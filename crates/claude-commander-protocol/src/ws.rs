@@ -17,7 +17,52 @@
 //! tagging mixing the two, so the discipline can't be violated by a malformed
 //! payload.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
+
+/// How often the server pings an attached socket. On each tick it also checks
+/// that *some* inbound frame (a pong, or real traffic) arrived since the
+/// previous one, which is how a half-open socket that never sends a close is
+/// detected.
+pub const ATTACH_PING_INTERVAL: Duration = Duration::from_secs(20);
+
+/// How many consecutive ping ticks may pass with no intervening inbound frame
+/// before the peer is declared dead and the attach is torn down. At 2 a peer
+/// tolerates a single dropped pong / scheduling hiccup.
+pub const ATTACH_MISSED_PONG_LIMIT: u32 = 2;
+
+/// How long a *silent* peer can survive before the server is guaranteed to have
+/// torn its attach down — the client's half of the heartbeat contract.
+///
+/// This lives here, rather than as a constant in each client, because it is a
+/// rule both ends must agree on: a mobile client whose process was frozen in the
+/// background cannot pong, so on resume it uses this to know whether its attach
+/// is definitely gone (reconnect) or merely *might* be (leave the live socket
+/// alone, so a scrolled tmux copy-mode view keeps its place). Duplicating the
+/// number client-side would let it drift the moment the heartbeat is retuned.
+///
+/// The derivation follows the server pump. Each tick first tears down if
+/// [`ATTACH_MISSED_PONG_LIMIT`] pings already went unanswered, otherwise sends a
+/// ping and counts it; any inbound frame zeroes the count. Reaching the limit
+/// therefore takes `LIMIT` ticks and detecting it takes one more, so a peer that
+/// falls silent survives at most `LIMIT + 1` intervals.
+///
+/// That is deliberately the **worst** case, so this is a one-way test: longer
+/// than it means the attach is certainly gone, but shorter does *not* mean it
+/// lives. Measured from the peer's last inbound frame — which zeroes the count —
+/// the next tick falls somewhere in `(0, ATTACH_PING_INTERVAL]` and teardown
+/// follows `LIMIT` intervals after it, so silence starting just *before* a tick is
+/// punished soonest: a floor of a shade over `LIMIT` intervals, 40s against
+/// today's 60s deadline. A client wanting certainty inside that window has to wait
+/// for the server's `detached` frame — exactly what a half-open socket never
+/// delivers.
+pub const fn attach_dead_after() -> Duration {
+    // Saturating rather than `checked_mul`, which is const but returns an Option
+    // a const fn can't unwrap ergonomically. Both operands are compile-time
+    // constants in the tens of seconds, so saturation is unreachable.
+    ATTACH_PING_INTERVAL.saturating_mul(ATTACH_MISSED_PONG_LIMIT + 1)
+}
 
 /// A control message sent by the *client* (browser/native UI) as a JSON text
 /// frame. The `auth` then `attach` messages form the mandatory handshake;
@@ -252,6 +297,20 @@ mod tests {
         let json = msg.to_text();
         assert_eq!(json, r#"{"type":"error","message":"no such session"}"#);
         assert_eq!(ServerControl::from_text(&json).unwrap(), msg);
+    }
+
+    /// The heartbeat deadline is a *wire* contract: a client that was away
+    /// longer than this knows its attach is gone without probing for it. Assert
+    /// the derivation, so retuning the interval or the tolerance can't silently
+    /// leave a client reconnecting on a stale threshold.
+    #[test]
+    fn attach_dead_after_covers_the_worst_case_heartbeat() {
+        assert_eq!(
+            attach_dead_after(),
+            ATTACH_PING_INTERVAL * (ATTACH_MISSED_PONG_LIMIT + 1)
+        );
+        // Concretely, with today's values: a silent peer is torn down by 60s.
+        assert_eq!(attach_dead_after(), Duration::from_secs(60));
     }
 
     #[test]

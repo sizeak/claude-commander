@@ -46,6 +46,17 @@ dependencies:
     git:
       url: https://github.com/sizeak/xterm.dart.git
       ref: commander
+  # Image attach for the terminal view. `image_picker` is fully supported on
+  # Android (native photo picker + camera) and "limited" on Linux, where its
+  # endorsed `image_picker_linux` implementation delegates to `file_selector` —
+  # a GTK file dialog, no camera. That asymmetry is why the UI only offers a
+  # camera option on Android.
+  image_picker: ^1.2.3
+  # Clipboard image *reading*, which Flutter's own `Clipboard` cannot do (text
+  # only). Covers Linux and Android from one API, so a phone screenshot pastes
+  # just like a desktop one. Builds its own Rust via cargokit — already a
+  # requirement here for flutter_rust_bridge, so no new toolchain.
+  super_clipboard: ^0.9.1
 
 dev_dependencies:
   flutter_test:

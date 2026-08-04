@@ -1,13 +1,17 @@
-//! Info pane widget
+//! Info widget
 //!
-//! Displays session metadata, PR details, and AI-generated summaries.
+//! Displays session metadata, PR details, and AI-generated summaries, or a
+//! project's path/branch/pull status. Two surfaces render it from the same
+//! content (built by `App::build_info_content`): the list views' right-pane
+//! Info tab, and the `i` Info modal — which is the only way to reach it from
+//! the board, where there is no right pane.
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Widget, Wrap},
+    widgets::{Paragraph, Widget, Wrap},
 };
 
 use crate::git::{AiSummary, ChecksStatus, DiffInfo, EnrichedPrInfo, PrState};
@@ -15,7 +19,7 @@ use crate::session::SessionStatus;
 use crate::tui::app::StackChainEntry;
 use crate::tui::theme::Theme;
 
-/// Data required to render the Info pane for a session.
+/// Data required to render the Info modal for a session.
 pub struct InfoSessionData<'a> {
     pub title: String,
     pub branch: String,
@@ -35,28 +39,35 @@ pub struct InfoSessionData<'a> {
     pub stack_chain: &'a [StackChainEntry],
 }
 
-/// Data required to render the Info pane for a project.
+/// Data required to render the Info surface for a project row. Projects are
+/// selectable in the list views (and in the board's sidebar), so the Info tab
+/// has to say something useful about them.
 pub struct InfoProjectData {
     pub name: String,
     pub repo_path: String,
     pub main_branch: String,
-    /// When set, the background project-branch pull is currently held back
-    /// for this project. Displayed as a "Pull: " line in the Info pane.
+    /// When set, the background project-branch pull is currently held back for
+    /// this project. Displayed as a "Pull: " line.
     pub pull_blocked: Option<String>,
 }
 
-/// Info pane content — either session or project data.
+/// Info content — session data, project data, or an empty placeholder.
+///
+/// A single, short-lived value built once per frame and consumed immediately —
+/// never stored in a collection — so the size gap between the variants doesn't
+/// matter; boxing would only add a per-frame heap allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum InfoContent<'a> {
     Session(InfoSessionData<'a>),
     Project(InfoProjectData),
     Empty,
 }
 
-/// Info view widget for the right pane.
+/// Info view widget. The caller draws any surrounding block and passes the
+/// inner area; this widget renders scrolled content only.
 pub struct InfoView<'a> {
     content: InfoContent<'a>,
     theme: &'a Theme,
-    block: Option<Block<'a>>,
     scroll: u16,
     /// Pre-built lines to render, bypassing `build_lines()` during `Widget::render`.
     prebuilt_lines: Option<Vec<Line<'static>>>,
@@ -67,15 +78,9 @@ impl<'a> InfoView<'a> {
         Self {
             content,
             theme,
-            block: None,
             scroll: 0,
             prebuilt_lines: None,
         }
-    }
-
-    pub fn block(mut self, block: Block<'a>) -> Self {
-        self.block = Some(block);
-        self
     }
 
     pub fn scroll(mut self, scroll: u16) -> Self {
@@ -393,7 +398,7 @@ impl<'a> InfoView<'a> {
             lines.push(Line::from(vec![
                 Span::styled(" Pull:    ", label),
                 Span::styled(
-                    format!("⚠ blocked — {reason}"),
+                    format!("\u{26a0} blocked — {reason}"),
                     Style::default().fg(self.theme.agent_waiting),
                 ),
             ]));
@@ -418,11 +423,7 @@ impl<'a> InfoView<'a> {
 
 impl<'a> Widget for InfoView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let inner_height = if self.block.is_some() {
-            area.height.saturating_sub(2) as usize
-        } else {
-            area.height as usize
-        };
+        let visible_height = area.height as usize;
 
         let all_lines = match self.prebuilt_lines {
             Some(lines) => lines,
@@ -432,23 +433,14 @@ impl<'a> Widget for InfoView<'a> {
         let visible: Vec<Line<'static>> = all_lines
             .into_iter()
             .skip(self.scroll as usize)
-            .take(inner_height)
+            .take(visible_height)
             .collect();
 
-        let paragraph = Paragraph::new(visible).wrap(Wrap { trim: false });
-
-        let paragraph = if let Some(block) = self.block {
-            paragraph.block(block)
-        } else {
-            paragraph
-        };
-
-        paragraph.render(area, buf);
+        Paragraph::new(visible)
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
     }
 }
-
-/// Info view state (reuses PreviewState for scrolling).
-pub type InfoViewState = super::PreviewState;
 
 /// Try to parse a GitHub hex color string (e.g. "d73a4a") into a ratatui Color.
 fn parse_hex_color(hex: &str) -> Option<ratatui::style::Color> {
@@ -560,34 +552,6 @@ mod tests {
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
         assert!(lines.len() > 15);
-    }
-
-    #[test]
-    fn test_info_view_project() {
-        let theme = test_theme();
-        let data = InfoProjectData {
-            name: "my-project".into(),
-            repo_path: "/home/user/projects/my-project".into(),
-            main_branch: "main".into(),
-            pull_blocked: None,
-        };
-        let view = InfoView::new(InfoContent::Project(data), &theme);
-        let lines = view.build_lines();
-        assert_eq!(lines.len(), 3);
-    }
-
-    #[test]
-    fn test_info_view_project_pull_blocked() {
-        let theme = test_theme();
-        let data = InfoProjectData {
-            name: "my-project".into(),
-            repo_path: "/home/user/projects/my-project".into(),
-            main_branch: "main".into(),
-            pull_blocked: Some("Working tree dirty".into()),
-        };
-        let view = InfoView::new(InfoContent::Project(data), &theme);
-        let lines = view.build_lines();
-        assert_eq!(lines.len(), 4);
     }
 
     #[test]

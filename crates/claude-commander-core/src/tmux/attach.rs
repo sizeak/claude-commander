@@ -172,7 +172,7 @@ fn paste_decision(
     orig: &[u8],
 ) -> PasteDecision {
     match capture {
-        Ok(Some(png)) if png.len() <= crate::paste_image::MAX_IMAGE_BYTES => {
+        Ok(Some(png)) if png.len() <= claude_commander_protocol::paste::MAX_IMAGE_BYTES => {
             PasteDecision::Upload {
                 png,
                 forward: orig.iter().copied().filter(|b| *b != 0x16).collect(),
@@ -213,10 +213,10 @@ async fn handle_image_paste(orig: &[u8], sink: Option<&Arc<dyn ImagePasteSink>>)
     match &capture {
         Err(e) => warn!("clipboard image read failed: {e}"),
         Ok(None) => debug!("Ctrl+V with no clipboard image; forwarding verbatim"),
-        Ok(Some(png)) if png.len() > crate::paste_image::MAX_IMAGE_BYTES => warn!(
+        Ok(Some(png)) if png.len() > claude_commander_protocol::paste::MAX_IMAGE_BYTES => warn!(
             "clipboard image {} bytes exceeds {} limit; not uploading",
             png.len(),
-            crate::paste_image::MAX_IMAGE_BYTES
+            claude_commander_protocol::paste::MAX_IMAGE_BYTES
         ),
         Ok(Some(_)) => {}
     }
@@ -1327,7 +1327,7 @@ mod tests {
     fn paste_decision_forwards_verbatim_when_over_size_cap() {
         // An over-limit image is not uploaded (the doomed transfer is skipped);
         // Ctrl+V is forwarded verbatim.
-        let too_big = vec![0u8; crate::paste_image::MAX_IMAGE_BYTES + 1];
+        let too_big = vec![0u8; claude_commander_protocol::paste::MAX_IMAGE_BYTES + 1];
         assert_eq!(
             paste_decision(Ok(Some(too_big)), b"\x16"),
             PasteDecision::Forward(b"\x16".to_vec())

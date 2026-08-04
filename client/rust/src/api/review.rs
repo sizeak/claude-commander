@@ -238,10 +238,6 @@ pub struct ReviewSnapshotDto {
     pub comments: Vec<CommentDto>,
     /// Display paths of files still marked reviewed.
     pub reviewed: Vec<String>,
-    /// The raw unified diff the snapshot was parsed from, to be handed straight
-    /// back to [`diff_rows`] for layout. `None` against a server predating the
-    /// field, in which case `diff_rows` falls back to `files`.
-    pub raw: Option<String>,
 }
 
 impl From<ReviewSnapshot> for ReviewSnapshotDto {
@@ -252,7 +248,6 @@ impl From<ReviewSnapshot> for ReviewSnapshotDto {
             files: s.diff.files.into_iter().map(Into::into).collect(),
             comments: s.comments.into_iter().map(Into::into).collect(),
             reviewed: s.reviewed,
-            raw: s.raw,
         }
     }
 }
@@ -492,11 +487,9 @@ mod tests {
             reviewed: vec![],
             content_hash: u64::MAX,
             dropped_comments: vec![],
-            raw: Some("diff --git a/x b/x\n".to_string()),
         };
         let dto: ReviewSnapshotDto = snap.into();
         assert_eq!(dto.content_hash, u64::MAX.to_string());
-        assert_eq!(dto.raw.as_deref(), Some("diff --git a/x b/x\n"));
     }
 
     #[test]

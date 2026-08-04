@@ -22,6 +22,13 @@ class ConnectionPage extends StatefulWidget {
 
   /// Persist + connect (or reconnect) the server. Invoked with the assembled
   /// config after a successful (or "save anyway") save.
+  ///
+  /// This form dismisses when it returns, so it must not await anything that can
+  /// outlast the commit. The edit path (`WorkspaceStore.updateServer`) therefore
+  /// returns at the persist point and reconnects in the background. The add path
+  /// (`addServer`) does await its first connect — the button reads "Connect", so
+  /// confirming it is the point — which is bounded by the client's request
+  /// timeout, not by the server coming up.
   final Future<void> Function(ServerConfig config) onSubmit;
 
   const ConnectionPage({

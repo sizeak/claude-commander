@@ -507,7 +507,7 @@ impl CommanderService {
     pub async fn paste_image(&self, query: &str, bytes: &[u8]) -> Result<PathBuf> {
         // Validate the bytes up front so junk/oversized input is a clean 400
         // regardless of whether the session exists (and before any disk write).
-        crate::paste_image::validate(bytes)?;
+        claude_commander_protocol::paste::validate(bytes)?;
 
         let tmux_name = self
             .resolve_tmux_session(query)
@@ -603,7 +603,8 @@ impl CommanderService {
 
         if let Some(section) = &opts.section {
             let section = section.clone();
-            let sections = self.config_store.read().sections.clone();
+            let sections =
+                crate::session::effective_sections(&self.config_store.read().sections).into_owned();
             let now = chrono::Utc::now();
             self.store
                 .mutate(move |state| {
@@ -785,17 +786,14 @@ impl CommanderService {
 
     /// Re-run section assignment over every session against the current
     /// `[[sections]]` config. Used at startup and after a live config change.
-    /// A no-op when no sections are configured and none are currently pinned.
+    /// With no `[[sections]]` configured, the baked-in default board sections
+    /// apply (see [`crate::session::effective_sections`]).
     pub async fn reconcile_all_section_assignments(&self) -> Result<()> {
-        let sections = self.config_store.read().sections.clone();
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
-                if sections.is_empty()
-                    && state.sessions.values().all(|s| s.current_section.is_none())
-                {
-                    return;
-                }
                 for session in state.sessions.values_mut() {
                     crate::session::apply_assignment(session, &sections, now);
                 }
@@ -806,12 +804,11 @@ impl CommanderService {
 
     /// Re-run section assignment for a single session against current config.
     /// Used after creating a session, where the rest of the set is already
-    /// reconciled. No-op when no sections are configured.
+    /// reconciled. With no `[[sections]]` configured, the baked-in default
+    /// board sections apply.
     pub async fn reconcile_one_section_assignment(&self, session_id: SessionId) -> Result<()> {
-        let sections = self.config_store.read().sections.clone();
-        if sections.is_empty() {
-            return Ok(());
-        }
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
@@ -979,7 +976,8 @@ impl CommanderService {
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
-        let sections = self.config_store.read().sections.clone();
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
@@ -1206,9 +1204,6 @@ impl CommanderService {
             reviewed,
             content_hash,
             dropped_comments,
-            // Moved, not cloned: nothing below needs the composition again, and
-            // a remote client re-parses this instead of the lossier `diff`.
-            raw: Some(composed.raw),
         })
     }
 
@@ -1673,7 +1668,8 @@ impl CommanderService {
     pub async fn set_section(&self, id: &SessionId, section: Option<String>) -> Result<()> {
         self.ensure_session_exists(id).await?;
         self.telemetry.feature("session.set_section");
-        let sections = self.config_store.read().sections.clone();
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         let id = *id;
         self.store
@@ -1729,7 +1725,10 @@ impl CommanderService {
         CreateOptions {
             default_program: config.default_session_program(),
             programs: config.programs.iter().map(ProgramInfo::from).collect(),
-            sections: config.sections.iter().map(|s| s.name.clone()).collect(),
+            sections: crate::session::effective_sections(&config.sections)
+                .iter()
+                .map(|s| s.name.clone())
+                .collect(),
         }
     }
 
@@ -2559,7 +2558,7 @@ fn init_telemetry(
     let telemetry = Telemetry::init(&config.telemetry, frontend, &install_id);
     if telemetry.is_active() {
         let env = EnvFingerprint::collect(Some(crate::tui::theme::ColorMode::detect().name()));
-        let snapshot = ConfigSnapshot::from_config(&config, store.try_view_mode());
+        let snapshot = ConfigSnapshot::from_config(&config);
         telemetry.session_start(&env, &snapshot);
     }
     telemetry
@@ -2614,7 +2613,10 @@ pub use claude_commander_protocol::api::{
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
 /// (Was `SessionInfo::from_session`; relocated here because `SessionInfo` is now
 /// a foreign type and this conversion needs core-only types.)
-fn session_info_from_session(session: &WorktreeSession, project_name: &str) -> SessionInfo {
+pub(crate) fn session_info_from_session(
+    session: &WorktreeSession,
+    project_name: &str,
+) -> SessionInfo {
     SessionInfo {
         id: session.id.as_uuid().to_string(),
         session_id: session.id,
@@ -3296,29 +3298,6 @@ mod tests {
             ApplyOutcome::Deferred { count, .. } => assert_eq!(count, 1),
             other => panic!("expected Deferred, got {other:?}"),
         }
-    }
-
-    /// A snapshot carries the composition it was parsed from, so a remote
-    /// client can lay the diff out itself (word diff, side-by-side, context
-    /// expansion) instead of re-deriving it from the lossier wire model.
-    #[tokio::test]
-    async fn open_review_carries_the_raw_composition() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let svc = service(&dir);
-        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
-
-        let snapshot = svc.open_review(&sid).await.unwrap();
-        let raw = snapshot.raw.expect("the raw diff must reach the client");
-        assert!(
-            raw.contains("+++ b/changed.txt"),
-            "expected the composed unified diff, got: {raw}"
-        );
-        // It is the *same* text `content_hash` was taken over, so a client that
-        // re-parses it cannot disagree with the server's staleness check.
-        assert_eq!(
-            xxhash_rust::xxh3::xxh3_64(raw.as_bytes()),
-            snapshot.content_hash
-        );
     }
 
     /// The safety precondition for the drop: a diff that fell back to

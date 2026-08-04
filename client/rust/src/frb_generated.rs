@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2073992048;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2083181267;
 
 // Section: executor
 
@@ -150,6 +150,39 @@ fn wire__crate__api__review__apply_comments_impl(
                         Ok(output_ok)
                     })(),
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__simple__attach_dead_after_millis_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "attach_dead_after_millis",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(crate::api::simple::attach_dead_after_millis())?;
+                    Ok(output_ok)
+                })())
             }
         },
     )
@@ -673,54 +706,6 @@ fn wire__crate__api__simple__delete_session_impl(
         },
     )
 }
-fn wire__crate__api__diff__diff_rows_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "diff_rows",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_raw = <Option<String>>::sse_decode(&mut deserializer);
-            let api_fallback = <crate::api::review::ReviewFileDto>::sse_decode(&mut deserializer);
-            let api_mode = <crate::api::diff::DiffLayoutMode>::sse_decode(&mut deserializer);
-            let api_file_text = <Option<String>>::sse_decode(&mut deserializer);
-            let api_expansions =
-                <Vec<crate::api::diff::DiffExpansion>>::sse_decode(&mut deserializer);
-            let api_tab_width = <u32>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
-                    (move || {
-                        let output_ok = crate::api::diff::diff_rows(
-                            api_raw,
-                            api_fallback,
-                            api_mode,
-                            api_file_text,
-                            api_expansions,
-                            api_tab_width,
-                        )?;
-                        Ok(output_ok)
-                    })(),
-                )
-            }
-        },
-    )
-}
 fn wire__crate__api__registry__disconnect_server_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -905,6 +890,38 @@ fn wire__crate__api__simple__health_tmux_impl(
                         Ok(output_ok)
                     })(),
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__simple__image_max_bytes_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "image_max_bytes",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(crate::api::simple::image_max_bytes())?;
+                    Ok(output_ok)
+                })())
             }
         },
     )
@@ -1196,6 +1213,44 @@ fn wire__crate__api__review__open_review_impl(
                     (move || {
                         let output_ok =
                             crate::api::review::open_review(api_handle, api_session_id)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__simple__paste_image_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "paste_image",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_handle = <String>::sse_decode(&mut deserializer);
+            let api_id = <String>::sse_decode(&mut deserializer);
+            let api_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok =
+                            crate::api::simple::paste_image(api_handle, api_id, api_bytes)?;
                         Ok(output_ok)
                     })(),
                 )
@@ -2177,149 +2232,6 @@ impl SseDecode for crate::api::mirrors::CreateOptions {
     }
 }
 
-impl SseDecode for crate::api::diff::DiffCellDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_present = <bool>::sse_decode(deserializer);
-        let mut var_origin =
-            <Option<crate::api::review::ReviewLineOrigin>>::sse_decode(deserializer);
-        let mut var_oldLineno = <Option<u32>>::sse_decode(deserializer);
-        let mut var_newLineno = <Option<u32>>::sse_decode(deserializer);
-        let mut var_sel = <Option<u32>>::sse_decode(deserializer);
-        let mut var_spans = <Vec<crate::api::diff::DiffSpanDto>>::sse_decode(deserializer);
-        let mut var_text = <String>::sse_decode(deserializer);
-        return crate::api::diff::DiffCellDto {
-            present: var_present,
-            origin: var_origin,
-            old_lineno: var_oldLineno,
-            new_lineno: var_newLineno,
-            sel: var_sel,
-            spans: var_spans,
-            text: var_text,
-        };
-    }
-}
-
-impl SseDecode for crate::api::diff::DiffExpandAction {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::diff::DiffExpandAction::Down,
-            1 => crate::api::diff::DiffExpandAction::Up,
-            2 => crate::api::diff::DiffExpandAction::All,
-            _ => unreachable!("Invalid variant for DiffExpandAction: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::diff::DiffExpansion {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_gap = <u32>::sse_decode(deserializer);
-        let mut var_action = <crate::api::diff::DiffExpandAction>::sse_decode(deserializer);
-        return crate::api::diff::DiffExpansion {
-            gap: var_gap,
-            action: var_action,
-        };
-    }
-}
-
-impl SseDecode for crate::api::diff::DiffLayoutDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_rows = <Vec<crate::api::diff::DiffRowDto>>::sse_decode(deserializer);
-        let mut var_selectable = <u32>::sse_decode(deserializer);
-        let mut var_hasHiddenContext = <bool>::sse_decode(deserializer);
-        return crate::api::diff::DiffLayoutDto {
-            rows: var_rows,
-            selectable: var_selectable,
-            has_hidden_context: var_hasHiddenContext,
-        };
-    }
-}
-
-impl SseDecode for crate::api::diff::DiffLayoutMode {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::diff::DiffLayoutMode::Inline,
-            1 => crate::api::diff::DiffLayoutMode::SideBySide,
-            _ => unreachable!("Invalid variant for DiffLayoutMode: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::diff::DiffRole {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::diff::DiffRole::Context,
-            1 => crate::api::diff::DiffRole::Addition,
-            2 => crate::api::diff::DiffRole::Deletion,
-            3 => crate::api::diff::DiffRole::HunkHeader,
-            4 => crate::api::diff::DiffRole::ExpandedContext,
-            5 => crate::api::diff::DiffRole::Other,
-            _ => unreachable!("Invalid variant for DiffRole: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::diff::DiffRowDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_kind = <crate::api::diff::DiffRowKind>::sse_decode(deserializer);
-        let mut var_fullWidth = <bool>::sse_decode(deserializer);
-        let mut var_left = <crate::api::diff::DiffCellDto>::sse_decode(deserializer);
-        let mut var_right = <crate::api::diff::DiffCellDto>::sse_decode(deserializer);
-        let mut var_gap = <Option<u32>>::sse_decode(deserializer);
-        let mut var_hidden = <u32>::sse_decode(deserializer);
-        let mut var_canExpandUp = <bool>::sse_decode(deserializer);
-        let mut var_canExpandDown = <bool>::sse_decode(deserializer);
-        return crate::api::diff::DiffRowDto {
-            kind: var_kind,
-            full_width: var_fullWidth,
-            left: var_left,
-            right: var_right,
-            gap: var_gap,
-            hidden: var_hidden,
-            can_expand_up: var_canExpandUp,
-            can_expand_down: var_canExpandDown,
-        };
-    }
-}
-
-impl SseDecode for crate::api::diff::DiffRowKind {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::diff::DiffRowKind::HunkHeader,
-            1 => crate::api::diff::DiffRowKind::Line,
-            2 => crate::api::diff::DiffRowKind::ExpandedContext,
-            3 => crate::api::diff::DiffRowKind::ExpandControl,
-            4 => crate::api::diff::DiffRowKind::AlignmentGap,
-            _ => unreachable!("Invalid variant for DiffRowKind: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::diff::DiffSpanDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_text = <String>::sse_decode(deserializer);
-        let mut var_role = <crate::api::diff::DiffRole>::sse_decode(deserializer);
-        let mut var_emphasis = <bool>::sse_decode(deserializer);
-        return crate::api::diff::DiffSpanDto {
-            text: var_text,
-            role: var_role,
-            emphasis: var_emphasis,
-        };
-    }
-}
-
 impl SseDecode for crate::api::mirrors::DiffStatDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2393,42 +2305,6 @@ impl SseDecode for Vec<crate::api::review::CommentDto> {
         let mut ans_ = vec![];
         for idx_ in 0..len_ {
             ans_.push(<crate::api::review::CommentDto>::sse_decode(deserializer));
-        }
-        return ans_;
-    }
-}
-
-impl SseDecode for Vec<crate::api::diff::DiffExpansion> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = vec![];
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::diff::DiffExpansion>::sse_decode(deserializer));
-        }
-        return ans_;
-    }
-}
-
-impl SseDecode for Vec<crate::api::diff::DiffRowDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = vec![];
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::diff::DiffRowDto>::sse_decode(deserializer));
-        }
-        return ans_;
-    }
-}
-
-impl SseDecode for Vec<crate::api::diff::DiffSpanDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = vec![];
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::diff::DiffSpanDto>::sse_decode(deserializer));
         }
         return ans_;
     }
@@ -2670,19 +2546,6 @@ impl SseDecode for Option<crate::api::mirrors::ReviewDecision> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::mirrors::ReviewDecision>::sse_decode(
-                deserializer,
-            ));
-        } else {
-            return None;
-        }
-    }
-}
-
-impl SseDecode for Option<crate::api::review::ReviewLineOrigin> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::review::ReviewLineOrigin>::sse_decode(
                 deserializer,
             ));
         } else {
@@ -2995,14 +2858,12 @@ impl SseDecode for crate::api::review::ReviewSnapshotDto {
         let mut var_files = <Vec<crate::api::review::ReviewFileDto>>::sse_decode(deserializer);
         let mut var_comments = <Vec<crate::api::review::CommentDto>>::sse_decode(deserializer);
         let mut var_reviewed = <Vec<String>>::sse_decode(deserializer);
-        let mut var_raw = <Option<String>>::sse_decode(deserializer);
         return crate::api::review::ReviewSnapshotDto {
             base: var_base,
             content_hash: var_contentHash,
             files: var_files,
             comments: var_comments,
             reviewed: var_reviewed,
-            raw: var_raw,
         };
     }
 }
@@ -3238,60 +3099,67 @@ fn pde_ffi_dispatcher_primary_impl(
         1 => wire__crate__api__simple__add_project_impl(port, ptr, rust_vec_len, data_len),
         2 => wire__crate__api__simple__agent_states_impl(port, ptr, rust_vec_len, data_len),
         3 => wire__crate__api__review__apply_comments_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__terminal__attach_terminal_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__simple__branch_diff_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__simple__cascade_abandon_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__simple__cascade_merge_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__simple__cascade_resume_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__terminal__change_feed_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__registry__connect_server_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__terminal__connection_feed_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__review__create_comment_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__simple__create_options_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__simple__create_session_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__review__delete_comment_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__simple__delete_session_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__diff__diff_rows_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__registry__disconnect_server_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__review__fetch_blob_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__simple__get_session_detail_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__simple__health_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__simple__health_tmux_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__simple__kill_session_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__simple__list_branches_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__review__list_comments_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__simple__list_sessions_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__simple__mark_read_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__simple__mark_unread_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__review__open_review_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__simple__pending_comment_sessions_impl(
+        4 => wire__crate__api__simple__attach_dead_after_millis_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        32 => wire__crate__api__simple__project_preview_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__simple__push_stack_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__review__refresh_review_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__simple__remove_project_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__simple__rename_session_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__simple__request_pr_refresh_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__simple__scan_directory_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__simple__session_preview_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__simple__set_programs_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__simple__set_section_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
-        45 => {
+        5 => wire__crate__api__terminal__attach_terminal_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__simple__branch_diff_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__simple__cascade_abandon_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__simple__cascade_merge_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__simple__cascade_resume_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__terminal__change_feed_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__registry__connect_server_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__terminal__connection_feed_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__review__create_comment_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__simple__create_options_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__simple__create_session_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__review__delete_comment_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__simple__delete_session_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__registry__disconnect_server_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__review__fetch_blob_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__simple__get_session_detail_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__simple__health_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__simple__health_tmux_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__simple__image_max_bytes_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__simple__kill_session_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__simple__list_branches_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__review__list_comments_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__simple__list_sessions_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__simple__mark_read_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__simple__mark_unread_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__review__open_review_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__simple__paste_image_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__simple__pending_comment_sessions_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        34 => wire__crate__api__simple__project_preview_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__simple__push_stack_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__review__refresh_review_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__simple__remove_project_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__simple__rename_session_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__simple__request_pr_refresh_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__simple__scan_directory_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__simple__session_preview_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__simple__set_programs_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__simple__set_section_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
+        47 => {
             wire__crate__api__terminal__terminal_send_input_impl(port, ptr, rust_vec_len, data_len)
         }
-        46 => {
+        48 => {
             wire__crate__api__review__toggle_file_reviewed_impl(port, ptr, rust_vec_len, data_len)
         }
-        47 => wire__crate__api__simple__toggle_keep_alive_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__simple__workspace_snapshot_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__simple__toggle_keep_alive_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__simple__workspace_snapshot_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3554,199 +3422,6 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::CreateOpt
 {
     fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::CreateOptions> {
         self.into()
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::diff::DiffCellDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.present.into_into_dart().into_dart(),
-            self.origin.into_into_dart().into_dart(),
-            self.old_lineno.into_into_dart().into_dart(),
-            self.new_lineno.into_into_dart().into_dart(),
-            self.sel.into_into_dart().into_dart(),
-            self.spans.into_into_dart().into_dart(),
-            self.text.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::diff::DiffCellDto {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::diff::DiffCellDto>
-    for crate::api::diff::DiffCellDto
-{
-    fn into_into_dart(self) -> crate::api::diff::DiffCellDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::diff::DiffExpandAction {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Down => 0.into_dart(),
-            Self::Up => 1.into_dart(),
-            Self::All => 2.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::diff::DiffExpandAction
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::diff::DiffExpandAction>
-    for crate::api::diff::DiffExpandAction
-{
-    fn into_into_dart(self) -> crate::api::diff::DiffExpandAction {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::diff::DiffExpansion {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.gap.into_into_dart().into_dart(),
-            self.action.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::diff::DiffExpansion
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::diff::DiffExpansion>
-    for crate::api::diff::DiffExpansion
-{
-    fn into_into_dart(self) -> crate::api::diff::DiffExpansion {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::diff::DiffLayoutDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.rows.into_into_dart().into_dart(),
-            self.selectable.into_into_dart().into_dart(),
-            self.has_hidden_context.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::diff::DiffLayoutDto
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::diff::DiffLayoutDto>
-    for crate::api::diff::DiffLayoutDto
-{
-    fn into_into_dart(self) -> crate::api::diff::DiffLayoutDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::diff::DiffLayoutMode {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Inline => 0.into_dart(),
-            Self::SideBySide => 1.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for crate::api::diff::DiffLayoutMode
-{
-}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::diff::DiffLayoutMode>
-    for crate::api::diff::DiffLayoutMode
-{
-    fn into_into_dart(self) -> crate::api::diff::DiffLayoutMode {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::diff::DiffRole {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Context => 0.into_dart(),
-            Self::Addition => 1.into_dart(),
-            Self::Deletion => 2.into_dart(),
-            Self::HunkHeader => 3.into_dart(),
-            Self::ExpandedContext => 4.into_dart(),
-            Self::Other => 5.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::diff::DiffRole {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::diff::DiffRole> for crate::api::diff::DiffRole {
-    fn into_into_dart(self) -> crate::api::diff::DiffRole {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::diff::DiffRowDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.kind.into_into_dart().into_dart(),
-            self.full_width.into_into_dart().into_dart(),
-            self.left.into_into_dart().into_dart(),
-            self.right.into_into_dart().into_dart(),
-            self.gap.into_into_dart().into_dart(),
-            self.hidden.into_into_dart().into_dart(),
-            self.can_expand_up.into_into_dart().into_dart(),
-            self.can_expand_down.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::diff::DiffRowDto {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::diff::DiffRowDto>
-    for crate::api::diff::DiffRowDto
-{
-    fn into_into_dart(self) -> crate::api::diff::DiffRowDto {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::diff::DiffRowKind {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::HunkHeader => 0.into_dart(),
-            Self::Line => 1.into_dart(),
-            Self::ExpandedContext => 2.into_dart(),
-            Self::ExpandControl => 3.into_dart(),
-            Self::AlignmentGap => 4.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::diff::DiffRowKind {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::diff::DiffRowKind>
-    for crate::api::diff::DiffRowKind
-{
-    fn into_into_dart(self) -> crate::api::diff::DiffRowKind {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::diff::DiffSpanDto {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.text.into_into_dart().into_dart(),
-            self.role.into_into_dart().into_dart(),
-            self.emphasis.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::diff::DiffSpanDto {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::diff::DiffSpanDto>
-    for crate::api::diff::DiffSpanDto
-{
-    fn into_into_dart(self) -> crate::api::diff::DiffSpanDto {
-        self
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -4248,7 +3923,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewSnapshotDto {
             self.files.into_into_dart().into_dart(),
             self.comments.into_into_dart().into_dart(),
             self.reviewed.into_into_dart().into_dart(),
-            self.raw.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4691,131 +4365,6 @@ impl SseEncode for crate::api::mirrors::CreateOptions {
     }
 }
 
-impl SseEncode for crate::api::diff::DiffCellDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.present, serializer);
-        <Option<crate::api::review::ReviewLineOrigin>>::sse_encode(self.origin, serializer);
-        <Option<u32>>::sse_encode(self.old_lineno, serializer);
-        <Option<u32>>::sse_encode(self.new_lineno, serializer);
-        <Option<u32>>::sse_encode(self.sel, serializer);
-        <Vec<crate::api::diff::DiffSpanDto>>::sse_encode(self.spans, serializer);
-        <String>::sse_encode(self.text, serializer);
-    }
-}
-
-impl SseEncode for crate::api::diff::DiffExpandAction {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::diff::DiffExpandAction::Down => 0,
-                crate::api::diff::DiffExpandAction::Up => 1,
-                crate::api::diff::DiffExpandAction::All => 2,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::diff::DiffExpansion {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <u32>::sse_encode(self.gap, serializer);
-        <crate::api::diff::DiffExpandAction>::sse_encode(self.action, serializer);
-    }
-}
-
-impl SseEncode for crate::api::diff::DiffLayoutDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <Vec<crate::api::diff::DiffRowDto>>::sse_encode(self.rows, serializer);
-        <u32>::sse_encode(self.selectable, serializer);
-        <bool>::sse_encode(self.has_hidden_context, serializer);
-    }
-}
-
-impl SseEncode for crate::api::diff::DiffLayoutMode {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::diff::DiffLayoutMode::Inline => 0,
-                crate::api::diff::DiffLayoutMode::SideBySide => 1,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::diff::DiffRole {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::diff::DiffRole::Context => 0,
-                crate::api::diff::DiffRole::Addition => 1,
-                crate::api::diff::DiffRole::Deletion => 2,
-                crate::api::diff::DiffRole::HunkHeader => 3,
-                crate::api::diff::DiffRole::ExpandedContext => 4,
-                crate::api::diff::DiffRole::Other => 5,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::diff::DiffRowDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <crate::api::diff::DiffRowKind>::sse_encode(self.kind, serializer);
-        <bool>::sse_encode(self.full_width, serializer);
-        <crate::api::diff::DiffCellDto>::sse_encode(self.left, serializer);
-        <crate::api::diff::DiffCellDto>::sse_encode(self.right, serializer);
-        <Option<u32>>::sse_encode(self.gap, serializer);
-        <u32>::sse_encode(self.hidden, serializer);
-        <bool>::sse_encode(self.can_expand_up, serializer);
-        <bool>::sse_encode(self.can_expand_down, serializer);
-    }
-}
-
-impl SseEncode for crate::api::diff::DiffRowKind {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::diff::DiffRowKind::HunkHeader => 0,
-                crate::api::diff::DiffRowKind::Line => 1,
-                crate::api::diff::DiffRowKind::ExpandedContext => 2,
-                crate::api::diff::DiffRowKind::ExpandControl => 3,
-                crate::api::diff::DiffRowKind::AlignmentGap => 4,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::diff::DiffSpanDto {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.text, serializer);
-        <crate::api::diff::DiffRole>::sse_encode(self.role, serializer);
-        <bool>::sse_encode(self.emphasis, serializer);
-    }
-}
-
 impl SseEncode for crate::api::mirrors::DiffStatDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -4875,36 +4424,6 @@ impl SseEncode for Vec<crate::api::review::CommentDto> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::review::CommentDto>::sse_encode(item, serializer);
-        }
-    }
-}
-
-impl SseEncode for Vec<crate::api::diff::DiffExpansion> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::diff::DiffExpansion>::sse_encode(item, serializer);
-        }
-    }
-}
-
-impl SseEncode for Vec<crate::api::diff::DiffRowDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::diff::DiffRowDto>::sse_encode(item, serializer);
-        }
-    }
-}
-
-impl SseEncode for Vec<crate::api::diff::DiffSpanDto> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::diff::DiffSpanDto>::sse_encode(item, serializer);
         }
     }
 }
@@ -5106,16 +4625,6 @@ impl SseEncode for Option<crate::api::mirrors::ReviewDecision> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::mirrors::ReviewDecision>::sse_encode(value, serializer);
-        }
-    }
-}
-
-impl SseEncode for Option<crate::api::review::ReviewLineOrigin> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::review::ReviewLineOrigin>::sse_encode(value, serializer);
         }
     }
 }
@@ -5395,7 +4904,6 @@ impl SseEncode for crate::api::review::ReviewSnapshotDto {
         <Vec<crate::api::review::ReviewFileDto>>::sse_encode(self.files, serializer);
         <Vec<crate::api::review::CommentDto>>::sse_encode(self.comments, serializer);
         <Vec<String>>::sse_encode(self.reviewed, serializer);
-        <Option<String>>::sse_encode(self.raw, serializer);
     }
 }
 

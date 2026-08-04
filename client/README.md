@@ -95,6 +95,24 @@ written to plain shared preferences.
   optional initial prompt.
 - **Live terminal** — WebSocket attach (agent or shell) rendered with the
   `xterm.dart` fork; a desktop pane on wide layouts, a pushed route on phone.
+  Re-attaches on returning to the foreground, since a backgrounded (frozen)
+  process can't answer the server's heartbeat pings and has its attach killed
+  server-side. Only when the attach is *known* dead, though: either it already
+  reported detached/error, or the app was away longer than
+  `protocol::ws::attach_dead_after()` — the deadline no unanswered attach
+  survives, read over the bridge rather than mirrored as a Dart constant. A
+  shorter absence leaves the live socket alone, because re-attaching spawns a
+  fresh `tmux attach-session` child and that loses a scrolled copy-mode view. The
+  status bar's reconnect button is always enabled, so a half-open socket (network
+  path gone without a TCP FIN, so no detach frame ever arrives) is never a dead
+  end.
+- **Image attach** — the terminal status bar's image button (agent attaches only)
+  offers the photo library / a file dialog, a camera capture on Android, or a
+  clipboard paste; on Linux **Ctrl+V** attaches a clipboard image directly and
+  falls back to a normal text paste when the clipboard holds no image. The bytes
+  go to `POST /sessions/{id}/paste-image`, which writes a temp file server-side
+  and types its path into the agent pane without pressing Enter — so a prompt can
+  be written around it. See [Image attach](#image-attach).
 - **Review** — diff view with inline comments, snippet-based re-anchoring, and
   apply; on-demand blob loading for images, with per-file reviewed toggles.
 - **Programs list editing** — a dedicated settings page (`ProgramsPage`) edits the
@@ -108,6 +126,57 @@ written to plain shared preferences.
 - **Cascade / push-stack** — triggered from the session detail view with their
   operation outcome reported (`cascadeMerge`/`pushStack`); a paused cascade shows
   a global resume/abandon banner (`cascadeResume`/`cascadeAbandon`).
+
+## Image attach
+
+Getting a screenshot to the agent works the same way it does from the desktop
+TUI's Ctrl+V, and reuses the same route.
+
+**Why a path, not an upload to the agent:** the Claude CLI accepts a plain-text
+image path in its prompt. `CommanderService::paste_image` validates the bytes,
+writes them to a pruned temp file, and `send-keys -l`s the absolute path into the
+session's agent pane with **no Enter** — the user adds prompt text and submits.
+The path therefore appears in the terminal view through the ordinary attach output
+stream, which is why the UI shows no success confirmation.
+
+**Where the rules live:** the accept allow-list (PNG/JPEG/GIF/WebP/BMP, sniffed
+from magic bytes — never a filename or `Content-Type`) and the 10 MiB cap are in
+`claude_commander_protocol::paste`, shared by the server's body limit, the
+service's re-check, and `RemoteClient::paste_image`'s local pre-check. So an
+invalid or oversized image is refused before it leaves the device, and
+`imageMaxBytes()` lets the UI reject an oversized pick from its file length
+without reading a large photo into memory.
+
+**Agent attaches only.** The path is injected into the *agent* pane, so the button
+is hidden — and Ctrl+V left to `xterm` — on a shell attach, where it would
+otherwise type into a pane the user cannot see.
+
+**Plugins:** `image_picker` (Android: native photo picker + camera; Linux:
+"limited" support via the endorsed `image_picker_linux` → `file_selector`, i.e. a
+GTK dialog with no camera) and `super_clipboard` for clipboard *image* reads,
+which Flutter's own text-only `Clipboard` cannot do. Both are behind the
+`ImagePickerService` / `ClipboardImageReader` seams in `lib/services/` so widget
+tests can substitute fakes instead of driving platform channels.
+
+**Ctrl+V interception.** `xterm` binds Ctrl+V to `PasteTextIntent`, handled by a
+`TerminalActions` widget *inside* `TerminalView` — so an outer `Actions` override
+is shadowed. The hook is `TerminalView.onKeyEvent`, which outranks both its
+shortcuts and its input handler. Pre-empting the key means the text-paste
+fallback has to be reproduced in `_pasteClipboard`; don't remove it, or Ctrl+V
+stops pasting text when the clipboard holds none.
+
+**Gradle note.** `super_clipboard` pulls `irondash_engine_context`, which still
+declares `compileSdkVersion 31`. The Nix SDK is read-only, so Gradle cannot
+install that platform — `android/build.gradle.kts` therefore pins every
+subproject's `compileSdk` to `ANDROID_COMPILE_SDK` (exported by the client dev
+shell), alongside the pre-existing NDK pin. Without it the APK build fails with
+"The SDK directory is not writable".
+
+**Known limitation.** Android may kill the activity during a camera capture under
+memory pressure; `image_picker` exposes `retrieveLostData()` for that, which we
+don't call — by the time the app restarts the terminal attach is gone, so there
+is nothing to re-target the upload at. The capture is simply lost and the user
+retries.
 
 ## Multi-server
 
@@ -249,6 +318,7 @@ The integration/e2e server tests self-skip when tmux is absent (a runtime check,
 | 5 | iOS / macOS | Not started (needs Mac + Xcode) |
 | 6 | Shared `claude-commander-client` transport crate (also backs the TUI's remote sessions) | Done |
 | 7 | Adaptive desktop shell (master-detail), programs-list editing, multi-server seams | Done / in progress |
+| 8 | Image attach (picker, camera, clipboard, Ctrl+V) | Done |
 
 **Measured throughput (Phase 3 spike, debug builds):**
 - Linux desktop: 23.7 MB/s end-to-end (frb stream → UTF-8 decode → xterm.dart VT parse/write → paint)

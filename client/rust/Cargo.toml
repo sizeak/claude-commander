@@ -25,15 +25,6 @@ claude-commander-client = { path = "../../crates/claude-commander-client" }
 # Same major versions as the protocol crate so the `Uuid`/`DateTime` in the
 # mirrors are the *same* types cargo resolves for the protocol DTOs.
 uuid = { version = "1.23", features = ["v4"] }
-# The diff view-model + layout engine the TUI also renders through, so both
-# frontends derive rows, word-diff emphasis and gap expansion from one
-# implementation. `default-features = false` drops the `wrap` module: it lays
-# text out into fixed terminal cells, and Flutter's `RichText` wraps for itself.
-#
-# Safe for the mobile cross-build — diffgrid pulls in diffy/similar/unicode-*
-# and nothing platform-specific — and it does NOT breach the
-# `claude-commander-client` rule against depending on core.
-diffgrid = { git = "https://github.com/sizeak/diffgrid", rev = "83698a53458868c7c691d89dbb21e89fbc905afa", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1"
 anyhow = "1"

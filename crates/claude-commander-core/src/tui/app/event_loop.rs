@@ -8,13 +8,14 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
-        // Kick off an initial background preview fetch
+        // Sync selection ids from the restored board cursor.
         self.update_selection();
         self.spawn_preview_update();
 
         loop {
-            // View-switch clearing happens inside `render` via the `Clear`
-            // widget (see the `clear_right_pane` handling there). We must not
+            // Full-screen-takeover clearing happens inside `render` via the
+            // `Clear` widget (see the `force_clear`/`leaving_fullscreen`
+            // handling there). We must not
             // call `terminal.clear()`: since ratatui 0.30 it reads the cursor
             // position from stdin, which races our background input reader,
             // times out, and kills the loop.
@@ -42,11 +43,15 @@ impl App {
             // Periodic background work (only on Tick). The PR-status,
             // project-pull, agent-state, and state-sync loops now run inside the
             // service (see `CommanderService::spawn_background_tasks`); the tick
-            // only refreshes the rendered list and the preview pane.
+            // only rebuilds the rendered rows and re-captures preview data.
             if needs_tick {
                 self.refresh_list_items().await;
 
-                // Spawn non-blocking preview update
+                // Re-capture the selection's pane/shell/diff. This is what makes
+                // the list views' right pane *live*; it self-gates to nothing
+                // when neither that pane nor the Info modal is showing.
+                // PR-status and project-pull polling live in
+                // CommanderService::spawn_background_tasks, not the UI tick.
                 self.spawn_preview_update();
             }
 
@@ -70,7 +75,9 @@ impl App {
                 // correct behavior when draining multiple events)
                 self.update_selection();
 
-                // Immediately fetch preview when selection changes
+                // Re-capture immediately when the selection changes, so the
+                // pane doesn't keep showing the previous session until the next
+                // tick.
                 if self.ui_state.selected_session_id != old_session
                     || self.ui_state.selected_project_id != old_project
                 {
@@ -114,14 +121,7 @@ impl App {
                 debug!("Config hot-reloaded from disk");
                 let old_servers = self.config.remote_servers.clone();
                 self.config = self.service.read_config();
-                let base = self
-                    .config
-                    .theme
-                    .preset
-                    .as_deref()
-                    .and_then(Theme::from_preset)
-                    .unwrap_or_default();
-                self.theme = base.with_overrides(&self.config.theme);
+                self.reload_theme();
 
                 // Reconcile the live backends against the new remote-server list
                 // (add/remove/rebuild handles) when it changed.

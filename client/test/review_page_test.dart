@@ -1,9 +1,6 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:claude_commander_client/pages/review_page.dart';
-import 'package:claude_commander_client/src/rust/api/diff.dart';
 import 'package:claude_commander_client/src/rust/api/review.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -304,13 +301,7 @@ void main() {
           displayPath: 'lib/first.dart',
           hunks: [
             hunk(
-              lines: [
-                line(
-                  ReviewLineOrigin.addition,
-                  'first file line',
-                  newLineno: 1,
-                ),
-              ],
+              lines: [line(ReviewLineOrigin.addition, 'first file line', newLineno: 1)],
             ),
           ],
         ),
@@ -318,13 +309,7 @@ void main() {
           displayPath: 'lib/second.dart',
           hunks: [
             hunk(
-              lines: [
-                line(
-                  ReviewLineOrigin.addition,
-                  'second file line',
-                  newLineno: 1,
-                ),
-              ],
+              lines: [line(ReviewLineOrigin.addition, 'second file line', newLineno: 1)],
             ),
           ],
         ),
@@ -333,28 +318,19 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
 
-    // The sidebar is a compressed tree: the shared `lib` directory is one row,
-    // and each file shows its own leaf rather than repeating the path. The
-    // first file's diff is shown by default (the pane is always open).
+    // The sidebar eyebrow and both file paths render; the first file's diff is
+    // shown by default (no expand tap needed — the pane is always open).
     expect(find.text('FILES CHANGED'), findsOneWidget);
-    expect(find.text('lib'), findsOneWidget);
-    expect(find.text('first.dart'), findsOneWidget);
-    expect(find.text('second.dart'), findsOneWidget);
+    expect(find.text('lib/first.dart'), findsWidgets);
+    expect(find.text('lib/second.dart'), findsWidgets);
     expect(find.text('first file line'), findsOneWidget);
     expect(find.text('second file line'), findsNothing);
 
     // Selecting the second file swaps the diff pane to its hunks.
-    await tester.tap(find.text('second.dart'));
+    await tester.tap(find.text('lib/second.dart'));
     await tester.pumpAndSettle();
     expect(find.text('second file line'), findsOneWidget);
     expect(find.text('first file line'), findsNothing);
-
-    // Collapsing the directory hides its files without disturbing the pane.
-    await tester.tap(find.text('lib'));
-    await tester.pumpAndSettle();
-    expect(find.text('first.dart'), findsNothing);
-    expect(find.text('second.dart'), findsNothing);
-    expect(find.text('second file line'), findsOneWidget);
   });
 
   testWidgets('the wide layout surfaces a comment whose file is not among the '
@@ -384,122 +360,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(api.countOf('deleteComment'), 1);
     expect(api.lastCall('deleteComment')!.args['commentId'], 'c-orphan');
-  });
-
-  testWidgets('the wide layout can switch the diff to side by side', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(1400, 1000);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
-
-    api.openReviewResponse = reviewSnapshot(
-      files: [
-        reviewFile(
-          displayPath: 'lib/foo.dart',
-          hunks: [
-            hunk(
-              lines: [line(ReviewLineOrigin.addition, 'a line', newLineno: 1)],
-            ),
-          ],
-        ),
-      ],
-    );
-    await tester.pumpWidget(wrap());
-    await tester.pumpAndSettle();
-
-    // Unified until asked otherwise — the layout mode is a property of the
-    // request, so the toggle has to reach the cdylib, not just repaint.
-    expect(api.lastCall('diffRows')!.args['mode'], DiffLayoutMode.inline);
-    await tester.tap(find.text('split'));
-    await tester.pumpAndSettle();
-    expect(api.lastCall('diffRows')!.args['mode'], DiffLayoutMode.sideBySide);
-  });
-
-  testWidgets('a diff with hidden context fetches the file text so the expand '
-      'controls can appear', (tester) async {
-    // Expansion reveals lines the diff never carried, so they can only come from
-    // the working-tree file — and the fetch is deferred until the layout says
-    // there is something hidden, so a fully-shown file costs no round trip.
-    api.diffRowsResponse = const DiffLayoutDto(
-      rows: [],
-      selectable: 0,
-      hasHiddenContext: true,
-    );
-    api.openReviewResponse = reviewSnapshot(
-      files: [reviewFile(displayPath: 'lib/foo.dart')],
-    );
-    await tester.pumpWidget(wrap());
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('lib/foo.dart'));
-    await tester.pumpAndSettle();
-
-    final fetch = api.lastCall('fetchBlob');
-    expect(fetch, isNotNull);
-    expect(fetch!.args['side'], 'new');
-    expect(fetch.args['path'], 'lib/foo.dart');
-    // ...and the layout is rebuilt with the text, so the controls can render.
-    expect(api.lastCall('diffRows')!.args['hasText'], isTrue);
-  });
-
-  testWidgets('a file text fetch that lands after the file was switched is '
-      'dropped instead of poisoning the new file', (tester) async {
-    // The diff pane keeps one state object and is handed a different file when
-    // the sidebar selection changes, so an in-flight fetch for the old file
-    // outlives the switch. Applied to the new file it would supply the wrong
-    // `FileSource` — wrong trailing-gap size, wrong revealed lines — and
-    // permanently overwrite the new file's own text if that arrived first.
-    tester.view.physicalSize = const Size(1400, 1000);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
-
-    // Every file reports hidden context, so each one triggers a text fetch.
-    api.diffRowsResponse = const DiffLayoutDto(
-      rows: [],
-      selectable: 0,
-      hasHiddenContext: true,
-    );
-    api.fetchBlobResponses['lib/first.dart'] = Uint8List.fromList(
-      utf8.encode('FIRST TEXT'),
-    );
-    api.fetchBlobResponses['lib/second.dart'] = Uint8List.fromList(
-      utf8.encode('SECOND TEXT'),
-    );
-    // Hold the first file's fetch open across the switch.
-    final firstFetch = Completer<void>();
-    api.fetchBlobGates['lib/first.dart'] = firstFetch;
-
-    api.openReviewResponse = reviewSnapshot(
-      files: [
-        reviewFile(displayPath: 'lib/first.dart'),
-        reviewFile(displayPath: 'lib/second.dart'),
-      ],
-    );
-    await tester.pumpWidget(wrap());
-    await tester.pumpAndSettle();
-
-    // The first file's fetch is in flight and cannot have completed.
-    expect(api.lastCall('fetchBlob')!.args['path'], 'lib/first.dart');
-    expect(api.lastCall('diffRows')!.args['text'], isNull);
-
-    // Switch to the second file, whose own fetch completes normally.
-    await tester.tap(find.text('second.dart'));
-    await tester.pumpAndSettle();
-    expect(api.lastCall('diffRows')!.args['file'], 'lib/second.dart');
-    expect(api.lastCall('diffRows')!.args['text'], 'SECOND TEXT');
-    final layoutsBefore = api.countOf('diffRows');
-
-    // Now the stale fetch lands. It must be dropped: no re-layout, and the
-    // second file keeps its own text.
-    firstFetch.complete();
-    await tester.pumpAndSettle();
-
-    expect(
-      api.countOf('diffRows'),
-      layoutsBefore,
-      reason: 'a stale fetch must not trigger a re-layout of the new file',
-    );
-    expect(api.lastCall('diffRows')!.args['text'], 'SECOND TEXT');
   });
 
   testWidgets('a snapshot refresh resets a now-out-of-range line selection', (

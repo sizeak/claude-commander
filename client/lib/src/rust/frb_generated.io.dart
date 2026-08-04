@@ -3,7 +3,6 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
-import 'api/diff.dart';
 import 'api/mirrors.dart';
 import 'api/registry.dart';
 import 'api/review.dart';
@@ -82,12 +81,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ReviewDecision dco_decode_box_autoadd_review_decision(dynamic raw);
 
   @protected
-  ReviewFileDto dco_decode_box_autoadd_review_file_dto(dynamic raw);
-
-  @protected
-  ReviewLineOrigin dco_decode_box_autoadd_review_line_origin(dynamic raw);
-
-  @protected
   ReviewSnapshotDto dco_decode_box_autoadd_review_snapshot_dto(dynamic raw);
 
   @protected
@@ -115,33 +108,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CreateOptions dco_decode_create_options(dynamic raw);
 
   @protected
-  DiffCellDto dco_decode_diff_cell_dto(dynamic raw);
-
-  @protected
-  DiffExpandAction dco_decode_diff_expand_action(dynamic raw);
-
-  @protected
-  DiffExpansion dco_decode_diff_expansion(dynamic raw);
-
-  @protected
-  DiffLayoutDto dco_decode_diff_layout_dto(dynamic raw);
-
-  @protected
-  DiffLayoutMode dco_decode_diff_layout_mode(dynamic raw);
-
-  @protected
-  DiffRole dco_decode_diff_role(dynamic raw);
-
-  @protected
-  DiffRowDto dco_decode_diff_row_dto(dynamic raw);
-
-  @protected
-  DiffRowKind dco_decode_diff_row_kind(dynamic raw);
-
-  @protected
-  DiffSpanDto dco_decode_diff_span_dto(dynamic raw);
-
-  @protected
   DiffStatDto dco_decode_diff_stat_dto(dynamic raw);
 
   @protected
@@ -161,15 +127,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<CommentDto> dco_decode_list_comment_dto(dynamic raw);
-
-  @protected
-  List<DiffExpansion> dco_decode_list_diff_expansion(dynamic raw);
-
-  @protected
-  List<DiffRowDto> dco_decode_list_diff_row_dto(dynamic raw);
-
-  @protected
-  List<DiffSpanDto> dco_decode_list_diff_span_dto(dynamic raw);
 
   @protected
   List<OperationStatusDto> dco_decode_list_operation_status_dto(dynamic raw);
@@ -230,9 +187,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ReviewDecision? dco_decode_opt_box_autoadd_review_decision(dynamic raw);
-
-  @protected
-  ReviewLineOrigin? dco_decode_opt_box_autoadd_review_line_origin(dynamic raw);
 
   @protected
   ReviewSnapshotDto? dco_decode_opt_box_autoadd_review_snapshot_dto(
@@ -414,16 +368,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  ReviewFileDto sse_decode_box_autoadd_review_file_dto(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  ReviewLineOrigin sse_decode_box_autoadd_review_line_origin(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   ReviewSnapshotDto sse_decode_box_autoadd_review_snapshot_dto(
     SseDeserializer deserializer,
   );
@@ -459,33 +403,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CreateOptions sse_decode_create_options(SseDeserializer deserializer);
 
   @protected
-  DiffCellDto sse_decode_diff_cell_dto(SseDeserializer deserializer);
-
-  @protected
-  DiffExpandAction sse_decode_diff_expand_action(SseDeserializer deserializer);
-
-  @protected
-  DiffExpansion sse_decode_diff_expansion(SseDeserializer deserializer);
-
-  @protected
-  DiffLayoutDto sse_decode_diff_layout_dto(SseDeserializer deserializer);
-
-  @protected
-  DiffLayoutMode sse_decode_diff_layout_mode(SseDeserializer deserializer);
-
-  @protected
-  DiffRole sse_decode_diff_role(SseDeserializer deserializer);
-
-  @protected
-  DiffRowDto sse_decode_diff_row_dto(SseDeserializer deserializer);
-
-  @protected
-  DiffRowKind sse_decode_diff_row_kind(SseDeserializer deserializer);
-
-  @protected
-  DiffSpanDto sse_decode_diff_span_dto(SseDeserializer deserializer);
-
-  @protected
   DiffStatDto sse_decode_diff_stat_dto(SseDeserializer deserializer);
 
   @protected
@@ -507,17 +424,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<CommentDto> sse_decode_list_comment_dto(SseDeserializer deserializer);
-
-  @protected
-  List<DiffExpansion> sse_decode_list_diff_expansion(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  List<DiffRowDto> sse_decode_list_diff_row_dto(SseDeserializer deserializer);
-
-  @protected
-  List<DiffSpanDto> sse_decode_list_diff_span_dto(SseDeserializer deserializer);
 
   @protected
   List<OperationStatusDto> sse_decode_list_operation_status_dto(
@@ -600,11 +506,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ReviewDecision? sse_decode_opt_box_autoadd_review_decision(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  ReviewLineOrigin? sse_decode_opt_box_autoadd_review_line_origin(
     SseDeserializer deserializer,
   );
 
@@ -820,18 +721,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_box_autoadd_review_file_dto(
-    ReviewFileDto self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_box_autoadd_review_line_origin(
-    ReviewLineOrigin self,
-    SseSerializer serializer,
-  );
-
-  @protected
   void sse_encode_box_autoadd_review_snapshot_dto(
     ReviewSnapshotDto self,
     SseSerializer serializer,
@@ -874,39 +763,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_create_options(CreateOptions self, SseSerializer serializer);
 
   @protected
-  void sse_encode_diff_cell_dto(DiffCellDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_diff_expand_action(
-    DiffExpandAction self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_diff_expansion(DiffExpansion self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_diff_layout_dto(DiffLayoutDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_diff_layout_mode(
-    DiffLayoutMode self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_diff_role(DiffRole self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_diff_row_dto(DiffRowDto self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_diff_row_kind(DiffRowKind self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_diff_span_dto(DiffSpanDto self, SseSerializer serializer);
-
-  @protected
   void sse_encode_diff_stat_dto(DiffStatDto self, SseSerializer serializer);
 
   @protected
@@ -933,24 +789,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_comment_dto(
     List<CommentDto> self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_list_diff_expansion(
-    List<DiffExpansion> self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_list_diff_row_dto(
-    List<DiffRowDto> self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_list_diff_span_dto(
-    List<DiffSpanDto> self,
     SseSerializer serializer,
   );
 
@@ -1062,12 +900,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_review_decision(
     ReviewDecision? self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_opt_box_autoadd_review_line_origin(
-    ReviewLineOrigin? self,
     SseSerializer serializer,
   );
 

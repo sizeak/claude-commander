@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::{Context, Result};
 use claude_commander_client::{
-    spawn_poller, ClientError, PollConfig, Poller, RemoteClient, RemoteServerSpec, SecretString,
+    ClientError, PollConfig, Poller, RemoteClient, RemoteServerSpec, SecretString, spawn_poller,
 };
 use claude_commander_protocol::connection::ConnectionState;
 use claude_commander_protocol::session::{ProjectId, SessionId};
@@ -148,7 +148,9 @@ pub fn connect_server(base_url: String, token: Option<String>) -> Result<String>
     } else {
         base_url.clone()
     };
-    let token = token.filter(|t| !t.is_empty()).map(SecretString::from);
+    let token = token
+        .filter(|t| !t.is_empty())
+        .map(SecretString::from);
     let spec = RemoteServerSpec {
         name,
         base_url,

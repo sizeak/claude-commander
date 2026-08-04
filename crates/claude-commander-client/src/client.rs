@@ -498,10 +498,28 @@ impl RemoteClient {
         self.patch_json_ok(self.session_url(id, &[]), &body).await
     }
 
-    /// Upload a pasted image (PNG bytes) to a session (`POST /paste-image`).
-    pub async fn paste_image(&self, id: SessionId, png: Vec<u8>) -> ClientResult<()> {
-        self.post_bytes_ok(self.session_url(id, &["paste-image"]), png, "image/png")
-            .await
+    /// Upload a pasted image to a session (`POST /paste-image`).
+    ///
+    /// The bytes are checked against the shared wire contract
+    /// ([`claude_commander_protocol::paste::validate`]) *before* the request, so
+    /// junk or over-cap content fails immediately as
+    /// [`ClientError::InvalidRequest`] rather than after a round trip — which
+    /// matters most on the slow mobile links that would otherwise spend the
+    /// upload only to be refused. Every remote caller (the TUI's Ctrl+V, the
+    /// CLI, the Flutter client) inherits the check by going through here.
+    ///
+    /// The sniffed type also sets `Content-Type`. That is advisory only: the
+    /// server re-sniffs the body and never trusts the header, so a wrong one
+    /// cannot widen what it accepts.
+    pub async fn paste_image(&self, id: SessionId, bytes: Vec<u8>) -> ClientResult<()> {
+        let format = claude_commander_protocol::paste::validate(&bytes)
+            .map_err(|e| ClientError::InvalidRequest(e.to_string()))?;
+        self.post_bytes_ok(
+            self.session_url(id, &["paste-image"]),
+            bytes,
+            format.content_type(),
+        )
+        .await
     }
 
     pub async fn mark_read(&self, id: SessionId) -> ClientResult<()> {
@@ -784,5 +802,70 @@ mod tests {
     fn diff_side_param_wire_forms() {
         assert_eq!(diff_side_param(DiffSide::Old), "old");
         assert_eq!(diff_side_param(DiffSide::New), "new");
+    }
+
+    /// A client pointed at a port nothing listens on. Any request that actually
+    /// reaches the network fails as [`ClientError::Unavailable`], so an
+    /// `InvalidRequest` from these tests proves the rejection happened locally.
+    fn unreachable_client() -> RemoteClient {
+        RemoteClient::new(RemoteServerSpec {
+            name: "box".to_string(),
+            // Port 0 is never connectable.
+            base_url: "http://127.0.0.1:0".to_string(),
+            token: None,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn paste_image_rejects_non_image_without_a_request() {
+        let err = unreachable_client()
+            .paste_image(SessionId::new(), b"not an image".to_vec())
+            .await
+            .expect_err("a non-image must be refused");
+        match err {
+            ClientError::InvalidRequest(m) => assert!(
+                m.contains("not a recognised image"),
+                "expected the contract's wording, got {m}"
+            ),
+            other => panic!("expected a local InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn paste_image_rejects_oversized_without_a_request() {
+        let too_big = vec![0u8; claude_commander_protocol::paste::MAX_IMAGE_BYTES + 1];
+        let err = unreachable_client()
+            .paste_image(SessionId::new(), too_big)
+            .await
+            .expect_err("an oversized body must be refused");
+        match err {
+            ClientError::InvalidRequest(m) => assert!(
+                m.contains("over the"),
+                "expected the size-cap wording, got {m}"
+            ),
+            other => panic!("expected a local InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// An accepted image still goes to the wire — proving the local check gates
+    /// on content, not on every call.
+    #[tokio::test]
+    async fn paste_image_sends_valid_image_to_the_wire() {
+        // Only the signature + start of IHDR: the allow-list sniffs a prefix, so
+        // this is the shortest body `validate` accepts. Deliberately not a
+        // decodable PNG — nothing on this path decodes it.
+        const PNG_MAGIC_PREFIX: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52,
+        ];
+        let err = unreachable_client()
+            .paste_image(SessionId::new(), PNG_MAGIC_PREFIX.to_vec())
+            .await
+            .expect_err("nothing is listening, so the request must fail");
+        assert!(
+            matches!(err, ClientError::Unavailable { .. }),
+            "a valid image must reach the transport, got {err:?}"
+        );
     }
 }

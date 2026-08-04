@@ -445,6 +445,129 @@ async fn ws_attach_stamps_last_attached_at() {
     drop(worktrees_dir);
 }
 
+/// `POST /sessions/{id}/paste-image` end to end: a real session, a real upload,
+/// and the written file plus the path injected into the pane.
+///
+/// The handler's own tests cover only the reject paths (400/404), which never
+/// touch disk or tmux; this is the happy path, so it needs the real fixture.
+/// Writes land under the harness's `paste_images_dir` (inside `data_dir`), never
+/// the real OS temp dir.
+#[tokio::test]
+async fn http_paste_image_writes_file_and_injects_path() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    // A minimal but valid 1×1 PNG — the allow-list sniffs content, so this is
+    // the smallest thing the route will accept.
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let data_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let state = test_state(&data_dir, &worktrees_dir);
+    let service = state.service.clone();
+    let addr = spawn_server(state).await;
+    let base = format!("http://{addr}/api");
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{base}/projects"))
+        .json(&serde_json::json!({ "path": repo_path }))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("{base}/sessions"))
+        .json(&serde_json::json!({
+            "project_path": repo_path,
+            "title": "paste-image",
+            "program": "bash",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let id = created["id"].as_str().expect("id").to_string();
+
+    // -- upload the image --
+    let resp = client
+        .post(format!("{base}/sessions/{id}/paste-image"))
+        .header("content-type", "image/png")
+        .body(TINY_PNG.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "a valid image upload should be 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let written = body["path"].as_str().expect("path should be a string");
+
+    // The server writes the bytes verbatim under its own generated name, with
+    // the extension sniffed from the content (never a client-supplied one).
+    assert!(
+        written.ends_with(".png"),
+        "extension should come from the magic bytes: {written}"
+    );
+    assert!(
+        std::path::Path::new(written).starts_with(data_dir.path()),
+        "test writes must stay inside the temp data dir, got {written}"
+    );
+    assert_eq!(
+        tokio::fs::read(written).await.unwrap(),
+        TINY_PNG,
+        "stored file should be byte-identical to the upload"
+    );
+
+    // -- the path is typed into the pane (send-keys -l, no Enter) --
+    let session_id =
+        claude_commander_core::session::SessionId::from_uuid(uuid::Uuid::parse_str(&id).unwrap());
+    let file_name = std::path::Path::new(written)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let mut injected = false;
+    for _ in 0..20 {
+        if let Ok(Some(content)) = service.get_pane_content(&id, None).await
+            && content.contains(&file_name)
+        {
+            injected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        injected,
+        "the stored image path ({file_name}) should be injected into the pane"
+    );
+
+    // -- a non-image is refused for an existing session too --
+    let resp = client
+        .post(format!("{base}/sessions/{id}/paste-image"))
+        .body(b"not an image".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a non-image body should be 400 even for a live session"
+    );
+
+    service.kill_session(&session_id).await.unwrap();
+    drop(repo_temp_dir);
+    drop(data_dir);
+    drop(worktrees_dir);
+}
+
 /// Receive frames until the next TEXT frame, returning its payload. `None` on
 /// close/error/timeout.
 async fn next_text_frame(

@@ -3,12 +3,6 @@
 use super::*;
 use crate::api::{ProjectInfo, SessionInfo, WorkspaceSnapshot};
 use std::collections::BTreeMap;
-// Used only by the tree-builder tests below, which build a snapshot from a
-// hand-constructed `AppState` via the same projection production used before
-// the change-feed cache landed.
-#[cfg(test)]
-use crate::api::workspace_snapshot_from_state;
-
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
         match update {
@@ -99,43 +93,51 @@ impl App {
                 self.refresh_list_items().await;
             }
             StateUpdate::PreviewReady {
+                spawned_at,
                 session_id,
                 project_id,
                 preview_content,
-                diff_info,
                 shell_content,
+                diff_info,
             } => {
-                let elapsed = self
-                    .ui_state
-                    .preview_update_spawned_at
-                    .map(|t| t.elapsed())
-                    .unwrap_or_default();
-                self.ui_state.preview_update_spawned_at = None;
-
-                // Only apply if selection hasn't changed since the fetch started
-                // (compare ids; session/project ids are unique across backends)
-                if session_id == self.ui_state.selected_session_id.map(|r| r.id)
-                    && project_id == self.ui_state.selected_project_id.map(|(_, p)| p)
-                {
-                    debug!(
-                        "Applying PreviewReady (preview_len={} diff_lines={} elapsed={:?})",
-                        preview_content.len(),
-                        diff_info.line_count,
-                        elapsed
-                    );
+                // Release the in-flight guard iff this result owns it. Keyed on
+                // the spawn token, not the selection: a result whose guard has
+                // since been replaced must not clear the newer fetch's guard,
+                // and a result for a selection that moved on *without* a
+                // respawn still has to release its own, or the next fetch is
+                // blocked until the 5s backstop.
+                if self.ui_state.preview_update_spawned_at == Some(spawned_at) {
+                    self.ui_state.preview_update_spawned_at = None;
+                }
+                // Only paint if the same thing is still selected — otherwise the
+                // pane would briefly show another session's output. Session and
+                // project ids are unique across backends, so comparing ids is
+                // enough.
+                let still_selected = self.ui_state.selected_session_id.map(|r| r.id) == session_id
+                    && self.ui_state.selected_project_id.map(|(_, p)| p) == project_id;
+                if still_selected {
                     self.ui_state.preview_content = preview_content;
-                    self.ui_state.diff_info = diff_info;
                     self.ui_state.shell_content = shell_content;
+                    self.ui_state.diff_info = diff_info;
                 } else {
-                    debug!(
-                        "Discarding stale PreviewReady (selection changed, elapsed={:?})",
-                        elapsed
-                    );
+                    debug!("Discarding stale PreviewReady (selection changed)");
                 }
             }
-            StateUpdate::EnrichedPrReady { session_id, info } => {
+            StateUpdate::EnrichedPrReady {
+                spawned_at,
+                session_id,
+                info,
+            } => {
+                // Same generation-token rule as `PreviewReady` above.
+                if self.ui_state.enriched_pr_fetch_spawned_at == Some(spawned_at) {
+                    self.ui_state.enriched_pr_fetch_spawned_at = None;
+                }
                 // Only apply if the session is still selected
                 if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
+                    // An empty result caches nothing, so record the attempt
+                    // separately — otherwise an open Info surface would refetch
+                    // (spawning `gh`) every few seconds for the whole session.
+                    self.ui_state.enriched_pr_unavailable = info.is_none().then_some(session_id);
                     self.ui_state.enriched_pr = info.map(|pr| (session_id, pr));
                 } else {
                     debug!("Discarding stale EnrichedPrReady for {}", session_id);
@@ -307,8 +309,10 @@ impl App {
                 self.refresh_backend_view(BackendId(backend_id)).await;
                 self.refresh_list_items().await;
                 // The session may have moved position (rename re-sorts, a section
-                // move relocates it); keep it selected and refresh its preview.
+                // move relocates it); keep it selected and refresh the Info
+                // modal's diff if it is open.
                 if self.select_session_in_tree(session_id) {
+                    self.ui_state.preview_update_spawned_at = None;
                     self.spawn_preview_update();
                 }
             }
@@ -427,7 +431,7 @@ impl App {
                         diff,
                         comments,
                         reviewed,
-                        models,
+                        segments,
                         content_hash,
                         dropped_comments,
                     } = *prepared;
@@ -435,7 +439,7 @@ impl App {
                     state.content_hash = content_hash;
                     state.reviewed = reviewed.into_iter().collect();
                     state.select_first_unreviewed();
-                    state.prime_views(models);
+                    state.prime_segments(segments);
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ensure_review_file_lines(&state).await;
@@ -542,7 +546,7 @@ impl App {
                                 diff,
                                 comments,
                                 reviewed,
-                                models,
+                                segments,
                                 content_hash,
                                 dropped_comments,
                                 ..
@@ -551,7 +555,7 @@ impl App {
                                 diff,
                                 comments,
                                 reviewed.into_iter().collect(),
-                                models,
+                                segments,
                                 content_hash,
                             );
                             // The drop notice wins over "Review refreshed": the
@@ -670,32 +674,177 @@ impl App {
     }
 
     pub(super) async fn refresh_list_items(&mut self) {
-        // Guard: if a section view is active but sections were removed from
-        // config (hot-reload), fall back to ProjectGrouped.
-        if matches!(
-            self.ui_state.view_mode,
-            ViewMode::SectionGrouped | ViewMode::SectionStacks
-        ) && self.config.sections.is_empty()
-        {
-            self.ui_state.view_mode = ViewMode::ProjectGrouped;
+        // A section list mode needs configured sections; fall back to the
+        // project list view if the user removed them (hot-reload). The board
+        // uses baked-in defaults, so it is unaffected.
+        if self.ui_state.view_mode.is_section_view() && self.config.sections.is_empty() {
+            self.ui_state.view_mode = crate::config::ViewMode::ProjectGrouped;
         }
 
-        // Read the change-feed-maintained cached snapshots. No store access on
-        // the refresh path: a backend mutation bumps the change feed, whose task
-        // fetches a fresh snapshot and folds it into the `BackendView` via
-        // `StateUpdate::BackendChanged` before this runs. Each backend
-        // contributes its own subtree under a per-server header — except when a
-        // lone local backend is configured, where the header is suppressed so
-        // the tree renders exactly as a single-machine setup always has.
+        // Drop a board filter whose project no longer exists in any snapshot
+        // (e.g. just deleted) so the columns don't filter to an absent project.
+        // Board-only; harmless in list modes.
+        if let Some(f) = self.ui_state.board_filter
+            && !self
+                .backends
+                .iter()
+                .any(|h| h.view.snapshot.projects.iter().any(|p| p.id == f))
+        {
+            self.ui_state.board_filter = None;
+        }
+
+        // One-time stale-server toast, computed up front and shared by both
+        // views (the per-row/header version annotation is recomputed in each
+        // branch). Deferred so `ui_state` isn't mutated under the backends
+        // borrow; only the first not-yet-warned remote mismatch is taken.
+        let mut pending_version_toast: Option<(usize, String, crate::backend::VersionMismatch)> =
+            None;
+        for h in &self.backends {
+            if h.id == crate::backend::LOCAL_BACKEND_ID {
+                continue;
+            }
+            if let Some(m) = crate::backend::server_version_mismatch(
+                &h.view.snapshot.server.version,
+                crate::VERSION,
+            ) && pending_version_toast.is_none()
+                && !self.ui_state.version_warned.contains(&h.id.0)
+            {
+                pending_version_toast = Some((h.id.0, h.backend.descriptor().name, m));
+            }
+        }
+
+        let cascade_paused = self
+            .backends
+            .iter()
+            .any(|h| h.view.snapshot.cascade_paused.is_some());
+
+        if self.ui_state.view_mode.is_board() {
+            self.rebuild_board_view();
+        } else {
+            self.rebuild_list_view();
+        }
+        self.ui_state.cascade_paused = cascade_paused;
+
+        // Fire the deferred stale-server toast now the backends borrow is
+        // released, into a free slot only (don't clobber a live message). Mark
+        // the server warned only when actually shown, so a deferred one retries.
+        if let Some((id, name, mismatch)) = pending_version_toast {
+            let slot_free = self
+                .ui_state
+                .status_message
+                .as_ref()
+                .is_none_or(|(_, expiry)| Instant::now() >= *expiry);
+            if slot_free {
+                self.ui_state.version_warned.insert(id);
+                self.ui_state.status_message = Some((
+                    format!(
+                        "{name} is on v{} — older than this client (v{}); some features may not work",
+                        mismatch.server, mismatch.client
+                    ),
+                    Instant::now() + Duration::from_secs(6),
+                ));
+            }
+        }
+
+        self.update_selection();
+        self.recompute_stack_chain();
+    }
+
+    /// Rebuild the kanban board model from every backend's cached snapshot and
+    /// re-anchor the board cursor to the tracked selection.
+    fn rebuild_board_view(&mut self) {
+        let sections = self.config.effective_sections();
+        let inputs: Vec<crate::session::BoardBackendInput> = self
+            .backends
+            .iter()
+            .map(|h| {
+                let version_warning = if h.id == crate::backend::LOCAL_BACKEND_ID {
+                    None
+                } else {
+                    crate::backend::server_version_mismatch(
+                        &h.view.snapshot.server.version,
+                        crate::VERSION,
+                    )
+                };
+                crate::session::BoardBackendInput {
+                    backend: h.id,
+                    name: h.backend.descriptor().name,
+                    connection: h.view.connection.clone(),
+                    version_warning,
+                    snapshot: &h.view.snapshot,
+                    agent_states: &h.view.agent_states.states,
+                }
+            })
+            .collect();
+        let mut board = crate::session::build_board(
+            &inputs,
+            sections.as_ref(),
+            self.config.in_progress_limit,
+            self.ui_state.board_filter,
+            self.config.hide_empty_sections,
+        );
+
+        // Mark rows whose LFS content is still being pulled (UI-only state).
+        if !self.ui_state.lfs_pull_in_flight.is_empty() {
+            for column in &mut board.columns {
+                for card in &mut column.cards {
+                    let SessionListItem::Worktree {
+                        id, lfs_pulling, ..
+                    } = &mut card.row
+                    else {
+                        unreachable!("board rows are always Worktree")
+                    };
+                    *lfs_pulling = self.ui_state.lfs_pull_in_flight.contains(id);
+                }
+            }
+        }
+
+        let counts = board.selectable_row_counts();
+        self.ui_state.board = board;
+        self.ui_state.board_state.sync(counts);
+
+        // Per-frame render inputs cached here (recomputed on rebuild only).
+        self.ui_state.session_numbers = self.ui_state.board.session_numbers();
+        self.ui_state.has_mixed_programs = board_has_mixed_programs(&self.ui_state.board);
+        self.rebuild_project_colors();
+
+        // Re-anchor the cursor to the tracked selection so a background rebuild
+        // that reorders the board doesn't strand the highlight on a different
+        // row than actions target.
+        let reanchor = if let Some(sid) = self.ui_state.selected_session_id.map(|r| r.id) {
+            self.ui_state.board.position_of(sid)
+        } else if let Some(pid) = self.ui_state.selected_project_id.map(|(_, p)| p)
+            && self
+                .ui_state
+                .board_state
+                .selected()
+                .is_some_and(|pos| pos.col == 0)
+        {
+            self.ui_state
+                .board
+                .sidebar_row_of(pid)
+                .map(|row| BoardPos { col: 0, row })
+        } else {
+            None
+        };
+        if let Some(pos) = reanchor {
+            self.ui_state.board_state.select(Some(pos));
+        }
+    }
+
+    /// Rebuild the flat tree-list rows for the active list view: an optional
+    /// pinned recents block, then one per-server header (when more than one
+    /// backend) followed by that backend's items.
+    fn rebuild_list_view(&mut self) {
         let single_backend = self.backends.len() == 1;
         let mut items: Vec<SessionListItem> = Vec::new();
 
         // Recent-sessions block, prepended above the per-backend tree and
         // independent of any server. Each row is a shortcut to a session that
-        // still appears in its normal place below; its number and project
-        // colour are mirrored from the real row at render time. Sessions never
-        // attached (no `last_attached_at`) are excluded. `recent_sessions_limit
-        // == 0` hides the block entirely.
+        // still appears in its normal place below; its number and project colour
+        // are mirrored from the real row at render time. Sessions never attached
+        // (no `last_attached_at`) are excluded. `recent_sessions_limit == 0`
+        // hides the block entirely.
         let recent_limit = self.config.recent_sessions_limit as usize;
         if recent_limit > 0 {
             let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, SessionListItem)> = Vec::new();
@@ -742,23 +891,10 @@ impl App {
         // divider); the per-backend tree appended below is the scrolling list.
         let recents_len = items.len();
 
-        // A stale-server warning to surface once (deferred until after the loop
-        // so `ui_state` isn't mutated while `self.backends` is borrowed). This
-        // seam covers every snapshot-fold path by construction, since they all
-        // re-run `refresh_list_items`.
-        let mut pending_version_toast: Option<(usize, String, crate::backend::VersionMismatch)> =
-            None;
         for handle in &self.backends {
             let snapshot = &handle.view.snapshot;
             let agent_states = &handle.view.agent_states.states;
             if !single_backend {
-                let name = handle.backend.descriptor().name;
-                // Compare this backend's reported server build against the
-                // client's. Only remote backends can skew: the local backend is
-                // in-process, and `crate::VERSION` (the core crate's version) is
-                // both what it reports and what we compare against, so they
-                // always match. A backend still showing its connecting
-                // placeholder also reports `crate::VERSION`, so it never warns.
                 let version_warning = if handle.id == crate::backend::LOCAL_BACKEND_ID {
                     None
                 } else {
@@ -767,22 +903,15 @@ impl App {
                         crate::VERSION,
                     )
                 };
-                if let Some(mismatch) = &version_warning
-                    && pending_version_toast.is_none()
-                    && !self.ui_state.version_warned.contains(&handle.id.0)
-                {
-                    pending_version_toast = Some((handle.id.0, name.clone(), mismatch.clone()));
-                }
                 items.push(SessionListItem::ServerHeader {
                     backend: handle.id,
-                    name,
+                    name: handle.backend.descriptor().name,
                     connection: handle.view.connection.clone(),
                     version_warning,
                 });
             }
             let mut backend_items = match self.ui_state.view_mode {
-                ViewMode::ProjectGrouped => build_project_grouped_items(snapshot, agent_states),
-                ViewMode::SectionGrouped => build_section_grouped_items(
+                crate::config::ViewMode::SectionGrouped => build_section_grouped_items(
                     snapshot,
                     &self.config.sections,
                     self.config.in_progress_limit,
@@ -790,7 +919,7 @@ impl App {
                     &self.ui_state.collapsed_sections,
                     self.config.hide_empty_sections,
                 ),
-                ViewMode::SectionStacks => build_stacked_section_items(
+                crate::config::ViewMode::SectionStacks => build_stacked_section_items(
                     snapshot,
                     &self.config.sections,
                     self.config.in_progress_limit,
@@ -798,37 +927,13 @@ impl App {
                     &self.ui_state.collapsed_sections,
                     self.config.hide_empty_sections,
                 ),
+                // ProjectGrouped (and Board, unreachable here) use the flat view.
+                _ => build_project_grouped_items(snapshot, agent_states),
             };
             items.append(&mut backend_items);
         }
 
-        // Fire the one-time stale-server toast now the `self.backends` borrow is
-        // released, but only into a free slot: don't clobber a live message
-        // (e.g. "Created session …", set just before this refresh). We mark the
-        // server warned only when the toast is actually shown, so a deferred one
-        // retries on a later refresh rather than being silently consumed. The
-        // persistent header annotation carries the warning regardless.
-        if let Some((id, name, mismatch)) = pending_version_toast {
-            let slot_free = self
-                .ui_state
-                .status_message
-                .as_ref()
-                .is_none_or(|(_, expiry)| Instant::now() >= *expiry);
-            if slot_free {
-                self.ui_state.version_warned.insert(id);
-                self.ui_state.status_message = Some((
-                    format!(
-                        "{name} is on v{} — older than this client (v{}); some features may not work",
-                        mismatch.server, mismatch.client
-                    ),
-                    Instant::now() + Duration::from_secs(6),
-                ));
-            }
-        }
-
-        // Mark rows whose LFS content is still being pulled in the background.
-        // Sourced from UiState (not the persisted session) so it survives the
-        // store's read-modify-write cycle untouched.
+        // Mark rows whose LFS content is still being pulled (UI-only state).
         if !self.ui_state.lfs_pull_in_flight.is_empty() {
             for item in &mut items {
                 match item {
@@ -854,22 +959,17 @@ impl App {
         let group_starts: Vec<bool> = items.iter().map(|i| i.is_group_header()).collect();
         self.ui_state.list_items = items;
         self.ui_state.recents_len = recents_len;
-        // The footer's "resume cascade" hint shows if *any* backend is paused.
-        self.ui_state.cascade_paused = self
-            .backends
-            .iter()
-            .any(|h| h.view.snapshot.cascade_paused.is_some());
         // Always install the selectable mask: even ProjectGrouped now carries
         // non-selectable rows (the recents header and its divider), which the
         // old "all rows selectable" `set_item_count` path would let the cursor
         // land on.
         self.ui_state.list_state.set_selectable(selectable);
         self.ui_state.list_state.set_group_starts(group_starts);
+    }
 
-        // Pre-compute stack chain for the selected session, from the snapshot of
-        // the backend that owns it (stacks never span backends). Built into an
-        // owned vec inside the snapshot-borrow scope, then moved into ui_state,
-        // so the immutable borrow of `self` ends before the mutation.
+    /// Pre-compute the stack-chain breadcrumb for the selected session from its
+    /// owning backend's snapshot (stacks never span backends).
+    fn recompute_stack_chain(&mut self) {
         let stack_chain = self.ui_state.selected_session_id.map(|sref| {
             let snapshot = &self.view_for(sref.backend).snapshot;
             let session_id = sref.id;
@@ -887,17 +987,7 @@ impl App {
                             .collect()
                     })
                     .unwrap_or_default();
-                // Walk up to the stack base
-                let mut base = session_id;
-                for _ in 0..project_sessions.len() {
-                    let base_session = project_sessions.iter().find(|s| s.session_id == base);
-                    match base_session
-                        .and_then(|s| crate::session::resolve_stack_parent(*s, &project_sessions))
-                    {
-                        Some(parent) => base = parent,
-                        None => break,
-                    }
-                }
+                let base = crate::session::stack_root(session_id, &project_sessions);
                 let chain = crate::session::stack_chain_from_base(base, &project_sessions);
                 if chain.len() > 1 {
                     for &sid in &chain {
@@ -931,71 +1021,44 @@ impl App {
             .await;
     }
 
-    /// Save left pane width to persisted UI prefs
-    pub(super) async fn save_left_pane_pct(&self) {
-        self.tui_prefs
-            .set_left_pane_pct(self.ui_state.left_pane_pct)
-            .await;
-    }
-
-    /// Restore selection and UI preferences from persisted UI prefs
+    /// Restore selection from persisted UI prefs onto the board.
+    ///
+    /// Prefers the last-selected session (its card row); falls back to the
+    /// last-selected project (its sidebar row); otherwise leaves the default
+    /// selection installed by `board_state.sync` in `refresh_list_items`.
+    /// Session/project ids are unique across backends, so the remembered
+    /// backend name needs no disambiguation here.
     pub(super) async fn restore_selection(&mut self) {
         let prefs = self.tui_prefs.prefs();
-        let (last_session, last_project, left_pane_pct, last_backend) = (
-            prefs.last_selected_session,
-            prefs.last_selected_project,
-            prefs.left_pane_pct,
-            prefs.last_selected_backend.clone(),
-        );
+        let (last_session, last_project) =
+            (prefs.last_selected_session, prefs.last_selected_project);
 
-        if let Some(pct) = left_pane_pct {
-            self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
-        }
-
-        // Resolve the remembered backend *name* back to its current id (config
-        // order can change between launches). An unknown/absent name resolves to
-        // the local backend.
-        let preferred_backend = last_backend
-            .and_then(|name| {
-                self.backends
-                    .iter()
-                    .find(|h| h.backend.descriptor().name == name)
-                    .map(|h| h.id)
-            })
-            .unwrap_or(LOCAL_BACKEND_ID);
-
-        let row_matches = |item: &SessionListItem| match item {
-            SessionListItem::Worktree { id, .. } => last_session.is_some_and(|s| s == *id),
-            SessionListItem::Project { id, .. } => {
-                last_session.is_none() && last_project.is_some_and(|p| p == *id)
+        if self.ui_state.view_mode.is_board() {
+            if let Some(sid) = last_session
+                && let Some(pos) = self.ui_state.board.position_of(sid)
+            {
+                self.ui_state.board_state.select(Some(pos));
+            } else if let Some(pid) = last_project {
+                // Selects the sidebar row (and syncs selection) when the project
+                // still exists; a no-op otherwise, leaving the default selection.
+                self.select_project_in_sidebar(pid);
             }
-            SessionListItem::SectionHeader { .. }
-            | SessionListItem::ServerHeader { .. }
-            | SessionListItem::Spacer
-            // Recent rows are shortcuts; restore always lands on the real row.
-            | SessionListItem::RecentsHeader
-            | SessionListItem::RecentSession { .. } => false,
-        };
-        let owning_backend = |item: &SessionListItem| match item {
-            SessionListItem::Worktree { id, .. } => Some(self.backend_of_session(*id)),
-            SessionListItem::Project { id, .. } => Some(self.backend_of_project(*id)),
-            _ => None,
-        };
-
-        // Prefer a matching row on the remembered backend; if that backend is
-        // gone (or the row moved), fall back to the first match on any backend.
-        let target_idx = self
-            .ui_state
-            .list_items
-            .iter()
-            .position(|item| row_matches(item) && owning_backend(item) == Some(preferred_backend))
-            .or_else(|| self.ui_state.list_items.iter().position(row_matches));
-
-        if let Some(idx) = target_idx {
+        } else if let Some(sid) = last_session
+            && let Some(idx) =
+                self.ui_state.list_items.iter().position(
+                    |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == sid),
+                )
+        {
             self.ui_state.list_state.select(Some(idx));
-        } else if !self.ui_state.list_items.is_empty() {
-            self.ui_state.list_state.select(Some(0));
+        } else if let Some(pid) = last_project
+            && let Some(idx) =
+                self.ui_state.list_items.iter().position(
+                    |item| matches!(item, SessionListItem::Project { id, .. } if *id == pid),
+                )
+        {
+            self.ui_state.list_state.select(Some(idx));
         }
+        self.update_selection();
     }
 }
 
@@ -1015,103 +1078,103 @@ pub(super) fn order_recent<T>(
         .collect()
 }
 
-/// Compute the display order of a project's sessions, grouping each stack
-/// directly under its base.
-///
-/// Returns `(session_id, stacked_child)` pairs in the order they should appear.
-/// Root-list sessions (unstacked + stack bases) are sorted newest-first by
-/// `created_at`; stacked children follow their root in parent→child (stack
-/// position) order at the single deeper indent.
-pub(super) fn build_session_order<S: crate::session::SessionNode>(
-    sessions: &[&S],
-) -> Vec<(SessionId, bool)> {
-    let mut root_sessions: Vec<&S> = Vec::new();
-    let mut children_by_parent: HashMap<SessionId, Vec<&S>> = HashMap::new();
-    for s in sessions {
-        match crate::session::resolve_stack_parent(*s, sessions) {
-            Some(parent_id) => {
-                children_by_parent.entry(parent_id).or_default().push(s);
-            }
-            None => {
-                root_sessions.push(s);
-            }
-        }
-    }
-
-    root_sessions.sort_by_key(|s| std::cmp::Reverse(s.node_created_at()));
-    for children in children_by_parent.values_mut() {
-        children.sort_by_key(|s| s.node_created_at());
-    }
-
-    let mut out = Vec::new();
-    for root in root_sessions {
-        out.push((root.node_id(), false));
-        // to_visit is a LIFO stack; reverse the initial children and every
-        // subsequent children-of-children push so pop() yields them in
-        // ascending created_at order.
-        let mut to_visit: Vec<&S> = children_by_parent
-            .get(&root.node_id())
-            .cloned()
-            .unwrap_or_default();
-        to_visit.reverse();
-        while let Some(next) = to_visit.pop() {
-            out.push((next.node_id(), true));
-            if let Some(grandchildren) = children_by_parent.get(&next.node_id()) {
-                for gc in grandchildren.iter().rev() {
-                    to_visit.push(gc);
-                }
-            }
-        }
-    }
-    out
-}
-
-fn worktree_item(
-    session: &SessionInfo,
-    agent_states: &BTreeMap<SessionId, AgentState>,
-    project_name_prefix: Option<&str>,
-    stacked_child: bool,
-) -> SessionListItem {
-    let title = match project_name_prefix {
-        Some(prefix) => format!("{}/{}", prefix, session.title),
-        None => session.title.clone(),
-    };
-    SessionListItem::Worktree {
-        id: session.session_id,
-        project_id: session.project_id,
-        title,
-        branch: session.branch.clone(),
-        status: session.status,
-        program: session.program.clone(),
-        pr_number: session.pr_number,
-        pr_url: session.pr_url.clone(),
-        pr_merged: session.pr_merged,
-        // The DTO carries the already-effective PR state; the list item's
-        // renderer re-applies `effective_pr_state`, which is idempotent on
-        // `Some`, so wrapping preserves the previous rendering exactly.
-        pr_state: Some(session.pr_state),
-        pr_draft: session.pr_draft,
-        pr_labels: session.pr_labels.clone(),
-        worktree_path: std::path::PathBuf::from(&session.worktree_path),
-        created_at: session.created_at,
-        agent_state: agent_states.get(&session.session_id).copied(),
-        unread: session.unread,
-        keep_alive: session.keep_alive,
-        // Set by refresh_list_items from UiState::lfs_pull_in_flight after the
-        // items are built.
-        lfs_pulling: false,
-        stacked_child,
-    }
-}
-
-/// Index a snapshot's sessions by id for O(1) lookup during tree building.
-fn session_index(snapshot: &WorkspaceSnapshot) -> HashMap<SessionId, &SessionInfo> {
+/// Index a snapshot's sessions by id for O(1) lookup during stack-chain
+/// building.
+fn session_index(
+    snapshot: &crate::api::WorkspaceSnapshot,
+) -> std::collections::HashMap<crate::session::SessionId, &crate::api::SessionInfo> {
     snapshot
         .sessions
         .iter()
         .map(|s| (s.session_id, s))
         .collect()
 }
+
+/// Whether the board's worktree rows span more than one distinct program
+/// (comparing base program names, so `claude --foo` and `claude --bar` count as
+/// one). Cached on `UiState` so the board widget doesn't recompute it per frame.
+fn board_has_mixed_programs(board: &crate::session::Board) -> bool {
+    let mut first: Option<&str> = None;
+    for card in board.cards() {
+        let SessionListItem::Worktree { program, .. } = &card.row else {
+            unreachable!("board rows are always Worktree")
+        };
+        let p = crate::tui::widgets::status_glyph::program_name(program);
+        match first {
+            None => first = Some(p),
+            Some(f) if f != p => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Apply freshly-detected agent states for the sessions just viewed during an
+/// attach, leaving every other session's entry untouched.
+///
+/// Returning from an attach must not blank the whole tree (which happens if the
+/// agent-state map is cleared wholesale) nor drop genuine background
+/// `Working → Idle` notifications. Only the sessions the user actually saw get
+/// their state overwritten here; because the user was watching them, the
+/// refreshed state is applied directly without running unread detection, so
+/// their own transitions are never re-flagged as unread. Every other session
+/// keeps its prior state, preserving the baseline a later poll diffs against.
+pub(super) fn apply_viewed_session_refresh(
+    agent_states: &mut BTreeMap<SessionId, AgentState>,
+    refreshed: BTreeMap<SessionId, AgentState>,
+) {
+    agent_states.extend(refreshed);
+}
+
+/// Preview the stack-retarget that deleting `session_id` would trigger, derived
+/// from a workspace snapshot: `(number of direct stacked children, branch they'd
+/// be retargeted onto)`. Returns `None` when the session has no direct stacked
+/// children, so the delete confirmation only mentions retargeting when it
+/// actually applies.
+///
+/// DTO twin of [`AppState::stack_retarget_preview`](crate::config::storage::AppState::stack_retarget_preview):
+/// the delete-confirm dialog derives its preview from the cached snapshot rather
+/// than reading the store, so a remote backend's snapshot drives it identically.
+pub(super) fn stack_retarget_preview_from_snapshot(
+    snapshot: &WorkspaceSnapshot,
+    session_id: SessionId,
+) -> Option<(usize, String)> {
+    let deleted = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.session_id == session_id)?;
+    let project_id = deleted.project_id;
+    let main_branch = snapshot
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)?
+        .main_branch
+        .clone();
+    let project_sessions: Vec<&SessionInfo> = snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.project_id == project_id)
+        .collect();
+
+    let child_ids: Vec<SessionId> = project_sessions
+        .iter()
+        .filter(|s| {
+            crate::session::resolve_stack_parent(**s, &project_sessions) == Some(session_id)
+        })
+        .map(|s| s.session_id)
+        .collect();
+    if child_ids.is_empty() {
+        return None;
+    }
+
+    let new_base_branch = crate::session::resolve_stack_parent(deleted, &project_sessions)
+        .and_then(|pid| project_sessions.iter().find(|s| s.session_id == pid))
+        .map(|p| p.branch.clone())
+        .unwrap_or(main_branch);
+    Some((child_ids.len(), new_base_branch))
+}
+
+// ---- List-view item builders (revived from main; reuse board.rs helpers) ----
 
 pub(super) fn build_project_grouped_items(
     snapshot: &WorkspaceSnapshot,
@@ -1139,31 +1202,18 @@ pub(super) fn build_project_grouped_items(
             .iter()
             .filter_map(|sid| by_id.get(sid).copied())
             .collect();
-        for (sid, stacked_child) in build_session_order(&sessions) {
+        for (sid, stacked_child) in crate::session::board::build_session_order(&sessions) {
             if let Some(session) = by_id.get(&sid).copied() {
-                items.push(worktree_item(session, agent_states, None, stacked_child));
+                items.push(crate::session::board::worktree_item(
+                    session,
+                    agent_states,
+                    None,
+                    stacked_child,
+                ));
             }
         }
     }
     items
-}
-
-/// Resolve the advisory WIP limit for a section by name. Returns the
-/// matching `SectionConfig::max_sessions` for user-defined sections, the
-/// top-level `in_progress_limit` for the implicit "In Progress" catch-all,
-/// or `None` when no limit is configured.
-fn resolve_section_limit(
-    name: &str,
-    sections: &[crate::session::SectionConfig],
-    in_progress_limit: Option<u32>,
-) -> Option<u32> {
-    if name == crate::session::IN_PROGRESS {
-        return in_progress_limit;
-    }
-    sections
-        .iter()
-        .find(|s| s.name == name)
-        .and_then(|s| s.max_sessions)
 }
 
 pub(super) fn build_section_grouped_items(
@@ -1195,7 +1245,11 @@ pub(super) fn build_section_grouped_items(
             name: group.name.clone(),
             count: group.sessions.len(),
             collapsed,
-            max_sessions: resolve_section_limit(&group.name, sections, in_progress_limit),
+            max_sessions: crate::session::board::resolve_section_limit(
+                &group.name,
+                sections,
+                in_progress_limit,
+            ),
         });
 
         if collapsed {
@@ -1235,7 +1289,12 @@ pub(super) fn build_section_grouped_items(
             if let Some(sids) = project_sessions {
                 for sid in sids {
                     if let Some(session) = by_id.get(sid).copied() {
-                        items.push(worktree_item(session, agent_states, None, false));
+                        items.push(crate::session::board::worktree_item(
+                            session,
+                            agent_states,
+                            None,
+                            false,
+                        ));
                     }
                 }
             }
@@ -1244,10 +1303,6 @@ pub(super) fn build_section_grouped_items(
     items
 }
 
-/// Like `build_section_grouped_items` but treats each PR stack as one unit:
-/// the whole stack lands in the section chosen by its newest leaf (with
-/// `section_override` walked closest-to-leaf-first), and stack indentation is
-/// preserved via `stacked_child: true` on non-root members.
 pub(super) fn build_stacked_section_items(
     snapshot: &WorkspaceSnapshot,
     sections: &[crate::session::SectionConfig],
@@ -1366,7 +1421,7 @@ pub(super) fn build_stacked_section_items(
             // the slice it's given, so passing just the group's members
             // keeps the root flat and descendants indented even when the
             // subgraph fans out.
-            let order = build_session_order(&members);
+            let order = crate::session::board::build_session_order(&members);
 
             by_section
                 .entry(section_name)
@@ -1413,7 +1468,11 @@ pub(super) fn build_stacked_section_items(
             name: section_name.clone(),
             count: total_count,
             collapsed,
-            max_sessions: resolve_section_limit(section_name, sections, in_progress_limit),
+            max_sessions: crate::session::board::resolve_section_limit(
+                section_name,
+                sections,
+                in_progress_limit,
+            ),
         });
         if collapsed {
             continue;
@@ -1447,78 +1506,18 @@ pub(super) fn build_stacked_section_items(
             for group in groups_in_proj {
                 for (sid, stacked_child) in group.order {
                     if let Some(session) = by_id.get(&sid).copied() {
-                        items.push(worktree_item(session, agent_states, None, stacked_child));
+                        items.push(crate::session::board::worktree_item(
+                            session,
+                            agent_states,
+                            None,
+                            stacked_child,
+                        ));
                     }
                 }
             }
         }
     }
     items
-}
-
-/// Apply freshly-detected agent states for the sessions just viewed during an
-/// attach, leaving every other session's entry untouched.
-///
-/// Returning from an attach must not blank the whole tree (which happens if the
-/// agent-state map is cleared wholesale) nor drop genuine background
-/// `Working → Idle` notifications. Only the sessions the user actually saw get
-/// their state overwritten here; because the user was watching them, the
-/// refreshed state is applied directly without running unread detection, so
-/// their own transitions are never re-flagged as unread. Every other session
-/// keeps its prior state, preserving the baseline a later poll diffs against.
-pub(super) fn apply_viewed_session_refresh(
-    agent_states: &mut BTreeMap<SessionId, AgentState>,
-    refreshed: BTreeMap<SessionId, AgentState>,
-) {
-    agent_states.extend(refreshed);
-}
-
-/// Preview the stack-retarget that deleting `session_id` would trigger, derived
-/// from a workspace snapshot: `(number of direct stacked children, branch they'd
-/// be retargeted onto)`. Returns `None` when the session has no direct stacked
-/// children, so the delete confirmation only mentions retargeting when it
-/// actually applies.
-///
-/// DTO twin of [`AppState::stack_retarget_preview`](crate::config::storage::AppState::stack_retarget_preview):
-/// the delete-confirm dialog derives its preview from the cached snapshot rather
-/// than reading the store, so a remote backend's snapshot drives it identically.
-pub(super) fn stack_retarget_preview_from_snapshot(
-    snapshot: &WorkspaceSnapshot,
-    session_id: SessionId,
-) -> Option<(usize, String)> {
-    let deleted = snapshot
-        .sessions
-        .iter()
-        .find(|s| s.session_id == session_id)?;
-    let project_id = deleted.project_id;
-    let main_branch = snapshot
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)?
-        .main_branch
-        .clone();
-    let project_sessions: Vec<&SessionInfo> = snapshot
-        .sessions
-        .iter()
-        .filter(|s| s.project_id == project_id)
-        .collect();
-
-    let child_ids: Vec<SessionId> = project_sessions
-        .iter()
-        .filter(|s| {
-            crate::session::resolve_stack_parent(**s, &project_sessions) == Some(session_id)
-        })
-        .map(|s| s.session_id)
-        .collect();
-    if child_ids.is_empty() {
-        return None;
-    }
-
-    let new_base_branch = crate::session::resolve_stack_parent(deleted, &project_sessions)
-        .and_then(|pid| project_sessions.iter().find(|s| s.session_id == pid))
-        .map(|p| p.branch.clone())
-        .unwrap_or(main_branch);
-    Some((child_ids.len(), new_base_branch))
 }
 
 #[cfg(test)]
@@ -1560,6 +1559,7 @@ mod unread_transition_tests {
 #[cfg(test)]
 mod stack_order_tests {
     use super::*;
+    use crate::api::workspace_snapshot_from_state;
     use crate::session::{ProjectId, WorktreeSession};
     use chrono::{Duration as ChronoDuration, Utc};
     use std::path::PathBuf;
@@ -1576,106 +1576,9 @@ mod stack_order_tests {
         s
     }
 
-    #[test]
-    fn ordering_unstacked_only_sorts_newest_first() {
-        let a = make_session("a", "a", 0);
-        let b = make_session("b", "b", 10);
-        let c = make_session("c", "c", 20);
-        let order = build_session_order(&[&a, &b, &c]);
-        assert_eq!(
-            order,
-            vec![(c.id, false), (b.id, false), (a.id, false)],
-            "newer sessions should appear first at the root level"
-        );
-    }
-
-    #[test]
-    fn ordering_single_stack_emits_base_then_children_in_stack_order() {
-        // base (oldest) ← child1 ← child2; all stacked, base at root indent.
-        let base = make_session("base", "base-br", 0);
-        let mut child1 = make_session("c1", "c1-br", 5);
-        child1.stack_parent_session_id = Some(base.id);
-        let mut child2 = make_session("c2", "c2-br", 10);
-        child2.stack_parent_session_id = Some(child1.id);
-
-        let order = build_session_order(&[&base, &child1, &child2]);
-        assert_eq!(
-            order,
-            vec![(base.id, false), (child1.id, true), (child2.id, true)]
-        );
-    }
-
-    #[test]
-    fn ordering_two_independent_stacks_interleave_by_base_created_at() {
-        // Two stacks; their bases sort by created_at among root rows. Each
-        // stack's children appear directly beneath its base.
-        let base_a = make_session("base-a", "base-a", 0);
-        let mut child_a = make_session("child-a", "child-a", 1);
-        child_a.stack_parent_session_id = Some(base_a.id);
-
-        let base_b = make_session("base-b", "base-b", 20);
-        let mut child_b = make_session("child-b", "child-b", 21);
-        child_b.stack_parent_session_id = Some(base_b.id);
-
-        let order = build_session_order(&[&base_a, &child_a, &base_b, &child_b]);
-        assert_eq!(
-            order,
-            vec![
-                (base_b.id, false), // newer base first at root level
-                (child_b.id, true),
-                (base_a.id, false),
-                (child_a.id, true),
-            ]
-        );
-    }
-
-    #[test]
-    fn ordering_mixed_stack_and_unstacked_interleaves_correctly() {
-        let base = make_session("base", "base", 0);
-        let mut child = make_session("child", "child", 5);
-        child.stack_parent_session_id = Some(base.id);
-        let solo = make_session("solo", "solo", 10);
-        let order = build_session_order(&[&base, &child, &solo]);
-        assert_eq!(
-            order,
-            vec![
-                (solo.id, false), // newest root first
-                (base.id, false),
-                (child.id, true), // follows its base
-            ]
-        );
-    }
-
-    #[test]
-    fn ordering_orphan_stack_parent_is_treated_as_root() {
-        let mut orphan = make_session("orphan", "orphan", 0);
-        orphan.stack_parent_session_id = Some(SessionId::new()); // dangling
-        let order = build_session_order(&[&orphan]);
-        assert_eq!(order, vec![(orphan.id, false)]);
-    }
-
-    #[test]
-    fn ordering_sibling_children_of_same_base_both_indent() {
-        // Two sessions sharing one base — both should render as stacked
-        // children, in created_at order, both indented.
-        let base = make_session("base", "base", 0);
-        let mut c1 = make_session("c1", "c1", 5);
-        c1.stack_parent_session_id = Some(base.id);
-        let mut c2 = make_session("c2", "c2", 10);
-        c2.stack_parent_session_id = Some(base.id);
-        let order = build_session_order(&[&base, &c1, &c2]);
-        assert_eq!(order, vec![(base.id, false), (c1.id, true), (c2.id, true)]);
-    }
-
-    #[test]
-    fn ordering_pr_base_matching_session_forms_stack() {
-        // No local link — GitHub PR info alone should form the stack.
-        let base = make_session("base", "base-br", 0);
-        let mut child = make_session("child", "child-br", 5);
-        child.pr_base_branch = Some("base-br".to_string());
-        let order = build_session_order(&[&base, &child]);
-        assert_eq!(order, vec![(base.id, false), (child.id, true)]);
-    }
+    // `build_session_order`'s ordering rules (stack grouping, newest-first
+    // roots, orphan/PR-base handling) are unit-tested where the function lives,
+    // in `session::board`.
 
     fn make_session_in_section(
         title: &str,
@@ -2364,40 +2267,7 @@ mod stack_order_tests {
         );
     }
 
-    #[test]
-    fn resolve_section_limit_uses_in_progress_limit_for_catch_all() {
-        let sections = vec![section_named("Open")];
-        assert_eq!(
-            super::resolve_section_limit(crate::session::IN_PROGRESS, &sections, Some(3)),
-            Some(3)
-        );
-        assert_eq!(
-            super::resolve_section_limit(crate::session::IN_PROGRESS, &sections, None),
-            None
-        );
-    }
-
-    #[test]
-    fn resolve_section_limit_reads_max_sessions_from_matching_config() {
-        let sections = vec![
-            section_named("Open"),
-            crate::session::SectionConfig {
-                name: "Review".into(),
-                max_sessions: Some(2),
-                ..Default::default()
-            },
-        ];
-        assert_eq!(
-            super::resolve_section_limit("Review", &sections, None),
-            Some(2)
-        );
-        assert_eq!(super::resolve_section_limit("Open", &sections, None), None);
-        assert_eq!(
-            super::resolve_section_limit("Missing", &sections, Some(99)),
-            None,
-            "in_progress_limit must not leak into other section names"
-        );
-    }
+    // `resolve_section_limit` is unit-tested where it lives, in `session::board`.
 
     #[test]
     fn section_grouped_header_carries_max_sessions_from_config() {
@@ -2598,24 +2468,6 @@ mod stack_order_tests {
         assert!(
             items.is_empty(),
             "empty state with hide_empty_sections should yield no items"
-        );
-    }
-
-    #[test]
-    fn ordering_pr_base_matching_main_pops_child_to_root() {
-        // When the PR retargets main (e.g. after the prior stack member was
-        // merged), the child becomes a stack root — both base and ex-child are
-        // root-level siblings.
-        let base = make_session("base", "base-br", 0);
-        let mut child = make_session("child", "child-br", 5);
-        child.pr_base_branch = Some("main".to_string());
-        // Local link still hanging around — PR data wins.
-        child.stack_parent_session_id = Some(base.id);
-        let order = build_session_order(&[&base, &child]);
-        assert_eq!(
-            order,
-            vec![(child.id, false), (base.id, false)],
-            "child with PR targeting main should pop to the root list"
         );
     }
 

@@ -122,16 +122,6 @@ impl App {
                     ),
                     SettingsRow::header("Appearance"),
                     SettingsRow::toggle(
-                        "Dim Unfocused Preview",
-                        c.dim_unfocused_preview,
-                        "dim_unfocused_preview",
-                    ),
-                    SettingsRow::text(
-                        "Dim Opacity",
-                        format!("{:.2}", c.dim_unfocused_opacity),
-                        "dim_unfocused_opacity",
-                    ),
-                    SettingsRow::toggle(
                         "Invert PR Label Color",
                         c.invert_pr_label_color,
                         "invert_pr_label_color",
@@ -152,6 +142,16 @@ impl App {
                         "recent_sessions_limit",
                     ),
                     SettingsRow::toggle("Rounded Borders", c.rounded_borders, "rounded_borders"),
+                    SettingsRow::toggle(
+                        "Dim Right Pane",
+                        c.dim_unfocused_preview,
+                        "dim_unfocused_preview",
+                    ),
+                    SettingsRow::text(
+                        "Dim Opacity",
+                        c.dim_unfocused_opacity.to_string(),
+                        "dim_unfocused_opacity",
+                    ),
                     SettingsRow::header("Performance"),
                     SettingsRow::text(
                         "UI Refresh FPS",
@@ -319,13 +319,6 @@ impl App {
                         "Preset",
                         o.preset.clone().unwrap_or_else(|| "(auto)".into()),
                         "preset",
-                    ),
-                    SettingsRow::text(
-                        "Appearance",
-                        o.appearance
-                            .map(|a| a.as_str().to_string())
-                            .unwrap_or_else(|| "(preset)".into()),
-                        "appearance",
                     ),
                     theme_row!("Border Focused", border_focused),
                     theme_row!("Border Unfocused", border_unfocused),
@@ -1041,11 +1034,6 @@ impl App {
                     }
                     Err(_) => {}
                 },
-                "dim_unfocused_opacity" => {
-                    if let Ok(v) = value.parse::<f32>() {
-                        self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
-                    }
-                }
                 "session_number_debounce_ms" => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.session_number_debounce_ms = v;
@@ -1054,6 +1042,13 @@ impl App {
                 "recent_sessions_limit" => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.recent_sessions_limit = v;
+                    }
+                }
+                // An opacity outside 0.0..=1.0 would render the pane black or
+                // brighter than the source, so clamp rather than reject.
+                "dim_unfocused_opacity" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
                     }
                 }
                 "ai_summary_model" => {
@@ -1154,7 +1149,7 @@ impl App {
                 _ => {}
             },
             SettingsTab::Theme => {
-                use crate::config::theme::{AppearanceValue, ColorValue};
+                use crate::config::theme::ColorValue;
 
                 if field_key == "preset" {
                     self.config.theme.preset = if value.is_empty() || value == "(auto)" {
@@ -1162,19 +1157,6 @@ impl App {
                     } else {
                         Some(value.to_string())
                     };
-                } else if field_key == "appearance" {
-                    // Clearing it (or typing the placeholder) falls back to
-                    // whatever the preset declares; anything unparseable is
-                    // ignored rather than silently flipping the surface.
-                    self.config.theme.appearance =
-                        if value.is_empty() || value == "(preset)" || value == "(auto)" {
-                            None
-                        } else if let Some(a) = AppearanceValue::parse(value) {
-                            Some(a)
-                        } else {
-                            warn!("Unknown theme appearance: {value:?} (expected dark or light)");
-                            self.config.theme.appearance
-                        };
                 } else {
                     // Try to parse the value as a ColorValue via TOML
                     let toml_input = if value.starts_with('#')
@@ -1228,15 +1210,9 @@ impl App {
                     }
                 }
 
-                // Rebuild theme from updated overrides
-                let base = self
-                    .config
-                    .theme
-                    .preset
-                    .as_deref()
-                    .and_then(Theme::from_preset)
-                    .unwrap_or_default();
-                self.theme = base.with_overrides(&self.config.theme);
+                // Rebuild theme from updated overrides (also refreshes the
+                // project-colour cache so card borders repaint immediately).
+                self.reload_theme();
             }
             SettingsTab::Keybindings => {
                 use crate::config::keybindings::{BindableAction, KeyBinding};
@@ -1311,11 +1287,11 @@ impl App {
             "hibernate_enabled" => self.config.hibernate_enabled = value,
             "nix_develop" => self.config.nix_develop = value,
             "project_pull_enabled" => self.config.project_pull_enabled = value,
-            "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
             "invert_pr_label_color" => self.config.invert_pr_label_color = value,
             "show_session_program" => self.config.show_session_program = value,
             "hide_empty_sections" => self.config.hide_empty_sections = value,
             "rounded_borders" => self.config.rounded_borders = value,
+            "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
             "precompute_review_caches" => self.config.precompute_review_caches = value,
             "ai_summary_enabled" => self.config.ai_summary_enabled = value,
             "commander_enabled" => self.config.commander_enabled = value,
@@ -1537,21 +1513,6 @@ impl App {
                                 // Open an inline option picker for theme presets
                                 use crate::tui::theme::PRESET_NAMES;
                                 let options: Vec<PickerOption> = PRESET_NAMES
-                                    .iter()
-                                    .map(|s| PickerOption::plain(*s))
-                                    .collect();
-                                let current_value = state.rows[state.selected_row].text_value();
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o.value == current_value)
-                                    .unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else if state.tab == SettingsTab::Theme && field_key == "appearance" {
-                                // Two named values plus "inherit the preset" —
-                                // a picker rather than free text, so there is
-                                // nothing to mistype.
-                                let options: Vec<PickerOption> = ["(preset)", "dark", "light"]
                                     .iter()
                                     .map(|s| PickerOption::plain(*s))
                                     .collect();
@@ -1972,16 +1933,11 @@ impl App {
         self.reconcile_section_assignments().await;
     }
 
-    /// The backend whose programs the `EditServerPrograms` command/cog targets:
-    /// the selected server header, else the selected session/project's backend,
-    /// else local.
+    /// The backend whose programs the `EditServerPrograms` command targets:
+    /// the selected session/project's backend, else local. (Sidebar server
+    /// headings aren't selectable — a heading click passes its backend to
+    /// `open_settings_on_programs` directly instead of routing through here.)
     pub(super) fn selected_backend_id(&self) -> crate::backend::BackendId {
-        if let Some(idx) = self.ui_state.list_state.selected()
-            && let Some(SessionListItem::ServerHeader { backend, .. }) =
-                self.ui_state.list_items.get(idx)
-        {
-            return *backend;
-        }
         if let Some(sref) = self.ui_state.selected_session_id {
             return sref.backend;
         }
