@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'review.dart';
 
-// These functions are ignored because they are not marked as `pub`: `absent`, `build`, `cell`, `content_gutter`, `content_spans`, `emit_row`, `from_wire`, `into_owned`, `intraline_options`, `new`, `parse_all`
+// These functions are ignored because they are not marked as `pub`: `absent`, `build`, `cell`, `content_gutter`, `content_spans`, `emit_row`, `from_wire`, `into_owned`, `intraline_options`, `new`, `parse_all`, `strip_gutter`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `TextSource`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `has_content`, `line_count`, `line`
 

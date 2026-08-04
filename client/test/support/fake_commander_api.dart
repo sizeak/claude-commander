@@ -37,6 +37,11 @@ class FakeCommanderApi implements CommanderApi {
   /// When set, `connectServer` awaits this before returning — lets a test hold a
   /// connect in flight (e.g. to dispose the store mid-connect).
   Completer<void>? connectGate;
+
+  /// When set, `disconnectServer` awaits this before returning — lets a test park
+  /// a `reconnect` inside its teardown window (old handle released, new config
+  /// not yet adopted) and run a second reconnect past it.
+  Completer<void>? disconnectGate;
   Object? workspaceSnapshotError;
   bool healthResponse = true;
   bool healthTmuxResponse = true;
@@ -79,6 +84,22 @@ class FakeCommanderApi implements CommanderApi {
   bool toggleKeepAliveResponse = false;
   bool toggleFileReviewedResponse = true;
   Uint8List fetchBlobResponse = Uint8List(0);
+
+  /// Matches the real cap in `claude_commander_protocol::paste::MAX_IMAGE_BYTES`
+  /// so size-limit tests exercise realistic numbers.
+  int imageMaxBytesResponse = 10 * 1024 * 1024;
+
+  /// Matches `claude_commander_protocol::ws::attach_dead_after()` so
+  /// foreground-reconnect tests reason about the real heartbeat deadline.
+  Duration attachDeadAfterResponse = const Duration(seconds: 60);
+
+  /// When set, [pasteImage] throws this instead of succeeding — for the upload
+  /// failure path (a rejected image, a dead server).
+  Object? pasteImageError;
+
+  /// Bytes handed to the most recent [pasteImage] call, so a test can assert the
+  /// picked/pasted image reached the API unmodified.
+  Uint8List? lastPastedImage;
 
   /// Per-path blob bodies, taking precedence over [fetchBlobResponse]. Lets a
   /// test tell two files' contents apart.
@@ -198,6 +219,7 @@ class FakeCommanderApi implements CommanderApi {
   @override
   Future<void> disconnectServer({required String handle}) async {
     _record('disconnectServer', {'handle': handle});
+    if (disconnectGate != null) await disconnectGate!.future;
   }
 
   @override
@@ -217,11 +239,24 @@ class FakeCommanderApi implements CommanderApi {
     return healthTmuxResponse;
   }
 
+  /// When set, `workspaceSnapshot` awaits this before returning — lets a test
+  /// hold a refresh in flight (e.g. a slow server mid-fetch). Checked before
+  /// [onWorkspaceSnapshot] runs, so a hook can arm the gate for the *next* fetch
+  /// without parking its own.
+  Completer<void>? workspaceSnapshotGate;
+
+  /// Called on every [workspaceSnapshot] — the seam for a test that needs
+  /// something to happen *while* a refresh is in flight (e.g. [emitChange],
+  /// modelling a poller tick landing mid-fetch).
+  void Function()? onWorkspaceSnapshot;
+
   @override
   Future<WorkspaceSnapshotDto> workspaceSnapshot({
     required String handle,
   }) async {
     _record('workspaceSnapshot', {'handle': handle});
+    if (workspaceSnapshotGate != null) await workspaceSnapshotGate!.future;
+    onWorkspaceSnapshot?.call();
     if (workspaceSnapshotError != null) throw workspaceSnapshotError!;
     return workspaceSnapshotResponse;
   }
@@ -408,6 +443,31 @@ class FakeCommanderApi implements CommanderApi {
   }) async {
     _record('toggleKeepAlive', {'id': id});
     return toggleKeepAliveResponse;
+  }
+
+  @override
+  Future<void> pasteImage({
+    required String handle,
+    required String id,
+    required Uint8List bytes,
+  }) async {
+    _record('pasteImage', {'id': id, 'bytes': bytes.length});
+    lastPastedImage = bytes;
+    if (pasteImageError != null) {
+      throw pasteImageError!;
+    }
+  }
+
+  @override
+  Future<int> imageMaxBytes() async {
+    _record('imageMaxBytes', {});
+    return imageMaxBytesResponse;
+  }
+
+  @override
+  Future<Duration> attachDeadAfter() async {
+    _record('attachDeadAfter', {});
+    return attachDeadAfterResponse;
   }
 
   @override

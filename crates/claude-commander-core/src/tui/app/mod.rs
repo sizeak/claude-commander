@@ -39,9 +39,12 @@ use tui_input::Input;
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
 use super::path_completer::PathCompleter;
 use super::theme::Theme;
+use super::widgets::board::{
+    BoardButtonRegion, BoardHitRegion, BoardRects, BoardState, BoardWidget,
+};
 use super::widgets::{
-    InfoContent, InfoProjectData, InfoSessionData, InfoView, InfoViewState, Preview, PreviewState,
-    TreeList, TreeListState,
+    InfoContent, InfoProjectData, InfoSessionData, InfoView, Preview, PreviewState, TreeList,
+    TreeListState,
 };
 use crate::api::{CommanderService, DiffSide};
 use crate::backend::{
@@ -49,13 +52,16 @@ use crate::backend::{
     BackendId, BackendView, CommanderBackend, ConnectionState, LOCAL_BACKEND_ID, LocalBackend,
     PlaceholderBackend, RemoteBackendFactory, SessionRef,
 };
+use crate::config::ViewMode;
 use crate::config::{BindableAction, Config, ConfigStore, RemoteServerConfig, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
     AiSummary, BlockReason, DiffInfo, EnrichedPrInfo, diff_hash, fetch_branch_summary,
     fetch_enriched_pr, is_gh_available,
 };
-use crate::session::{AgentState, ProjectId, SessionId, SessionListItem, SessionStatus};
+use crate::session::{
+    AgentState, Board, BoardPos, ProjectId, SessionId, SessionListItem, SessionStatus,
+};
 
 mod actions;
 mod background;
@@ -72,8 +78,6 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(crate) use modals::confirm_modal_area;
 pub use review::DiffReviewState;
 pub(crate) use review::ImageEntry;
 pub use review::ReviewPrepared;
@@ -238,35 +242,85 @@ pub enum AttachTarget {
 }
 
 /// Minimum left pane width as a percentage of the content area
-const MIN_LEFT_PANE_PCT: u16 = 15;
+pub(crate) const MIN_LEFT_PANE_PCT: u16 = 15;
 /// Maximum left pane width as a percentage of the content area
-const MAX_LEFT_PANE_PCT: u16 = 60;
+pub(crate) const MAX_LEFT_PANE_PCT: u16 = 60;
 /// Default left pane width as a percentage of the content area
-const DEFAULT_LEFT_PANE_PCT: u16 = 30;
+pub(crate) const DEFAULT_LEFT_PANE_PCT: u16 = 30;
 
-/// Which pane is currently focused
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FocusedPane {
-    #[default]
-    SessionList,
-    RightPane,
-}
-
-/// Which view is shown in the right pane
+/// Which view the right-hand pane shows in the *list* view modes.
+///
+/// The board is a full-screen takeover with no right pane, so this is only
+/// consulted when [`ViewMode::is_board`] is false. `Info` renders the same
+/// content as the `i` Info modal — which remains the only way to reach it from
+/// the board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RightPaneView {
+    /// Live capture of the session's agent pane.
     #[default]
     Preview,
+    /// Session metadata, diffstat, PR details and AI summary.
     Info,
+    /// Live capture of the session's (or project's) shell pane.
     Shell,
 }
 
-// `ViewMode` lives in `crate::config` so that `AppState` can persist it.
-// Re-exported here so existing call sites in this module's submodules
-// (which all do `use super::*;`) keep compiling unchanged.
-pub use crate::config::ViewMode;
+impl RightPaneView {
+    /// Advance the tab cycle. A project has no agent pane, so its cycle is the
+    /// two-tab `Shell ↔ Info`; a session cycles all three.
+    pub fn cycled(self, on_project: bool, forward: bool) -> Self {
+        if on_project {
+            return match self.effective(true) {
+                Self::Info => Self::Shell,
+                _ => Self::Info,
+            };
+        }
+        match (self, forward) {
+            (Self::Preview, true) => Self::Info,
+            (Self::Info, true) => Self::Shell,
+            (Self::Shell, true) => Self::Preview,
+            (Self::Preview, false) => Self::Shell,
+            (Self::Info, false) => Self::Preview,
+            (Self::Shell, false) => Self::Info,
+        }
+    }
 
-/// A single entry in the pre-computed stack chain for the Info pane.
+    /// Tab labels and the active index, for the pane header.
+    ///
+    /// Returned as a slice + index so the header renderer stays ignorant of
+    /// which selection kind produced it.
+    pub fn tabs(self, on_project: bool) -> (&'static [&'static str], usize) {
+        if on_project {
+            (
+                &["Shell", "Info"],
+                match self.effective(true) {
+                    Self::Info => 1,
+                    _ => 0,
+                },
+            )
+        } else {
+            (
+                &["Preview", "Info", "Shell"],
+                match self {
+                    Self::Preview => 0,
+                    Self::Info => 1,
+                    Self::Shell => 2,
+                },
+            )
+        }
+    }
+
+    /// The view actually rendered for the current selection: a project has no
+    /// agent pane, so `Preview` collapses to `Shell` there.
+    pub fn effective(self, on_project: bool) -> Self {
+        match (self, on_project) {
+            (Self::Preview, true) => Self::Shell,
+            _ => self,
+        }
+    }
+}
+
+/// A single entry in the pre-computed stack chain for the Info modal.
 #[derive(Debug, Clone)]
 pub struct StackChainEntry {
     pub title: String,
@@ -445,6 +499,10 @@ pub enum Modal {
     /// session). View-only state; the session itself lives on `App`, so closing
     /// this leaves the conversation running.
     Conversation { input: Input, scroll: u16 },
+    /// Session Info overlay (metadata, diffstat, PR details, AI summary) for the
+    /// selected session. `scroll` is the first visible line of the composed
+    /// `InfoView` content, clamped against its height each frame (like `Help`).
+    Info { scroll: u16 },
 }
 
 /// A session match in the quick-switch modal
@@ -1253,28 +1311,69 @@ pub enum ConfirmAction {
 
 /// Application UI state
 pub struct AppUiState {
-    /// Session list state
+    /// Active view. List modes (`ProjectGrouped`/`SectionGrouped`/
+    /// `SectionStacks`) render the tree-list; `Board` renders the kanban board.
+    /// Cycled with `v` (`ToggleViewMode`).
+    pub view_mode: ViewMode,
+    /// Flat tree-list rows for the active list view. Rebuilt only in a list
+    /// view; retains the last list-view rows while the board is shown (consumers
+    /// dispatch on `view_mode`, so the stale rows are never read there).
+    pub list_items: Vec<SessionListItem>,
+    /// Tree-list navigation state (list modes only).
     pub list_state: TreeListState,
-    /// Preview pane state
-    pub preview_state: PreviewState,
-    /// Info pane state
-    pub info_state: InfoViewState,
+    /// Section headers the user has collapsed (section list modes).
+    pub collapsed_sections: std::collections::HashSet<String>,
+    /// Kanban board model (sidebar + section columns). Rebuilt from `AppState`
+    /// each `refresh_list_items`.
+    pub board: Board,
+    /// Board navigation state (cursor position + per-column scroll).
+    pub board_state: BoardState,
+    /// Clickable board regions from the last render frame, mapping screen rects
+    /// to board positions for mouse clicks. Rebuilt every frame.
+    pub board_hit_regions: Vec<BoardHitRegion>,
+    /// Clickable card-button regions from the last render frame, mapping screen
+    /// rects to a `(board position, action button)`. Checked before
+    /// `board_hit_regions` so a click on a button both selects the card and
+    /// fires its action. Rebuilt every frame.
+    pub board_button_regions: Vec<BoardButtonRegion>,
+    /// Sidebar server-heading hit regions from the last render frame; a click
+    /// opens that server's Settings → Programs tab.
+    pub board_heading_regions: Vec<(Rect, crate::backend::BackendId)>,
+    /// Column/sidebar rectangles from the last render frame, for wheel-scroll
+    /// targeting. `None` before the first board render.
+    pub board_column_rects: Option<BoardRects>,
+    /// Active project filter: when `Some`, the board columns show only that
+    /// project's cards (the sidebar still lists every project). Set by the
+    /// sidebar cursor (see `refresh_list_items`), cleared by Esc in the main
+    /// view. `ProjectId`s are globally unique, so this needs no backend qualifier.
+    pub board_filter: Option<ProjectId>,
     /// Enriched PR info for the currently selected session
     pub enriched_pr: Option<(SessionId, EnrichedPrInfo)>,
+    /// Session whose enriched-PR fetch came back empty (no PR data, or `gh`
+    /// failed). Without this a failed fetch would never cache, so an Info
+    /// surface left open would respawn `gh` every few seconds forever. Cleared
+    /// by an explicit PR-status refresh, which is the retry path.
+    pub enriched_pr_unavailable: Option<SessionId>,
     /// Cached AI summaries keyed by session ID
     pub ai_summaries: std::collections::HashMap<SessionId, AiSummary>,
-    /// Currently focused pane
-    pub focused_pane: FocusedPane,
-    /// Which view is shown in the right pane
-    pub right_pane_view: RightPaneView,
     /// Current modal
     pub modal: Modal,
-    /// Session list items (flattened hierarchy). The first `recents_len` items
-    /// form the pinned "Recent" block (header + shortcut rows + divider) that
-    /// renders in a fixed panel above the scrolling list; the rest render in
-    /// the scrollable main list. `0` when there is no recents block.
-    pub list_items: Vec<SessionListItem>,
-    /// Number of leading `list_items` that make up the pinned recents block.
+    /// Column-major session numbering (session id → 1-based number) for the
+    /// board rows. Recomputed in `refresh_list_items` and borrowed by the board
+    /// widget so it isn't rebuilt on every paint.
+    pub session_numbers: HashMap<SessionId, usize>,
+    /// Whether the board's sessions span more than one distinct program.
+    /// Recomputed in `refresh_list_items`; gates the `(program)` row suffix.
+    pub has_mixed_programs: bool,
+    /// Per-project (border, session-title) colours, keyed by project id in the
+    /// board's name-sorted order. Recomputed in `refresh_list_items` and
+    /// borrowed by the board widget rather than rebuilt per frame.
+    pub project_colors: HashMap<ProjectId, (Color, Color)>,
+    /// Number of leading `list_items` that make up the pinned recents block
+    /// (list views only). The first `recents_len` items form the pinned
+    /// "Recent" block (header + shortcut rows + divider) that renders in a
+    /// fixed panel above the scrolling list; the rest render in the scrollable
+    /// main list. `0` when there is no recents block.
     pub recents_len: usize,
     /// Persisted scroll offset of the main (scrolling) list — the item index,
     /// relative to `list_items[recents_len..]`, shown at the top of the list
@@ -1283,16 +1382,37 @@ pub struct AppUiState {
     pub main_list_offset: usize,
     /// Visible row count of the main (scrolling) list, recorded each render.
     /// The list body has no border, so one row is one item — this is the page
-    /// size for `ListPageUp`/`ListPageDown`.
+    /// size for `ListPageUp`/`ListPageDown` in the list views.
     pub main_list_height: u16,
-    /// Preview content
-    pub preview_content: String,
-    /// Shell pane state
-    pub shell_state: PreviewState,
-    /// Shell content
-    pub shell_content: String,
     /// Diff info
     pub diff_info: Arc<DiffInfo>,
+    /// Which live view the right-hand pane shows (list views only — the board
+    /// is full-screen and has no right pane).
+    pub right_pane_view: RightPaneView,
+    /// Latest agent-pane capture for the selection, fed by `spawn_preview_update`.
+    pub preview_content: String,
+    /// Latest shell-pane capture for the selection.
+    pub shell_content: String,
+    /// Scroll/follow state for the Preview tab.
+    pub preview_state: PreviewState,
+    /// Scroll/follow state for the Shell tab.
+    pub shell_state: PreviewState,
+    /// Scroll state for the Info tab. Its line count is known up front, so it
+    /// is driven by `set_metrics` rather than by scanning captured text.
+    pub info_state: PreviewState,
+    /// Left (session-list) pane width as a percentage of the content area,
+    /// clamped to [`MIN_LEFT_PANE_PCT`]..=[`MAX_LEFT_PANE_PCT`]. Persisted in
+    /// `tui.json`.
+    pub left_pane_pct: u16,
+    /// When the last background preview/shell capture was spawned (None = not
+    /// in flight). Guards `spawn_preview_update` against double-spawns.
+    pub preview_update_spawned_at: Option<Instant>,
+    /// Right-pane rect from the last render frame, for wheel hit-testing.
+    /// `None` in board view (no right pane) and before the first frame.
+    pub right_pane_rect: Option<Rect>,
+    /// Effective right-pane view as of the last frame, so the renderer can reset
+    /// the pane's cells when the tab actually being shown changes.
+    pub last_pane_view: Option<RightPaneView>,
     /// Status message (with expiry time)
     pub status_message: Option<(String, Instant)>,
     /// Backend ids (raw) that have already shown their one-time version-mismatch
@@ -1353,14 +1473,24 @@ pub struct AppUiState {
     pub pending_open_review: Option<SessionId>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
-    /// Needs right pane clear (set on view switch, consumed on render)
-    pub clear_right_pane: bool,
-    /// Left pane width as a percentage (adjustable at runtime via < / >)
-    pub left_pane_pct: u16,
+    /// When attached via shell toggle (Ctrl+\), stores the session name to switch back to.
+    /// Contains (current_session_name, paired_session_name) so we can toggle between them.
+    pub shell_toggle_pair: Option<(String, String)>,
+    /// Force a full in-memory repaint on the next render (via the `Clear`
+    /// widget, not `terminal.clear()` — see `render`). Set when leaving a
+    /// full-screen modal takeover so its cells don't linger under the board.
+    pub force_clear: bool,
+    /// Whether the previous frame was a full-screen modal takeover
+    /// (ReviewDiff/Conversation). A true→false transition triggers a `Clear`.
+    pub prev_fullscreen: bool,
     /// Whether the `gh` CLI is available
     pub gh_available: bool,
-    /// When the last background preview fetch was spawned (None = not in flight)
-    pub preview_update_spawned_at: Option<Instant>,
+    /// When the last enriched-PR fetch was spawned (None = not in flight).
+    /// Guards `spawn_info_fetch` against double-spawns: `update_selection` now
+    /// runs it every tick (via `refresh_list_items`), so without this an open
+    /// Info modal would re-spawn a duplicate `gh` fetch each tick until the
+    /// first resolves. Mirrors `preview_update_spawned_at`'s 5s safety window.
+    pub enriched_pr_fetch_spawned_at: Option<Instant>,
     /// Whether a review-diff refresh re-compose is currently in flight, so the
     /// idle trigger and a manual refresh don't double-spawn.
     pub review_refresh_in_flight: bool,
@@ -1372,14 +1502,23 @@ pub struct AppUiState {
     pub agent_states: BTreeMap<SessionId, AgentState>,
     /// Cached mirror of `AppState::cascade_paused_at.is_some()` — used by
     /// `is_command_available` to gate the `CascadeResume` / `CascadeAbandon`
-    /// palette entries without an async read on every keystroke. Refreshed
-    /// alongside `list_items`.
+    /// palette entries without an async read on every keystroke. Refreshed in
+    /// `refresh_list_items`.
     pub cascade_paused: bool,
-    /// Section names that are currently collapsed in the list view.
-    pub collapsed_sections: std::collections::HashSet<String>,
-    /// Last left-mouse click on a session-list row: (list index, timestamp).
+    /// Last left-mouse click on a board row: (board position, timestamp).
     /// Used to detect double-click on the same row within `DOUBLE_CLICK_WINDOW`.
-    pub last_left_click: Option<(usize, Instant)>,
+    pub last_left_click: Option<(BoardPos, Instant)>,
+    /// Last left-mouse click on a session-list row: (list index, timestamp).
+    /// The list-view analogue of `last_left_click` (double-click detection).
+    pub last_list_click: Option<(usize, Instant)>,
+    /// Screen rect of the scrolling main-list rows (below the heading and the
+    /// pinned recents panel), recorded each frame in list view for mouse
+    /// hit-testing. `None` in board view.
+    pub list_rect: Option<Rect>,
+    /// Screen rect of the pinned recents panel, recorded each frame in list view
+    /// when a recents block is shown. `None` when there is no recents panel (or
+    /// in board view).
+    pub recents_rect: Option<Rect>,
     /// Last left-mouse click in the review diff body: (screen row, timestamp).
     /// Used to detect a double-click on the same row within `DOUBLE_CLICK_WINDOW`,
     /// which opens a comment box like a right-click.
@@ -1389,8 +1528,6 @@ pub struct AppUiState {
     /// `DOUBLE_CLICK_WINDOW`. Cleared on any modal keystroke or paste, since
     /// typing can refilter the list out from under a pending click.
     pub modal_list_last_click: Option<(usize, Instant)>,
-    /// Current list view mode (project-grouped vs section-grouped).
-    pub view_mode: ViewMode,
     /// Pre-computed stack chain for the selected session (empty if not stacked).
     pub stack_chain: Vec<StackChainEntry>,
     /// Projects whose most recent background pull was held back, with the
@@ -1419,22 +1556,38 @@ pub struct AppUiState {
 impl Default for AppUiState {
     fn default() -> Self {
         Self {
-            list_state: TreeListState::new(),
-            preview_state: PreviewState::new(),
-            info_state: InfoViewState::new(),
-            enriched_pr: None,
-            ai_summaries: std::collections::HashMap::new(),
-            shell_state: PreviewState::new(),
-            shell_content: String::new(),
-            focused_pane: FocusedPane::default(),
-            right_pane_view: RightPaneView::default(),
-            modal: Modal::None,
+            view_mode: ViewMode::default(),
             list_items: Vec::new(),
+            list_state: TreeListState::default(),
+            collapsed_sections: std::collections::HashSet::new(),
+            board: Board::default(),
+            board_state: BoardState::new(),
+            board_hit_regions: Vec::new(),
+            board_button_regions: Vec::new(),
+            board_heading_regions: Vec::new(),
+            board_column_rects: None,
+            board_filter: None,
+            enriched_pr: None,
+            enriched_pr_unavailable: None,
+            ai_summaries: std::collections::HashMap::new(),
+            modal: Modal::None,
+            session_numbers: HashMap::new(),
+            has_mixed_programs: false,
+            project_colors: HashMap::new(),
             recents_len: 0,
             main_list_offset: 0,
             main_list_height: 0,
-            preview_content: String::new(),
             diff_info: Arc::new(DiffInfo::empty()),
+            right_pane_view: RightPaneView::default(),
+            preview_content: String::new(),
+            shell_content: String::new(),
+            preview_state: PreviewState::new(),
+            shell_state: PreviewState::new(),
+            info_state: PreviewState::anchored_top(),
+            left_pane_pct: DEFAULT_LEFT_PANE_PCT,
+            preview_update_spawned_at: None,
+            right_pane_rect: None,
+            last_pane_view: None,
             status_message: None, // (message, expiry)
             version_warned: HashSet::new(),
             review_body_rect: None,
@@ -1453,21 +1606,23 @@ impl Default for AppUiState {
             attach_request: None,
             pending_open_review: None,
             editor_command: None,
-            clear_right_pane: false,
-            left_pane_pct: DEFAULT_LEFT_PANE_PCT,
+            shell_toggle_pair: None,
+            force_clear: false,
+            prev_fullscreen: false,
             gh_available: false,
-            preview_update_spawned_at: None,
+            enriched_pr_fetch_spawned_at: None,
             review_refresh_in_flight: false,
             terminal_size: Rect::default(),
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             agent_states: BTreeMap::new(),
             cascade_paused: false,
-            collapsed_sections: std::collections::HashSet::new(),
             last_left_click: None,
+            last_list_click: None,
+            list_rect: None,
+            recents_rect: None,
             review_last_click: None,
             modal_list_last_click: None,
-            view_mode: ViewMode::default(),
             stack_chain: Vec::new(),
             project_pull_blocked: HashMap::new(),
             lfs_pull_in_flight: std::collections::HashSet::new(),
@@ -1478,6 +1633,19 @@ impl Default for AppUiState {
 }
 
 impl AppUiState {
+    /// Whether the selection is a project row rather than a session. A project
+    /// has no agent pane, so the right pane offers it Shell and Info only.
+    pub fn is_project_selected(&self) -> bool {
+        self.selected_session_id.is_none() && self.selected_project_id.is_some()
+    }
+
+    /// Whether the right pane is currently showing its Info tab. False on the
+    /// board, which has no right pane.
+    pub fn is_info_tab(&self) -> bool {
+        !self.view_mode.is_board()
+            && self.right_pane_view.effective(self.is_project_selected()) == RightPaneView::Info
+    }
+
     /// Whether a given command is currently invokable.
     ///
     /// These rules mirror the early-return guards scattered across
@@ -1504,6 +1672,7 @@ impl AppUiState {
             | BindableAction::ToggleKeepAlive
             | BindableAction::OpenPullRequest
             | BindableAction::OpenReviewDiff
+            | BindableAction::OpenInfo
             | BindableAction::MoveToSection => has_session,
             // Opening the operator's editor only works against a local worktree;
             // a remote backend has no path on this machine.
@@ -1518,9 +1687,11 @@ impl AppUiState {
             BindableAction::CascadeResume | BindableAction::CascadeAbandon => self.cascade_paused,
             // Removing a project is only meaningful from a project row (no session selected)
             BindableAction::RemoveProject => has_project && !has_session,
-            // GenerateSummary only does something when the Info pane is active
+            // GenerateSummary is only meaningful while an Info surface is
+            // showing — the modal or the right pane's Info tab — since that is
+            // where the summary (and its `g` hotkey) is displayed.
             BindableAction::GenerateSummary => {
-                has_session && self.right_pane_view == RightPaneView::Info
+                has_session && (matches!(self.modal, Modal::Info { .. }) || self.is_info_tab())
             }
             // Creating a session or checking out a branch issues a request to the
             // selected project's backend (create-options / branch list). A
@@ -1529,6 +1700,12 @@ impl AppUiState {
             // `connected` true (local default), so single-machine setups and the
             // no-selection case are unaffected.
             BindableAction::NewSession | BindableAction::CheckoutBranch => connected,
+            // The right pane only exists in the list views; the board is a
+            // full-screen takeover, so these have nothing to act on there.
+            BindableAction::TogglePane
+            | BindableAction::TogglePaneReverse
+            | BindableAction::ShrinkLeftPane
+            | BindableAction::GrowLeftPane => !self.view_mode.is_board(),
             // All other actions are always available
             _ => true,
         }
@@ -1556,6 +1733,8 @@ impl AppUiState {
                     | BindableAction::PreviousGroup
                     | BindableAction::NavigateFirst
                     | BindableAction::NavigateLast
+                    | BindableAction::NavigateLeft
+                    | BindableAction::NavigateRight
             ) {
                 continue;
             }
@@ -2035,6 +2214,15 @@ impl App {
             .find(|s| s.session_id == r.id)
     }
 
+    /// Look up a project across every backend's cached snapshot. Project ids are
+    /// globally unique, so the first match is the only one — which lets callers
+    /// that hold a bare `ProjectId` (the Info surfaces) skip the qualifier.
+    pub(super) fn project(&self, id: ProjectId) -> Option<&crate::api::ProjectInfo> {
+        self.backends
+            .iter()
+            .find_map(|h| h.view.snapshot.projects.iter().find(|p| p.id == id))
+    }
+
     /// The local backend concretely, for the local-only affordances the trait
     /// deliberately omits (name-based attach, shell-toggle resolution, the
     /// commander session). `None` if backend 0 isn't a [`LocalBackend`] — never
@@ -2390,17 +2578,25 @@ impl App {
                 commander_enabled: self.commander_enabled_at_init,
             });
 
-        // Restore the last-selected view if the user has previously chosen
-        // one. If they haven't, fall back to the section-aware default:
-        // SectionStacks when sections are configured, else ProjectGrouped.
-        // Any section view falls back to ProjectGrouped at refresh time if
-        // sections have since been removed from config.
+        // Restore the last-selected view (before the first list build so the
+        // correct structure — list vs board — is populated up front). If the
+        // user never chose one, fall back to the section-aware default:
+        // SectionStacks when sections are configured, else ProjectGrouped. Any
+        // section view falls back to ProjectGrouped at refresh time if sections
+        // have since been removed from config.
         let persisted_view = self.tui_prefs.prefs().view_mode;
         self.ui_state.view_mode = match persisted_view {
             Some(view) => view,
             None if !self.config.sections.is_empty() => ViewMode::SectionStacks,
             None => ViewMode::ProjectGrouped,
         };
+
+        // Restore the list views' pane split. Clamped on the way in so a
+        // hand-edited or older out-of-range `tui.json` can't render an unusable
+        // (or zero-width) pane.
+        if let Some(pct) = self.tui_prefs.prefs().left_pane_pct {
+            self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
+        }
 
         // Restore last selection from persisted state
         self.refresh_list_items().await;

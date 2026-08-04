@@ -21,6 +21,13 @@ void main() {
     token: 'other-token',
   );
 
+  const thirdConfig = ServerConfig(
+    id: 'other-server',
+    name: 'other renamed',
+    baseUrl: 'http://third.test:7777',
+    token: 'third-token',
+  );
+
   const id = '11111111-2222-3333-4444-555555555555';
 
   AgentStatesSnapshotDto statesWith(AgentState state) => AgentStatesSnapshotDto(
@@ -101,6 +108,39 @@ void main() {
     expect(notifications, greaterThan(0));
   });
 
+  test('refresh() does not wait on the follow-up a mid-flight tick queued', () async {
+    final store = build();
+    addTearDown(store.dispose);
+    await store.connect();
+
+    // A poller tick lands while our fetch is in flight, so a follow-up refresh
+    // is coalesced onto it — and that follow-up then parks on a slow server.
+    final gate = Completer<void>();
+    addTearDown(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    var armed = false;
+    api.onWorkspaceSnapshot = () {
+      if (armed) return;
+      armed = true;
+      api.emitChange(); // queues a follow-up refresh
+      api.workspaceSnapshotGate = gate; // which will park
+    };
+
+    final before = api.countOf('workspaceSnapshot');
+    var done = false;
+    unawaited(store.refresh().then((_) => done = true));
+    await pumpEventQueue();
+
+    // The caller's refresh completed on its own fetch. Chaining the queued
+    // follow-up onto it instead re-arms the await on every tick — on a busy
+    // server that never unwinds, stranding connect()/reconnect() and every UI
+    // spinner waiting on them (e.g. the Edit server form's Save).
+    expect(done, isTrue);
+    // The follow-up did still fire — it's parked on the gate, not skipped.
+    expect(api.countOf('workspaceSnapshot'), before + 2);
+  });
+
   test('a connection-feed event updates connection and notifies', () async {
     final store = build();
     addTearDown(store.dispose);
@@ -150,6 +190,49 @@ void main() {
     expect(disconnectIdx, lessThan(connectIdxs[1]));
     // The new handle's feeds are live; the old one's are gone.
     expect(api.lastCall('changeFeed')!.args['handle'], 'handle-2');
+  });
+
+  test('a superseded reconnect does not roll its config back over a newer edit', () async {
+    api.connectServerResponse = 'handle-1';
+    final store = build();
+    addTearDown(store.dispose);
+    await store.connect();
+
+    // Edit #1 (the real flow: WorkspaceStore.updateServer applies the config,
+    // persists, then reconnects). Its reconnect parks while releasing handle-1.
+    final gate = Completer<void>();
+    api.disconnectGate = gate;
+    store.applyConfig(otherConfig);
+    final first = store.reconnect(otherConfig);
+    await pumpEventQueue();
+
+    // updateServer completes at the persist commit point and leaves the
+    // reconnect unawaited, so the Edit server form dismisses immediately: the
+    // user can reopen it and save edit #2 while reconnect #1 is still parked
+    // (easy when the old server is wedged and its disconnect sits on a 30s
+    // timeout). Edit #2 runs to completion.
+    api.disconnectGate = null;
+    api.connectServerResponse = 'handle-3';
+    store.applyConfig(thirdConfig);
+    await store.reconnect(thirdConfig);
+
+    // Reconnect #1 now resumes on a stale epoch. It must not assign its own
+    // (older) config, nor supersede the live connection with a third connect.
+    gate.complete();
+    await first;
+    await pumpEventQueue();
+
+    // The persisted list holds edit #2, so the store must too — otherwise the UI
+    // and the keychain disagree until the next launch.
+    expect(store.config.baseUrl, thirdConfig.baseUrl);
+    expect(store.config.token, thirdConfig.token);
+    expect(store.config.name, thirdConfig.name);
+    // Still live on edit #2's connection — a bail must not leave a dead store.
+    expect(store.handle, 'handle-3');
+    expect(api.countOf('connectServer'), 2);
+    expect(api.countOf('changeFeed'), 2);
+    // Reconnect #1 released handle-1 before bailing: no leak, no double-release.
+    expect(api.countOf('disconnectServer'), 1);
   });
 
   test('dispose() releases the handle', () async {

@@ -507,7 +507,7 @@ impl CommanderService {
     pub async fn paste_image(&self, query: &str, bytes: &[u8]) -> Result<PathBuf> {
         // Validate the bytes up front so junk/oversized input is a clean 400
         // regardless of whether the session exists (and before any disk write).
-        crate::paste_image::validate(bytes)?;
+        claude_commander_protocol::paste::validate(bytes)?;
 
         let tmux_name = self
             .resolve_tmux_session(query)
@@ -603,7 +603,8 @@ impl CommanderService {
 
         if let Some(section) = &opts.section {
             let section = section.clone();
-            let sections = self.config_store.read().sections.clone();
+            let sections =
+                crate::session::effective_sections(&self.config_store.read().sections).into_owned();
             let now = chrono::Utc::now();
             self.store
                 .mutate(move |state| {
@@ -785,17 +786,14 @@ impl CommanderService {
 
     /// Re-run section assignment over every session against the current
     /// `[[sections]]` config. Used at startup and after a live config change.
-    /// A no-op when no sections are configured and none are currently pinned.
+    /// With no `[[sections]]` configured, the baked-in default board sections
+    /// apply (see [`crate::session::effective_sections`]).
     pub async fn reconcile_all_section_assignments(&self) -> Result<()> {
-        let sections = self.config_store.read().sections.clone();
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
-                if sections.is_empty()
-                    && state.sessions.values().all(|s| s.current_section.is_none())
-                {
-                    return;
-                }
                 for session in state.sessions.values_mut() {
                     crate::session::apply_assignment(session, &sections, now);
                 }
@@ -806,12 +804,11 @@ impl CommanderService {
 
     /// Re-run section assignment for a single session against current config.
     /// Used after creating a session, where the rest of the set is already
-    /// reconciled. No-op when no sections are configured.
+    /// reconciled. With no `[[sections]]` configured, the baked-in default
+    /// board sections apply.
     pub async fn reconcile_one_section_assignment(&self, session_id: SessionId) -> Result<()> {
-        let sections = self.config_store.read().sections.clone();
-        if sections.is_empty() {
-            return Ok(());
-        }
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
@@ -979,7 +976,8 @@ impl CommanderService {
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
-        let sections = self.config_store.read().sections.clone();
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
@@ -1673,7 +1671,8 @@ impl CommanderService {
     pub async fn set_section(&self, id: &SessionId, section: Option<String>) -> Result<()> {
         self.ensure_session_exists(id).await?;
         self.telemetry.feature("session.set_section");
-        let sections = self.config_store.read().sections.clone();
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         let id = *id;
         self.store
@@ -1729,7 +1728,10 @@ impl CommanderService {
         CreateOptions {
             default_program: config.default_session_program(),
             programs: config.programs.iter().map(ProgramInfo::from).collect(),
-            sections: config.sections.iter().map(|s| s.name.clone()).collect(),
+            sections: crate::session::effective_sections(&config.sections)
+                .iter()
+                .map(|s| s.name.clone())
+                .collect(),
         }
     }
 
@@ -2559,7 +2561,7 @@ fn init_telemetry(
     let telemetry = Telemetry::init(&config.telemetry, frontend, &install_id);
     if telemetry.is_active() {
         let env = EnvFingerprint::collect(Some(crate::tui::theme::ColorMode::detect().name()));
-        let snapshot = ConfigSnapshot::from_config(&config, store.try_view_mode());
+        let snapshot = ConfigSnapshot::from_config(&config);
         telemetry.session_start(&env, &snapshot);
     }
     telemetry
@@ -2614,7 +2616,10 @@ pub use claude_commander_protocol::api::{
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
 /// (Was `SessionInfo::from_session`; relocated here because `SessionInfo` is now
 /// a foreign type and this conversion needs core-only types.)
-fn session_info_from_session(session: &WorktreeSession, project_name: &str) -> SessionInfo {
+pub(crate) fn session_info_from_session(
+    session: &WorktreeSession,
+    project_name: &str,
+) -> SessionInfo {
     SessionInfo {
         id: session.id.as_uuid().to_string(),
         session_id: session.id,

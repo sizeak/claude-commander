@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import '../src/rust/api/diff.dart' as diff;
 import '../src/rust/api/diff.dart'
     show DiffExpansion, DiffLayoutDto, DiffLayoutMode;
@@ -119,6 +121,29 @@ abstract class CommanderApi {
 
   Future<bool> toggleKeepAlive({required String handle, required String id});
 
+  /// Upload an image to a session's agent pane. The server writes it to a temp
+  /// file and types the path into the pane without pressing Enter, so it shows
+  /// up in the terminal view through the normal attach stream — no success
+  /// feedback needed. Throws if the bytes aren't an allow-listed image or exceed
+  /// [imageMaxBytes]; the message is safe to show the user.
+  Future<void> pasteImage({
+    required String handle,
+    required String id,
+    required Uint8List bytes,
+  });
+
+  /// The pasted-image size cap in bytes, from the shared wire contract. Lets the
+  /// UI refuse an oversized pick from its file length instead of reading the
+  /// whole thing into memory first.
+  Future<int> imageMaxBytes();
+
+  /// How long a silent client can be away before the server has certainly torn
+  /// its terminal attach down, from the shared wire contract. A backgrounded app
+  /// can't answer the server's heartbeat pings, so the terminal uses this on
+  /// resume to tell "definitely dead, re-attach" from "might still be live,
+  /// leave it alone".
+  Future<Duration> attachDeadAfter();
+
   Future<String> addProject({required String handle, required String path});
 
   Future<void> removeProject({required String handle, required String id});
@@ -234,10 +259,49 @@ abstract class CommanderApi {
   Stream<ConnectionStateDto> connectionFeed({required String handle});
 }
 
+/// Restores FIFO delivery for one attach's terminal control calls.
+///
+/// `flutter_rust_bridge` runs a non-`sync` call on a worker thread pool, so two
+/// calls issued back-to-back from Dart can execute — and so reach the attach's
+/// channel — in either order. That transposes fast keystrokes, and a burst of
+/// resizes can leave the remote PTY at a stale size while the local terminal has
+/// moved on. Chaining each call onto the previous one's completion means only one
+/// is ever in flight per attach, so order is the order they were issued in.
+class AttachControlLane {
+  final Map<String, Future<void>> _tails = {};
+
+  /// Run [op] after every call already queued for [attachId].
+  Future<void> run(String attachId, Future<void> Function() op) {
+    final previous = _tails[attachId] ?? Future<void>.value();
+    final result = previous.then((_) => op());
+    // The tail swallows failures: one failed call must not wedge the lane, and
+    // callers that fire-and-forget shouldn't strand an error on it either.
+    late final Future<void> tail;
+    tail = result.catchError((Object _) {}).whenComplete(() {
+      // Self-cleaning: drop the queue once it drains, but only if nothing has
+      // been chained on since. Attach ids are per-attach UUIDs and a reconnect
+      // simply abandons the old one, so without this the map would grow by an
+      // entry per reconnect for the lifetime of the app.
+      if (_tails[attachId] == tail) _tails.remove(attachId);
+    });
+    _tails[attachId] = tail;
+    return result;
+  }
+
+  /// How many attaches still have queued work. Test-only seam for the
+  /// self-cleaning behaviour above.
+  @visibleForTesting
+  int get pendingAttaches => _tails.length;
+}
+
 /// The production [CommanderApi]: every method forwards straight to the
 /// generated `lib/src/rust/api/*.dart` bridge functions.
 class RustCommanderApi implements CommanderApi {
-  const RustCommanderApi();
+  RustCommanderApi();
+
+  /// Serialises `terminalSendInput`/`terminalResize`/`terminalDetach`, which are
+  /// order-sensitive; see [AttachControlLane].
+  final AttachControlLane _control = AttachControlLane();
 
   @override
   Future<String> connectServer({required String baseUrl, String? token}) =>
@@ -376,6 +440,23 @@ class RustCommanderApi implements CommanderApi {
   @override
   Future<bool> toggleKeepAlive({required String handle, required String id}) =>
       simple.toggleKeepAlive(handle: handle, id: id);
+
+  @override
+  Future<void> pasteImage({
+    required String handle,
+    required String id,
+    required Uint8List bytes,
+  }) => simple.pasteImage(handle: handle, id: id, bytes: bytes);
+
+  @override
+  Future<int> imageMaxBytes() => simple.imageMaxBytes();
+
+  /// The bridge carries plain milliseconds (a `u32`, so Dart sees an `int` rather
+  /// than a `BigInt`); rewrap it as a [Duration] here so no call site has to
+  /// remember the unit.
+  @override
+  Future<Duration> attachDeadAfter() async =>
+      Duration(milliseconds: await simple.attachDeadAfterMillis());
 
   @override
   Future<String> addProject({required String handle, required String path}) =>
@@ -528,18 +609,28 @@ class RustCommanderApi implements CommanderApi {
   Future<void> terminalSendInput({
     required String attachId,
     required List<int> bytes,
-  }) => terminal.terminalSendInput(attachId: attachId, bytes: bytes);
+  }) => _control.run(
+    attachId,
+    () => terminal.terminalSendInput(attachId: attachId, bytes: bytes),
+  );
 
   @override
   Future<void> terminalResize({
     required String attachId,
     required int cols,
     required int rows,
-  }) => terminal.terminalResize(attachId: attachId, cols: cols, rows: rows);
+  }) => _control.run(
+    attachId,
+    () => terminal.terminalResize(attachId: attachId, cols: cols, rows: rows),
+  );
 
   @override
-  Future<void> terminalDetach({required String attachId}) =>
-      terminal.terminalDetach(attachId: attachId);
+  Future<void> terminalDetach({required String attachId}) => _control.run(
+    // Still queued behind any pending input, so a detach can't overtake the
+    // keystrokes it was meant to follow.
+    attachId,
+    () => terminal.terminalDetach(attachId: attachId),
+  );
 
   @override
   Stream<BigInt> changeFeed({required String handle}) =>

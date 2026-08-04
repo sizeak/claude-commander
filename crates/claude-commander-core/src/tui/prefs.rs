@@ -37,8 +37,9 @@ pub struct TuiPrefs {
     /// See [`migrate_prefs_schema`].
     #[serde(default)]
     pub schema_version: u32,
-    /// Last-selected session-list view (Project / Sections / Stacks). `None`
-    /// means the user never chose one, so the TUI picks a section-aware default.
+    /// Last-active session-list view (Project / Sections / Stacks / Board),
+    /// restored on the next launch. `None`/absent means the user never chose
+    /// one, so the TUI uses the section-aware default ([`ViewMode::default`]).
     #[serde(default)]
     pub view_mode: Option<ViewMode>,
     /// Last-focused session, restored on the next launch.
@@ -54,7 +55,9 @@ pub struct TuiPrefs {
     /// backend (back-compat with prefs written before multi-backend).
     #[serde(default)]
     pub last_selected_backend: Option<String>,
-    /// Persisted left-pane width, as a percentage of terminal width.
+    /// Left (session-list) pane width in the list views, as a percentage of the
+    /// content area. `None`/absent means "never resized", so the TUI uses
+    /// [`DEFAULT_LEFT_PANE_PCT`](crate::tui::app::DEFAULT_LEFT_PANE_PCT).
     #[serde(default)]
     pub left_pane_pct: Option<u16>,
 }
@@ -159,11 +162,6 @@ impl TuiPrefsStore {
         }
     }
 
-    /// Persist the chosen session-list view.
-    pub async fn set_view_mode(&self, view: ViewMode) {
-        self.update(|p| p.view_mode = Some(view)).await;
-    }
-
     /// Persist the last-focused session/project selection, qualified by the
     /// owning backend's name (so it survives config-order changes).
     pub async fn set_selection(
@@ -180,7 +178,12 @@ impl TuiPrefsStore {
         .await;
     }
 
-    /// Persist the left-pane width.
+    /// Persist the last-active session-list view so it survives restarts.
+    pub async fn set_view_mode(&self, view: ViewMode) {
+        self.update(|p| p.view_mode = Some(view)).await;
+    }
+
+    /// Persist the left-pane width (already clamped by the caller).
     pub async fn set_left_pane_pct(&self, pct: u16) {
         self.update(|p| p.left_pane_pct = Some(pct)).await;
     }
@@ -259,27 +262,29 @@ mod tests {
                 "projects": {},
                 "sessions": {},
                 "view_mode": "ProjectGrouped",
-                "left_pane_pct": 42
+                "last_selected_session": "6f7cc1f0-45a1-4a5e-93c8-6dfa1cb8f4ea",
+                "last_selected_project": null
             }"#,
         )
         .unwrap();
 
         // First load with no tui.json lifts the values across, then the v0->v1
         // schema migration drops the view choice so this user re-defers to the
-        // new SectionStacks default. Unrelated prefs (pane width) survive.
+        // new default. Unrelated legacy prefs (the last selection) survive.
         let store = TuiPrefsStore::load(dir.path());
         let prefs = store.prefs();
         assert_eq!(prefs.view_mode, None);
-        assert_eq!(prefs.left_pane_pct, Some(42));
+        assert!(
+            prefs.last_selected_session.is_some(),
+            "legacy last_selected_session must migrate"
+        );
         assert_eq!(prefs.schema_version, CURRENT_PREFS_SCHEMA);
 
         // …and writes tui.json so a second, independent load reads it back
         // without touching state.json or re-running the migration.
         assert!(dir.path().join("tui.json").exists());
         let reloaded = TuiPrefsStore::load(dir.path()).prefs();
-        assert_eq!(reloaded.view_mode, None);
-        assert_eq!(reloaded.left_pane_pct, Some(42));
-        assert_eq!(reloaded.schema_version, CURRENT_PREFS_SCHEMA);
+        assert_eq!(reloaded, prefs);
     }
 
     #[test]
@@ -301,7 +306,7 @@ mod tests {
         // A pre-migration tui.json: an explicit view choice, no schema field.
         std::fs::write(
             dir.path().join("tui.json"),
-            r#"{"view_mode": "ProjectGrouped", "left_pane_pct": 30}"#,
+            r#"{"view_mode": "ProjectGrouped", "last_selected_backend": "buildbox"}"#,
         )
         .unwrap();
 
@@ -309,7 +314,7 @@ mod tests {
         // leaves unrelated prefs intact, and persists the bump.
         let prefs = TuiPrefsStore::load(dir.path()).prefs();
         assert_eq!(prefs.view_mode, None);
-        assert_eq!(prefs.left_pane_pct, Some(30));
+        assert_eq!(prefs.last_selected_backend.as_deref(), Some("buildbox"));
         assert_eq!(prefs.schema_version, CURRENT_PREFS_SCHEMA);
 
         let reloaded = TuiPrefsStore::load(dir.path()).prefs();
@@ -342,17 +347,46 @@ mod tests {
         let project = ProjectId::new();
         {
             let store = TuiPrefsStore::load(dir.path());
-            store.set_view_mode(ViewMode::ProjectGrouped).await;
             store
                 .set_selection(Some(session), Some(project), Some("buildbox".to_string()))
                 .await;
-            store.set_left_pane_pct(30).await;
         }
         let reloaded = TuiPrefsStore::load(dir.path()).prefs();
-        assert_eq!(reloaded.view_mode, Some(ViewMode::ProjectGrouped));
         assert_eq!(reloaded.last_selected_session, Some(session));
         assert_eq!(reloaded.last_selected_project, Some(project));
         assert_eq!(reloaded.last_selected_backend.as_deref(), Some("buildbox"));
-        assert_eq!(reloaded.left_pane_pct, Some(30));
+    }
+
+    #[tokio::test]
+    async fn left_pane_pct_persists_and_survives_reload() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            TuiPrefsStore::load(dir.path()).prefs().left_pane_pct,
+            None,
+            "an unresized divider must record no preference"
+        );
+        {
+            let store = TuiPrefsStore::load(dir.path());
+            store.set_left_pane_pct(45).await;
+        }
+        assert_eq!(
+            TuiPrefsStore::load(dir.path()).prefs().left_pane_pct,
+            Some(45)
+        );
+    }
+
+    #[test]
+    fn left_pane_pct_migrates_out_of_legacy_state_json() {
+        // Anyone upgrading from a build that predates tui.json keeps the pane
+        // width they had, rather than silently snapping back to the default.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("state.json"),
+            r#"{"left_pane_pct": 42, "seen_help": true}"#,
+        )
+        .unwrap();
+
+        let prefs = TuiPrefsStore::load(dir.path()).prefs();
+        assert_eq!(prefs.left_pane_pct, Some(42));
     }
 }

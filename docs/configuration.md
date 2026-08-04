@@ -152,6 +152,19 @@ project_pull_interval_secs = 3600
 # Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘)
 rounded_borders = false
 
+# Dim the live-capture tabs (Preview / Shell) of the list views' right-hand
+# pane. They are passive tails — keys always drive the session list — so they
+# render dimmed by default to keep the list visually dominant. Set to false to
+# render them at full brightness. The pane's Info tab is never dimmed (it is
+# static text, not a tail), and the board has no right pane at all.
+dim_unfocused_preview = true
+
+# How much to dim the right pane's colours (0.0 = fully dimmed/black, 1.0 = no
+# dimming). Uses a foreground colour override rather than the terminal DIM
+# modifier, for cross-terminal consistency. Only applies when
+# dim_unfocused_preview is true.
+dim_unfocused_opacity = 0.4
+
 # When opening the review view, precompute every file's render caches
 # (word-diff segments + syntax highlighting) up front behind a loading spinner,
 # instead of building each file's cache lazily on first navigation. Trades a
@@ -159,20 +172,13 @@ rounded_borders = false
 # set to false for lazy, instant-open behaviour.
 # precompute_review_caches = true
 
-# Dim the right pane (preview/diff/shell) when the session list is focused
-dim_unfocused_preview = true
-
-# How much to dim unfocused pane colors (0.0 = fully dimmed/black, 1.0 = no dimming)
-# Uses a foreground color override for cross-terminal compatibility (no Modifier::DIM)
-dim_unfocused_opacity = 0.4
-
 # Leader key for quick-switch session search
 # Supports: " ", "space", "ctrl+k", "f1", etc.
 # leader_key = " "
 
 # Render PR labels as colored text on the default background (the pre-pill
 # style). Default false renders them as colored "pill" blocks that stand out
-# more in the session list.
+# more on the board.
 # invert_pr_label_color = false
 
 # Show the running program as a "(program)" suffix on session rows. Only
@@ -180,10 +186,11 @@ dim_unfocused_opacity = 0.4
 # for a single-program setup. Disabled by default; set to true to show it.
 # show_session_program = false
 
-# Hide empty section headers in the session list. When enabled, sections with
-# zero sessions (including "In Progress") are omitted along with their spacers,
-# reducing visual clutter. Enabled by default; set to false to always show all
-# section headers.
+# Hide empty section columns on the board. When enabled, a section with no
+# cards (including the implicit "In Progress" catch-all) is dropped from the
+# columns, so a board with many configured sections shows only those with work.
+# The sidebar still lists every project. Enabled by default; set to false to
+# always show every section column.
 # hide_empty_sections = true
 
 # Debounce delay in ms when typing multi-digit session numbers
@@ -201,7 +208,7 @@ state_sync_interval_ms = 2000
 # Log file path (if set, logs to file; use with --debug)
 # log_file = "/tmp/claude-commander.log"
 
-# Enable AI-generated branch summaries in the Info pane (default: true)
+# Enable AI-generated branch summaries in the Info modal (default: true)
 # ai_summary_enabled = true
 
 # Claude model used for AI summaries (default: Haiku for cost efficiency)
@@ -256,12 +263,18 @@ state_sync_interval_ms = 2000
 # previous_group = ["["]
 # navigate_first = ["Home"]
 # navigate_last = ["End"]
-# list_page_up = ["PageUp"]                # page the session list
+# navigate_left = ["h", "Left"]
+# navigate_right = ["l", "Right"]
+# list_page_up = ["PageUp"]                # page the list / board column
 # list_page_down = ["PageDown"]
-# page_up = ["Ctrl-u"]                     # page the right pane (preview/info/shell)
-# page_down = ["Ctrl-d"]
+# page_up = ["Ctrl-u"]                     # first card in the board column
+# page_down = ["Ctrl-d"]                   # last card in the board column
+# open_info = ["i"]
+# toggle_pane = ["Tab"]                    # cycle the right pane: Preview / Info / Shell
+# toggle_pane_reverse = ["Shift-Tab"]
+# shrink_left_pane = ["<"]                 # move the list/pane divider left
+# grow_left_pane = [">"]                   # move it right
 # quit = ["q", "Ctrl-c"]
-# toggle_pane = ["Tab"]
 # toggle_keep_alive = ["K"]                # palette-only by default; bind a key here
 
 # Remote claude-commander servers. Each entry adds a server node to the
@@ -321,7 +334,7 @@ always resumes, since that's what makes it non-destructive.
 command palette on a session (or `claude-commander keep-alive <session>
 [--on|--off]`) to exempt it from hibernation — useful for a long-running build,
 a watched log, or anything you want to keep warm. A kept-alive session shows an
-anchor (`⚓`) marker in the session list. The action has no default hotkey; bind
+anchor (`⚓`) marker on the board. The action has no default hotkey; bind
 one via `toggle_keep_alive` under `[keybindings]` (e.g. `toggle_keep_alive =
 ["K"]`) if you want a shortcut. The flag persists across restarts.
 
@@ -500,13 +513,32 @@ Appearance** (`,` key); clear the field to fall back to the preset.
 
 ## Session List Sections
 
-Group the session list under configurable headers based on GitHub PR state.
+Sections are the **columns** of the [board](../README.md#board). Each configured section becomes one column, and a session's card lands in the first column whose predicate it matches.
 
-By default `[[sections]]` is empty and the list keeps its project-grouped view. Once you declare one or more sections, the list defaults to the **Section Stacks** layout: section headers at the top level, each repo nested beneath as a sub-header, and sessions indented below their repo, with each PR stack kept together as a unit under the section chosen by its base (the stack root). Press `v` to cycle between this, the plain **Sections** layout, and the project-grouped view.
+Sections drive both the **board** columns and the section-grouped **list** views
+(`v` cycles project list → Sections → Section Stacks → board). When `[[sections]]`
+is empty, the board shows three baked-in default columns assigned automatically
+from GitHub PR state — **In Progress** (the catch-all), **In Review** (open PR),
+and **Merged** (merged PR) — and the list stays project-grouped. Declaring any
+`[[sections]]` **replaces** the board defaults with your own columns and makes the
+section list views meaningful; nothing is written back to `config.toml`.
 
-In the plain **Sections** layout, [PR-stack grouping](usage.md#pr-stacks) is dropped — stacked children are no longer visually nested under their stack base, and ordering within the list follows the section rules instead (a base and its child may land in different sections depending on their PR state). The **Section Stacks** layout keeps each stack nested as a unit. In either case the underlying stack links are still tracked and the `t` hotkey still stacks new sessions onto the top of a stack.
+An implicit **"In Progress"** section is always the first column / group and acts
+as the catch-all — any session whose PR state doesn't match a later section's
+predicate lands here. It also accounts for every project that hasn't placed a
+session into a later column, so newly added projects stay visible.
 
-An implicit **"In Progress"** section is always the first row and acts as the catch-all — any session whose PR state doesn't match a later section's predicate lands here. It also lists every repo that hasn't placed a session into a later section, so newly added projects remain visible.
+The two section list views differ in how they treat stacks. The **Section
+Stacks** layout (the default once sections are configured) keeps each
+[PR stack](usage.md#pr-stacks) together as a unit under the section chosen by its
+base (the stack root), with children nested under their base — so a draft session
+stacked on top never drags the whole stack out of the base's section. The plain
+**Sections** layout drops that nesting — ordering follows the section rules, so a
+base and its child may land in different sections depending on their PR state. On
+the board a stack is a run of contiguous cards that moves between columns as a
+unit, its base and children always sharing one column. In every view the
+underlying stack links are still tracked and the `t` hotkey still stacks new
+sessions onto the top.
 
 ### Example
 
@@ -530,30 +562,19 @@ pr_state = ["merged", "closed"]
 name = "Stale"             # no predicates → manual-only waypoint
 ```
 
-Visually:
+Each section is a column on the board and the leftmost column is the project
+sidebar. Each session is its own card, titled with its number and name and
+coloured by project; the interior line carries the status glyph and the
+`[>_] [±] [i]` action buttons.
 
 ```
-In Progress (12)
-   terraform [main] (3)
-      session-a
-      session-b
-      session-c
-   genio     [main] (0)
-
-Needs Review (1)
-   genio     [main] (1)
-      fix-dns-spam
-
-In Review (2)
-   terraform [main] (1)
-      new-metrics-port
-   genio     [main] (1)
-      claude/add-elasticsearch-readonly-creds
-
-Merged (3)
-   …
-
-Stale (0)
+ Projects    │ In Progress (12)     │ Needs Review (1)     │ In Review (2)
+ terraform 4 │ ╭ 1 session-a ─────╮ │ ╭ 5 fix-dns-spam ──╮ │ ╭ 6 new-metrics ───╮
+ genio     3 │ │ ●      [>_][±][i]│ │ │ ●      [>_][±][i]│ │ │ ●      [>_][±][i]│
+             │ ╰──────────────────╯ │ ╰──────────────────╯ │ ╰──────────────────╯
+             │ ╭ 2 session-b ─────╮ │                      │ ╭ 7 add-ela… ──────╮
+             │ │ ●      [>_][±][i]│ │                      │ │ ●      [>_][±][i]│
+             │ ╰──────────────────╯ │                      │ ╰──────────────────╯
 ```
 
 ### Predicate fields
@@ -580,7 +601,7 @@ Select a session and press `m` (or open the palette with `Space`, or `Shift+Spac
 
 ### Creating sessions inside a section
 
-In the section-grouped views, a session created with `n` lands in the section the cursor was in, not the "In Progress" catch-all. For a manual-only waypoint (no predicates) this sets the same pin as a manual move; for a predicate-bearing section it's a soft placement — the session starts there but still auto-advances through the pipeline as its PR progresses. Creating from "In Progress" keeps the default behaviour. The CLI's `claude-commander new --section` flag follows the same rules.
+On the board, a session created with `n` lands in the column the cursor was in, not the "In Progress" catch-all. For a manual-only waypoint (no predicates) this sets the same pin as a manual move; for a predicate-bearing section it's a soft placement — the session starts there but still auto-advances through the pipeline as its PR progresses. Creating from "In Progress" keeps the default behaviour. The CLI's `claude-commander new --section` flag follows the same rules.
 
 ### WIP limits
 
@@ -611,8 +632,9 @@ features are used and retire the ones that aren't. It is **on by default** and
 **What is sent:** the name of each feature you use (e.g. `review.open`,
 `session.create`), a coarse environment fingerprint (OS, architecture, terminal
 program, shell *name*, terminal colour mode), a non-sensitive config snapshot
-(theme preset, view mode, which optional features are enabled), the frontend
-name + version, the library version, and a random, resettable install id.
+(theme preset, whether custom sections are configured, which optional features
+are enabled), the frontend name + version, the library version, and a random,
+resettable install id.
 
 **What is never sent:** typed text, prompts, Claude session content, comment
 bodies, branch/session names, repository paths, command arguments, or arbitrary

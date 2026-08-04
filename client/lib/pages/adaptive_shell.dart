@@ -156,7 +156,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     return CommanderStoreScope(
       store: store,
       // Rekey per (server, session) so switching selection rebuilds the pane
-      // (resets the tab + tears down any live terminal).
+      // (back to the Agent tab + tears down the outgoing session's attach).
       child: _DetailPane(
         key: ValueKey('${store.config.id}:${resolved.id}'),
         session: resolved,
@@ -435,7 +435,9 @@ class _DetailPane extends StatefulWidget {
 }
 
 class _DetailPaneState extends State<_DetailPane> {
-  _DetailTab _tab = _DetailTab.detail;
+  /// Selecting a session lands on the live agent pane — the thing you almost
+  /// always came to look at. Overview is one tab away for the metadata.
+  _DetailTab _tab = _DetailTab.terminal;
 
   void _go(_DetailTab tab) => setState(() => _tab = tab);
 
