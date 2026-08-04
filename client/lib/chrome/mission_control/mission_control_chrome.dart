@@ -639,14 +639,16 @@ class MissionControlChrome extends Chrome {
   ///
   /// [ChromeSegmentedSpec.note] is ignored: the filter strip never had one, and
   /// there is nowhere in a scrolling row to put a fixed tile.
-  Widget _segmentedChips(CommanderTokens t, ChromeSegmentedSpec spec) => SizedBox(
-    height: 46,
-    child: ListView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
-      children: [for (final s in spec.segments) _chip(t, s)],
-    ),
-  );
+  Widget _segmentedChips(CommanderTokens t, ChromeSegmentedSpec spec) {
+    return SizedBox(
+      height: 46,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+        children: [for (final s in spec.segments) _chip(t, s)],
+      ),
+    );
+  }
 
   Widget _chip(CommanderTokens t, ChromeSegment segment) => Padding(
     padding: const EdgeInsets.only(right: 7),
@@ -743,7 +745,10 @@ class MissionControlChrome extends Chrome {
           : const EdgeInsets.fromLTRB(18, 14, 18, 8),
       child: Row(
         children: [
-          if (branded) ...[const BrandMark(size: 32), const SizedBox(width: 10)],
+          if (branded) ...[
+            const BrandMark(size: 32),
+            const SizedBox(width: 10),
+          ],
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -815,7 +820,9 @@ class MissionControlChrome extends Chrome {
     final filter = spec.filter;
     final slices = spec.slices;
     if (filter == null && slices == null) return null;
-    if (filter == null && slices!.style == ChromeSegmentedStyle.chips) {
+    if (filter == null &&
+        slices != null &&
+        slices.style == ChromeSegmentedStyle.chips) {
       return buildSegmented(context, slices);
     }
     return Padding(

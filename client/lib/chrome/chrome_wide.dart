@@ -692,9 +692,14 @@ class LcarsDetail extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(child: spec.content),
-                const SizedBox(width: _lcarsGap),
+                // The tab column sits *inboard* of the content, between the
+                // fleet list and the workspace — that is where the design deck's
+                // landscape frames put it, and it keeps the rail-then-content
+                // reading order consistent with the outer nav rail. Emulator
+                // capture caught it pinned to the far right edge.
                 SizedBox(width: _lcarsTabWidth, child: _tabs(t)),
+                const SizedBox(width: _lcarsGap),
+                Expanded(child: spec.content),
               ],
             ),
           ),

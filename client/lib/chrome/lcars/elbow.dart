@@ -26,7 +26,10 @@ class ChromeElbow extends StatelessWidget {
 
   final ElbowCorner corner;
 
-  /// Fixed height. Null lets the block flex (the rail's inert filler).
+  /// The block's height. Treated as a **minimum** when the block carries a
+  /// [label], so a label that wraps to two lines grows the block instead of
+  /// being clipped — 'ADD SERVER' in a 34px block did exactly that. Null lets
+  /// the block flex (the rail's inert filler).
   final double? height;
 
   final String? label;
@@ -60,8 +63,7 @@ class ChromeElbow extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
     final r = Radius.circular(t.elbowRadius);
-    final content = Container(
-      height: height,
+    final decorated = Container(
       decoration: BoxDecoration(
         color: color,
         borderRadius: BorderRadius.only(
@@ -75,9 +77,9 @@ class ChromeElbow extends StatelessWidget {
       alignment: label == null ? null : labelAlignment,
       child: label == null
           ? null
-          // Rail blocks are fixed-height by design, so an unbounded text scaler
-          // would overflow them. Clamped rather than ignored: accessibility
-          // scaling still applies, just bounded to what the block can hold.
+          // Two lines maximum, and the scaler is clamped: the block grows to fit
+          // a wrapped label, but a rail only has so much vertical room to give,
+          // so accessibility scaling still applies — just bounded.
           : MediaQuery.withClampedTextScaling(
               maxScaleFactor: 1.3,
               child: Text(
@@ -96,6 +98,16 @@ class ChromeElbow extends StatelessWidget {
               ),
             ),
     );
+    // A labelled block may need to grow past `height`; an unlabelled one (a rail
+    // filler or a colour band) is exactly the height it was given.
+    final content = height == null
+        ? decorated
+        : label == null
+            ? SizedBox(height: height, child: decorated)
+            : ConstrainedBox(
+                constraints: BoxConstraints(minHeight: height!),
+                child: decorated,
+              );
     if (onTap == null) return content;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,

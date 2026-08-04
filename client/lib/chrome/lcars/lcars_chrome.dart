@@ -100,8 +100,9 @@ class LcarsChrome extends Chrome {
     return _railColumn(t, blocks);
   }
 
-  /// A rail: [blocks] stacked at the deck's 5px pitch, in a [CommanderTokens.railWidth]
-  /// column. Shared by the page rail and the view rail so the two cannot drift.
+  /// A rail: [blocks] stacked at the deck's 5px pitch, in a column
+  /// [CommanderTokens.railWidth] wide. Shared by the page rail and the view rail
+  /// so the two cannot drift.
   Widget _railColumn(CommanderTokens t, List<Widget> blocks) => SizedBox(
     width: t.railWidth,
     child: Column(
@@ -635,7 +636,10 @@ class LcarsChrome extends Chrome {
           border: InputBorder.none,
           enabledBorder: InputBorder.none,
           focusedBorder: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 11),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 4,
+            vertical: 11,
+          ),
           prefixIcon: icon == null ? null : Icon(icon, size: 16),
           prefixIconColor: t.nav,
           hintText: hint == null ? null : t.caseLabel(hint),
@@ -705,7 +709,7 @@ class LcarsChrome extends Chrome {
           label: t.caseLabel(slice.label),
           onTap: slice.onTap,
         ),
-      for (final action in actions.take(actions.length > 1 ? actions.length - 1 : 0))
+      for (final action in _railExtraActions(actions))
         ChromeElbow(
           color: _kindColor(action.kind, t),
           labelColor: _kindLabelColor(action.kind, t),
@@ -737,6 +741,11 @@ class LcarsChrome extends Chrome {
     ];
     return _railColumn(t, blocks);
   }
+
+  /// The actions that get a block of their own — every one but the last, which
+  /// the closing elbow carries.
+  Iterable<ChromeAction> _railExtraActions(List<ChromeAction> actions) =>
+      actions.length > 1 ? actions.take(actions.length - 1) : const [];
 
   /// The content column: the elbow cap closing the rail's bracket, the title and
   /// its subtitle, the filter field, then the body.
