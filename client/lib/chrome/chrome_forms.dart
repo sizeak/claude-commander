@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 import 'chrome.dart';
+import 'chrome_wide.dart';
 
 /// A row in a list of sessions, activity events, servers or files.
 ///
@@ -122,6 +123,14 @@ class ChromeBarButton {
   /// Shown instead of [label] by Mission Control where an icon reads better.
   final IconData? icon;
 
+  /// The hover/long-press description, defaulting to [label].
+  ///
+  /// Distinct from [label] because the two serve different masters: [label] is
+  /// the visible caption and has to stay short enough for an LCARS block, while
+  /// the tooltip can say the whole thing. The session lifecycle bar relies on
+  /// exactly that — 'Push' / 'Push stack', 'Cascade' / 'Cascade merge'.
+  final String? tooltip;
+
   final ChromeActionKind kind;
   final VoidCallback? onPressed;
 
@@ -131,6 +140,7 @@ class ChromeBarButton {
   const ChromeBarButton({
     required this.label,
     this.icon,
+    this.tooltip,
     this.kind = ChromeActionKind.normal,
     this.onPressed,
     this.expand = false,
@@ -219,6 +229,12 @@ abstract interface class ChromeForms {
   Widget buildButtonBar(BuildContext context, ChromeButtonBarSpec spec);
   Widget buildFooterNav(BuildContext context, ChromeFooterNavSpec spec);
   Widget buildShell(BuildContext context, ChromeShellSpec spec);
+
+  /// The wide (desktop/tablet) shell, and the workspace pane inside it. Their
+  /// specs and both implementations live in `chrome_wide.dart` — see that file
+  /// for why the two variants are co-located.
+  Widget buildWide(BuildContext context, ChromeWideSpec spec);
+  Widget buildWideDetail(BuildContext context, ChromeWideDetailSpec spec);
 
   /// A section eyebrow ("SERVERS", "FILES CHANGED").
   Widget buildEyebrow(BuildContext context, String label);

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../theme/tokens.dart';
 import '../chrome.dart';
 import '../chrome_forms.dart';
+import '../chrome_wide.dart';
 import 'elbow.dart';
 
 /// The LCARS chrome: a black canvas, an elbow rail down the left holding
@@ -544,6 +545,13 @@ class LcarsChrome extends Chrome {
       ),
     );
   }
+
+  @override
+  Widget buildWide(BuildContext context, ChromeWideSpec spec) => LcarsWide(spec);
+
+  @override
+  Widget buildWideDetail(BuildContext context, ChromeWideDetailSpec spec) =>
+      LcarsDetail(spec);
 
   @override
   Widget buildEyebrow(BuildContext context, String label) {

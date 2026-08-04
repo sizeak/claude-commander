@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome_forms.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
@@ -244,85 +245,96 @@ class _TimelineItem extends StatelessWidget {
     ),
   );
 
+  /// The actionable event's card. Its tint is a [SessionTone], not a colour
+  /// derived here, so it reads the same as the row of the session it is about:
+  /// an amber-tinted rounded card in Mission Control, a salmon- (or, for a held
+  /// cascade, tan-) top-bordered panel in LCARS.
+  ///
+  /// The "NEEDS YOU" / "PAUSED" label stays inline beside the title rather than
+  /// becoming the panel's `eyebrow`: the eyebrow slot renders *above* the
+  /// content (outside the box entirely in Mission Control), which would pull the
+  /// label out of the title row it belongs to.
   Widget _needsYouCard(BuildContext context) {
     final t = CommanderTokens.of(context);
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
+    // Paused is the held tone, which Mission Control paints identically to
+    // waiting (both are its one amber) and LCARS distinguishes.
+    final tone = event.kind == ActivityKind.paused
+        ? SessionTone.held
+        : SessionTone.waiting;
+    final toneStyle = t.toneStyle(tone);
+    return ChromePanel(
+      ChromePanelSpec(
+        tone: tone,
+        padding: const EdgeInsets.fromLTRB(14, 11, 12, 11),
         onTap: event.sessionId == null ? null : onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(14, 11, 12, 11),
-          decoration: BoxDecoration(
-            color: t.attention.withValues(alpha: 0.09),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: t.attention.withValues(alpha: 0.4)),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          event.kind == ActivityKind.paused
-                              ? 'PAUSED'
-                              : 'NEEDS YOU',
-                          style: t.meta(
-                            size: 9,
-                            weight: FontWeight.w700,
-                            color: t.attentionOn,
-                            letterSpacing: 0.8,
-                          ),
-                        ),
-                        const SizedBox(width: 9),
-                        Flexible(
-                          child: Text(
-                            event.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: t.text,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      '${event.description} · ${event.serverName} / ${event.location}',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: t.meta(size: 10.5),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (event.at != null)
-                    Text(
-                      relativeAge(event.at!),
-                      style: t.meta(size: 10, color: t.textFaint),
-                    ),
-                  const SizedBox(height: 8),
-                  if (event.sessionId != null) _answerButton(context),
+                  Row(
+                    children: [
+                      Text(
+                        event.kind == ActivityKind.paused
+                            ? 'PAUSED'
+                            : 'NEEDS YOU',
+                        style: t.meta(
+                          size: 9,
+                          weight: FontWeight.w700,
+                          color: toneStyle.onTint,
+                          letterSpacing: 0.8,
+                        ),
+                      ),
+                      const SizedBox(width: 9),
+                      Flexible(
+                        child: Text(
+                          event.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: t.text,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '${event.description} · ${event.serverName} / ${event.location}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: t.meta(size: 10.5),
+                  ),
                 ],
               ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 10),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (event.at != null)
+                  Text(
+                    relativeAge(event.at!),
+                    style: t.meta(size: 10, color: t.textFaint),
+                  ),
+                const SizedBox(height: 8),
+                if (event.sessionId != null) _answerButton(context),
+              ],
+            ),
+          ],
         ),
       ),
     );
   }
 
+  /// The card's inline call to action. Not a [ChromeButtonBar]: it is decoration
+  /// rather than a control (the whole panel is the tap target), and Mission
+  /// Control renders a bar cell as either an icon over a caption or a flat
+  /// surface key pill — neither of which is this filled accent chip.
   Widget _answerButton(BuildContext context) {
     final t = CommanderTokens.of(context);
     return Container(
@@ -342,6 +354,16 @@ class _TimelineItem extends StatelessWidget {
     );
   }
 
+  /// A non-actionable event: two lines of text and a trailing age, with no fill,
+  /// border or radius of its own.
+  ///
+  /// Deliberately **not** a [ChromeListRow]. The chrome's two-line shape is a
+  /// faithful copy of the fleet list's recents tile, which is a denser row than
+  /// this one and is ruled with a bottom divider — adopting it would put a
+  /// divider under every event on a timeline that is already delimited by its
+  /// rail, shrink both lines by a point, and inset the text away from the node
+  /// dot that is positioned against it. Being frameless, this row is already
+  /// theme-neutral: every colour is a token and the face follows the theme.
   Widget _eventRow(BuildContext context) {
     final t = CommanderTokens.of(context);
     final trailing = event.at == null

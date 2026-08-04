@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../chrome/chrome.dart';
+import '../chrome/chrome_forms.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/review.dart' as rust;
@@ -373,7 +374,7 @@ class _ReviewBodyState extends State<ReviewBody> {
     );
   }
 
-  /// The phone flow: comments, then the expandable per-file cards.
+  /// The phone flow: comments, then the expandable per-file rows.
   Widget _narrowBody(BuildContext context, rust.ReviewSnapshotDto snap) {
     final t = CommanderTokens.of(context);
     return RefreshIndicator(
@@ -384,16 +385,17 @@ class _ReviewBodyState extends State<ReviewBody> {
           Text('Base: ${snap.base}', style: t.meta(color: t.textFaint)),
           const SizedBox(height: 10),
           if (snap.comments.isNotEmpty) ...[
-            Text('Comments', style: t.eyebrow()),
-            const SizedBox(height: 8),
+            const ChromeEyebrow('Comments'),
             ...snap.comments.map((c) => _commentCard(context, c)),
             const SizedBox(height: 18),
           ],
-          Text('Files changed', style: t.eyebrow()),
-          const SizedBox(height: 8),
-          ...snap.files.map(
-            (f) => _FileCard(
+          const ChromeEyebrow('Files changed'),
+          // One flat run, so a row's position is its index in the whole list.
+          for (final (i, f) in snap.files.indexed)
+            _FileCard(
               file: f,
+              index: i,
+              count: snap.files.length,
               reviewed: _reviewed.contains(f.displayPath),
               onToggleReviewed: (_busy || _toggling.contains(f.displayPath))
                   ? null
@@ -401,7 +403,6 @@ class _ReviewBodyState extends State<ReviewBody> {
               onLoadImage: _loadBlob,
               onAddComment: _busy ? null : _addComment,
             ),
-          ),
         ],
       ),
     );
@@ -437,25 +438,28 @@ class _ReviewBodyState extends State<ReviewBody> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-            child: Text('FILES CHANGED', style: t.eyebrow()),
-          ),
+          const ChromeEyebrow('FILES CHANGED'),
           Expanded(
             child: ListView(
               padding: const EdgeInsets.symmetric(horizontal: 10),
               children: [
                 for (var i = 0; i < snap.files.length; i++)
-                  _FileRow(
-                    file: snap.files[i],
-                    selected: i == sel,
-                    reviewed: _reviewed.contains(snap.files[i].displayPath),
-                    onSelect: () => setState(() => _selectedFile = i),
-                    onToggleReviewed:
-                        (_busy ||
-                            _toggling.contains(snap.files[i].displayPath))
-                        ? null
-                        : () => _toggleReviewed(snap.files[i].displayPath),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: _fileRow(
+                      context,
+                      file: snap.files[i],
+                      index: i,
+                      count: snap.files.length,
+                      selected: i == sel,
+                      reviewed: _reviewed.contains(snap.files[i].displayPath),
+                      onSelect: () => setState(() => _selectedFile = i),
+                      onToggleReviewed:
+                          (_busy ||
+                              _toggling.contains(snap.files[i].displayPath))
+                          ? null
+                          : () => _toggleReviewed(snap.files[i].displayPath),
+                    ),
                   ),
               ],
             ),
@@ -531,10 +535,7 @@ class _ReviewBodyState extends State<ReviewBody> {
           child: ListView(
             children: [
               if (otherComments.isNotEmpty) ...[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-                  child: Text('OTHER COMMENTS', style: t.eyebrow()),
-                ),
+                const ChromeEyebrow('OTHER COMMENTS'),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   child: Column(
@@ -546,10 +547,7 @@ class _ReviewBodyState extends State<ReviewBody> {
                 const SizedBox(height: 8),
               ],
               if (fileComments.isNotEmpty) ...[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-                  child: Text('COMMENTS', style: t.eyebrow()),
-                ),
+                const ChromeEyebrow('COMMENTS'),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   child: Column(
@@ -575,28 +573,46 @@ class _ReviewBodyState extends State<ReviewBody> {
     );
   }
 
+  /// One staged/applied comment as a chrome panel: a rounded card in Mission
+  /// Control (which is exactly what the `Card` this replaced rendered — the app's
+  /// `cardTheme` is the same surface, radius and border the panel builds), a
+  /// hard-cornered top-bordered block in LCARS.
+  ///
+  /// The `ListTile` stays *inside* the panel with the panel's own padding zeroed,
+  /// so the content keeps its existing metrics rather than being re-laid-out by
+  /// hand. Deliberately no [ChromePanelSpec.accent] from the comment's status:
+  /// Mission Control renders an accent as a tinted border, which would change a
+  /// card that is currently plain.
   Widget _commentCard(BuildContext context, rust.CommentDto c) {
     final t = CommanderTokens.of(context);
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        title: Text(c.comment, style: Theme.of(context).textTheme.bodyMedium),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: Text(
-            '${c.file} · ${c.side == rust.ReviewCommentSide.old ? "old" : "new"} '
-            'L${c.lineStart}'
-            '${c.lineEnd != c.lineStart ? "-${c.lineEnd}" : ""}',
-            style: t.meta(color: t.textFaint),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: ChromePanel(
+        ChromePanelSpec(
+          padding: EdgeInsets.zero,
+          child: ListTile(
+            title: Text(
+              c.comment,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            subtitle: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                '${c.file} · ${c.side == rust.ReviewCommentSide.old ? "old" : "new"} '
+                'L${c.lineStart}'
+                '${c.lineEnd != c.lineStart ? "-${c.lineEnd}" : ""}',
+                style: t.meta(color: t.textFaint),
+              ),
+            ),
+            leading: _commentStatusChip(context, c.status),
+            trailing: IconButton(
+              onPressed: _busy ? null : () => _deleteComment(c.id),
+              icon: Icon(Icons.delete_outline, color: t.textMuted),
+              tooltip: 'Delete comment',
+            ),
+            isThreeLine: false,
           ),
         ),
-        leading: _commentStatusChip(context, c.status),
-        trailing: IconButton(
-          onPressed: _busy ? null : () => _deleteComment(c.id),
-          icon: Icon(Icons.delete_outline, color: t.textMuted),
-          tooltip: 'Delete comment',
-        ),
-        isThreeLine: false,
       ),
     );
   }
@@ -661,8 +677,8 @@ class ReviewPage extends StatelessWidget {
 }
 
 /// The colour that codes a file's change status — success for an add, danger for
-/// a delete, working for a modify, info for a rename — shared by the status dot
-/// and the status chip.
+/// a delete, working for a modify, info for a rename — carried into a row by
+/// [_statusDot], and approximated for LCARS by [_statusTone].
 Color _statusColor(BuildContext context, rust.ReviewFileStatus status) {
   final t = CommanderTokens.of(context);
   return switch (status) {
@@ -680,6 +696,54 @@ String _statusLabel(rust.ReviewFileStatus status) => switch (status) {
   rust.ReviewFileStatus.renamed => 'renamed',
 };
 
+/// The tone a changed file's row paints with.
+///
+/// [ChromeListRowSpec] carries a [SessionTone] rather than a colour, so a file's
+/// own [_statusColor] cannot reach LCARS' leading number block and 2px top
+/// border: no tone's accent is `success` or `danger` in either theme. These are
+/// the nearest available readings of each change kind. Mission Control is
+/// unaffected by the choice — its divider-ruled row only consults the tone for an
+/// attention state (none of these is one) and takes its change colour from
+/// [_statusDot] in the glyph slot instead.
+SessionTone _statusTone(rust.ReviewFileStatus status) => switch (status) {
+  // Something new and live.
+  rust.ReviewFileStatus.added => SessionTone.working,
+  // Inert — the file is gone.
+  rust.ReviewFileStatus.deleted => SessionTone.stopped,
+  // Changed, and not yet seen.
+  rust.ReviewFileStatus.modified => SessionTone.unread,
+  // `creating`'s accent is `info` in both themes, which is exactly the colour
+  // [_statusColor] gives a rename.
+  rust.ReviewFileStatus.renamed => SessionTone.creating,
+};
+
+/// Where a row sits in a run of [count] rows. LCARS rounds a run's outer corners
+/// so it reads as one bracketed cluster; Mission Control ignores it. Mirrors
+/// `session_list_page.dart`'s helper of the same name.
+ChromeRowPosition _rowPosition(int index, int count) {
+  if (count == 1) return ChromeRowPosition.only;
+  if (index == 0) return ChromeRowPosition.first;
+  if (index == count - 1) return ChromeRowPosition.last;
+  return ChromeRowPosition.middle;
+}
+
+/// The two-digit number LCARS prints in a file row's leading block.
+///
+/// Sequential rather than [lcarsRowNumber]: these rows are keyed on a file path,
+/// not a session id, and the design's FILES CHANGED list numbers files in reading
+/// order (`01`, `02`, …). The hash exists because a session list reorders on
+/// activity and would renumber itself constantly; a file list holds its order for
+/// as long as the snapshot does, so an index is stable here.
+String _fileNumber(int index) => (index + 1).toString().padLeft(2, '0');
+
+/// The metadata line under a file row's path: its line delta and change kind.
+///
+/// One string, so it can be the row's subtitle. That costs the green/red split
+/// the two counts used to render with — a subtitle is plain text the chrome
+/// colours itself (muted in Mission Control, the tone accent in LCARS).
+String _fileSubtitle(rust.ReviewFileDto file) =>
+    '+${file.added} −${file.removed} · ${_statusLabel(file.status)}';
+
 /// A small square status swatch (the deck's rounded-1px chip in a file row).
 Widget _statusDot(BuildContext context, rust.ReviewFileStatus status) =>
     Container(
@@ -691,86 +755,65 @@ Widget _statusDot(BuildContext context, rust.ReviewFileStatus status) =>
       ),
     );
 
-/// One row in the wide FILES CHANGED sidebar: a status swatch, the mono path,
-/// per-file +/− counts, and a reviewed toggle. Tapping the row selects the file
-/// for the diff pane; the trailing check toggles its reviewed mark.
-class _FileRow extends StatelessWidget {
-  final rust.ReviewFileDto file;
-  final bool selected;
-  final bool reviewed;
-  final VoidCallback onSelect;
-  final VoidCallback? onToggleReviewed;
-
-  const _FileRow({
-    required this.file,
-    required this.selected,
-    required this.reviewed,
-    required this.onSelect,
-    required this.onToggleReviewed,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CommanderTokens.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Material(
-        color: selected ? t.surface : Colors.transparent,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-          side: BorderSide(color: selected ? t.border : Colors.transparent),
-        ),
-        child: InkWell(
-          onTap: onSelect,
-          borderRadius: BorderRadius.circular(8),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 8),
-            child: Row(
-              children: [
-                _statusDot(context, file.status),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    file.displayPath,
-                    overflow: TextOverflow.ellipsis,
-                    style: t.meta(color: selected ? t.text : t.textBright),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                if (file.added > 0)
-                  Text('+${file.added}', style: t.meta(color: t.success)),
-                if (file.removed > 0) ...[
-                  const SizedBox(width: 5),
-                  Text('−${file.removed}', style: t.meta(color: t.danger)),
-                ],
-                const SizedBox(width: 4),
-                InkWell(
-                  onTap: onToggleReviewed,
-                  customBorder: const CircleBorder(),
-                  child: Padding(
-                    padding: const EdgeInsets.all(2),
-                    child: Icon(
-                      reviewed
-                          ? Icons.check_circle
-                          : Icons.radio_button_unchecked,
-                      size: 16,
-                      color: reviewed ? t.success : t.idle,
-                    ),
-                  ),
-                ),
-              ],
-            ),
+/// One row in the wide FILES CHANGED sidebar: the change-kind swatch, the path,
+/// its line delta, and a reviewed toggle. Tapping the row selects the file for the
+/// diff pane; the trailing check toggles its reviewed mark.
+///
+/// A chrome row, so LCARS renders it as a numbered leading block against a
+/// top-bordered panel and Mission Control as its divider-ruled two-line row.
+Widget _fileRow(
+  BuildContext context, {
+  required rust.ReviewFileDto file,
+  required int index,
+  required int count,
+  required bool selected,
+  required bool reviewed,
+  required VoidCallback onSelect,
+  required VoidCallback? onToggleReviewed,
+}) {
+  final t = CommanderTokens.of(context);
+  return ChromeListRow(
+    ChromeListRowSpec(
+      title: file.displayPath,
+      subtitle: _fileSubtitle(file),
+      tone: _statusTone(file.status),
+      glyph: _statusDot(context, file.status),
+      number: _fileNumber(index),
+      selected: selected,
+      position: _rowPosition(index, count),
+      onTap: onSelect,
+      trailingWidget: InkWell(
+        onTap: onToggleReviewed,
+        customBorder: const CircleBorder(),
+        child: Padding(
+          padding: const EdgeInsets.all(2),
+          child: Icon(
+            reviewed ? Icons.check_circle : Icons.radio_button_unchecked,
+            size: 16,
+            color: reviewed ? t.success : t.idle,
           ),
         ),
       ),
-    );
-  }
+    ),
+  );
 }
 
-/// One changed file as an expandable card (phone layout): header (path + stats +
-/// status), and either a unified-diff body or a binary placeholder.
-class _FileCard extends StatelessWidget {
+/// One changed file in the phone flow: a chrome row (path, line delta + change
+/// kind, a reviewed checkbox and an expand caret) over the file's unified diff or
+/// binary placeholder once expanded.
+///
+/// Was a `Card` wrapping an `ExpansionTile`. A [ChromeListRow] has no children
+/// slot — the two themes disagree about a row's shape, not about what hangs below
+/// one — so the expanded/collapsed state is held here and the body rendered
+/// beneath the row rather than inside it.
+class _FileCard extends StatefulWidget {
   final rust.ReviewFileDto file;
+
+  /// Position in the changed-files run: drives the row's LCARS number and which
+  /// of its corners round.
+  final int index;
+  final int count;
+
   final bool reviewed;
 
   /// Toggle this file's reviewed mark; null while busy.
@@ -784,6 +827,8 @@ class _FileCard extends StatelessWidget {
 
   const _FileCard({
     required this.file,
+    required this.index,
+    required this.count,
     required this.reviewed,
     required this.onToggleReviewed,
     required this.onLoadImage,
@@ -791,46 +836,56 @@ class _FileCard extends StatelessWidget {
   });
 
   @override
+  State<_FileCard> createState() => _FileCardState();
+}
+
+class _FileCardState extends State<_FileCard> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      clipBehavior: Clip.antiAlias,
-      child: ExpansionTile(
-        shape: const Border(),
-        collapsedShape: const Border(),
-        leading: Checkbox(
-          value: reviewed,
-          onChanged: onToggleReviewed == null
-              ? null
-              : (_) => onToggleReviewed!(),
-        ),
-        title: Text(
-          file.displayPath,
-          style: t.meta(size: 13, color: t.text),
-          overflow: TextOverflow.ellipsis,
-        ),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Row(
-            children: [
-              AppChip(
-                label: _statusLabel(file.status),
-                color: _statusColor(context, file.status),
-              ),
-              const SizedBox(width: 8),
-              Text('+${file.added}', style: t.meta(color: t.success)),
-              const SizedBox(width: 6),
-              Text('−${file.removed}', style: t.meta(color: t.danger)),
-            ],
-          ),
-        ),
+    final file = widget.file;
+    final onToggleReviewed = widget.onToggleReviewed;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _FileDiffBody(
-            file: file,
-            onLoadImage: onLoadImage,
-            onAddComment: onAddComment,
+          ChromeListRow(
+            ChromeListRowSpec(
+              title: file.displayPath,
+              subtitle: _fileSubtitle(file),
+              tone: _statusTone(file.status),
+              glyph: _statusDot(context, file.status),
+              number: _fileNumber(widget.index),
+              position: _rowPosition(widget.index, widget.count),
+              onTap: () => setState(() => _expanded = !_expanded),
+              trailingWidget: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Checkbox(
+                    visualDensity: VisualDensity.compact,
+                    value: widget.reviewed,
+                    onChanged: onToggleReviewed == null
+                        ? null
+                        : (_) => onToggleReviewed(),
+                  ),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                    color: t.textMuted,
+                  ),
+                ],
+              ),
+            ),
           ),
+          if (_expanded)
+            _FileDiffBody(
+              file: file,
+              onLoadImage: widget.onLoadImage,
+              onAddComment: widget.onAddComment,
+            ),
         ],
       ),
     );

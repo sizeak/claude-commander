@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../theme/tokens.dart';
 import '../chrome.dart';
 import '../chrome_forms.dart';
+import '../chrome_wide.dart';
 
 /// The default chrome: a Material `Scaffold` with an `AppBar`, app-bar actions,
 /// and a docked `FloatingActionButton` for the primary action.
@@ -386,7 +387,8 @@ class MissionControlChrome extends Chrome {
           child: IconButton(
             onPressed: button.onPressed,
             icon: Icon(icon, size: 18),
-            tooltip: button.label,
+            // Fuller than the caption where the caption had to stay short.
+            tooltip: button.tooltip ?? button.label,
             color: color,
             disabledColor: t.textDim,
             visualDensity: VisualDensity.compact,
@@ -565,4 +567,12 @@ class MissionControlChrome extends Chrome {
       ),
     );
   }
+
+  @override
+  Widget buildWide(BuildContext context, ChromeWideSpec spec) =>
+      MissionControlWide(spec);
+
+  @override
+  Widget buildWideDetail(BuildContext context, ChromeWideDetailSpec spec) =>
+      MissionControlDetail(spec);
 }

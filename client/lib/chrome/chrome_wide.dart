@@ -1,24 +1,14 @@
 /// The desktop/tablet shell and its workspace frame, for both themes.
 ///
-/// **Why this file branches on [ChromeKind] internally rather than going through
-/// the [Chrome] interface.** Every other structural element in this layer is an
-/// abstract `build*` on [Chrome]/[ChromeForms] with two implementations. This one
-/// is not, purely for a mechanical reason: `chrome.dart`, `chrome_forms.dart` and
-/// both chrome implementations are owned by other parts of this same change, so
-/// adding `buildWide`/`buildWideDetail` to the interface here would collide. The
-/// branch below is therefore a **deliberate, temporary compromise, not the final
-/// shape** — a follow-up should:
+/// Dispatch goes through the [Chrome] interface like every other element in this
+/// layer: `buildWide` and `buildWideDetail` are declared on [ChromeForms] and
+/// implemented by each chrome, which returns the matching variant from this file.
 ///
-/// * move [ChromeWideSpec] / [ChromeWideDetailSpec] into `chrome_forms.dart`,
-/// * add `buildWide` and `buildWideDetail` to the [ChromeForms] interface,
-/// * move `_MissionControlWide`/`_MissionControlDetail` into
-///   `mission_control_chrome.dart` and the `_Lcars*` pair into `lcars_chrome.dart`,
-/// * and reduce [ChromeWide] / [ChromeWideDetail] to the one-line widget
-///   front-ends every other element in this layer already has.
-///
-/// Until then, note the two smells this leaves: LCARS geometry (elbows, the
-/// deck's block heights) lives outside `lcars/`, and the two themes' layouts sit
-/// in one file instead of one each.
+/// The two variants live together here, rather than one in `mission_control/` and
+/// one in `lcars/`, because the thing they have in common is the *layout problem* —
+/// how many columns the width affords, and which pane owns the navigation. Reading
+/// them side by side is what makes the 1180px threshold and the folded-nav
+/// fallback comprehensible; split across two files, each half looks arbitrary.
 library;
 
 import 'package:flutter/material.dart';
@@ -36,7 +26,7 @@ import 'lcars/elbow.dart';
 /// are fixed at [_lcarsNavWidth] + [_lcarsFleetWidth] = 394px, so at 900px the
 /// workspace would be left ~500px, where the deck's workspace frames assume
 /// 1120px+. Between the wide breakpoint and this one, LCARS folds the nav into
-/// the fleet column instead (see [_LcarsWide]).
+/// the fleet column instead (see [LcarsWide]).
 const double kLcarsThreeColumnWidth = 1180;
 
 /// The wide shell's structure, described rather than laid out.
@@ -94,10 +84,7 @@ class ChromeWide extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      switch (CommanderTokens.of(context).chrome) {
-        ChromeKind.missionControl => _MissionControlWide(spec),
-        ChromeKind.lcars => _LcarsWide(spec),
-      };
+      Chrome.of(context).buildWide(context, spec);
 }
 
 /// One tab of the workspace pane. Carries its own [Key] so the key travels with
@@ -159,10 +146,7 @@ class ChromeWideDetail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      switch (CommanderTokens.of(context).chrome) {
-        ChromeKind.missionControl => _MissionControlDetail(spec),
-        ChromeKind.lcars => _LcarsDetail(spec),
-      };
+      Chrome.of(context).buildWideDetail(context, spec);
 }
 
 /// The fleet pane's count line, formatted once so the two themes cannot drift on
@@ -176,9 +160,9 @@ String _countsLine(ChromeWideSpec spec) =>
 
 /// Mission Control's two panes: the fleet rail and the workspace, split by a
 /// hairline. Unchanged from the hand-built layout this replaced.
-class _MissionControlWide extends StatelessWidget {
+class MissionControlWide extends StatelessWidget {
   final ChromeWideSpec spec;
-  const _MissionControlWide(this.spec);
+  const MissionControlWide(this.spec, {super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -188,7 +172,7 @@ class _MissionControlWide extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SizedBox(width: _mcRailWidth, child: _rail(context, t)),
+            SizedBox(width: _mcRailWidth, child: _rail(t)),
             VerticalDivider(width: 1, color: t.borderSubtle),
             Expanded(child: spec.workspace),
           ],
@@ -200,7 +184,7 @@ class _MissionControlWide extends StatelessWidget {
   /// The persistent Fleet rail: a branded header (brand mark + "Fleet" + mono
   /// counts), the shared session list, and a footer carrying the
   /// FLEET/ACTIVITY toggle, settings, and new-session.
-  Widget _rail(BuildContext context, CommanderTokens t) => Container(
+  Widget _rail(CommanderTokens t) => Container(
     color: t.canvas,
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -336,9 +320,9 @@ class _McIconButton extends StatelessWidget {
 }
 
 /// Mission Control's workspace: header, the underline tab row, then the body.
-class _MissionControlDetail extends StatelessWidget {
+class MissionControlDetail extends StatelessWidget {
   final ChromeWideDetailSpec spec;
-  const _MissionControlDetail(this.spec);
+  const MissionControlDetail(this.spec, {super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -466,9 +450,9 @@ class _MissionControlDetail extends StatelessWidget {
 /// enough for the two-pane shell — the nav rail folds into the fleet column as a
 /// horizontal run of blocks under the list, so the workspace keeps its width
 /// rather than paying 104px for a rail.
-class _LcarsWide extends StatelessWidget {
+class LcarsWide extends StatelessWidget {
   final ChromeWideSpec spec;
-  const _LcarsWide(this.spec);
+  const LcarsWide(this.spec, {super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -621,10 +605,7 @@ class _LcarsWide extends StatelessWidget {
   /// contiguous run of blocks, pill-ended on the outside only — the same shape
   /// the phone shell's footer uses, so the fold reads as the same control.
   Widget _foldedNav(CommanderTokens t) {
-    final actions = [
-      ?spec.newSession,
-      ?spec.settings,
-    ];
+    final actions = [?spec.newSession, ?spec.settings];
     final count = spec.modes.length + actions.length;
     final blocks = <Widget>[
       for (var i = 0; i < spec.modes.length; i++)
@@ -694,9 +675,9 @@ class _LcarsWide extends StatelessWidget {
 /// Control shape — LCARS marks selection by *filling* a block, and a filled block
 /// wants to be part of a bracket down one edge. It sits on the right so the
 /// workspace is framed on the side the shell's nav rail does not already occupy.
-class _LcarsDetail extends StatelessWidget {
+class LcarsDetail extends StatelessWidget {
   final ChromeWideDetailSpec spec;
-  const _LcarsDetail(this.spec);
+  const LcarsDetail(this.spec, {super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -850,11 +831,10 @@ TextStyle _caption(
   CommanderTokens t,
   Color color, {
   double letterSpacing = 0,
-  FontWeight weight = FontWeight.w500,
 }) => TextStyle(
   fontFamily: t.sans,
   fontSize: 11,
-  fontWeight: weight,
+  fontWeight: FontWeight.w500,
   letterSpacing: letterSpacing,
   color: color,
 );
