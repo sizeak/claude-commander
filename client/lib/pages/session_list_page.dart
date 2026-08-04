@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome_forms.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
@@ -399,11 +400,14 @@ class _SessionListBodyState extends State<SessionListBody> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 2, 12, 12),
       children: [
-        for (final (store, session) in pairs)
-          _RecentTile(
+        // One flat run, so the position is the index in the whole list.
+        for (final (i, (store, session)) in pairs.indexed)
+          _recentRow(
+            context,
             store: store,
             session: session,
             selected: session.id == widget.selectedId,
+            position: _rowPosition(i, pairs.length),
             onTap: () => widget.onSelect(store, session),
           ),
       ],
@@ -653,14 +657,20 @@ class _ServerSection extends StatelessWidget {
         )
       else
         for (final group in groups) ...[
-          _ProjectHeader(name: group.project.name, count: group.sessions.length),
-          for (final session in group.sessions)
+          ChromeEyebrow(
+            '${group.project.name.toUpperCase()} · ${group.sessions.length}',
+          ),
+          // Each project group is its own run, so a row's position is its index
+          // within the group rather than within the whole server section.
+          for (final (i, session) in group.sessions.indexed)
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
-              child: _GroupedTile(
+              child: _groupedRow(
+                context,
                 store: store,
                 session: session,
                 selected: session.id == selectedId,
+                position: _rowPosition(i, group.sessions.length),
                 onTap: () => onSelect(store, session),
               ),
             ),
@@ -1085,191 +1095,98 @@ class _InlineNote extends StatelessWidget {
   }
 }
 
-/// A subtle project sub-header (the deck's `GENIO · 3` eyebrow) naming the
-/// project a run of session tiles belongs to and how many it holds.
-class _ProjectHeader extends StatelessWidget {
-  final String name;
-  final int count;
-  const _ProjectHeader({required this.name, required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CommanderTokens.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 10, 12, 6),
-      child: Text(
-        '${name.toUpperCase()} · $count',
-        style: t.eyebrow(),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-    );
-  }
+/// Where a row sits in a run of [count] rows. LCARS rounds a run's outer
+/// corners so it reads as one bracketed cluster; Mission Control ignores it.
+ChromeRowPosition _rowPosition(int index, int count) {
+  if (count == 1) return ChromeRowPosition.only;
+  if (index == 0) return ChromeRowPosition.first;
+  if (index == count - 1) return ChromeRowPosition.last;
+  return ChromeRowPosition.middle;
 }
 
-/// A dense MRU row for the Recent tab: the state glyph, the title, a mono
-/// `state · project · server` subtitle, and a trailing PR badge + relative age.
-/// Divider-ruled rather than carded, matching the deck's flat recents list.
-class _RecentTile extends StatelessWidget {
-  final CommanderStore store;
-  final SessionInfo session;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _RecentTile({
-    required this.store,
-    required this.session,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CommanderTokens.of(context);
-    final descriptor = sessionDescriptor(
-      session,
-      store.agentStateFor(session.id),
-    );
-    final waiting = descriptor.wantsAttention;
-    final subtitle =
-        '${descriptor.label} · ${session.projectName} · ${store.config.name}';
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 9),
-          decoration: BoxDecoration(
-            color: selected ? t.surfaceSelected : null,
-            border: Border(bottom: BorderSide(color: t.divider)),
-          ),
-          child: Row(
-            children: [
-              SessionGlyph(descriptor),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      session.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: t.text,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: t.meta(
-                        size: 10,
-                        color: waiting ? t.attentionOn : t.textMuted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (session.prNumber != null) ...[
+/// A dense MRU row for the Recent tab: the state glyph, the title, a
+/// `state · project · server` metadata line, and a trailing PR badge + relative
+/// age.
+///
+/// The subtitle is load-bearing beyond its content: it is what selects Mission
+/// Control's divider-ruled row shape over its carded one, so this row always
+/// passes one.
+Widget _recentRow(
+  BuildContext context, {
+  required CommanderStore store,
+  required SessionInfo session,
+  required bool selected,
+  required ChromeRowPosition position,
+  required VoidCallback onTap,
+}) {
+  final t = CommanderTokens.of(context);
+  final descriptor = sessionDescriptor(
+    session,
+    store.agentStateFor(session.id),
+  );
+  final age = relativeAge(session.lastAttachedAt ?? session.createdAt);
+  final pr = session.prNumber;
+  return ChromeListRow(
+    ChromeListRowSpec(
+      title: session.title,
+      subtitle:
+          '${descriptor.label} · ${session.projectName} · ${store.config.name}',
+      tone: descriptor.tone,
+      glyph: SessionGlyph(descriptor),
+      number: lcarsRowNumber(session.id),
+      selected: selected,
+      position: position,
+      onTap: onTap,
+      // This row wants a PR badge *and* the age, but `trailingWidget`
+      // supersedes `trailing` rather than sitting beside it — so when there is
+      // a PR the pair is composed here instead. The gap and the age's style are
+      // the ones the chrome's own trailing slot uses, which is what keeps a PR
+      // row and a PR-less one identical apart from the badge. Dropping the age
+      // instead would have been a visible change to Mission Control.
+      trailing: pr == null ? age : null,
+      trailingWidget: pr == null
+          ? null
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                prChip(context, pr, session.prState),
                 const SizedBox(width: 8),
-                prChip(context, session.prNumber!, session.prState),
+                Text(age, style: t.meta(size: 10, color: t.textFaint)),
               ],
-              const SizedBox(width: 8),
-              Text(
-                relativeAge(session.lastAttachedAt ?? session.createdAt),
-                style: t.meta(size: 10, color: t.textFaint),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+            ),
+    ),
+  );
 }
 
-/// A carded session row for the grouped All view: the state glyph, the title,
-/// and a trailing PR badge (or the state word when there's no PR). Selected rows
-/// tint with the primary accent; rows that want attention take the attention
-/// tint — both pull the eye to the row that needs it.
-class _GroupedTile extends StatelessWidget {
-  final CommanderStore store;
-  final SessionInfo session;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _GroupedTile({
-    required this.store,
-    required this.session,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CommanderTokens.of(context);
-    final descriptor = sessionDescriptor(
-      session,
-      store.agentStateFor(session.id),
-    );
-    final waiting = descriptor.wantsAttention;
-    final Color bg, borderColor;
-    if (selected) {
-      bg = t.primary.withValues(alpha: 0.1);
-      borderColor = t.primary.withValues(alpha: 0.5);
-    } else if (waiting) {
-      bg = t.attention.withValues(alpha: 0.09);
-      borderColor = t.attention.withValues(alpha: 0.45);
-    } else {
-      bg = t.surface;
-      borderColor = t.border;
-    }
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: borderColor),
-          ),
-          child: Row(
-            children: [
-              SessionGlyph(descriptor, width: 12),
-              const SizedBox(width: 9),
-              Expanded(
-                child: Text(
-                  session.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                    color: t.text,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (session.prNumber != null)
-                prChip(context, session.prNumber!, session.prState)
-              else
-                Text(
-                  descriptor.label,
-                  style: t.meta(
-                    size: 10,
-                    color: waiting ? t.attentionOn : t.textMuted,
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+/// A session row for the grouped All view: the state glyph, the title, and a
+/// trailing PR badge (or the state word when there's no PR).
+///
+/// Deliberately **no subtitle**: that is what selects Mission Control's carded
+/// row shape. See [_recentRow].
+Widget _groupedRow(
+  BuildContext context, {
+  required CommanderStore store,
+  required SessionInfo session,
+  required bool selected,
+  required ChromeRowPosition position,
+  required VoidCallback onTap,
+}) {
+  final descriptor = sessionDescriptor(
+    session,
+    store.agentStateFor(session.id),
+  );
+  final pr = session.prNumber;
+  return ChromeListRow(
+    ChromeListRowSpec(
+      title: session.title,
+      tone: descriptor.tone,
+      glyph: SessionGlyph(descriptor, width: 12),
+      number: lcarsRowNumber(session.id),
+      selected: selected,
+      position: position,
+      onTap: onTap,
+      trailing: pr == null ? descriptor.label : null,
+      trailingWidget: pr == null ? null : prChip(context, pr, session.prState),
+    ),
+  );
 }
