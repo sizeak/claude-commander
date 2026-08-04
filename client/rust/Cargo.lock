@@ -1154,6 +1154,7 @@ dependencies = [
 [[package]]
 name = "diffgrid"
 version = "0.1.0"
+source = "git+https://github.com/sizeak/diffgrid?rev=83698a53458868c7c691d89dbb21e89fbc905afa#83698a53458868c7c691d89dbb21e89fbc905afa"
 dependencies = [
  "diffy",
  "similar",
