@@ -152,10 +152,11 @@ project_pull_interval_secs = 3600
 # Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘)
 rounded_borders = false
 
-# Dim the list views' right-hand pane (Preview / Shell). That pane is a passive
-# live capture — keys always drive the session list — so it renders dimmed by
-# default to keep the list visually dominant. Set to false to render it at full
-# brightness. The board has no right pane, so this has no effect there.
+# Dim the live-capture tabs (Preview / Shell) of the list views' right-hand
+# pane. They are passive tails — keys always drive the session list — so they
+# render dimmed by default to keep the list visually dominant. Set to false to
+# render them at full brightness. The pane's Info tab is never dimmed (it is
+# static text, not a tail), and the board has no right pane at all.
 dim_unfocused_preview = true
 
 # How much to dim the right pane's colours (0.0 = fully dimmed/black, 1.0 = no
@@ -269,7 +270,7 @@ state_sync_interval_ms = 2000
 # page_up = ["Ctrl-u"]                     # first card in the board column
 # page_down = ["Ctrl-d"]                   # last card in the board column
 # open_info = ["i"]
-# toggle_pane = ["Tab"]                    # switch the right pane: Preview / Shell
+# toggle_pane = ["Tab"]                    # cycle the right pane: Preview / Info / Shell
 # toggle_pane_reverse = ["Shift-Tab"]
 # shrink_left_pane = ["<"]                 # move the list/pane divider left
 # grow_left_pane = [">"]                   # move it right

@@ -13,11 +13,17 @@
 use super::*;
 
 impl App {
-    /// Whether the Info modal is open. The enriched-PR fetch is gated on this
-    /// (it feeds only that modal), and it is one of the two things that make
-    /// preview data worth capturing — see [`Self::preview_data_wanted`].
+    /// Whether an Info surface is currently showing: the `i` modal, or the list
+    /// views' right-pane Info tab. The enriched-PR and AI-summary fetches feed
+    /// only those, so they are gated on this.
     fn is_info_open(&self) -> bool {
-        matches!(self.ui_state.modal, Modal::Info { .. })
+        matches!(self.ui_state.modal, Modal::Info { .. }) || self.is_info_tab_showing()
+    }
+
+    /// Whether the right pane is currently on its Info tab. False on the board
+    /// (no right pane) and whenever a capture tab is selected.
+    fn is_info_tab_showing(&self) -> bool {
+        self.ui_state.is_info_tab()
     }
 
     /// Whether anything on screen currently consumes preview data: the list

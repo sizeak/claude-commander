@@ -118,6 +118,18 @@ impl PreviewState {
         Self::default()
     }
 
+    /// A state anchored at the top that does not follow new content.
+    ///
+    /// For panes whose content is a document rather than a live tail — the Info
+    /// tab — where auto-scrolling to the bottom on every refresh would hide the
+    /// title and status the reader actually wants.
+    pub fn anchored_top() -> Self {
+        Self {
+            follow: false,
+            ..Self::default()
+        }
+    }
+
     /// Update content info
     pub fn set_content(&mut self, content: &str, visible_height: u16) {
         // Exclude trailing empty lines (tmux capture-pane returns full pane height)

@@ -424,12 +424,15 @@ impl App {
     }
 
     /// Render the list views' right-hand pane: a live capture of the selected
-    /// session's agent pane or shell, with a tab header naming both.
+    /// session's agent pane or shell, or its Info view, with a tab header.
     ///
-    /// The pane is passive — keys always drive the session list — so it renders
-    /// dimmed when `dim_unfocused_preview` is set, keeping the list visually
-    /// dominant. Content arrives from `spawn_preview_update`; the scroll state
-    /// follows the tail until the user wheels away from the bottom.
+    /// The pane is passive — keys always drive the session list — so the live
+    /// captures render dimmed when `dim_unfocused_preview` is set, keeping the
+    /// list visually dominant. Info is exempt: it is static, already styled for
+    /// legibility, and shares its lines with the modal, so dimming it would only
+    /// make the same text harder to read. Capture content arrives from
+    /// `spawn_preview_update`; its scroll follows the tail until the user wheels
+    /// away from the bottom.
     fn render_right_pane(&mut self, frame: &mut Frame, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -444,6 +447,26 @@ impl App {
             .border_type(self.border_type())
             .border_style(self.theme.border_unfocused());
 
+        if view == RightPaneView::Info {
+            // InfoView draws no block of its own, so give it the inner area and
+            // render the tab-header block around it.
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            // Build the lines once: they size the scroll metrics *and* render.
+            // The content borrows `self`, so clamp against a local copy of the
+            // offset here and record the metrics after that borrow is released.
+            let info = InfoView::new(self.build_info_content(), &self.theme);
+            let lines = info.build_lines();
+            let total = lines.len();
+            let max_scroll = total.saturating_sub(inner.height as usize) as u16;
+            let scroll = self.ui_state.info_state.scroll_offset.min(max_scroll);
+            frame.render_widget(info.with_prebuilt_lines(lines).scroll(scroll), inner);
+
+            self.ui_state.info_state.set_metrics(total, inner.height);
+            return;
+        }
+
         let dim_opacity = self
             .config
             .dim_unfocused_preview
@@ -451,12 +474,14 @@ impl App {
 
         // Borders take one row top and bottom.
         let inner_height = area.height.saturating_sub(2);
-        let (content, state) = match view {
-            RightPaneView::Preview => (
+        // Only the two capture tabs reach here — Info returned above.
+        let (content, state) = if view == RightPaneView::Preview {
+            (
                 &self.ui_state.preview_content,
                 &mut self.ui_state.preview_state,
-            ),
-            RightPaneView::Shell => (&self.ui_state.shell_content, &mut self.ui_state.shell_state),
+            )
+        } else {
+            (&self.ui_state.shell_content, &mut self.ui_state.shell_state)
         };
         state.set_content(content, inner_height);
         let scroll = state.scroll_offset;
@@ -496,13 +521,14 @@ impl App {
         Line::from(spans)
     }
 
-    /// Build the Info-modal content for the selected session.
+    /// Build the Info content for the current selection — session detail, or a
+    /// project's path/branch/pull status when a project row is selected.
     ///
-    /// Extracted from the old right-pane `render_info`; consumed by the Info
-    /// modal (`Modal::Info`), which reuses the `InfoView` widget.
-    pub(super) fn build_session_info_content(&self) -> InfoContent<'_> {
+    /// Shared by both surfaces that render `InfoView`: the right pane's Info tab
+    /// and the `i` Info modal, so the two can never disagree.
+    pub(super) fn build_info_content(&self) -> InfoContent<'_> {
         let Some(sref) = self.ui_state.selected_session_id else {
-            return InfoContent::Empty;
+            return self.build_project_info_content();
         };
         let session_id = sref.id;
 
@@ -559,6 +585,28 @@ impl App {
             ai_summary,
             summary_key_hint,
             stack_chain: &self.ui_state.stack_chain,
+        })
+    }
+
+    /// Info content for a selected project row: its path, main branch, and any
+    /// reason the background branch pull is currently held back. `Empty` when
+    /// nothing (or something that is neither) is selected.
+    fn build_project_info_content(&self) -> InfoContent<'_> {
+        let Some((_backend, project_id)) = self.ui_state.selected_project_id else {
+            return InfoContent::Empty;
+        };
+        let Some(project) = self.project(project_id) else {
+            return InfoContent::Empty;
+        };
+        InfoContent::Project(InfoProjectData {
+            name: project.name.clone(),
+            repo_path: project.repo_path.display().to_string(),
+            main_branch: project.main_branch.clone(),
+            pull_blocked: self
+                .ui_state
+                .project_pull_blocked
+                .get(&project_id)
+                .map(|r| r.as_str().to_string()),
         })
     }
 

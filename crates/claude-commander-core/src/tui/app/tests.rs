@@ -6873,7 +6873,7 @@ async fn info_content_resolves_in_a_list_view_from_the_snapshot() {
     app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
     app.ui_state.selected_session_id = Some(SessionRef::local(sid));
     assert!(
-        matches!(app.build_session_info_content(), InfoContent::Session(_)),
+        matches!(app.build_info_content(), InfoContent::Session(_)),
         "Info content must resolve in a list view, not just on the board"
     );
 }
@@ -6964,26 +6964,69 @@ fn split_list_view_never_starves_a_pane_at_tiny_widths() {
 
 #[test]
 fn right_pane_view_toggles_and_labels_its_tabs() {
-    assert_eq!(RightPaneView::Preview.toggled(), RightPaneView::Shell);
-    assert_eq!(RightPaneView::Shell.toggled(), RightPaneView::Preview);
+    // A session cycles all three tabs, and back to where it started.
+    let mut v = RightPaneView::Preview;
+    for expected in [
+        RightPaneView::Info,
+        RightPaneView::Shell,
+        RightPaneView::Preview,
+    ] {
+        v = v.cycled(false, true);
+        assert_eq!(v, expected);
+    }
+    // Reverse walks the same ring the other way.
+    for expected in [
+        RightPaneView::Shell,
+        RightPaneView::Info,
+        RightPaneView::Preview,
+    ] {
+        v = v.cycled(false, false);
+        assert_eq!(v, expected);
+    }
 
-    // A session shows both tabs, with the active one indexed.
+    // Tab labels, with the active one indexed.
     assert_eq!(
         RightPaneView::Preview.tabs(false),
-        (&["Preview", "Shell"][..], 0)
+        (&["Preview", "Info", "Shell"][..], 0)
+    );
+    assert_eq!(
+        RightPaneView::Info.tabs(false),
+        (&["Preview", "Info", "Shell"][..], 1)
     );
     assert_eq!(
         RightPaneView::Shell.tabs(false),
-        (&["Preview", "Shell"][..], 1)
+        (&["Preview", "Info", "Shell"][..], 2)
     );
 
-    // A project has no agent pane: one tab, and Preview collapses to Shell.
-    assert_eq!(RightPaneView::Preview.tabs(true), (&["Shell"][..], 0));
+    // A project has no agent pane: two tabs, Preview collapses to Shell, and
+    // the cycle is a straight Shell ↔ Info toggle in either direction.
+    assert_eq!(
+        RightPaneView::Preview.tabs(true),
+        (&["Shell", "Info"][..], 0)
+    );
+    assert_eq!(RightPaneView::Info.tabs(true), (&["Shell", "Info"][..], 1));
     assert_eq!(RightPaneView::Preview.effective(true), RightPaneView::Shell);
+    assert_eq!(RightPaneView::Info.effective(true), RightPaneView::Info);
     assert_eq!(
         RightPaneView::Preview.effective(false),
         RightPaneView::Preview
     );
+
+    for forward in [true, false] {
+        // Preview is shown as Shell on a project, so it cycles to Info.
+        assert_eq!(
+            RightPaneView::Preview.cycled(true, forward),
+            RightPaneView::Info
+        );
+        assert_eq!(
+            RightPaneView::Shell.cycled(true, forward),
+            RightPaneView::Info
+        );
+        assert_eq!(
+            RightPaneView::Info.cycled(true, forward),
+            RightPaneView::Shell
+        );
+    }
 }
 
 #[tokio::test]
@@ -7041,7 +7084,11 @@ async fn toggle_pane_switches_tabs_only_in_list_views() {
     assert_eq!(app.ui_state.right_pane_view, RightPaneView::Preview);
 
     app.handle_command(UserCommand::TogglePane).await;
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Info);
+    app.handle_command(UserCommand::TogglePane).await;
     assert_eq!(app.ui_state.right_pane_view, RightPaneView::Shell);
+    app.handle_command(UserCommand::TogglePaneReverse).await;
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Info);
     app.handle_command(UserCommand::TogglePaneReverse).await;
     assert_eq!(app.ui_state.right_pane_view, RightPaneView::Preview);
 
@@ -7200,4 +7247,99 @@ async fn wheel_scrolls_the_pane_over_it_and_moves_the_selection_over_the_list() 
     app.scroll_pane_at(list.x + 1, ScrollDirection::Down);
     assert_ne!(app.ui_state.list_state.selected(), selected);
     assert_eq!(app.ui_state.preview_state.scroll_offset, pane_offset);
+}
+
+#[tokio::test]
+async fn info_tab_renders_session_detail_in_the_right_pane() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (snap, sid, _pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.right_pane_view = RightPaneView::Info;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(&terminal);
+
+    assert!(
+        text.contains("Preview") && text.contains("Info") && text.contains("Shell"),
+        "all three tab labels must render in the header"
+    );
+    assert!(
+        text.contains("remote-sess"),
+        "the Info tab must render the selected session's detail, not a placeholder"
+    );
+}
+
+#[tokio::test]
+async fn info_tab_renders_project_detail_when_a_project_is_selected() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (snap, _sid, pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    // A project row: no session selected.
+    app.ui_state.selected_session_id = None;
+    app.ui_state.selected_project_id = Some((BackendId(0), pid));
+    app.ui_state.right_pane_view = RightPaneView::Info;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(&terminal);
+
+    // A project has no agent pane, so it offers Shell and Info only.
+    assert!(
+        !text.contains("Preview"),
+        "a project row must not offer a Preview tab"
+    );
+    assert!(
+        text.contains("remote-proj"),
+        "the Info tab must describe the selected project"
+    );
+    assert!(
+        text.contains("/tmp/rp"),
+        "the project's repo path must render"
+    );
+}
+
+#[tokio::test]
+async fn generate_summary_is_offered_from_the_info_tab_as_well_as_the_modal() {
+    let (snap, sid, _pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    // On a capture tab the summary has nowhere to show, so it stays hidden.
+    app.ui_state.right_pane_view = RightPaneView::Preview;
+    assert!(
+        !app.ui_state
+            .is_command_available(BindableAction::GenerateSummary)
+    );
+
+    // The Info tab displays it, so `g` becomes available without opening the
+    // modal — the tab is now a first-class Info surface.
+    app.ui_state.right_pane_view = RightPaneView::Info;
+    assert!(
+        app.ui_state
+            .is_command_available(BindableAction::GenerateSummary)
+    );
+
+    // The board has no right pane, so only the modal can offer it there.
+    app.ui_state.view_mode = ViewMode::Board;
+    assert!(
+        !app.ui_state
+            .is_command_available(BindableAction::GenerateSummary)
+    );
+    app.ui_state.modal = Modal::Info { scroll: 0 };
+    assert!(
+        app.ui_state
+            .is_command_available(BindableAction::GenerateSummary)
+    );
 }

@@ -43,7 +43,8 @@ use super::widgets::board::{
     BoardButtonRegion, BoardHitRegion, BoardRects, BoardState, BoardWidget,
 };
 use super::widgets::{
-    InfoContent, InfoSessionData, InfoView, Preview, PreviewState, TreeList, TreeListState,
+    InfoContent, InfoProjectData, InfoSessionData, InfoView, Preview, PreviewState, TreeList,
+    TreeListState,
 };
 use crate::api::{CommanderService, DiffSide};
 use crate::backend::{
@@ -247,44 +248,63 @@ pub(crate) const MAX_LEFT_PANE_PCT: u16 = 60;
 /// Default left pane width as a percentage of the content area
 pub(crate) const DEFAULT_LEFT_PANE_PCT: u16 = 30;
 
-/// Which live view the right-hand pane shows in the *list* view modes.
+/// Which view the right-hand pane shows in the *list* view modes.
 ///
 /// The board is a full-screen takeover with no right pane, so this is only
-/// consulted when [`ViewMode::is_board`] is false. Session metadata is *not* a
-/// variant here: that lives in the `i` Info modal (reachable from the board
-/// too), so there is exactly one info surface to keep in sync.
+/// consulted when [`ViewMode::is_board`] is false. `Info` renders the same
+/// content as the `i` Info modal — which remains the only way to reach it from
+/// the board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RightPaneView {
     /// Live capture of the session's agent pane.
     #[default]
     Preview,
+    /// Session metadata, diffstat, PR details and AI summary.
+    Info,
     /// Live capture of the session's (or project's) shell pane.
     Shell,
 }
 
 impl RightPaneView {
-    /// The other view — `Tab`/`BackTab` both toggle, since there are two.
-    pub fn toggled(self) -> Self {
-        match self {
-            Self::Preview => Self::Shell,
-            Self::Shell => Self::Preview,
+    /// Advance the tab cycle. A project has no agent pane, so its cycle is the
+    /// two-tab `Shell ↔ Info`; a session cycles all three.
+    pub fn cycled(self, on_project: bool, forward: bool) -> Self {
+        if on_project {
+            return match self.effective(true) {
+                Self::Info => Self::Shell,
+                _ => Self::Info,
+            };
+        }
+        match (self, forward) {
+            (Self::Preview, true) => Self::Info,
+            (Self::Info, true) => Self::Shell,
+            (Self::Shell, true) => Self::Preview,
+            (Self::Preview, false) => Self::Shell,
+            (Self::Info, false) => Self::Preview,
+            (Self::Shell, false) => Self::Info,
         }
     }
 
     /// Tab labels and the active index, for the pane header.
     ///
-    /// A project has no agent pane, so it shows a single `Shell` tab; a session
-    /// shows both. Returned as a slice + index so the header renderer stays
-    /// ignorant of which selection kind produced it.
+    /// Returned as a slice + index so the header renderer stays ignorant of
+    /// which selection kind produced it.
     pub fn tabs(self, on_project: bool) -> (&'static [&'static str], usize) {
         if on_project {
-            (&["Shell"], 0)
+            (
+                &["Shell", "Info"],
+                match self.effective(true) {
+                    Self::Info => 1,
+                    _ => 0,
+                },
+            )
         } else {
             (
-                &["Preview", "Shell"],
+                &["Preview", "Info", "Shell"],
                 match self {
                     Self::Preview => 0,
-                    Self::Shell => 1,
+                    Self::Info => 1,
+                    Self::Shell => 2,
                 },
             )
         }
@@ -293,7 +313,10 @@ impl RightPaneView {
     /// The view actually rendered for the current selection: a project has no
     /// agent pane, so `Preview` collapses to `Shell` there.
     pub fn effective(self, on_project: bool) -> Self {
-        if on_project { Self::Shell } else { self }
+        match (self, on_project) {
+            (Self::Preview, true) => Self::Shell,
+            _ => self,
+        }
     }
 }
 
@@ -1369,6 +1392,9 @@ pub struct AppUiState {
     pub preview_state: PreviewState,
     /// Scroll/follow state for the Shell tab.
     pub shell_state: PreviewState,
+    /// Scroll state for the Info tab. Its line count is known up front, so it
+    /// is driven by `set_metrics` rather than by scanning captured text.
+    pub info_state: PreviewState,
     /// Left (session-list) pane width as a percentage of the content area,
     /// clamped to [`MIN_LEFT_PANE_PCT`]..=[`MAX_LEFT_PANE_PCT`]. Persisted in
     /// `tui.json`.
@@ -1548,6 +1574,7 @@ impl Default for AppUiState {
             shell_content: String::new(),
             preview_state: PreviewState::new(),
             shell_state: PreviewState::new(),
+            info_state: PreviewState::anchored_top(),
             left_pane_pct: DEFAULT_LEFT_PANE_PCT,
             preview_update_spawned_at: None,
             right_pane_rect: None,
@@ -1603,6 +1630,19 @@ impl AppUiState {
     /// commands that would actually *do* something if selected. Pure with
     /// respect to `self` — safe to unit-test by constructing a default
     /// `AppUiState` and mutating a few fields.
+    /// Whether the selection is a project row rather than a session. A project
+    /// has no agent pane, so the right pane offers it Shell and Info only.
+    pub fn is_project_selected(&self) -> bool {
+        self.selected_session_id.is_none() && self.selected_project_id.is_some()
+    }
+
+    /// Whether the right pane is currently showing its Info tab. False on the
+    /// board, which has no right pane.
+    pub fn is_info_tab(&self) -> bool {
+        !self.view_mode.is_board()
+            && self.right_pane_view.effective(self.is_project_selected()) == RightPaneView::Info
+    }
+
     pub fn is_command_available(&self, action: BindableAction) -> bool {
         // A degraded/connecting remote backend can't service actions against its
         // sessions/projects, so gate those on the selected backend being live.
@@ -1637,9 +1677,12 @@ impl AppUiState {
             BindableAction::CascadeResume | BindableAction::CascadeAbandon => self.cascade_paused,
             // Removing a project is only meaningful from a project row (no session selected)
             BindableAction::RemoveProject => has_project && !has_session,
-            // GenerateSummary is only meaningful while the Info modal is open —
-            // that's where the summary (and its `g` hotkey) is displayed.
-            BindableAction::GenerateSummary => matches!(self.modal, Modal::Info { .. }),
+            // GenerateSummary is only meaningful while an Info surface is
+            // showing — the modal or the right pane's Info tab — since that is
+            // where the summary (and its `g` hotkey) is displayed.
+            BindableAction::GenerateSummary => {
+                has_session && (matches!(self.modal, Modal::Info { .. }) || self.is_info_tab())
+            }
             // Creating a session or checking out a branch issues a request to the
             // selected project's backend (create-options / branch list). A
             // degraded/connecting remote can't service those and the awaits would
@@ -2159,6 +2202,15 @@ impl App {
             .sessions
             .iter()
             .find(|s| s.session_id == r.id)
+    }
+
+    /// Look up a project across every backend's cached snapshot. Project ids are
+    /// globally unique, so the first match is the only one — which lets callers
+    /// that hold a bare `ProjectId` (the Info surfaces) skip the qualifier.
+    pub(super) fn project(&self, id: ProjectId) -> Option<&crate::api::ProjectInfo> {
+        self.backends
+            .iter()
+            .find_map(|h| h.view.snapshot.projects.iter().find(|p| p.id == id))
     }
 
     /// The local backend concretely, for the local-only affordances the trait

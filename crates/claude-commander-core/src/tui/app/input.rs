@@ -1674,10 +1674,17 @@ impl App {
             UserCommand::TogglePane | UserCommand::TogglePaneReverse
                 if !self.ui_state.view_mode.is_board() =>
             {
-                self.ui_state.right_pane_view = self.ui_state.right_pane_view.toggled();
+                let forward = matches!(cmd, UserCommand::TogglePane);
+                self.ui_state.right_pane_view = self
+                    .ui_state
+                    .right_pane_view
+                    .cycled(self.is_project_selected(), forward);
                 // The outgoing tab's styled cells would otherwise linger under
                 // the incoming one.
                 self.ui_state.force_clear = true;
+                // Landing on Info needs the enriched-PR / summary fetches that
+                // only run while an Info surface is showing.
+                self.spawn_info_fetch();
                 self.spawn_preview_update();
             }
             UserCommand::ShrinkLeftPane => self.resize_left_pane(-2).await,

@@ -257,10 +257,9 @@ impl App {
             .map(|r| (r.pos, r.button))
     }
 
-    /// Whether the selection is a project row rather than a session. A project
-    /// has no agent pane, so the right pane shows only its shell.
+    /// Whether the selection is a project row rather than a session.
     pub(super) fn is_project_selected(&self) -> bool {
-        self.ui_state.selected_session_id.is_none() && self.ui_state.selected_project_id.is_some()
+        self.ui_state.is_project_selected()
     }
 
     /// Scroll state of the right pane's active tab, so wheel handling doesn't
@@ -272,6 +271,7 @@ impl App {
             .effective(self.is_project_selected())
         {
             RightPaneView::Preview => &mut self.ui_state.preview_state,
+            RightPaneView::Info => &mut self.ui_state.info_state,
             RightPaneView::Shell => &mut self.ui_state.shell_state,
         }
     }
