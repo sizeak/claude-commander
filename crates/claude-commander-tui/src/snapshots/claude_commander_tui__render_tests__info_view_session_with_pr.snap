@@ -1,0 +1,28 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+expression: terminal.backend()
+---
+"                                                                      "
+"                                                                      "
+"           ╭ Info — demo ──────────────────────────────────╮          "
+"           │ Session: auth-session                         │          "
+"           │ Branch:  feature-auth                         │          "
+"           │ Created: 2026-04-01 12:00 UTC                 │          "
+"           │ Status:  ● running                            │          "
+"           │ Program: claude                               │          "
+"           │ Path:    /tmp/wt/auth                         │          "
+"           │ Changes: 2 file(s), +10 -5 lines              │          "
+"           │                                               │          "
+"           │ ─────────────────────────────────             │          "
+"           │                                               │          "
+"           │ PR #42: Add authentication flow               │          "
+"           │ URL:    https://github.com/org/repo/pull/42   │          "
+"           │ State:  ● Open                                │          "
+"           │ Labels: bug  enhancement                      │          "
+"           │ CI:     ✓ Passing                             │          "
+"           │                                               │          "
+"           │ Description:                                  │          "
+"           │ This PR adds OAuth2 auth.                     │          "
+"           ╰───────────────────────────────────────────────╯          "
+"                                                                      "
+"                                                                      "

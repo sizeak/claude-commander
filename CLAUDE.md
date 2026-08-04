@@ -111,6 +111,15 @@ Two hard rules:
 
 Unit tests are co-located in source files (`#[cfg(test)]`). Integration tests in `tests/integration_test.rs` require tmux. All async tests use `#[tokio::test]`.
 
+**Render snapshots (insta).** The TUI crate carries visual-regression snapshots, which catch what targeted assertions miss — a column width that shifts, borders that stop joining, a card that loses a line. Two homes, both deliberate:
+
+- `claude-commander-tui/src/render_tests.rs` — TreeList, InfoView, modals, status bar, quick switch, via ratatui's `TestBackend`. Frames widgets with the app's *real* geometry (`app::centered_rect`, `app::confirm_modal_area`) rather than a copy, so a geometry change shows up in the snapshot instead of quietly diverging.
+- `claude-commander-tui/src/widgets/board/render.rs` — board snapshots, kept beside the fixture builders and `render` harness its unit tests already use. `BoardWidget::render` writes into a `Buffer` and returns hit-test output, so it isn't a `StatefulWidget` and can't go through `Frame::render_stateful_widget`; a local `buffer_snapshot` formats the buffer the way `TestBackend` would.
+
+Both capture **symbols only, not styles** — that's `TestBackend`'s limitation too. Colour and highlighting stay the job of targeted assertions (e.g. `selected_session_row_is_highlighted`). Run `cargo insta review` to accept or update; never blind-accept a diff, because these are the tests that only fail when rendering genuinely changed.
+
+Snapshots are easy to lose by accident: #260 deleted `render_tests.rs` and all 27 snapshots as collateral of removing the preview pane, without saying so, and the orphaned `insta` dependency then looked like dead weight. If a change invalidates a snapshot, re-point it at the new UI — don't delete the file.
+
 ### Test isolation
 
 Tests must not read or modify anything on the real filesystem. Any disk access must go through `tempfile::TempDir` (already in dev-deps) for OS-portable temp paths. Never hardcode `/tmp/...` as a real path. Dummy `PathBuf` values stored in struct fields (never accessed on disk) are acceptable.
@@ -123,10 +132,11 @@ Use red-green TDD: write a failing test first, then implement the fix. Key areas
 
 - **State management** (`config/storage.rs`) — bidirectional session-project linking, cascade delete, active session filtering
 - **Status state machine** (`session/types.rs`) — transition guards, timestamp updates, display strings
-- **Key mappings** (`tui/event.rs`) — every documented keybinding has a test; release/repeat events ignored
+- **Key mappings** (tui crate's `event.rs`) — every documented keybinding has a test; release/repeat events ignored
 - **Config resolution** (`config/settings.rs`) — editor precedence chain, GUI editor auto-detection
-- **Widget state** (`tui/widgets/`) — TreeListState navigation/wrap/clamp, PreviewState follow mode/scroll
-- **Review view** (`tui/app/review.rs`) — `DiffReviewState` file/cursor/scroll navigation, visual-mode selection math, side-by-side row pairing, mouse row mapping
+- **Widget state** (tui crate's `widgets/`) — TreeListState navigation/wrap/clamp, board cursor clamping/re-anchoring
+- **Rendered output** (tui crate's `render_tests.rs`, `widgets/board/render.rs`) — insta snapshots; see above
+- **Review view** (tui crate's `app/review.rs`) — `DiffReviewState` file/cursor/scroll navigation, visual-mode selection math, side-by-side row pairing, mouse row mapping
 - **Caching** (`tmux/capture.rs`, `git/diff.rs`) — hash determinism, TTL staleness, parse_diff_stat edge cases
 - **Name sanitization** (`session/manager.rs`) — branch name generation, special char handling
 - **Error types** (`error.rs`) — all variant displays, type conversions

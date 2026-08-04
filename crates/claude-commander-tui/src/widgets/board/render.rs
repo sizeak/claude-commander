@@ -2033,4 +2033,128 @@ mod tests {
             "buttons must leave one pad column before the right border"
         );
     }
+
+    // --- snapshots -------------------------------------------------------
+    //
+    // The assertions above check individual invariants (a glyph is present, a
+    // rect lines up). These snapshot whole frames, which is what catches the
+    // failures targeted assertions miss: a column width that shifts, borders
+    // that stop joining, a card that silently loses a line. They live here
+    // rather than in `crate::render_tests` so they reuse the fixture builders
+    // and `render` harness above instead of duplicating them.
+    //
+    // `BoardWidget::render` writes into a `Buffer` and returns hit-test output,
+    // so it is not a `StatefulWidget` and cannot go through
+    // `Frame::render_stateful_widget` the way the widgets in
+    // `crate::render_tests` do — hence rendering into a buffer and formatting it
+    // the way ratatui's `TestBackend` would.
+
+    /// Format a `Buffer` as one quoted string per row, matching `TestBackend`'s
+    /// `Display` so board snapshots read like the other render snapshots.
+    ///
+    /// Captures **symbols only**, not styles — same limitation as `TestBackend`.
+    /// So these snapshots pin geometry, truncation and glyph choice, while colour
+    /// and highlighting stay the job of the targeted assertions above
+    /// (`selected_session_row_is_highlighted`, `selected_sidebar_row_is_highlighted`).
+    fn buffer_snapshot(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in buf.area.y..buf.area.y + buf.area.height {
+            out.push('"');
+            for x in buf.area.x..buf.area.x + buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push_str("\"\n");
+        }
+        out
+    }
+
+    #[test]
+    fn snapshot_board_single_column() {
+        let pid = ProjectId::new();
+        let board = Board {
+            servers: vec![],
+            projects: vec![entry(pid, "my-app", 1)],
+            columns: vec![column(
+                claude_commander_core::session::IN_PROGRESS,
+                None,
+                vec![card(pid, wt(pid, "add-auth", false))],
+            )],
+        };
+        let (buf, _) = render(&board, 80, 14, None);
+        insta::assert_snapshot!(buffer_snapshot(&buf));
+    }
+
+    /// Three columns at a width where each is narrow enough to truncate a card's
+    /// branch label — the case where column arithmetic is easiest to get wrong.
+    /// A selection is set so the layout is snapshotted in the state the user
+    /// actually sees, but the highlight itself is a style and so invisible here;
+    /// `selected_session_row_is_highlighted` covers that.
+    #[test]
+    fn snapshot_board_multi_column_layout() {
+        let pid = ProjectId::new();
+        let board = Board {
+            servers: vec![],
+            projects: vec![entry(pid, "my-app", 3)],
+            columns: vec![
+                column(
+                    claude_commander_core::session::IN_PROGRESS,
+                    None,
+                    vec![
+                        card(pid, wt(pid, "add-auth", false)),
+                        card(pid, wt(pid, "fix-login", false)),
+                    ],
+                ),
+                column(
+                    "In Review",
+                    None,
+                    vec![card(pid, wt(pid, "refactor", false))],
+                ),
+                column("Merged", None, vec![]),
+            ],
+        };
+        // Column 1 is the sidebar, so BoardPos { column: 1, .. } is the first
+        // real column — select its second card.
+        let (buf, _) = render(&board, 110, 16, Some(BoardPos { col: 1, row: 1 }));
+        insta::assert_snapshot!(buffer_snapshot(&buf));
+    }
+
+    #[test]
+    fn snapshot_board_stacked_card() {
+        let pid = ProjectId::new();
+        // A `stacked_child` row gets its own border, indented two columns and
+        // correspondingly narrower, so the nesting is visible while the stack
+        // still reads as one unit. Snapshotted because that indent-plus-inset
+        // arithmetic is what silently drifts.
+        let board = Board {
+            servers: vec![],
+            projects: vec![entry(pid, "my-app", 2)],
+            columns: vec![column(
+                claude_commander_core::session::IN_PROGRESS,
+                None,
+                vec![
+                    card(pid, wt(pid, "parent-feature", false)),
+                    card(pid, wt(pid, "stacked-child", true)),
+                ],
+            )],
+        };
+        let (buf, _) = render(&board, 80, 14, None);
+        insta::assert_snapshot!(buffer_snapshot(&buf));
+    }
+
+    #[test]
+    fn snapshot_board_sidebar_with_two_projects() {
+        let a = ProjectId::new();
+        let z = ProjectId::new();
+        let board = Board {
+            servers: vec![],
+            projects: vec![entry(a, "alpha", 1), entry(z, "zeta", 2)],
+            columns: vec![column(
+                claude_commander_core::session::IN_PROGRESS,
+                None,
+                vec![card(a, wt(a, "one", false))],
+            )],
+        };
+        let (buf, _) = render(&board, 90, 12, None);
+        insta::assert_snapshot!(buffer_snapshot(&buf));
+    }
 }

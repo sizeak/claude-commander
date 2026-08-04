@@ -32,6 +32,12 @@ mod prefs;
 mod syntax_highlight;
 mod widgets;
 
+/// Visual-regression snapshots of rendered widgets (insta + ratatui's
+/// `TestBackend`). Board rendering is snapshotted in `widgets::board::render`
+/// instead, next to the fixture harness its unit tests already use.
+#[cfg(test)]
+mod render_tests;
+
 pub use app::*;
 pub use error::{Result, TuiError};
 pub use event::*;

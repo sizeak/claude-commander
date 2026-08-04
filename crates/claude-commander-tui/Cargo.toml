@@ -100,3 +100,8 @@ claude-commander-core = { path = "../claude-commander-core", features = [
 ] }
 # Temp directories for the prefs / path-completer tests.
 tempfile = "3.27"
+# Snapshot testing of rendered output (`src/render_tests.rs` and the board's
+# render tests), via ratatui's `TestBackend`. This belongs to the frontend crate:
+# core has nothing to render, which is why the dependency did not follow it.
+# `cargo insta review` to accept/update.
+insta = "1.48"

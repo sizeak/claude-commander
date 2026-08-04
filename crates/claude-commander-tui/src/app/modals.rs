@@ -1208,7 +1208,7 @@ impl App {
 }
 
 /// Helper to center a rect within an area
-pub(super) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

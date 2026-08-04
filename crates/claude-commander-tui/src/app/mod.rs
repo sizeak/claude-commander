@@ -77,6 +77,11 @@ mod state;
 #[cfg(test)]
 mod tests;
 
+/// Modal geometry, re-exported for the crate's render snapshots so they frame
+/// widgets with the same rects the app ships rather than a copy that can drift.
+/// Test-only, so a normal build doesn't carry an unused re-export.
+#[cfg(test)]
+pub(crate) use modals::{centered_rect, confirm_modal_area};
 pub use review::DiffReviewState;
 pub(crate) use review::ImageEntry;
 pub use review::ReviewPrepared;
