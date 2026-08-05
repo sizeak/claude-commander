@@ -141,6 +141,13 @@ pub struct Theme {
     // Status bar
     pub status_bar_bg: Color,
     pub status_bar_fg: Color,
+    /// Accent for the hotkey letter in `[n]ew session` and the board's top-bar
+    /// title, both of which are painted *on the status bar*.
+    ///
+    /// Not `text_accent`: that is tuned to read on the canvas, and reusing it
+    /// here only worked while every preset's bar was dark. See
+    /// `every_preset_status_bar_accent_is_legible_on_its_bar`.
+    pub status_bar_accent: Color,
 
     /// Colour capability this theme was built for. Drives capability-aware
     /// palettes (e.g. the review diff view) so RGB fills degrade gracefully.
@@ -471,6 +478,9 @@ impl Theme {
 
             status_bar_bg: Color::Blue,
             status_bar_fg: Color::White,
+            // Not Blue: `text_accent` is Blue here, and a blue letter on the
+            // blue bar was invisible but for its bold.
+            status_bar_accent: Color::LightYellow,
         }
     }
 
@@ -537,6 +547,7 @@ impl Theme {
 
             status_bar_bg: Color::Indexed(236),
             status_bar_fg: Color::Indexed(252),
+            status_bar_accent: Color::Indexed(147), // Matches text_accent
         }
     }
 
@@ -603,6 +614,7 @@ impl Theme {
 
             status_bar_bg: Color::Rgb(49, 50, 68),
             status_bar_fg: Color::Rgb(205, 214, 244),
+            status_bar_accent: Color::Rgb(180, 190, 254), // Matches text_accent
         }
     }
 
@@ -668,6 +680,7 @@ impl Theme {
 
             status_bar_bg: Color::Rgb(45, 45, 45), // Dark gray #2d2d2d
             status_bar_fg: Color::Rgb(204, 204, 204), // Light gray #cccccc
+            status_bar_accent: Color::Rgb(124, 165, 212), // Matches text_accent
         }
     }
 
@@ -733,6 +746,7 @@ impl Theme {
 
             status_bar_bg: Color::Rgb(30, 31, 28), // Very dark bg #1e1f1c
             status_bar_fg: Color::Rgb(248, 248, 242), // Warm white #f8f8f2
+            status_bar_accent: Color::Rgb(174, 129, 255), // Matches text_accent
         }
     }
 
@@ -798,6 +812,7 @@ impl Theme {
 
             status_bar_bg: Color::Rgb(31, 29, 46), // Dark bg #1f1d2e
             status_bar_fg: Color::Rgb(224, 222, 244), // Muted rose fg #e0def4
+            status_bar_accent: Color::Rgb(196, 167, 231), // Matches text_accent
         }
     }
 
@@ -889,6 +904,10 @@ impl Theme {
             // also reaches attached sessions through `tmux_status_style`.
             status_bar_bg: Color::Rgb(247, 160, 29),
             status_bar_fg: Color::Rgb(0, 0, 0),
+            // Dark periwinkle: amber's complement, so the hotkey letter reads
+            // at ~6:1 and stays distinct from the black bar text. The lilac
+            // `text_accent` is barely legible here.
+            status_bar_accent: Color::Rgb(46, 46, 92),
         }
     }
 
@@ -958,6 +977,7 @@ impl Theme {
         apply!(palette_command_fg);
         apply!(status_bar_bg);
         apply!(status_bar_fg);
+        apply!(status_bar_accent);
 
         // selection_fg is Option<Color> in Theme but Option<ColorValue> in overrides
         if let Some(cv) = overrides.selection_fg {
@@ -1358,6 +1378,95 @@ mod tests {
         assert_eq!(theme.text_primary, Color::Reset);
         // A field the fixture leaves alone keeps its LCARS value.
         assert_eq!(theme.status_running, Color::Rgb(247, 160, 29));
+    }
+
+    /// WCAG relative luminance, for [`contrast_ratio`].
+    fn relative_luminance(color: Color) -> f32 {
+        let (r, g, b) = color_to_approx_rgb(color);
+        let lin = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    /// WCAG contrast ratio between two colours, 1.0 (identical) to 21.0.
+    fn contrast_ratio(a: Color, b: Color) -> f32 {
+        let (la, lb) = (relative_luminance(a), relative_luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// The hotkey letter in `[n]ew session` and the board's top-bar title are
+    /// painted on the **status bar**, so their accent has to contrast with
+    /// `status_bar_bg` — not with the canvas.
+    ///
+    /// Both sites used `text_accent`, a colour chosen to read on the canvas. That
+    /// held only because every preset's bar happened to be dark too: `lcars` has a
+    /// light amber bar, where lilac `text_accent` is barely legible, and `basic`
+    /// painted a blue letter on its own blue bar at a ratio of 1.0 — invisible but
+    /// for the bold. `status_bar_accent` exists so a preset states this explicitly.
+    #[test]
+    fn every_preset_status_bar_accent_is_legible_on_its_bar() {
+        for name in PRESET_NAMES.iter().filter(|n| **n != "(auto)") {
+            let theme = Theme::from_preset(name).unwrap();
+            let ratio = contrast_ratio(theme.status_bar_accent, theme.status_bar_bg);
+            assert!(
+                ratio >= 4.5,
+                "preset \"{name}\" paints its status-bar accent at {ratio:.2}:1 on \
+                 its own bar; WCAG AA wants 4.5:1"
+            );
+            // The plain bar text has to be legible on it as well.
+            let fg_ratio = contrast_ratio(theme.status_bar_fg, theme.status_bar_bg);
+            assert!(
+                fg_ratio >= 4.5,
+                "preset \"{name}\" status_bar_fg is {fg_ratio:.2}:1 on its own bar"
+            );
+        }
+    }
+
+    /// The accent is a distinct field, but the presets that already read well keep
+    /// exactly the colour they rendered before it existed — so adding it is a
+    /// no-op for every theme but the two that were broken.
+    #[test]
+    fn status_bar_accent_preserves_the_presets_that_were_already_legible() {
+        for name in [
+            "indexed",
+            "truecolor",
+            "monokai-dimmed",
+            "zedokai",
+            "rose-pine",
+        ] {
+            let theme = Theme::from_preset(name).unwrap();
+            assert_eq!(
+                theme.status_bar_accent, theme.text_accent,
+                "preset \"{name}\" rendered its hotkey letter in text_accent and must not shift"
+            );
+        }
+        // The two that could not keep `text_accent` deliberately diverge.
+        assert_ne!(
+            Theme::lcars().status_bar_accent,
+            Theme::lcars().text_accent,
+            "lilac on the amber bar is the bug being fixed"
+        );
+        assert_ne!(
+            Theme::basic().status_bar_accent,
+            Theme::basic().status_bar_bg,
+            "basic drew a blue letter on a blue bar"
+        );
+    }
+
+    #[test]
+    fn status_bar_accent_is_overridable() {
+        let themed = Theme::lcars().with_overrides(&ThemeOverrides {
+            status_bar_accent: Some(ColorValue(Color::Rgb(9, 9, 9))),
+            ..Default::default()
+        });
+        assert_eq!(themed.status_bar_accent, Color::Rgb(9, 9, 9));
     }
 
     #[test]

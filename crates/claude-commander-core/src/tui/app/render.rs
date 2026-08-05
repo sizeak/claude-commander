@@ -226,7 +226,7 @@ impl App {
             Span::styled(
                 title_text,
                 style
-                    .fg(self.theme.text_accent)
+                    .fg(self.theme.status_bar_accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" ".repeat(pad), style),
@@ -635,7 +635,7 @@ impl App {
         };
 
         let base_style = self.theme.status_bar();
-        let accent = base_style.fg(self.theme.text_accent);
+        let accent = base_style.fg(self.theme.status_bar_accent);
         let sep = Span::styled(" \u{2502} ", base_style);
 
         // Fill the entire status bar background

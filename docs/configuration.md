@@ -502,6 +502,23 @@ set `agent_working = "rainbow"` to get the rainbow back.
 
 When `preset` is unset (or `"(auto)"`), the theme auto-detects your terminal's color capability.
 
+### Status bar accent
+
+The highlighted hotkey letter in `[n]ew session` and the board's top-bar title are
+drawn **on** the status bar, so they get their own colour, `status_bar_accent`,
+rather than the canvas-tuned `text_accent`:
+
+```toml
+[theme]
+status_bar_accent = "#2e2e5c"
+```
+
+Every preset whose bar is dark sets this to the same value it already used, so the
+appearance is unchanged. It exists because two presets could not: `lcars` has a
+light amber bar where a lilac letter is barely legible, and `basic` drew a blue
+letter on its own blue bar. Editable in-app from **Settings ▸ Theme ▸ Status Bar
+Accent** (`,` key).
+
 Individual color overrides (e.g. `border_focused = "#ff6600"`) still apply on top of the chosen preset.
 
 ### Light terminals
