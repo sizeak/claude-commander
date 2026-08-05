@@ -94,6 +94,18 @@ class MissionControlChrome extends Chrome {
         'actions instead.',
       );
     }
+    // Violet, and that is a **deliberate change** from what shipped before this
+    // branch, made with sign-off rather than by accident.
+    //
+    // Before, the phone shell's new-session FAB set `accent` explicitly while the
+    // Servers/Projects/Programs FABs set nothing and so inherited Material 3's
+    // default — `primaryContainer`, which this scheme maps to the slate
+    // `surfaceSelected` (measured: #242938 on a #E7EBF2 icon). Two renderings for
+    // one widget across four screens, and the difference lived only in whether a
+    // call site happened to type colour arguments.
+    //
+    // A page's *primary* action is the branded one by definition, so there is
+    // nothing for `ChromeActionKind` to express here and it is not consulted.
     return FloatingActionButton(
       onPressed: action.onPressed,
       tooltip: action.label,
@@ -232,11 +244,13 @@ class MissionControlChrome extends Chrome {
                       spec.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: t.text,
-                      ),
+                      style: spec.monoTitle
+                          ? t.meta(size: 13, color: t.text)
+                          : TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: t.text,
+                            ),
                     ),
                     const SizedBox(height: 2),
                     Text(
@@ -852,6 +866,10 @@ class MissionControlChrome extends Chrome {
   /// into its own label. Verbatim casing: uppercasing here would break the call
   /// sites that already pass sentence case ("Files changed").
   @override
+  /// The padding is `_ProjectHeader`'s. The review screen's own eyebrows sat at
+  /// `LTRB(16, 14, 16, 10)` before the migration, so they tighten slightly here —
+  /// one shared element cannot carry two paddings, and the session list is the
+  /// denser, more frequently seen of the two.
   Widget buildEyebrow(BuildContext context, String label) {
     final t = CommanderTokens.of(context);
     return Padding(

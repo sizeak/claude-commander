@@ -3,7 +3,7 @@
 The app icon is the same mark as the in-app `BrandMark` widget
 (`lib/widgets/brand_mark.dart`): three rank chevrons in the brand gradient on
 the deck's slate tile. Colours come from `BrandAssets` (`lib/theme/brand_assets.dart`) — `tileTop` /
-`brandTileBottom` for the tile, `brandGradient` for the chevrons.
+`tileBottom` for the tile, `chevronGradient` for the chevrons.
 
 | File | Role |
 |------|------|

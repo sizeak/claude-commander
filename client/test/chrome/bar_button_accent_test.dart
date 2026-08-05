@@ -34,6 +34,61 @@ void main() {
     return tester.widget<IconButton>(find.byType(IconButton)).color;
   }
 
+  group('page-level FAB colours', () {
+    // A page's primary action is branded violet in every case. This is a
+    // deliberate unification: before this branch the manager pages' FABs set no
+    // colours and inherited Material 3's `primaryContainer` (the slate
+    // `surfaceSelected`), while the phone shell's set `accent`. One widget, two
+    // renderings, differing only by whether a call site typed colour arguments.
+    testWidgets('a page primaryAction is the branded accent', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: themeDataFor(missionControlTokens),
+          home: ChromePage(
+            title: 'Servers',
+            primaryAction: ChromeButtonAction(
+              icon: Icons.add,
+              label: 'Add server',
+              onPressed: () {},
+            ),
+            body: const SizedBox(),
+          ),
+        ),
+      );
+      final fab = tester.widget<FloatingActionButton>(
+        find.byType(FloatingActionButton),
+      );
+      expect(fab.backgroundColor, missionControlTokens.primary);
+      expect(fab.foregroundColor, missionControlTokens.canvas);
+      // And not the Material default it used to fall back to.
+      expect(fab.backgroundColor, isNot(missionControlTokens.surfaceSelected));
+    });
+
+    testWidgets('the docked shell FAB matches it', (tester) async {
+      // The one that was already violet — the two must not drift apart again.
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: themeDataFor(missionControlTokens),
+          home: ChromeShell(
+            ChromeShellSpec(
+              items: const [],
+              centreAction: ChromeButtonAction(
+                icon: Icons.add,
+                label: 'New session',
+                onPressed: () {},
+              ),
+              body: const SizedBox(),
+            ),
+          ),
+        ),
+      );
+      final fab = tester.widget<FloatingActionButton>(
+        find.byType(FloatingActionButton),
+      );
+      expect(fab.backgroundColor, missionControlTokens.primary);
+    });
+  });
+
   group('ChromeBarButton.accent', () {
     testWidgets('overrides the colour that kind alone would give', (
       tester,

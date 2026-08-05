@@ -44,6 +44,11 @@ class ChromeListRowSpec {
   /// Dimmed, for an inert or unreachable row.
   final bool dimmed;
 
+  /// Render [title] in the monospace face. For rows whose title is a file path:
+  /// everywhere else in the review UI a path is monospace, and a sans one reads
+  /// as prose rather than as a path.
+  final bool monoTitle;
+
   final VoidCallback? onTap;
 
   /// Where this row sits in a visual run, so LCARS can round only the outer
@@ -60,6 +65,7 @@ class ChromeListRowSpec {
     this.number,
     this.selected = false,
     this.dimmed = false,
+    this.monoTitle = false,
     this.onTap,
     this.position = ChromeRowPosition.middle,
   });

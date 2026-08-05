@@ -52,7 +52,15 @@ class ThemeController extends ChangeNotifier {
   /// Reads the stored choice. Safe to call once at startup; a store failure
   /// leaves the default in place rather than blocking launch.
   Future<void> load() async {
-    final stored = await _store.read(prefKey);
+    // Caught, not propagated: `main()` awaits this before `runApp`, so a throwing
+    // store — a corrupt preferences file on the Linux backend, say — would turn a
+    // cosmetic preference into a failure to launch. The default is a fine answer.
+    String? stored;
+    try {
+      stored = await _store.read(prefKey);
+    } catch (_) {
+      return;
+    }
     final resolved = ThemeId.fromWire(stored);
     if (resolved == _id) return;
     _id = resolved;
@@ -66,7 +74,11 @@ class ThemeController extends ChangeNotifier {
     if (id == _id) return;
     _id = id;
     notifyListeners();
-    await _store.write(prefKey, id.wire);
+    // Same reasoning: the theme has already been applied, so a failed write costs
+    // persistence across relaunch, not this session.
+    try {
+      await _store.write(prefKey, id.wire);
+    } catch (_) {}
   }
 }
 
