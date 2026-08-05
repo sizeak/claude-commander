@@ -4,6 +4,7 @@ import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:claude_commander_client/window/window_controller.dart';
 import 'package:claude_commander_client/window/window_frame.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -86,6 +87,49 @@ void main() {
 
     expect(find.byType(ChromeWindowBar), findsNothing);
     expect(find.text('page'), findsOneWidget);
+  });
+
+  testWidgets('the bar has a full-window overlay for its tooltips', (
+    tester,
+  ) async {
+    // The bar sits above the Navigator, so the app's own overlay is *below* it
+    // and its controls' tooltips need one supplied here. Wrapping only the bar
+    // gives them a 32px-tall overlay, which paints a tooltip and then clips it
+    // to the bar — visible as a sliver of a label under the button.
+    final c = newController();
+    await pumpApp(tester, controller: c.controller);
+
+    final overlay = find.ancestor(
+      of: find.byType(ChromeWindowBar),
+      matching: find.byType(Overlay),
+    );
+    expect(overlay, findsOneWidget);
+    expect(tester.getSize(overlay), tester.getSize(find.byType(WindowFrame)));
+  });
+
+  testWidgets('a control tooltip is placed below the bar, inside the window', (
+    tester,
+  ) async {
+    final c = newController();
+    await pumpApp(tester, controller: c.controller);
+
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    addTearDown(mouse.removePointer);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(tester.getCenter(find.byTooltip('Maximise')));
+    await tester.pump(const Duration(seconds: 1));
+
+    final label = find.text('Maximise');
+    expect(label, findsOneWidget);
+    final rect = tester.getRect(label);
+    final bar = tester.getRect(find.byType(ChromeWindowBar));
+    // Below the bar and within the window: a tooltip laid out inside a
+    // bar-height overlay is squeezed against the bar and clipped by it.
+    expect(rect.top, greaterThanOrEqualTo(bar.bottom));
+    expect(
+      tester.getRect(find.byType(WindowFrame)).contains(rect.topLeft),
+      isTrue,
+    );
   });
 
   testWidgets('the bar drives the window through the controller', (

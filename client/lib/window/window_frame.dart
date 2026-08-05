@@ -70,14 +70,18 @@ class _WindowFrameState extends State<WindowFrame> {
       listenable: controller,
       builder: (context, _) {
         if (!controller.showWindowBar) return widget.child;
-        return Column(
-          children: [
-            // The bar needs a `Material` for its buttons' ink, and an `Overlay`
-            // for their tooltips: this sits above the `Navigator`, so the app's
-            // own overlay is *below* us and `Overlay.of` would find nothing.
-            Material(
-              type: MaterialType.transparency,
-              child: Overlay.wrap(
+        // The bar's controls need an `Overlay` for their tooltips, because this
+        // sits above the `Navigator` and the app's own overlay is *below* us, so
+        // `Overlay.of` finds nothing. It wraps the whole column rather than just
+        // the bar: an overlay the height of the bar gives a tooltip a 32px box to
+        // live in, which paints the label and then clips it to a sliver.
+        return Overlay.wrap(
+          child: Column(
+            children: [
+              // A `Material` for the buttons' ink, which the bar is otherwise
+              // outside of — the app's own starts inside the routes below.
+              Material(
+                type: MaterialType.transparency,
                 child: ChromeWindowBar(
                   ChromeWindowBarSpec(
                     title: WindowController.windowTitle,
@@ -90,9 +94,9 @@ class _WindowFrameState extends State<WindowFrame> {
                   ),
                 ),
               ),
-            ),
-            Expanded(child: widget.child),
-          ],
+              Expanded(child: widget.child),
+            ],
+          ),
         );
       },
     );
