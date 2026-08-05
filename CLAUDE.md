@@ -124,6 +124,8 @@ When adding or changing config options, hotkeys, or keybindings:
 - **Settings modal** — Add new config options to `build_settings_rows()` in `app.rs` (General tab) and the corresponding `apply_settings_edit()` match arm so they are editable from the in-app settings UI
 - **CLAUDE.md** — No update needed for individual options; the Architecture section points to `Config` struct as the source of truth
 
+**Screenshots are generated, never hand-edited.** Everything in `docs/images/` comes out of `docs/tool/` — one hermetic fixture (`fixture.sh`: temp XDG tree, throwaway tmux server, three demo repos, ten sessions, a stand-in agent) rendered by `capture-tui.sh` (TUI → SVG via Rich) and `capture-client.sh` (the real Flutter app → PNGs). When a UI change dates an image, re-run the capture rather than editing the file; when the demo *content* is wrong, change `cc_seed_fixture`. Never point a capture at real sessions — the fixture exists so a screenshot can't leak a project, branch or prompt.
+
 ## Pre-commit hooks
 
 This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and `cargo clippy` on every commit, and `dart format` (via `client/tool/dart-format.sh`) when the commit touches Dart. After cloning, run:

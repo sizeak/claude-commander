@@ -53,6 +53,16 @@ client dev shell if `dart` isn't already on your `PATH` — so it works whether 
 not you're inside `nix develop .#client`. The same script backs CI's Format Dart
 step (`--check`), so the two can't drift.
 
+### Screenshots
+
+The images in `docs/images/` are **generated**, not hand-captured: both capture
+scripts render one hermetic demo workspace (three projects, ten sessions, two PR
+stacks, a stand-in agent) so nothing of yours leaks into a screenshot and the
+terminal and client images stay consistent. Regenerate after a UI change with
+`docs/tool/capture-tui.sh` or
+`nix develop .#clientCi -c docs/tool/capture-client.sh`; see
+[`docs/tool/README.md`](docs/tool/README.md).
+
 ### Architecture
 
 The TUI event loop (`App`) owns the terminal and render state. It sends user commands to a `SessionManager` which coordinates tmux and git operations via async channels. Git read operations use gitoxide (pure Rust); worktree mutations and tmux use CLI subprocesses with semaphore-based throttling.

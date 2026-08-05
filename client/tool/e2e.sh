@@ -113,8 +113,13 @@ if [ ! -e "$CLIENT_DIR/rust/target/release" ] || [ -L "$CLIENT_DIR/rust/target/r
 fi
 
 # -- drive the app end-to-end on the Linux desktop target --
+#
+# The e2e journey is named explicitly rather than running the whole
+# integration_test/ directory: it also holds screenshots_test.dart, which renders
+# the README images from a *different* fixture and is driven by
+# docs/tool/capture-client.sh.
 cd "$CLIENT_DIR"
-flutter test integration_test -d linux \
+flutter test integration_test/app_flows_test.dart -d linux \
   --dart-define=CC_E2E_BASE_URL="$BASE_URL" \
   --dart-define=CC_E2E_TOKEN="$TOKEN" \
   --dart-define=CC_E2E_REPO="$REPO"

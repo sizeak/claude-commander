@@ -2,7 +2,7 @@
 
 A high-performance terminal UI for managing Claude coding sessions, written in Rust.
 
-![Claude Commander kanban board](docs/images/board.svg)
+![The session list grouped by section, with PR stacks nested and a live preview of the selected session's agent](docs/images/stacked.svg)
 
 ## Features
 
@@ -84,10 +84,11 @@ See the full [keyboard shortcuts](#keyboard-shortcuts) below, and the
 
 The session list can be shown four ways, cycled with `v`: three **list**
 views — grouped by **project**, by **section**, or by **section with
-PR stacks** — and the full-screen kanban **board**. The list starts in the
-project-grouped view; press `v` to rotate project → sections → stacks → board →
-project. When no `[[sections]]` are configured the two section views render
-identically to the project view, so `v` skips them and simply toggles between
+PR stacks** — and the full-screen kanban **board**. A first run starts in the
+section-with-stacks view when `[[sections]]` are configured and in the
+project-grouped view when they aren't; press `v` to rotate project → sections →
+stacks → board → project. When no `[[sections]]` are configured the two section
+views render identically to the project view, so `v` skips them and simply toggles between
 the project list and the board. The chosen view is remembered across restarts.
 
 The three list views pair the list with a **right-hand pane** carrying
@@ -102,6 +103,8 @@ expanded with the **Toggle section** command (unbound by default; bind a key in
 Settings or run it from the command palette).
 
 #### Board
+
+![The kanban board: sections as columns, sessions as project-coloured cards, projects in the sidebar](docs/images/board.svg)
 
 Each **column** is a section, and
 every session is its own **card**: the border is coloured by project and its
@@ -271,6 +274,32 @@ tree header, or run **"Edit server's program list…"** from the palette, to ope
 Settings → Programs targeting that server. In the Programs tab, `t` cycles which
 backend (local or a remote server) you're editing; edits are saved to the chosen
 backend as you make them.
+
+## Flutter Client
+
+For the times you're not at a terminal, [`client/`](client/README.md) is a
+cross-platform GUI client for the same `claude-commander-server` — verified on
+**Linux desktop** and **Android**. It connects to as many servers as you like at
+once and groups their sessions together, and it carries the parts of the TUI that
+matter away from the keyboard: live agent state, the attached terminal over
+WebSocket, and the diff review with line comments.
+
+Below the 900px breakpoint it's a stacked phone flow — fleet list, then session
+detail, then the live agent terminal. It ships two themes, **Mission Control**
+(the default) and **LCARS**, switchable from settings:
+
+<p align="center">
+  <img src="docs/images/client-sessions.png" alt="The client's fleet list on a phone: sessions grouped by project with agent-state glyphs and PR badges" width="31%">
+  &nbsp;
+  <img src="docs/images/client-terminal.png" alt="The client on a phone attached to a session's agent terminal" width="31%">
+  &nbsp;
+  <img src="docs/images/client-lcars.png" alt="The same fleet list on a phone in the LCARS theme: black background, amber and lilac elbow chrome" width="31%">
+</p>
+
+Above it, the same page bodies become a desktop layout: the fleet list beside a
+workspace whose Overview / Agent / Shell / Changes tabs switch in place.
+
+![The client on the desktop: fleet list on the left, the selected session's live agent terminal on the right](docs/images/client-desktop.png)
 
 ## Documentation
 
