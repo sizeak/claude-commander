@@ -17,6 +17,7 @@ pub const PRESET_NAMES: &[&str] = &[
     "monokai-dimmed",
     "zedokai",
     "rose-pine",
+    "lcars",
 ];
 
 /// Terminal color capability
@@ -800,10 +801,101 @@ impl Theme {
         }
     }
 
+    /// LCARS — the Star Trek: TNG console palette: black canvas, amber primary,
+    /// lilac and periwinkle accents, tan text.
+    ///
+    /// The peer of the Flutter client's LCARS theme, and the colours are
+    /// transcribed from the same source: `client/lib/theme/tokens.dart`, itself a
+    /// transcription of the design deck. Where a token has no matching field here
+    /// the value is derived, and says so.
+    ///
+    /// Colour only. The client's LCARS is a *structural* re-skin — elbow rails,
+    /// block panels, condensed uppercase type — and a terminal can render almost
+    /// none of that, so none of it is attempted here.
+    pub fn lcars() -> Self {
+        Self {
+            mode: ColorMode::TrueColor,
+            appearance: Appearance::Dark,
+            border_focused: Color::Rgb(247, 160, 29), // Amber #f7a01d
+            border_unfocused: Color::Rgb(92, 74, 107), // Rail filler #5c4a6b
+
+            selection_bg: Color::Rgb(36, 24, 9), // Deep amber-brown #241809
+            selection_fg: Some(Color::Rgb(255, 204, 153)), // Tan #ffcc99
+
+            status_creating: Color::Rgb(156, 156, 255), // Periwinkle #9c9cff
+            // Amber, not a green: the deck's RUN blocks are amber, so `working`
+            // collapses onto the primary here.
+            status_running: Color::Rgb(247, 160, 29),
+            status_stopped: Color::Rgb(92, 74, 107), // Idle #5c4a6b
+            status_pr: Color::Rgb(143, 191, 143),    // Sage #8fbf8f
+            status_pr_merged: Color::Rgb(204, 153, 204), // Lilac #cc99cc
+
+            pr_open: Color::Rgb(156, 156, 255), // Periwinkle #9c9cff
+            pr_draft: Color::Rgb(138, 122, 106), // Muted tan #8a7a6a
+            pr_closed: Color::Rgb(204, 68, 68), // Danger #cc4444
+
+            // Derived: each hue darkened by hand until bold tan reads on top.
+            // The deck's own near-blacks are row *fills* behind body text, too
+            // dark to distinguish five pill states from one another.
+            pr_pill_open_bg: Color::Rgb(46, 46, 92), // Dark periwinkle
+            pr_pill_draft_bg: Color::Rgb(43, 37, 48), // Dark neutral
+            pr_pill_closed_bg: Color::Rgb(92, 30, 30), // Dark danger
+            pr_pill_review_bg: Color::Rgb(46, 74, 46), // Dark sage
+            pr_pill_merged_bg: Color::Rgb(74, 46, 74), // Dark lilac
+            pr_pill_text: Color::Rgb(255, 204, 153), // Tan #ffcc99
+
+            // The one preset that is not Rainbow: the shared palette's six
+            // pastels are exactly the hues LCARS avoids.
+            agent_working: AgentWorkingStyle::Solid(Color::Rgb(247, 160, 29)),
+            agent_waiting: Color::Rgb(204, 102, 102), // Salmon #cc6666
+            unread_indicator: Color::Rgb(156, 156, 255), // Periwinkle #9c9cff
+
+            text_primary: Color::Rgb(255, 204, 153), // Tan #ffcc99
+            text_secondary: Color::Rgb(138, 122, 106), // Muted tan #8a7a6a
+            text_accent: Color::Rgb(204, 153, 204),  // Lilac #cc99cc
+            // Derived: the lilac lightened, so conversation chrome stays in the
+            // family without colliding with `text_accent`.
+            conversation_accent: Color::Rgb(224, 179, 224),
+            // Derived: the palette's six accents, each paired with a lightened
+            // variant for the session title under the project header.
+            project_colors: vec![
+                (Color::Rgb(247, 160, 29), Color::Rgb(255, 204, 153)), // Amber / tan
+                (Color::Rgb(204, 153, 204), Color::Rgb(224, 179, 224)), // Lilac
+                (Color::Rgb(156, 156, 255), Color::Rgb(189, 189, 255)), // Periwinkle
+                (Color::Rgb(204, 102, 102), Color::Rgb(224, 153, 153)), // Salmon
+                (Color::Rgb(143, 191, 143), Color::Rgb(179, 217, 179)), // Sage
+                (Color::Rgb(201, 143, 74), Color::Rgb(229, 184, 122)), // Held tan
+            ],
+
+            diff_added: Color::Rgb(143, 191, 143), // Sage #8fbf8f
+            // Salmon rather than the deck's harder `danger` #cc4444: removed
+            // lines are body text and have to stay legible at length.
+            diff_removed: Color::Rgb(204, 102, 102), // Salmon #cc6666
+            diff_hunk_header: Color::Rgb(204, 153, 204), // Lilac #cc99cc
+            diff_file_header: Color::Rgb(255, 204, 153), // Tan #ffcc99
+            diff_context: Color::Reset,
+            diff_expand_bg: Color::Rgb(36, 29, 43), // Divider #241d2b
+            diff_hunk_header_bg: Color::Rgb(18, 15, 20), // Dimmer divider band
+
+            modal_info: Color::Rgb(156, 156, 255), // Periwinkle #9c9cff
+            // The deck's `held` tan, which has no session-status field here.
+            modal_warning: Color::Rgb(201, 143, 74), // #c98f4a
+            modal_error: Color::Rgb(204, 68, 68),    // Danger #cc4444
+
+            palette_command_bg: Color::Rgb(36, 24, 9), // Deep amber-brown #241809
+            palette_command_fg: Color::Rgb(255, 204, 153), // Tan #ffcc99
+
+            // A solid amber bar with black text, as the deck's rails are. This
+            // also reaches attached sessions through `tmux_status_style`.
+            status_bar_bg: Color::Rgb(247, 160, 29),
+            status_bar_fg: Color::Rgb(0, 0, 0),
+        }
+    }
+
     /// Look up a preset palette by name.
     ///
     /// Recognised names: `"basic"`, `"indexed"`, `"truecolor"`, `"monokai-dimmed"`,
-    /// `"zedokai"`, `"rosé-pine"` / `"rose-pine"`.
+    /// `"zedokai"`, `"rosé-pine"` / `"rose-pine"`, `"lcars"`.
     pub fn from_preset(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "basic" => Some(Self::basic()),
@@ -812,6 +904,7 @@ impl Theme {
             "monokai-dimmed" | "monokai_dimmed" => Some(Self::monokai_dimmed()),
             "zedokai" => Some(Self::zedokai()),
             "rosé-pine" | "rose-pine" | "rosé_pine" | "rose_pine" => Some(Self::rose_pine()),
+            "lcars" => Some(Self::lcars()),
             _ => None,
         }
     }
@@ -1184,6 +1277,90 @@ mod tests {
     }
 
     #[test]
+    fn test_from_preset_lcars() {
+        let theme = Theme::from_preset("lcars").unwrap();
+        assert_eq!(theme.border_focused, Color::Rgb(247, 160, 29)); // Amber
+        assert_eq!(theme.status_running, Color::Rgb(247, 160, 29));
+        assert_eq!(theme.text_primary, Color::Rgb(255, 204, 153)); // Tan
+        assert_eq!(theme.text_accent, Color::Rgb(204, 153, 204)); // Lilac
+        assert_eq!(theme.agent_waiting, Color::Rgb(204, 102, 102)); // Salmon
+        assert_eq!(theme.project_colors.len(), 6);
+
+        // The status bar is a solid amber chrome accent with black text, so it
+        // does not double as the review diff view's bands the way every other
+        // preset's dark bar does — those stay dark enough to read code on.
+        assert_eq!(theme.status_bar_bg, Color::Rgb(247, 160, 29));
+        assert_eq!(theme.status_bar_fg, Color::Rgb(0, 0, 0));
+        assert_eq!(theme.diff_expand_bg, Color::Rgb(36, 29, 43));
+        assert_eq!(theme.diff_hunk_header_bg, Color::Rgb(18, 15, 20));
+    }
+
+    /// The Settings ▸ Theme picker enumerates [`PRESET_NAMES`] and nothing else,
+    /// so a preset missing from it is unreachable from the UI however well
+    /// [`Theme::from_preset`] resolves it.
+    #[test]
+    fn lcars_appears_in_preset_names() {
+        assert!(PRESET_NAMES.contains(&"lcars"));
+        // Every listed name must resolve, bar the auto-detect placeholder.
+        for name in PRESET_NAMES.iter().filter(|n| **n != "(auto)") {
+            assert!(
+                Theme::from_preset(name).is_some(),
+                "preset \"{name}\" is offered in the picker but does not resolve"
+            );
+        }
+    }
+
+    /// LCARS is the one preset whose spinner is a solid colour: the deck paints
+    /// its RUN blocks amber, and the shared rainbow's six pastels are exactly the
+    /// hues this palette avoids. Users can still override it.
+    #[test]
+    fn lcars_working_spinner_is_solid_amber() {
+        let theme = Theme::from_preset("lcars").unwrap();
+        assert_eq!(
+            theme.agent_working,
+            AgentWorkingStyle::Solid(Color::Rgb(247, 160, 29))
+        );
+        // Every other preset keeps the cycling rainbow.
+        assert_eq!(Theme::rose_pine().agent_working, AgentWorkingStyle::Rainbow);
+    }
+
+    /// The persisted `[theme]` contract and the new preset in one test: a
+    /// `config.toml` may name `lcars` alongside every form [`ColorValue`] accepts,
+    /// and all of them must still parse. `config.toml` is never rewritten, so each
+    /// of these four spellings is permanently load-bearing.
+    #[test]
+    fn lcars_preset_resolves_and_config_forms_survive() {
+        let overrides: ThemeOverrides = toml::from_str(
+            r##"
+                preset = "lcars"
+                border_unfocused = "dark_gray"
+                selection_bg = 117
+                border_focused = "#89b4fa"
+                text_primary = "reset"
+            "##,
+        )
+        .unwrap();
+
+        assert_eq!(overrides.preset.as_deref(), Some("lcars"));
+        assert_eq!(overrides.border_unfocused.unwrap().0, Color::DarkGray);
+        assert_eq!(overrides.selection_bg.unwrap().0, Color::Indexed(117));
+        assert_eq!(
+            overrides.border_focused.unwrap().0,
+            Color::Rgb(137, 180, 250)
+        );
+        assert_eq!(overrides.text_primary.unwrap().0, Color::Reset);
+
+        // The preset resolves and per-field overrides still layer on top of it.
+        let theme = Theme::from_preset(overrides.preset.as_deref().unwrap())
+            .expect("lcars is a recognised preset")
+            .with_overrides(&overrides);
+        assert_eq!(theme.border_focused, Color::Rgb(137, 180, 250));
+        assert_eq!(theme.text_primary, Color::Reset);
+        // A field the fixture leaves alone keeps its LCARS value.
+        assert_eq!(theme.status_running, Color::Rgb(247, 160, 29));
+    }
+
+    #[test]
     fn test_from_preset_unknown_returns_none() {
         assert!(Theme::from_preset("catppuccin").is_none());
     }
@@ -1462,5 +1639,8 @@ mod tests {
             Theme::truecolor().tmux_status_style(),
             "bg=#313244,fg=#cdd6f4"
         );
+        // LCARS' amber bar reaches attached sessions through this, which is why
+        // the docs call it out as overridable.
+        assert_eq!(Theme::lcars().tmux_status_style(), "bg=#f7a01d,fg=#000000");
     }
 }
