@@ -6160,7 +6160,7 @@ fn top_bar_keeps_title_accent_and_right_aligns_counts() {
     let cell = &buf[(1u16, 0u16)];
     assert_eq!(cell.symbol(), "C", "title starts at x=1");
     assert_eq!(
-        cell.fg, app.theme.text_accent,
+        cell.fg, app.theme.status_bar_accent,
         "title keeps its accent fg (not stripped by the counts paragraph)"
     );
 
