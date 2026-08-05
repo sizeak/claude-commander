@@ -1448,6 +1448,85 @@ async fn list_page_down_stops_at_the_last_row() {
 }
 
 // ---------------------------------------------------------------------------
+// Status-bar accent is the bar's accent, not the canvas's
+// ---------------------------------------------------------------------------
+
+/// The hotkey letter in `[n]ew session` must be painted with
+/// `theme.status_bar_accent`, not `theme.text_accent`.
+///
+/// `every_preset_status_bar_accent_is_legible_on_its_bar` (in `tui::theme`) proves
+/// the *palette* is sane, but it cannot see which of the two fields
+/// `render_status_bar` reaches for — so on its own it would stay green if that line
+/// were reverted, putting a 1.11:1 lilac letter back on the LCARS amber bar. This
+/// pins the render site itself.
+#[tokio::test]
+async fn status_bar_hotkey_letter_uses_the_status_bar_accent() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    // LCARS is the preset where the two colours differ, so it is the one that can
+    // tell them apart. On a dark-bar preset both fields hold the same value and
+    // the assertion below would pass either way.
+    app.config.theme.preset = Some("lcars".to_string());
+    app.reload_theme();
+    let accent = app.theme.status_bar_accent;
+    let canvas_accent = app.theme.text_accent;
+    assert_ne!(
+        accent, canvas_accent,
+        "lcars must separate the bar accent from the canvas accent"
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let y = buffer.area.height - 1; // the status bar is the bottom row
+
+    // Find a `[x]` triple on the bar and read the bracketed cell's foreground.
+    let letter_fg = (1..buffer.area.width - 1)
+        .find(|&x| buffer[(x - 1, y)].symbol() == "[" && buffer[(x + 1, y)].symbol() == "]")
+        .map(|x| buffer[(x, y)].style().fg)
+        .expect("the status bar draws at least one [x] hotkey label");
+
+    assert_eq!(
+        letter_fg,
+        Some(accent),
+        "the hotkey letter must use status_bar_accent"
+    );
+    assert_ne!(letter_fg, Some(canvas_accent));
+}
+
+/// The board's top-bar title is the second site that paints an accent onto a
+/// status-bar-styled row, so it needs the same pin as the hotkey letter above.
+#[tokio::test]
+async fn board_top_bar_title_uses_the_status_bar_accent() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.ui_state.view_mode = crate::config::ViewMode::Board;
+    app.config.theme.preset = Some("lcars".to_string());
+    app.reload_theme();
+    let accent = app.theme.status_bar_accent;
+    let canvas_accent = app.theme.text_accent;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    // " Claude Commander" is drawn on row 0; the first `C` carries the accent.
+    let title_fg = (0..buffer.area.width)
+        .find(|&x| buffer[(x, 0)].symbol() == "C")
+        .map(|x| buffer[(x, 0)].style().fg)
+        .expect("the board draws its top-bar title");
+
+    assert_eq!(title_fg, Some(accent));
+    assert_ne!(title_fg, Some(canvas_accent));
+}
+
+// ---------------------------------------------------------------------------
 // View-switch clearing happens in render(), not via terminal.clear()
 // ---------------------------------------------------------------------------
 
@@ -6081,7 +6160,7 @@ fn top_bar_keeps_title_accent_and_right_aligns_counts() {
     let cell = &buf[(1u16, 0u16)];
     assert_eq!(cell.symbol(), "C", "title starts at x=1");
     assert_eq!(
-        cell.fg, app.theme.text_accent,
+        cell.fg, app.theme.status_bar_accent,
         "title keeps its accent fg (not stripped by the counts paragraph)"
     );
 

@@ -349,6 +349,7 @@ impl App {
                     theme_row!("Modal Error", modal_error),
                     theme_row!("Status Bar BG", status_bar_bg),
                     theme_row!("Status Bar FG", status_bar_fg),
+                    theme_row!("Status Bar Accent", status_bar_accent),
                 ]
             }
         }
@@ -1225,7 +1226,8 @@ impl App {
                             modal_warning,
                             modal_error,
                             status_bar_bg,
-                            status_bar_fg
+                            status_bar_fg,
+                            status_bar_accent
                         );
                     }
                 }

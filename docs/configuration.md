@@ -486,8 +486,38 @@ Available presets:
 | `monokai-dimmed` | Muted/desaturated Monokai — dark grays with soft gold, green, and blue accents |
 | `zedokai` | Vibrant Monokai variant inspired by the Zed editor — vivid pink, green, and orange |
 | `rose-pine` | Soft pink/rose aesthetic — deep navy-rose backgrounds with warm rose, iris, and foam accents |
+| `lcars` | Star Trek: TNG console palette — black canvas with amber, lilac, periwinkle and salmon accents on tan text. The peer of the mobile/desktop client's LCARS theme |
+
+The four named presets (`monokai-dimmed`, `zedokai`, `rose-pine`, `lcars`) are
+24-bit palettes and need a **truecolor** terminal; on a 16- or 256-color terminal
+their colors will be approximated by the terminal itself. Use `basic` or `indexed`
+there instead.
+
+Two things are specific to `lcars`. Its status bar is solid amber with black text
+rather than a dark band, and since `status_bar_bg` also drives the tmux status line
+(`status-style`), that amber bar appears in attached sessions too — override
+`status_bar_bg` / `status_bar_fg` if you would rather it stayed dark. Its Working
+spinner is a solid amber instead of the cycling rainbow every other preset uses;
+set `agent_working = "rainbow"` to get the rainbow back.
 
 When `preset` is unset (or `"(auto)"`), the theme auto-detects your terminal's color capability.
+
+### Status bar accent
+
+The highlighted hotkey letter in `[n]ew session` and the board's top-bar title are
+drawn **on** the status bar, so they get their own colour, `status_bar_accent`,
+rather than the canvas-tuned `text_accent`:
+
+```toml
+[theme]
+status_bar_accent = "#2e2e5c"
+```
+
+Every preset whose bar is dark sets this to the same value it already used, so the
+appearance is unchanged. It exists because two presets could not: `lcars` has a
+light amber bar where a lilac letter is barely legible, and `basic` drew a blue
+letter on its own blue bar. Editable in-app from **Settings ▸ Theme ▸ Status Bar
+Accent** (`,` key).
 
 Individual color overrides (e.g. `border_focused = "#ff6600"`) still apply on top of the chosen preset.
 
