@@ -273,7 +273,7 @@ and each theme draws its own: a flat 32px bar in Mission Control, a run of block
 (`MIN` / `MAX` / `CLOSE`) in LCARS. Drag the bar to move the window, double-click to
 maximise.
 
-Three details that are load-bearing rather than incidental:
+Four details that are load-bearing rather than incidental:
 
 - **`setTitleBarStyle(hidden)`, never `setAsFrameless`.** On the runner's header-bar
   path — Wayland, and X11 under GNOME — the former hides the header *widget* and
@@ -288,9 +288,15 @@ Three details that are load-bearing rather than incidental:
 - **Window *position* is X11-only.** Wayland does not let a client place its own
   window, so the `x,y` in `commander.window.bounds` is honoured only on X11; the
   size restores everywhere.
-- **F11 is a `HardwareKeyboard` handler, not a `Shortcuts` widget.** Those handlers
-  run before the focus tree, so F11 is caught ahead of the terminal view, which
-  would otherwise forward it to the remote PTY.
+- **F11 is a `FocusManager` *early* key handler.** The terminal view maps F11 to
+  `TerminalKey.f11` and forwards the escape sequence to the remote PTY, so the key
+  has to be taken before the focus walk reaches it. Neither obvious option does
+  that: a `Shortcuts` widget sits above the focused terminal, and a
+  `HardwareKeyboard` handler — which *does* run first — only answers the engine,
+  because `KeyEventManager` dispatches to the focus tree regardless of its result.
+  An early handler runs before the walk and `KeyEventResult.handled`
+  short-circuits it. Every F11 event is claimed, repeats and release included;
+  only the press acts.
 - **Geometry is never saved while fullscreen or maximised.** Those bounds are the
   screen, and restoring them would leave nothing to un-maximise back to.
 
