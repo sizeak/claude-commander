@@ -126,6 +126,9 @@ written to plain shared preferences.
 - **Cascade / push-stack** — triggered from the session detail view with their
   operation outcome reported (`cascadeMerge`/`pushStack`); a paused cascade shows
   a global resume/abandon banner (`cascadeResume`/`cascadeAbandon`).
+- **Window modes** (desktop) — fullscreen, a borderless frame where the app draws
+  its own themed window bar, and a window size/position remembered across
+  launches. See [Window modes](#window-modes).
 
 ## Image attach
 
@@ -217,6 +220,89 @@ not yet verified there.
 - Creates the Android AVD `cctest` (android-35, google\_apis, x86\_64, Pixel 6) on first entry if it doesn't already exist.
 
 > The Nix SDK is read-only. Every SDK component the build needs must be declared in `flake.nix` (in `platformVersions`, `buildToolsVersions`, `ndkVersions`, etc.) rather than being auto-installed by Gradle or `flutter doctor`.
+
+## Golden tests
+
+`test/goldens/` holds reference images for the chrome layer — each chrome form on
+its own, plus the session list, settings and wide shell — rendered in **both**
+themes. They run as part of `flutter test`; the Nix-pinned Flutter is what makes
+that safe, since identical Skia and font versions mean CI rasterises exactly as
+your machine does.
+
+Regenerate after an intended visual change, then **look at the diff before
+committing** — an unexplained image change is the entire point:
+
+```sh
+cd client && flutter test test/goldens --update-goldens
+```
+
+Three things the harness (`test/support/golden.dart`) has to do, each learned by
+getting it wrong first:
+
+- **Load the bundled fonts.** `flutter test` does not; without `loadCommanderFonts()`
+  every glyph is an Ahem box and the references pin a layout the app never draws.
+- **Load `MaterialIcons` from `FLUTTER_ROOT`.** Otherwise every icon is the same
+  notdef square — the window bar's maximise and restore goldens came out byte-for-byte
+  identical, pinning nothing.
+- **Pump inside a real `Scaffold`.** A `Text` with no `Material` ancestor picks up
+  `DefaultTextStyle.fallback`, which Flutter draws with a yellow double underline.
+
+What they can't do: they render at `devicePixelRatio` 1 in logical pixels, so an
+artifact that only exists in a rasterised window at fractional DPI (see the LCARS
+eyebrow's padding comment) renders identically here and passes. They also can't
+see the session state glyphs, which no bundled face contains — see the note in
+`golden.dart`.
+
+## Window modes
+
+Desktop only, via `window_manager`. Two independent settings plus remembered
+geometry, all persisted through `SharedPreferences` and applied **before the first
+frame** — the runner shows the window on its first Flutter frame, so a late restore
+is a visible jump from the default 1280x720.
+
+| | Shortcut | Settings row | Default |
+|---|---|---|---|
+| Fullscreen | `F11` | WINDOW → Full screen | off |
+| Window frame | `Shift+F11` | WINDOW → Window frame | **hidden** (borderless) |
+
+**Why borderless is the default.** GTK3 has no `xdg-decoration` support, so a GTK3
+window on Wayland is always client-side decorated — KWin will never draw its own
+title bar for this app, and the "native" frame is a GNOME-style GTK header bar even
+in a KDE session. The app's own bar is the only frame that can match the desktop,
+and each theme draws its own: a flat 32px bar in Mission Control, a run of blocks
+(`MIN` / `MAX` / `CLOSE`) in LCARS. Drag the bar to move the window, double-click to
+maximise.
+
+Four details that are load-bearing rather than incidental:
+
+- **`setTitleBarStyle(hidden)`, never `setAsFrameless`.** On the runner's header-bar
+  path — Wayland, and X11 under GNOME — the former hides the header *widget* and
+  leaves the window GTK-decorated, so its invisible client-side resize border
+  survives and borderless needs no resize grips of its own. **This does not hold on
+  the other path**: with no header bar the plugin falls through to
+  `gtk_window_set_decorated(false)` (`window_manager_plugin.cc:512-519`), which is
+  what `setAsFrameless` does, so borderless on X11 outside GNOME leaves a window
+  with no resize border — resizable only via the WM (KWin: `Meta`+right-drag).
+  Deliberately not accommodated: X11 is deprecated and out of scope here. Switch
+  the frame to Native in Settings if you are on it.
+- **Window *position* is X11-only.** Wayland does not let a client place its own
+  window, so the `x,y` in `commander.window.bounds` is honoured only on X11; the
+  size restores everywhere.
+- **F11 is a `FocusManager` *early* key handler.** The terminal view maps F11 to
+  `TerminalKey.f11` and forwards the escape sequence to the remote PTY, so the key
+  has to be taken before the focus walk reaches it. Neither obvious option does
+  that: a `Shortcuts` widget sits above the focused terminal, and a
+  `HardwareKeyboard` handler — which *does* run first — only answers the engine,
+  because `KeyEventManager` dispatches to the focus tree regardless of its result.
+  An early handler runs before the walk and `KeyEventResult.handled`
+  short-circuits it. Every F11 event is claimed, repeats and release included;
+  only the press acts.
+- **Geometry is never saved while fullscreen or maximised.** Those bounds are the
+  screen, and restoring them would leave nothing to un-maximise back to.
+
+No Android path: `window_manager` declares only linux/macos/windows, so
+`createWindowService()` returns null there — which means no `WindowController`, and
+therefore no window bar and no key handler, without a platform check in the UI.
 
 ## Build and run
 

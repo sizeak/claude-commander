@@ -799,6 +799,80 @@ class LcarsChrome extends Chrome {
   Widget buildWideDetail(BuildContext context, ChromeWideDetailSpec spec) =>
       LcarsDetail(spec);
 
+  /// The window bar as a run of blocks: a lilac cap carrying the app name, dark
+  /// filler that absorbs the slack (and is the drag surface), then three control
+  /// blocks closing the run.
+  ///
+  /// Not a flat bar of icon buttons — LCARS has no such element. The controls are
+  /// short-coded blocks (`MIN`, `MAX`, `CLOSE`) like every other LCARS control,
+  /// wrapped in [Tooltip]s so an abbreviation still announces its full name.
+  @override
+  Widget buildWindowBar(BuildContext context, ChromeWindowBarSpec spec) {
+    final t = CommanderTokens.of(context);
+    final controls = windowBarControls(spec);
+    // The name cap, the filler and each control are one run, so only the two
+    // outer ends round — the bar reads as a single bracket across the window.
+    final count = controls.length + 2;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: _seam),
+      child: Row(
+        children: [
+          // The name cap and the filler are the drag surface; the controls to
+          // their right are deliberately outside it.
+          Expanded(
+            child: applyWindowBarGestures(
+              spec,
+              Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: _runEnds(0, count, t.pillRadius),
+                    child: ChromeElbow(
+                      color: t.nav,
+                      labelColor: t.canvas,
+                      height: _windowBarHeight,
+                      label: t.caseLabel(spec.title),
+                      labelAlignment: Alignment.center,
+                      labelSize: 12,
+                      labelWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(width: _seam),
+                  // Inert filler: the block that makes the run span the window,
+                  // and the easiest part of the bar to grab for a drag.
+                  Expanded(
+                    child: ChromeElbow(
+                      color: t.divider,
+                      height: _windowBarHeight,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          for (var i = 0; i < controls.length; i++) ...[
+            const SizedBox(width: _seam),
+            Tooltip(
+              message: controls[i].label,
+              child: ClipRRect(
+                borderRadius: _runEnds(i + 2, count, t.pillRadius),
+                child: ChromeElbow(
+                  color: controls[i].destructive ? t.danger : t.borderSubtle,
+                  labelColor: controls[i].destructive ? t.canvas : t.nav,
+                  height: _windowBarHeight,
+                  label: controls[i].code,
+                  labelAlignment: Alignment.center,
+                  labelSize: 12,
+                  labelWeight: FontWeight.w700,
+                  onTap: controls[i].onTap,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget buildEyebrow(BuildContext context, String label) {
     final t = CommanderTokens.of(context);
@@ -808,7 +882,18 @@ class LcarsChrome extends Chrome {
       // header read as part of its first row rather than as a heading over the
       // run. Mission Control's eyebrow carried this padding from the start;
       // LCARS' was a bare Text.
-      padding: const EdgeInsets.only(top: 12, bottom: 6),
+      //
+      // 13 rather than 12, and the odd number is load-bearing. An 11px Antonio
+      // line box is 14.23 logical px, so headings accrue fractional offsets down
+      // the list; at dpr 1.5 the *first* one landed half a physical pixel out of
+      // phase with the rest, putting its cap tops flush on a pixel boundary. It
+      // rendered a hard top edge — read as clipped, though nothing clips it —
+      // while every later heading got a soft antialiased row above its caps. One
+      // extra logical pixel moves this heading 1.5 physical px (flipping its
+      // phase) and every heading below it 3.0 (leaving theirs alone), so the
+      // first agrees with the rest. Verified by dumping both headings' pixels:
+      // identical rasterisation, row for row.
+      padding: const EdgeInsets.only(top: 13, bottom: 6),
       child: Text(
         t.caseLabel(label),
         maxLines: 1,
@@ -835,6 +920,10 @@ const _railPitch = 5.0;
 
 /// The list row's leading number block (deck P2's node headers: `width:38px`).
 const _rowNumberWidth = 38.0;
+
+/// The app-drawn window bar's block height. Matches Mission Control's bar so
+/// switching theme while borderless does not reflow the page beneath it.
+const _windowBarHeight = 32.0;
 
 /// A slice block in a view rail. Taller than a rail action (26) because a slice is
 /// the rail's primary control, matching the wide nav's destination blocks.

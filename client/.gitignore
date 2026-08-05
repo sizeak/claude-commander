@@ -28,3 +28,7 @@ local.properties
 .vscode/
 *.swp
 .DS_Store
+
+# flutter_test writes mismatch artifacts here on a golden failure. They are
+# debugging output, not fixtures — one set got committed on this branch already.
+test/goldens/failures/

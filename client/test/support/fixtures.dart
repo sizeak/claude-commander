@@ -23,6 +23,12 @@ SessionInfo sessionInfo({
   SessionStatus status = SessionStatus.running,
   String program = 'bash',
   String projectName = 'my-repo',
+
+  /// The owning project, defaulting to one derived from [id] — i.e. every
+  /// session is its own project unless a test says otherwise. Pass the same
+  /// value to two sessions to put them in one group, which is what the list's
+  /// grouping keys on; sharing only [projectName] is not enough.
+  String? projectId,
   int? prNumber,
   PrState prState = PrState.open,
   bool unread = false,
@@ -41,7 +47,9 @@ SessionInfo sessionInfo({
     branch: branch,
     status: status,
     program: program,
-    projectId: ProjectId(field0: uuid),
+    projectId: ProjectId(
+      field0: projectId == null ? uuid : UuidValue.fromString(projectId),
+    ),
     projectName: projectName,
     prNumber: prNumber,
     prUrl: null,

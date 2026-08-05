@@ -8,6 +8,7 @@ import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
 import '../theme/theme_controller.dart';
 import '../theme/tokens.dart';
+import '../window/window_controller.dart';
 import 'session_list_page.dart';
 import 'theme_picker_page.dart';
 
@@ -62,6 +63,9 @@ class SettingsPage extends StatelessWidget {
             const ChromeEyebrow('WORKSPACE'),
             ..._workspaceRows(context, workspace),
             const SizedBox(height: 16),
+            // Desktop only, and structurally so: on a phone there is no
+            // WindowController in scope, so this yields nothing.
+            ..._windowRows(context),
             const ChromeEyebrow('APPEARANCE'),
             const _ThemeRow(),
           ],
@@ -148,6 +152,42 @@ class _ServerRow extends StatelessWidget {
   }
 }
 
+/// The window rows, or nothing at all where there is no window to manage.
+///
+/// Their captions carry the keyboard shortcuts, which makes this the one place in
+/// the app that documents them.
+List<Widget> _windowRows(BuildContext context) {
+  final controller = WindowScope.of(context);
+  if (controller == null) return const [];
+  return [
+    const ChromeEyebrow('WINDOW'),
+    ListenableBuilder(
+      listenable: controller,
+      // One listener for both rows: they are two views of the same controller,
+      // and F11 can change either behind this screen's back.
+      builder: (context, _) => Column(
+        children: [
+          _SettingsRow(
+            label: 'Full screen',
+            caption: 'F11',
+            state: controller.fullscreen ? 'ON' : 'OFF',
+            highlightState: controller.fullscreen,
+            onTap: controller.toggleFullscreen,
+          ),
+          _SettingsRow(
+            label: 'Window frame',
+            caption: 'Shift+F11',
+            state: controller.titleBar.label.toUpperCase(),
+            highlightState: controller.titleBar == TitleBarMode.borderless,
+            onTap: controller.toggleTitleBar,
+          ),
+        ],
+      ),
+    ),
+    const SizedBox(height: 16),
+  ];
+}
+
 /// The theme row, showing the active theme's name and opening the picker.
 class _ThemeRow extends StatelessWidget {
   const _ThemeRow();
@@ -200,9 +240,21 @@ class _ConnectionDot extends StatelessWidget {
 ///
 /// A null [onTap] renders disabled: dimmed text and no chevron, so the row
 /// still explains itself (via [caption]) instead of silently ignoring taps.
+///
+/// A [state] replaces the chevron, for a row that toggles something rather than
+/// opening something. Deliberately a word and not a Material `Switch`: a switch
+/// would be the first Material control to leak into LCARS, where it has no
+/// counterpart and would read as another theme's part.
 class _SettingsRow extends StatelessWidget {
   final String label;
   final String caption;
+
+  /// This row's current value ('ON', 'HIDDEN'). Non-null makes the row a toggle:
+  /// the chevron gives way to this.
+  final String? state;
+
+  /// Tints [state] with the theme's accent, for the value that is "on".
+  final bool highlightState;
 
   /// Overrides the caption colour, for a caption that is a warning rather than
   /// metadata.
@@ -217,6 +269,8 @@ class _SettingsRow extends StatelessWidget {
   const _SettingsRow({
     required this.label,
     required this.caption,
+    this.state,
+    this.highlightState = false,
     this.captionColor,
     this.accent,
     this.leading,
@@ -267,7 +321,17 @@ class _SettingsRow extends StatelessWidget {
                   ],
                 ),
               ),
-              if (enabled) ...[
+              if (state case final value?) ...[
+                const SizedBox(width: 8),
+                Text(
+                  value,
+                  style: t.meta(
+                    size: 10.5,
+                    weight: FontWeight.w700,
+                    color: highlightState ? t.primary : t.textFaint,
+                  ),
+                ),
+              ] else if (enabled) ...[
                 const SizedBox(width: 8),
                 Icon(Icons.chevron_right, size: 18, color: t.textFaint),
               ],
