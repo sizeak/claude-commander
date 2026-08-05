@@ -221,6 +221,38 @@ not yet verified there.
 
 > The Nix SDK is read-only. Every SDK component the build needs must be declared in `flake.nix` (in `platformVersions`, `buildToolsVersions`, `ndkVersions`, etc.) rather than being auto-installed by Gradle or `flutter doctor`.
 
+## Golden tests
+
+`test/goldens/` holds reference images for the chrome layer — each chrome form on
+its own, plus the session list, settings and wide shell — rendered in **both**
+themes. They run as part of `flutter test`; the Nix-pinned Flutter is what makes
+that safe, since identical Skia and font versions mean CI rasterises exactly as
+your machine does.
+
+Regenerate after an intended visual change, then **look at the diff before
+committing** — an unexplained image change is the entire point:
+
+```sh
+cd client && flutter test test/goldens --update-goldens
+```
+
+Three things the harness (`test/support/golden.dart`) has to do, each learned by
+getting it wrong first:
+
+- **Load the bundled fonts.** `flutter test` does not; without `loadCommanderFonts()`
+  every glyph is an Ahem box and the references pin a layout the app never draws.
+- **Load `MaterialIcons` from `FLUTTER_ROOT`.** Otherwise every icon is the same
+  notdef square — the window bar's maximise and restore goldens came out byte-for-byte
+  identical, pinning nothing.
+- **Pump inside a real `Scaffold`.** A `Text` with no `Material` ancestor picks up
+  `DefaultTextStyle.fallback`, which Flutter draws with a yellow double underline.
+
+What they can't do: they render at `devicePixelRatio` 1 in logical pixels, so an
+artifact that only exists in a rasterised window at fractional DPI (see the LCARS
+eyebrow's padding comment) renders identically here and passes. They also can't
+see the session state glyphs, which no bundled face contains — see the note in
+`golden.dart`.
+
 ## Window modes
 
 Desktop only, via `window_manager`. Two independent settings plus remembered
