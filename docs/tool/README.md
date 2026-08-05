@@ -36,7 +36,8 @@ nix develop .#clientCi -c docs/tool/capture-client.sh
 `clientCi` is the shell to prefer: it carries `xvfb-run` plus software GL, so the
 app renders headless instead of taking over the desktop. In `.#client` (no
 `xvfb-run`) the app opens a real window; that works too, and `CC_NO_XVFB=1`
-forces it. Writes `client-sessions.png`, `client-terminal.png` and
+forces it. Writes `client-sessions.png`, `client-terminal.png`,
+`client-lcars.png` (the same fleet list in the LCARS theme) and
 `client-desktop.png`.
 
 ## Hermeticity

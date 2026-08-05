@@ -171,6 +171,9 @@ void main() {
     // screenshots are of the fleet, and a throwaway in-memory list store keeps
     // the run from touching the real device's secure storage or preferences.
     final api = RustCommanderApi();
+    // A throwaway prefs store: the run must not read or write the real device's
+    // theme choice, and it starts every capture on the default theme.
+    final theme = ThemeController(store: InMemoryPrefStore());
     final workspace = WorkspaceStore(
       api: api,
       listStore: InMemoryServerListStore(const [
@@ -187,11 +190,7 @@ void main() {
     await tester.pumpWidget(
       RepaintBoundary(
         key: shotKey,
-        child: CommanderApp(
-          api: api,
-          workspace: workspace,
-          theme: ThemeController(store: InMemoryPrefStore()),
-        ),
+        child: CommanderApp(api: api, workspace: workspace, theme: theme),
       ),
     );
 
@@ -229,8 +228,8 @@ void main() {
     await waitForTerminalOutput(tester);
     await shoot(tester, 'client-terminal');
 
-    // ---- desktop: rail + workspace ----
-    // Back out to the fleet list first. The phone flow is list → detail →
+    // ---- back to the fleet list ----
+    // Back out of the pushed routes first. The phone flow is list → detail →
     // terminal, so there are two routes to pop, and both pushed pages carry the
     // session title in their app bar — popping until the fleet header is showing
     // is what keeps the next step's row finder unambiguous.
@@ -240,6 +239,30 @@ void main() {
       await tester.pump(const Duration(milliseconds: 600));
     }
     await waitFor(tester, find.text('Fleet'));
+
+    // ---- phone: the LCARS theme ----
+    // Switching themes is a live repaint driven by the controller the app already
+    // holds — so set it here rather than walking the settings UI. LCARS re-inflates
+    // the shells (different chrome, different widget types), which is why this
+    // happens on the list, after the terminal attach has been popped.
+    await theme.select(ThemeId.lcars);
+    // LCARS renders row titles upper-cased, so the settled frame is the one where
+    // *either* spelling is on screen — matching only the mixed-case one would wait
+    // out the timeout on a list that is already correct.
+    await pumpUntil(
+      tester,
+      () =>
+          find.text(_focusSession.toUpperCase()).evaluate().isNotEmpty ||
+          find.text(_focusSession).evaluate().isNotEmpty,
+      reason: 'the fleet list re-rendered in LCARS',
+    );
+    await shoot(tester, 'client-lcars');
+    // Back to the default for the desktop shot: the desktop layout is worth
+    // showing in the theme most people run.
+    await theme.select(ThemeId.missionControl);
+    await waitFor(tester, find.text(_focusSession));
+
+    // ---- desktop: rail + workspace ----
     // Resizing the view re-runs AdaptiveShell's LayoutBuilder, which swaps the
     // phone flow for the wide layout. Wait for the swap explicitly: capturing a
     // phone shell stretched across a 1440px frame would look like the desktop

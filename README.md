@@ -285,12 +285,15 @@ matter away from the keyboard: live agent state, the attached terminal over
 WebSocket, and the diff review with line comments.
 
 Below the 900px breakpoint it's a stacked phone flow — fleet list, then session
-detail, then the live agent terminal:
+detail, then the live agent terminal. It ships two themes, **Mission Control**
+(the default) and **LCARS**, switchable from settings:
 
 <p align="center">
-  <img src="docs/images/client-sessions.png" alt="The client's fleet list on a phone: sessions grouped by project with agent-state glyphs and PR badges" width="45%">
+  <img src="docs/images/client-sessions.png" alt="The client's fleet list on a phone: sessions grouped by project with agent-state glyphs and PR badges" width="31%">
   &nbsp;
-  <img src="docs/images/client-terminal.png" alt="The client on a phone attached to a session's agent terminal" width="45%">
+  <img src="docs/images/client-terminal.png" alt="The client on a phone attached to a session's agent terminal" width="31%">
+  &nbsp;
+  <img src="docs/images/client-lcars.png" alt="The same fleet list on a phone in the LCARS theme: black background, amber and lilac elbow chrome" width="31%">
 </p>
 
 Above it, the same page bodies become a desktop layout: the fleet list beside a
