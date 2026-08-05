@@ -126,6 +126,9 @@ written to plain shared preferences.
 - **Cascade / push-stack** — triggered from the session detail view with their
   operation outcome reported (`cascadeMerge`/`pushStack`); a paused cascade shows
   a global resume/abandon banner (`cascadeResume`/`cascadeAbandon`).
+- **Window modes** (desktop) — fullscreen, a borderless frame where the app draws
+  its own themed window bar, and a window size/position remembered across
+  launches. See [Window modes](#window-modes).
 
 ## Image attach
 
@@ -217,6 +220,43 @@ not yet verified there.
 - Creates the Android AVD `cctest` (android-35, google\_apis, x86\_64, Pixel 6) on first entry if it doesn't already exist.
 
 > The Nix SDK is read-only. Every SDK component the build needs must be declared in `flake.nix` (in `platformVersions`, `buildToolsVersions`, `ndkVersions`, etc.) rather than being auto-installed by Gradle or `flutter doctor`.
+
+## Window modes
+
+Desktop only, via `window_manager`. Two independent settings plus remembered
+geometry, all persisted through `SharedPreferences` and applied **before the first
+frame** — the runner shows the window on its first Flutter frame, so a late restore
+is a visible jump from the default 1280x720.
+
+| | Shortcut | Settings row | Default |
+|---|---|---|---|
+| Fullscreen | `F11` | WINDOW → Full screen | off |
+| Window frame | `Shift+F11` | WINDOW → Window frame | **hidden** (borderless) |
+
+**Why borderless is the default.** GTK3 has no `xdg-decoration` support, so a GTK3
+window on Wayland is always client-side decorated — KWin will never draw its own
+title bar for this app, and the "native" frame is a GNOME-style GTK header bar even
+in a KDE session. The app's own bar is the only frame that can match the desktop,
+and each theme draws its own: a flat 32px bar in Mission Control, a run of blocks
+(`MIN` / `MAX` / `CLOSE`) in LCARS. Drag the bar to move the window, double-click to
+maximise.
+
+Three details that are load-bearing rather than incidental:
+
+- **`setTitleBarStyle(hidden)`, never `setAsFrameless`.** On the runner's header-bar
+  path the former hides the header *widget* and leaves the window GTK-decorated, so
+  its invisible client-side resize border survives; frameless forces
+  `decorated=false` and takes resizing with it. That is why borderless needs no
+  resize grips of its own.
+- **F11 is a `HardwareKeyboard` handler, not a `Shortcuts` widget.** Those handlers
+  run before the focus tree, so F11 is caught ahead of the terminal view, which
+  would otherwise forward it to the remote PTY.
+- **Geometry is never saved while fullscreen or maximised.** Those bounds are the
+  screen, and restoring them would leave nothing to un-maximise back to.
+
+No Android path: `window_manager` declares only linux/macos/windows, so
+`createWindowService()` returns null there — which means no `WindowController`, and
+therefore no window bar and no key handler, without a platform check in the UI.
 
 ## Build and run
 

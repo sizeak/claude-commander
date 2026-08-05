@@ -890,4 +890,59 @@ class MissionControlChrome extends Chrome {
   @override
   Widget buildWideDetail(BuildContext context, ChromeWideDetailSpec spec) =>
       MissionControlDetail(spec);
+
+  /// A flat 32px bar: the app name in the monospace meta face on the left, the
+  /// three window controls on the right, a hairline rule underneath.
+  ///
+  /// Sized and styled to read as the app bar's quieter sibling — it sits directly
+  /// above one, so anything with more presence would compete with the page title
+  /// for the top of the window.
+  @override
+  Widget buildWindowBar(BuildContext context, ChromeWindowBarSpec spec) {
+    final t = CommanderTokens.of(context);
+    return Container(
+      height: _windowBarHeight,
+      decoration: BoxDecoration(
+        color: t.canvasRaised,
+        border: Border(bottom: BorderSide(color: t.borderSubtle)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: applyWindowBarGestures(
+              spec,
+              Container(
+                alignment: Alignment.centerLeft,
+                padding: const EdgeInsets.only(left: 12),
+                child: Text(
+                  spec.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: t.meta(size: 10.5, color: t.textMuted),
+                ),
+              ),
+            ),
+          ),
+          for (final control in windowBarControls(spec))
+            IconButton(
+              icon: Icon(control.icon, size: 15),
+              tooltip: control.label,
+              color: control.destructive ? t.danger : t.textMuted,
+              visualDensity: VisualDensity.compact,
+              splashRadius: 14,
+              constraints: const BoxConstraints.tightFor(
+                width: _windowBarHeight + 8,
+                height: _windowBarHeight,
+              ),
+              padding: EdgeInsets.zero,
+              onPressed: control.onTap,
+            ),
+        ],
+      ),
+    );
+  }
 }
+
+/// The app-drawn window bar's height. Matches the GTK header bar it replaces
+/// closely enough that toggling the frame does not reflow the page beneath it.
+const _windowBarHeight = 32.0;

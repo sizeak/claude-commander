@@ -393,6 +393,52 @@ class ChromeShellSpec {
   });
 }
 
+/// The desktop window's own title bar, drawn by the app.
+///
+/// Shown when the native title bar is hidden (`TitleBarMode.borderless`), which
+/// is the desktop default: GTK3 has no `xdg-decoration` support, so a GTK3 window
+/// on Wayland is always client-side decorated and KWin will never draw its own
+/// title bar for this app — the "native" frame is a GNOME-style header bar even
+/// in a KDE session, and this is the only frame that can match the desktop.
+///
+/// Declarative for the same reason [ChromeAction] is: the two themes disagree
+/// structurally, LCARS having no notion of a flat bar of icon buttons. Carrying
+/// the *callbacks* rather than a built widget also keeps `chrome/` free of any
+/// `window_manager` import, so both bars are testable with plain closures.
+@immutable
+class ChromeWindowBarSpec {
+  /// The app's name. Deliberately not the active page's title, which the page's
+  /// own chrome already shows and which would make the bar flicker on every
+  /// navigation.
+  final String title;
+
+  /// Drives the maximise control's glyph and label.
+  final bool isMaximized;
+
+  /// The user began dragging the bar's empty space — hand it to the compositor as
+  /// a window move.
+  final VoidCallback onDragStart;
+
+  /// A double-tap on the bar, which every desktop treats as maximise/restore.
+  final VoidCallback onDoubleTap;
+
+  final VoidCallback onMinimize;
+  final VoidCallback onToggleMaximize;
+
+  /// Quits the app, as the native close button does.
+  final VoidCallback onClose;
+
+  const ChromeWindowBarSpec({
+    required this.title,
+    this.isMaximized = false,
+    required this.onDragStart,
+    required this.onDoubleTap,
+    required this.onMinimize,
+    required this.onToggleMaximize,
+    required this.onClose,
+  });
+}
+
 /// The form-element half of the chrome contract.
 ///
 /// Split from [Chrome] into its own interface purely to keep the files readable.
@@ -415,6 +461,9 @@ abstract interface class ChromeForms {
 
   /// A section eyebrow ("SERVERS", "FILES CHANGED").
   Widget buildEyebrow(BuildContext context, String label);
+
+  /// The app-drawn window title bar, for borderless desktop windows.
+  Widget buildWindowBar(BuildContext context, ChromeWindowBarSpec spec);
 }
 
 // ── Widget front-ends ────────────────────────────────────────────────────────
@@ -505,4 +554,14 @@ class ChromeEyebrow extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       Chrome.of(context).buildEyebrow(context, label);
+}
+
+/// The app-drawn window title bar. See [ChromeWindowBarSpec].
+class ChromeWindowBar extends StatelessWidget {
+  final ChromeWindowBarSpec spec;
+  const ChromeWindowBar(this.spec, {super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      Chrome.of(context).buildWindowBar(context, spec);
 }
