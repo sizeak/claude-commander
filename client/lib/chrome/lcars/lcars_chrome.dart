@@ -883,23 +883,23 @@ class LcarsChrome extends Chrome {
       // header read as part of its first row rather than as a heading over the
       // run. Mission Control's eyebrow carried this padding from the start;
       // LCARS' was a bare Text.
-      padding: const EdgeInsets.only(top: 12, bottom: 6),
+      //
+      // 13 rather than 12, and the odd number is load-bearing. An 11px Antonio
+      // line box is 14.23 logical px, so headings accrue fractional offsets down
+      // the list; at dpr 1.5 the *first* one landed half a physical pixel out of
+      // phase with the rest, putting its cap tops flush on a pixel boundary. It
+      // rendered a hard top edge — read as clipped, though nothing clips it —
+      // while every later heading got a soft antialiased row above its caps. One
+      // extra logical pixel moves this heading 1.5 physical px (flipping its
+      // phase) and every heading below it 3.0 (leaving theirs alone), so the
+      // first agrees with the rest. Verified by dumping both headings' pixels:
+      // identical rasterisation, row for row.
+      padding: const EdgeInsets.only(top: 13, bottom: 6),
       child: Text(
         t.caseLabel(label),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        // Bigger and heavier than the base caption, which the other LCARS
-        // captions keep. Nothing clips this text — but at 11px Antonio's cap
-        // curves land in a single pixel row of partial coverage, so a `C` or an
-        // `O` rasterises flat-topped and the heading reads as shaved off. 12.5px
-        // at w600 gives the curve a second row to live in.
-        style: _caption(
-          t,
-          t.info,
-          size: 12.5,
-          letterSpacing: 1.4,
-          weight: FontWeight.w600,
-        ),
+        style: _caption(t, t.info, letterSpacing: 1.4),
       ),
     );
   }
@@ -954,12 +954,11 @@ const _footerCentreWidth = 46.0;
 TextStyle _caption(
   CommanderTokens t,
   Color color, {
-  double size = 11,
   double letterSpacing = 0,
   FontWeight weight = FontWeight.w500,
 }) => TextStyle(
   fontFamily: t.sans,
-  fontSize: size,
+  fontSize: 11,
   fontWeight: weight,
   letterSpacing: letterSpacing,
   color: color,
