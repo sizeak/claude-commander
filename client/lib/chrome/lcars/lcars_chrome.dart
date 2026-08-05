@@ -888,7 +888,18 @@ class LcarsChrome extends Chrome {
         t.caseLabel(label),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: _caption(t, t.info, letterSpacing: 1.4),
+        // Bigger and heavier than the base caption, which the other LCARS
+        // captions keep. Nothing clips this text — but at 11px Antonio's cap
+        // curves land in a single pixel row of partial coverage, so a `C` or an
+        // `O` rasterises flat-topped and the heading reads as shaved off. 12.5px
+        // at w600 gives the curve a second row to live in.
+        style: _caption(
+          t,
+          t.info,
+          size: 12.5,
+          letterSpacing: 1.4,
+          weight: FontWeight.w600,
+        ),
       ),
     );
   }
@@ -943,11 +954,12 @@ const _footerCentreWidth = 46.0;
 TextStyle _caption(
   CommanderTokens t,
   Color color, {
+  double size = 11,
   double letterSpacing = 0,
   FontWeight weight = FontWeight.w500,
 }) => TextStyle(
   fontFamily: t.sans,
-  fontSize: 11,
+  fontSize: size,
   fontWeight: weight,
   letterSpacing: letterSpacing,
   color: color,
