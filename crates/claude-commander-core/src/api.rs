@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures::StreamExt;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::agent::AgentKind;
@@ -727,40 +727,52 @@ impl CommanderService {
         }
 
         // 3. Sync session status against live tmux, then sync worktrees.
-        let session_ids: Vec<(SessionId, String)> = {
+        // Stopped sessions are probed too: the sync runs both ways, so a live
+        // pane whose session was wrongly flagged stopped comes back (see
+        // [`reconciled_status`]).
+        let session_ids: Vec<(SessionId, String, SessionStatus)> = {
             let state = self.store.read().await;
             state
                 .sessions
                 .values()
-                .filter(|s| s.status.is_active() && s.status != SessionStatus::Creating)
-                .map(|s| (s.id, s.tmux_session_name.clone()))
+                .filter(|s| s.status != SessionStatus::Creating)
+                .map(|s| (s.id, s.tmux_session_name.clone(), s.status))
                 .collect()
         };
-        for (session_id, tmux_name) in session_ids {
-            let should_mark_stopped =
-                if let Ok(exists) = self.manager.tmux.session_exists(&tmux_name).await {
-                    if !exists {
-                        true
-                    } else {
-                        self.manager
-                            .tmux
-                            .is_pane_dead(&tmux_name)
-                            .await
-                            .unwrap_or(false)
-                    }
-                } else {
-                    false
-                };
-            if should_mark_stopped {
+        let probed: Vec<(SessionId, String, SessionStatus, PaneProbe)> =
+            futures::stream::iter(session_ids.into_iter().map(
+                |(id, tmux_name, status)| async move {
+                    let probe = self.probe_pane(&tmux_name).await;
+                    (id, tmux_name, status, probe)
+                },
+            ))
+            .buffer_unordered(PANE_PROBE_CONCURRENCY)
+            .collect()
+            .await;
+        for (session_id, tmux_name, status, probe) in probed {
+            let Some(next) = reconciled_status(status, probe) else {
+                continue;
+            };
+            if next == SessionStatus::Stopped {
+                // A dead pane leaves its tmux session behind; drop it so the
+                // next attach recreates the session cleanly.
                 let _ = self.manager.tmux.kill_session(&tmux_name).await;
-                self.store
-                    .mutate(move |state| {
-                        if let Some(session) = state.get_session_mut(&session_id) {
-                            session.set_status(SessionStatus::Stopped);
-                        }
-                    })
-                    .await?;
+            } else {
+                info!("Reviving session {session_id}: its tmux pane is live");
             }
+            self.store
+                .mutate(move |state| {
+                    if let Some(session) = state.get_session_mut(&session_id) {
+                        session.set_status(next);
+                        if next == SessionStatus::Running {
+                            // A live pane holds the agent's conversation, so
+                            // there is nothing to resume into — upholds the
+                            // "live pane ⇒ not hibernated" invariant.
+                            session.hibernated = false;
+                        }
+                    }
+                })
+                .await?;
         }
         let project_ids: Vec<ProjectId> = {
             let state = self.store.read().await;
@@ -2197,6 +2209,28 @@ impl CommanderService {
         Ok(())
     }
 
+    /// Ask tmux what state a session's pane is in, keeping a tmux *failure*
+    /// distinct from a genuine absence so [`reconciled_status`] can refuse to
+    /// act on it. `session_exists` already draws that line for `has-session`;
+    /// an `is_pane_dead` error gets the same treatment here.
+    async fn probe_pane(&self, tmux_name: &str) -> PaneProbe {
+        match self.manager.tmux.session_exists(tmux_name).await {
+            Ok(false) => PaneProbe::Absent,
+            Ok(true) => match self.manager.tmux.is_pane_dead(tmux_name).await {
+                Ok(true) => PaneProbe::Dead,
+                Ok(false) => PaneProbe::Live,
+                Err(e) => {
+                    debug!("Pane-liveness probe failed for {tmux_name}: {e}");
+                    PaneProbe::Unknown
+                }
+            },
+            Err(e) => {
+                debug!("Session-existence probe failed for {tmux_name}: {e}");
+                PaneProbe::Unknown
+            }
+        }
+    }
+
     /// `(id, tmux_session_name, program)` tuples for active sessions, the input
     /// shape [`AgentStateDetector::detect_all`] expects.
     async fn active_session_targets(&self) -> Vec<(SessionId, String, String)> {
@@ -2323,6 +2357,13 @@ const PR_FANOUT_CONCURRENCY: usize = 8;
 /// spawn one `git fetch` per project at the same instant.
 const PROJECT_PULL_FANOUT_CONCURRENCY: usize = 4;
 
+/// Cap concurrent pane probes in the startup reconcile. The reconcile probes
+/// *every* session (it syncs both ways), so on a long-lived workspace this is
+/// tens of `tmux has-session` calls on the pre-first-paint path — serially that
+/// is a visible startup stall. `TmuxExecutor`'s own semaphore is the real
+/// throttle; this just keeps the in-flight future count sane.
+const PANE_PROBE_CONCURRENCY: usize = 8;
+
 /// Minimum gap between PR-status fan-outs, debouncing rapid manual triggers
 /// (e.g. a double manual refresh). It sits far below `pr_check_interval_secs`,
 /// so a manual refresh is still effectively immediate.
@@ -2377,6 +2418,55 @@ fn with_commander_target(
         ));
     }
     active
+}
+
+/// What tmux reports about one session's pane, as the startup reconciler sees
+/// it. Distinguishing [`Self::Unknown`] from [`Self::Absent`] is the whole
+/// point: a tmux *failure* tells us nothing about the session and must never
+/// move its status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneProbe {
+    /// The tmux session exists and its pane is running.
+    Live,
+    /// The tmux session exists but its pane has exited (held by
+    /// `remain-on-exit`).
+    Dead,
+    /// The tmux session genuinely does not exist.
+    Absent,
+    /// tmux itself failed (crashed server, timeout, spawn error).
+    Unknown,
+}
+
+/// The status a session should be moved to given what tmux reports, or `None`
+/// to leave it as it is.
+///
+/// Reconciliation is deliberately **bidirectional**. A live pane and a
+/// `Stopped` status contradict each other — every path that produces `Stopped`
+/// (kill, hibernate, this reconciler) kills the pane first — and the
+/// contradiction is reachable: a pass that read tmux as absent (a run pointed at
+/// a different `TMUX_TMPDIR`, or `no server running` from a server that has
+/// since restarted) marks sessions `Stopped`, and its cleanup kill no-ops on
+/// that same wrong socket, leaving live agents flagged stopped. Without the
+/// revive there is no way back: `Stopped` suppresses agent-state detection
+/// (gated on [`SessionStatus::is_active`]), so those rows render `○` forever.
+///
+/// Pure, so the policy can be tested without tmux.
+pub(crate) fn reconciled_status(stored: SessionStatus, probe: PaneProbe) -> Option<SessionStatus> {
+    match probe {
+        // A detection failure is not evidence of anything.
+        PaneProbe::Unknown => None,
+        // A live pane means Running, whatever we had recorded. Transient
+        // cascade states (`Merging`/`Pushing`/`CascadePaused`) are left alone —
+        // they imply a live pane already and carry extra meaning this reconciler
+        // must not erase.
+        PaneProbe::Live => (stored == SessionStatus::Stopped).then_some(SessionStatus::Running),
+        // No pane, or a pane whose program exited: Stopped, unless the session
+        // is mid-creation (a pane that does not exist *yet* is normal, and
+        // stale `Creating` records are dropped earlier in the reconcile).
+        PaneProbe::Absent | PaneProbe::Dead => (stored != SessionStatus::Creating
+            && stored != SessionStatus::Stopped)
+            .then_some(SessionStatus::Stopped),
+    }
 }
 
 /// Whether the agent-state poll tick can skip entirely: nothing to detect (no
@@ -3610,6 +3700,141 @@ mod tests {
         assert!(state.projects.contains_key(&pid), "project must survive");
     }
 
+    /// Seed a project plus one session pinned to `tmux_name`, with the given
+    /// stored status and hibernation marker. Paths live under `dir` so nothing
+    /// touches the real filesystem.
+    async fn seed_session_for_tmux(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+        tmux_name: &str,
+        status: SessionStatus,
+        hibernated: bool,
+    ) -> SessionId {
+        let project = Project::new("repo", dir.path().join("repo"), "main");
+        let pid = project.id;
+        let mut session =
+            WorktreeSession::new(pid, "task", "branch-task", dir.path().join("wt"), "claude");
+        session.tmux_session_name = tmux_name.to_string();
+        session.set_status(status);
+        session.hibernated = hibernated;
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+        sid
+    }
+
+    /// Start a real tmux session with a live (long-sleeping) pane on the
+    /// service's isolated socket dir. Requires tmux, like the rest of the
+    /// tmux-backed tests.
+    async fn start_live_pane(svc: &CommanderService, dir: &tempfile::TempDir, tmux_name: &str) {
+        svc.session_manager()
+            .tmux
+            .create_session(tmux_name, dir.path(), Some("sleep 300"))
+            .await
+            .expect("isolated tmux server should accept a new session");
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_revives_stopped_session_with_a_live_pane() {
+        // `Stopped` with a live pane is an inconsistency: the only paths that
+        // produce Stopped (kill, hibernate, reconcile) all kill the pane first.
+        // It happens when a reconcile pass reads tmux as absent — a run pointed
+        // at a different socket dir, or `no server running` from a server that
+        // restarted — and its cleanup kill then no-ops on that same wrong
+        // socket, so live panes keep running while state says stopped.
+        // Reconciliation must therefore be bidirectional: without the revive,
+        // the row renders `○ stopped` forever and agent-state detection stays
+        // suppressed (it is gated on `status.is_active()`), so the spinner and
+        // waiting-for-input glyphs never appear again for that session.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let tmux_name = "cc-revive-live";
+        start_live_pane(&svc, &dir, tmux_name).await;
+        let sid = seed_session_for_tmux(&svc, &dir, tmux_name, SessionStatus::Stopped, true).await;
+
+        svc.startup_reconcile().await.unwrap();
+
+        {
+            let state = svc.store().read().await;
+            let session = state.get_session(&sid).unwrap();
+            assert_eq!(
+                session.status,
+                SessionStatus::Running,
+                "a Stopped session whose tmux pane is alive must be revived to Running"
+            );
+            assert!(
+                !session.hibernated,
+                "a live pane leaves nothing to resume into, so the hibernation \
+                 marker must be cleared with the revive"
+            );
+        }
+        let _ = svc.session_manager().tmux.kill_session(tmux_name).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_attachable_marks_a_live_stopped_session_running() {
+        // The attach path already probes `session_exists` + `is_pane_dead` and
+        // finds the pane alive, but only its *recreate* branch wrote the status
+        // back — so attaching to a wrongly-Stopped session left it Stopped, and
+        // its glyph stayed `○` while the user sat in the live agent pane.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let tmux_name = "cc-attach-live";
+        start_live_pane(&svc, &dir, tmux_name).await;
+        let sid = seed_session_for_tmux(&svc, &dir, tmux_name, SessionStatus::Stopped, true).await;
+
+        let resolved = svc
+            .session_manager()
+            .ensure_attachable(&sid)
+            .await
+            .expect("a live pane is attachable");
+        assert_eq!(resolved, tmux_name, "the live session must be reused as-is");
+
+        {
+            let state = svc.store().read().await;
+            let session = state.get_session(&sid).unwrap();
+            assert_eq!(
+                session.status,
+                SessionStatus::Running,
+                "attaching to a live pane must reflect that in the stored status"
+            );
+            assert!(!session.hibernated, "a live pane is not hibernated");
+        }
+        let _ = svc.session_manager().tmux.kill_session(tmux_name).await;
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_leaves_a_stopped_session_with_no_tmux_alone() {
+        // The other half of the bidirectional rule: absence must not be
+        // mistaken for a revive signal, and a genuinely hibernated session must
+        // keep its marker so the next wake still resumes its conversation.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_session_for_tmux(
+            &svc,
+            &dir,
+            "cc-no-such-session",
+            SessionStatus::Stopped,
+            true,
+        )
+        .await;
+
+        svc.startup_reconcile().await.unwrap();
+
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.status, SessionStatus::Stopped);
+        assert!(
+            session.hibernated,
+            "a hibernated session with no live pane must keep its resume marker"
+        );
+    }
+
     #[tokio::test]
     async fn startup_reconcile_clears_stale_merging_state() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -4205,6 +4430,75 @@ mod tests {
         assert!(poll_tick_should_send(true, false, true));
         assert!(!poll_tick_should_send(true, true, true));
         assert!(!poll_tick_should_send(true, false, false));
+    }
+
+    #[test]
+    fn reconciled_status_syncs_both_directions() {
+        use PaneProbe::*;
+        use SessionStatus::*;
+
+        // Gone or exited ⇒ Stopped.
+        assert_eq!(reconciled_status(Running, Absent), Some(Stopped));
+        assert_eq!(reconciled_status(Running, Dead), Some(Stopped));
+        // …and back again: a live pane under a Stopped record is the
+        // inconsistency this reconciler exists to repair.
+        assert_eq!(reconciled_status(Stopped, Live), Some(Running));
+
+        // Already agreeing: no write, no change-feed churn.
+        assert_eq!(reconciled_status(Running, Live), None);
+        assert_eq!(reconciled_status(Stopped, Absent), None);
+        assert_eq!(reconciled_status(Stopped, Dead), None);
+    }
+
+    #[test]
+    fn reconciled_status_never_acts_on_a_tmux_failure() {
+        // A crashed/timed-out tmux command says nothing about the session. Acting
+        // on it is what mass-stops live sessions, so every stored status must
+        // survive an Unknown probe untouched.
+        for stored in [
+            SessionStatus::Running,
+            SessionStatus::Stopped,
+            SessionStatus::Creating,
+            SessionStatus::Merging,
+            SessionStatus::Pushing,
+            SessionStatus::CascadePaused,
+        ] {
+            assert_eq!(
+                reconciled_status(stored, PaneProbe::Unknown),
+                None,
+                "{stored:?} must be left alone when tmux itself failed"
+            );
+        }
+    }
+
+    #[test]
+    fn reconciled_status_leaves_creating_and_cascade_states_alone() {
+        // A `Creating` session's pane does not exist *yet* — stale records are
+        // dropped by step 1 of the reconcile, not stopped here.
+        assert_eq!(
+            reconciled_status(SessionStatus::Creating, PaneProbe::Absent),
+            None
+        );
+        assert_eq!(
+            reconciled_status(SessionStatus::Creating, PaneProbe::Live),
+            None
+        );
+        // The transient cascade states already imply a live pane and carry
+        // meaning beyond "running" (step 2 resets the stale ones), so a live
+        // probe must not flatten them to Running.
+        for stored in [
+            SessionStatus::Merging,
+            SessionStatus::Pushing,
+            SessionStatus::CascadePaused,
+        ] {
+            assert_eq!(reconciled_status(stored, PaneProbe::Live), None);
+            // But a vanished pane still stops them — that is how a crashed
+            // mid-cascade session stops spinning.
+            assert_eq!(
+                reconciled_status(stored, PaneProbe::Absent),
+                Some(SessionStatus::Stopped)
+            );
+        }
     }
 
     #[test]
