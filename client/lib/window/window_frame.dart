@@ -31,35 +31,49 @@ class _WindowFrameState extends State<WindowFrame> {
     if (controller == _controller) return;
     // Only carry a global key handler while there is a window it can act on.
     if (_controller == null && controller != null) {
-      HardwareKeyboard.instance.addHandler(_onKey);
+      FocusManager.instance.addEarlyKeyEventHandler(_onKey);
     } else if (_controller != null && controller == null) {
-      HardwareKeyboard.instance.removeHandler(_onKey);
+      FocusManager.instance.removeEarlyKeyEventHandler(_onKey);
     }
     _controller = controller;
   }
 
   @override
   void dispose() {
-    if (_controller != null) HardwareKeyboard.instance.removeHandler(_onKey);
+    if (_controller != null) {
+      FocusManager.instance.removeEarlyKeyEventHandler(_onKey);
+    }
     super.dispose();
   }
 
   /// F11 toggles fullscreen, Shift+F11 the window frame.
   ///
-  /// A [HardwareKeyboard] handler rather than a `Shortcuts` widget: these run
-  /// *before* the focus tree, so F11 reaches us ahead of the terminal view, which
-  /// would otherwise forward it to the remote PTY and never let it out.
-  bool _onKey(KeyEvent event) {
+  /// An **early** [FocusManager] handler, and the choice is load-bearing twice
+  /// over. A `Shortcuts` widget would sit above the focused terminal view, which
+  /// maps F11 to `TerminalKey.f11` and forwards the escape sequence to the remote
+  /// PTY — the key would toggle the window *and* type `\x1b[23~` into the user's
+  /// agent session. A [HardwareKeyboard] handler does not fix that either,
+  /// despite running first: `KeyEventManager` calls `_dispatchKeyMessage`
+  /// unconditionally afterwards, so returning true there only answers the engine
+  /// and the focus tree still gets the event. Early handlers run before the focus
+  /// walk *and* [KeyEventResult.handled] short-circuits it.
+  KeyEventResult _onKey(KeyEvent event) {
     final controller = _controller;
-    if (controller == null) return false;
-    if (event is! KeyDownEvent) return false;
-    if (event.logicalKey != LogicalKeyboardKey.f11) return false;
-    if (HardwareKeyboard.instance.isShiftPressed) {
-      controller.toggleTitleBar();
-    } else {
-      controller.toggleFullscreen();
+    if (controller == null) return KeyEventResult.ignored;
+    if (event.logicalKey != LogicalKeyboardKey.f11) {
+      return KeyEventResult.ignored;
     }
-    return true;
+    // Act on the press only — a held key must not thrash the window — but claim
+    // every F11 event, repeats and the release included. Letting those through
+    // would hand the terminal the very sequence this exists to stop.
+    if (event is KeyDownEvent) {
+      if (HardwareKeyboard.instance.isShiftPressed) {
+        controller.toggleTitleBar();
+      } else {
+        controller.toggleFullscreen();
+      }
+    }
+    return KeyEventResult.handled;
   }
 
   @override

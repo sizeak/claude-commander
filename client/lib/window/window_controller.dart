@@ -107,6 +107,11 @@ class WindowController extends ChangeNotifier {
       if (_fullscreen) await _service.setFullScreen(true);
     });
 
+    // Seeded from the window rather than assumed false: the desktop can restore
+    // a session's windows maximized, and a bar that opened with the wrong glyph
+    // would stay wrong until the user happened to maximize it again.
+    _maximized = await _guard(_service.isMaximized) ?? false;
+
     _events = _service.events.listen(_onWindowEvent);
   }
 
@@ -148,7 +153,17 @@ class WindowController extends ChangeNotifier {
     // so the bar's glyph flips with the click. The event confirms it.
     _maximized = target;
     notifyListeners();
-    await _guard(() => _service.setMaximized(target));
+    try {
+      await _service.setMaximized(target);
+    } catch (_) {
+      // The optimistic flip was a lie and no event will arrive to correct it —
+      // the maximize/unmaximize feed only reports changes that *happened*. Ask
+      // the window what is actually true rather than leaving the wrong glyph up.
+      final actual = await _guard(_service.isMaximized);
+      if (actual == null || actual == _maximized) return;
+      _maximized = actual;
+      notifyListeners();
+    }
   }
 
   Future<void> close() => _guard(_service.close);

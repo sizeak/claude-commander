@@ -177,6 +177,49 @@ void main() {
       expect(c.controller.fullscreen, isFalse);
     });
 
+    testWidgets('never reaches the focused key handler', (tester) async {
+      // The whole reason the frame owns this key rather than a `Shortcuts`
+      // widget: the terminal view maps F11 to `TerminalKey.f11` and forwards the
+      // escape sequence to the remote PTY. Toggling fullscreen *and* typing
+      // \x1b[23~ into the user's agent session is not a shortcut, it's a bug.
+      final c = newController();
+      final seen = <LogicalKeyboardKey>[];
+      await tester.pumpWidget(
+        WindowScope(
+          controller: c.controller,
+          child: MaterialApp(
+            theme: themeDataFor(missionControlTokens),
+            builder: (context, child) => WindowFrame(child: child!),
+            home: Scaffold(
+              body: Focus(
+                autofocus: true,
+                onKeyEvent: (node, event) {
+                  // Presses only: `sendKeyEvent` sends a down *and* an up, and
+                  // it is the press the terminal would forward.
+                  if (event is KeyDownEvent) seen.add(event.logicalKey);
+                  return KeyEventResult.handled;
+                },
+                child: const SizedBox.expand(),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.f11);
+      await tester.pumpAndSettle();
+
+      expect(c.controller.fullscreen, isTrue, reason: 'the frame still acts');
+      expect(seen, isEmpty, reason: 'but the terminal never sees the key');
+
+      // The counter-check: everything else must still reach the terminal, or
+      // this "fix" would be a keyboard that swallows typing.
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+      await tester.pumpAndSettle();
+      expect(seen, [LogicalKeyboardKey.keyA]);
+    });
+
     testWidgets('is not consumed when there is no window to manage', (
       tester,
     ) async {

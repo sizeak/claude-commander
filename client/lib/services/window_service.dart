@@ -23,6 +23,11 @@ enum WindowEvent {
 ///
 /// Whole pixels: this is a remembered window placement, and a persisted
 /// `1280.0000001` would be noise in a preferences file no one can hand-edit.
+///
+/// The **position** half only takes effect on X11: Wayland does not let a client
+/// place its own window, so `gtk_window_move` is a no-op there and a restored
+/// window keeps its size but lands wherever the compositor puts it. Worth knowing
+/// before debugging "the position isn't restored".
 @immutable
 class WindowBounds {
   final int x;
@@ -135,10 +140,16 @@ WindowService? createWindowService() => switch (defaultTargetPlatform) {
 /// The real window, via `window_manager`.
 ///
 /// Uses `setTitleBarStyle(hidden)` and deliberately **never** `setAsFrameless`.
-/// On the runner's header-bar path the former hides the header *widget* and
-/// leaves the window GTK-decorated, so its invisible client-side resize border
-/// survives and borderless needs no resize grips of its own; frameless forces
-/// `decorated=false` and takes resizing with it.
+/// On the runner's header-bar path — Wayland, and X11 under GNOME — the former
+/// hides the header *widget* and leaves the window GTK-decorated, so its
+/// invisible client-side resize border survives and borderless needs no resize
+/// grips of its own; frameless forces `decorated=false` and takes resizing with
+/// it.
+///
+/// Off that path the two converge: with no header bar the plugin falls through to
+/// `gtk_window_set_decorated(false)` itself, so borderless on X11 outside GNOME
+/// *does* lose the resize border. Not accommodated on purpose — X11 is deprecated
+/// and out of scope — but do not read the paragraph above as universal.
 class WindowManagerService with WindowListener implements WindowService {
   final _events = StreamController<WindowEvent>.broadcast();
 

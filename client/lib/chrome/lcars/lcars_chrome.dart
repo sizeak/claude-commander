@@ -799,7 +799,6 @@ class LcarsChrome extends Chrome {
   Widget buildWideDetail(BuildContext context, ChromeWideDetailSpec spec) =>
       LcarsDetail(spec);
 
-  @override
   /// The window bar as a run of blocks: a lilac cap carrying the app name, dark
   /// filler that absorbs the slack (and is the drag surface), then three control
   /// blocks closing the run.

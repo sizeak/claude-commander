@@ -339,6 +339,28 @@ void main() {
       expect(c.window.calls, ['startDragging', 'minimize', 'close']);
     });
 
+    test('load seeds the maximized state from the window', () async {
+      // A desktop can restore a session's windows maximized, and no event will
+      // announce a state that was already true at startup.
+      final c = _controller();
+      c.window.maximized = true;
+      await c.controller.load();
+
+      expect(c.controller.maximized, isTrue);
+    });
+
+    test('a refused maximize resyncs rather than lying', () async {
+      final c = _controller();
+      await c.controller.load();
+      c.window.failingMethod = 'setMaximized(true)';
+
+      await c.controller.toggleMaximize();
+
+      // The optimistic flip is corrected from the window: no maximize event will
+      // arrive for a change that never happened, so nothing else would fix it.
+      expect(c.controller.maximized, isFalse);
+    });
+
     test('toggleMaximize flips the window and the reported state', () async {
       final c = _controller();
       await c.controller.load();

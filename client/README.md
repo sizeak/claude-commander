@@ -276,10 +276,18 @@ maximise.
 Three details that are load-bearing rather than incidental:
 
 - **`setTitleBarStyle(hidden)`, never `setAsFrameless`.** On the runner's header-bar
-  path the former hides the header *widget* and leaves the window GTK-decorated, so
-  its invisible client-side resize border survives; frameless forces
-  `decorated=false` and takes resizing with it. That is why borderless needs no
-  resize grips of its own.
+  path — Wayland, and X11 under GNOME — the former hides the header *widget* and
+  leaves the window GTK-decorated, so its invisible client-side resize border
+  survives and borderless needs no resize grips of its own. **This does not hold on
+  the other path**: with no header bar the plugin falls through to
+  `gtk_window_set_decorated(false)` (`window_manager_plugin.cc:512-519`), which is
+  what `setAsFrameless` does, so borderless on X11 outside GNOME leaves a window
+  with no resize border — resizable only via the WM (KWin: `Meta`+right-drag).
+  Deliberately not accommodated: X11 is deprecated and out of scope here. Switch
+  the frame to Native in Settings if you are on it.
+- **Window *position* is X11-only.** Wayland does not let a client place its own
+  window, so the `x,y` in `commander.window.bounds` is honoured only on X11; the
+  size restores everywhere.
 - **F11 is a `HardwareKeyboard` handler, not a `Shortcuts` widget.** Those handlers
   run before the focus tree, so F11 is caught ahead of the terminal view, which
   would otherwise forward it to the remote PTY.
