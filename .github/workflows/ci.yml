@@ -245,3 +245,66 @@ jobs:
       # PATH, so the shim must be linked there first (else `rustc -vV` 127):
       #   - name: Run Linux End-to-End Tests
       #     run: nix develop .#clientCi -c bash -c 'mkdir -p ~/.cargo/bin && ln -sf "$(command -v rustup)" ~/.cargo/bin/rustup && xvfb-run -a client/tool/e2e.sh'
+
+  client-apple:
+    name: Client Apple Builds
+    # GitHub's macOS runners are free for public repositories, and they are
+    # arm64 — so this is also the only coverage the Apple-silicon side of
+    # flake.nix gets. Xcode is preinstalled, which is the one prerequisite Nix
+    # cannot supply (see `clientXcrunShim`).
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Not just the icon masters this time: .gitattributes sends *.png to
+          # LFS, which includes every AppIcon asset in the two runners. Without
+          # this, `actool` compiles pointer files into the asset catalog.
+          lfs: true
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v30
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+
+      - name: Restore Nix Store Cache
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-client-apple-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock', 'client/pubspec.lock') }}
+          restore-prefixes-first-match: nix-client-apple-${{ runner.os }}-
+
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/rust
+
+      - name: Restore Pub Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('client/pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-
+
+      # Same stale-git-dep hazard as the Linux client job; see the note there.
+      - name: Fetch Flutter Packages
+        run: nix develop .#clientApple -c bash -c 'rm -rf ~/.pub-cache/git && cd client && flutter pub get'
+
+      # The simulator build is the one that exercises the whole Apple path end
+      # to end: CocoaPods, cargokit's Rust staticlib for the iOS triples, and
+      # the xcrun shim's delegation to the host Xcode. It needs no signing
+      # identity, so it runs on a bare runner.
+      - name: Build iOS (Simulator)
+        run: nix develop .#clientApple -c bash -c 'cd client && flutter build ios --simulator --debug'
+
+      # The macOS runner signs ad-hoc (CODE_SIGN_IDENTITY = "-"), so this needs
+      # no Developer ID either.
+      - name: Build macOS
+        run: nix develop .#clientApple -c bash -c 'cd client && flutter build macos --debug'
+
+      # Not covered here: launching either app. The iOS app boots and runs in a
+      # simulator locally, but doing it in CI means booting a runtime and
+      # waiting on SpringBoard, which is slow and flaky enough to want its own
+      # task. Device builds are also out of scope — they need a signing
+      # identity, which a fork's PR cannot have.

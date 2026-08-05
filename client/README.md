@@ -3,9 +3,11 @@
 Cross-platform Flutter client for [claude-commander-server](../crates/claude-commander-server) —
 the GUI counterpart to the terminal UI, for whichever device you're not sitting at
 a `claude-commander` shell on. Verified targets today are **Linux desktop** and
-**Android**. iOS/macOS are deferred (no Xcode toolchain here), but the app is kept
-macOS-safe as it grows: `reqwest` uses `rustls` (no OpenSSL to cross-build), and
-Linux-only desktop dependencies are gated behind `isLinux` in the dev shell.
+**Android**. iOS/macOS now have runners (`client/ios`, `client/macos`), app icons and
+dev-shell support, but no build has been run yet — see [iOS / macOS](#ios--macos).
+The app is kept Apple-safe as it grows: `reqwest` uses `rustls` (no OpenSSL to
+cross-build), and Linux-only desktop dependencies are gated behind `isLinux` in the
+dev shell.
 
 The app talks to the server's HTTP REST API (`/api/…`) and its WebSocket terminal
 attach endpoint (`/ws/attach`) — the same server the TUI drives locally or attaches
@@ -202,17 +204,27 @@ SDK (platforms 34/35/36, build-tools, NDK r28 `28.0.13004108`, emulator + x86\_6
 system images), JDK 17, `cargo-ndk`, `flutter_rust_bridge_codegen`, CMake/Ninja/Clang
 for the native build, and `pkg-config`/`libclang`.
 
-On Linux the shell also provides the GTK/X11 stack Flutter needs for the desktop
-target (`gtk3`, `glib`, `pcre2`, `libepoxy`, `libx11`, `libsecret`), gated behind
-`isLinux` so the same shell definition works on macOS. macOS uses Cocoa built via
-Xcode — those libs are not in the shell on Darwin, and the desktop target itself is
-not yet verified there.
+Each host's extra native stack is appended conditionally, since neither desktop's
+libs are any use to the other:
+
+- **Linux** — the GTK/X11 stack Flutter needs for the desktop target (`gtk3`, `glib`,
+  `pcre2`, `libepoxy`, `libx11`, `libsecret`), gated behind `isLinux`.
+- **macOS** — CocoaPods (Flutter shells out to `pod install` for both Apple runners),
+  the Apple Rust targets (`clientAppleTargets` in `flake.nix`), an `xcrun` shim, and
+  Xcode-toolchain overrides for the iOS triples.
+  Cocoa itself comes from Xcode, which is a host prerequisite rather than a Nix input
+  — it can't be packaged, which is why the Apple side can't be hermetic the way
+  Android is. The shellHook warns at entry if no Xcode is selected.
 
 **What the shellHook sets up:**
 
 - `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `ANDROID_NDK_ROOT/HOME`, `ANDROID_NDK_VERSION`, `JAVA_HOME` — pointed at the Nix-provided SDK.
 - `flutter config --android-sdk` — points Flutter at the Nix SDK (read-only; no auto-install).
 - `LD_LIBRARY_PATH=/usr/lib:…` — lets Nix-built libepoxy find the system Mesa EGL at runtime (Linux desktop only).
+- `flutter config --enable-ios` / `--enable-macos-desktop` (macOS only) — both are opt-in in Flutter's own per-user config (`~/.config/flutter_settings`), so checking the runners into the repo doesn't switch them on.
+- `CC_`/`CXX_`/`AR_`/`CARGO_TARGET_*_LINKER` for `aarch64-apple-ios`, `aarch64-apple-ios-sim` and `x86_64-apple-ios` (macOS only) — pointed at Xcode's toolchain, since Nix's cc wrapper injects `-mmacos-version-min` (which clang rejects alongside `-miphoneos-version-min`) and `NIX_LDFLAGS` (which drags the macOS `libiconv` into an iOS link). The darwin triples are left on Nix's toolchain — that host is what it is built for.
+- `IPHONEOS_DEPLOYMENT_TARGET=13.0` (macOS only) — the Runner's own minimum. Unpinned, cc-rs takes the SDK's default while rustc still defaults to iOS 10, and the mismatch fails the link on compiler-rt symbols (`___chkstk_darwin`) that libSystem no longer carries.
+- `PATH` gets an `xcrun` shim ahead of the stdenv's (macOS only) — see `clientXcrunShim` in `flake.nix`. Dart's native-assets build hooks run each `hooks/build.dart` under a filtered environment that keeps `PATH` but drops `DEVELOPER_DIR`, and nixpkgs' `xcrun` stub can only find an SDK through that variable. Without the shim it returns `error: unable to find sdk: 'macosx'`, the string is passed to clang as `-isysroot`, and any hook-built C/ObjC source dies on a missing `assert.h`/`Foundation.h`. `objective_c` is a transitive dependency, so this took plain `flutter test` down on macOS — nothing Apple-specific required.
 - `client/rust/target/release → debug` symlink — frb's `ioDirectory` looks for `release/`; the symlink means a debug build is found immediately.
 - Creates the Android AVD `cctest` (android-35, google\_apis, x86\_64, Pixel 6) on first entry if it doesn't already exist.
 
@@ -251,10 +263,38 @@ flutter run -d emulator-5554
 
 ### iOS / macOS
 
-Not yet built — needs a Mac with Xcode. The Rust side is kept buildable toward it
-(`staticlib` output, `rustls`-only TLS, no Linux-only deps in shared code paths),
-but there is no `staticlib` cross-compile target, no Xcode project wiring, and no
-verification here.
+Scaffolded but **not yet built**. What exists:
+
+- `client/ios` and `client/macos` runners, from `flutter create --platforms=ios,macos
+  --org com.claudecommander .`. Bundle id `com.claudecommander.claudeCommanderClient`
+  (no underscores allowed, so it can't match the Android `applicationId` exactly);
+  display name "Claude Commander" on both, matching the Android `android:label`.
+- App icons for both, generated from their own masters — see
+  [`tool/icon/README.md`](tool/icon/README.md) for why the Apple platforms can't
+  share `icon_full.svg`.
+- Dev-shell support: CocoaPods, the four Apple Rust targets, the `xcrun` shim, and
+  `flutter config --enable-ios/--enable-macos-desktop`.
+- `rust_builder/{ios,macos}` podspecs, which ship with cargokit — `pod install` runs
+  `build_pod.sh` to produce the Rust staticlib, the same way the Android Gradle
+  plugin drives `cargo-ndk`.
+
+The Rust half is verified: `cargo build --target <triple>` produces the staticlib for
+each Apple triple from inside the shell with no extra environment. That needs Xcode's
+C toolchain rather than the shell's, because rustls resolves to `aws-lc-rs` here and
+`aws-lc-sys` compiles C and arm64 assembly — the shellHook exports `CC_`/`CXX_`/`AR_`
+and `CARGO_TARGET_*_LINKER` for the iOS triples to arrange that (see `flake.nix` for
+what each one is working around).
+
+What has not happened: no `flutter build ios`/`macos`, so the Xcode half is unproven
+end to end. The Podfiles are there (`flutter pub get` writes them once a runner
+exists) but no `pod install` has — so there is no `Podfile.lock`, cargokit's
+`build_pod.sh` has never run, and nothing is signed. Expect the first build to need
+`sudo xcodebuild -runFirstLaunch` and a signing team in Xcode.
+
+> `flutter create` copies its templates straight out of the read-only Nix store, so
+> the files it writes are mode `444`. Run `chmod -R u+w client/ios client/macos` after
+> adding a platform, or the next tool to touch them (`flutter_launcher_icons` was the
+> first here) fails with `Permission denied`.
 
 ## frb codegen loop
 
@@ -315,7 +355,7 @@ The integration/e2e server tests self-skip when tmux is absent (a runtime check,
 | 2 | Session detail + lifecycle (kill/restart/delete/create) | Done |
 | 3 | Live terminal (WebSocket, `xterm.dart`) | Done |
 | 4 | Review/diff + inline comments, apply | Done |
-| 5 | iOS / macOS | Not started (needs Mac + Xcode) |
+| 5 | iOS / macOS | Runners, icons and dev-shell support in place; no build run yet |
 | 6 | Shared `claude-commander-client` transport crate (also backs the TUI's remote sessions) | Done |
 | 7 | Adaptive desktop shell (master-detail), programs-list editing, multi-server seams | Done / in progress |
 | 8 | Image attach (picker, camera, clipboard, Ctrl+V) | Done |
