@@ -10,7 +10,7 @@ impl App {
     ) -> Result<()> {
         // Sync selection ids from the restored board cursor.
         self.update_selection();
-        self.spawn_diff_fetch();
+        self.spawn_preview_update();
 
         loop {
             // Full-screen-takeover clearing happens inside `render` via the
@@ -43,14 +43,16 @@ impl App {
             // Periodic background work (only on Tick). The PR-status,
             // project-pull, agent-state, and state-sync loops now run inside the
             // service (see `CommanderService::spawn_background_tasks`); the tick
-            // only rebuilds the rendered rows and refreshes the Info-modal diff.
+            // only rebuilds the rendered rows and re-captures preview data.
             if needs_tick {
                 self.refresh_list_items().await;
 
-                // Refresh the Info-modal diff if it is open (no-op otherwise).
+                // Re-capture the selection's pane/shell/diff. This is what makes
+                // the list views' right pane *live*; it self-gates to nothing
+                // when neither that pane nor the Info modal is showing.
                 // PR-status and project-pull polling live in
                 // CommanderService::spawn_background_tasks, not the UI tick.
-                self.spawn_diff_fetch();
+                self.spawn_preview_update();
             }
 
             if self.ui_state.should_quit {
@@ -73,13 +75,15 @@ impl App {
                 // correct behavior when draining multiple events)
                 self.update_selection();
 
-                // Refresh the Info-modal diff when the selection changes.
+                // Re-capture immediately when the selection changes, so the
+                // pane doesn't keep showing the previous session until the next
+                // tick.
                 if self.ui_state.selected_session_id != old_session
                     || self.ui_state.selected_project_id != old_project
                 {
                     // Cancel any in-flight fetch for the old selection
-                    self.ui_state.diff_fetch_spawned_at = None;
-                    self.spawn_diff_fetch();
+                    self.ui_state.preview_update_spawned_at = None;
+                    self.spawn_preview_update();
                 }
             }
             AppEvent::StateUpdate(update) => self.handle_state_update(update).await,

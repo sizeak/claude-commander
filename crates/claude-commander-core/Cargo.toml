@@ -58,6 +58,19 @@ ratatui-core = { version = "0.1", features = ["std"] }
 # only for the TUI's async `EventStream` — is deliberately NOT enabled here.
 crossterm = "0.29"
 
+# Diff view-model and layout engine: unified-diff parsing, logical rows,
+# gap expansion, role-tagged spans, soft wrapping and hit-testing. The review
+# view and `git::review_diff`'s parser both delegate to it.
+#
+# Pinned to an exact revision rather than a branch so a build is reproducible
+# and an upstream push can't silently change what this compiles against. Bump
+# the `rev` deliberately when picking up diffgrid changes — and bump it in
+# `claude-commander-tui` and `client/rust` in the same commit. `Config.theme`
+# embeds a `diffgrid::style::Appearance`, so a rev that differs between core and
+# a frontend makes that two distinct types and the frontend stops compiling
+# against core (see #270, which fixed exactly that for the cdylib).
+diffgrid = { git = "https://github.com/sizeak/diffgrid", rev = "83698a53458868c7c691d89dbb21e89fbc905afa" }
+
 # Git (pure Rust)
 gix = { version = "0.85", default-features = false, features = [
     "sha1",
@@ -96,6 +109,9 @@ directories = "6.0"
 url = "2.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 regex = "1.12"
+# No unicode-width / unicode-segmentation: the width and grapheme arithmetic they
+# serve is the review view's, so they live with `claude-commander-tui`. Core's own
+# diff work delegates to `diffgrid`.
 
 # Async utilities
 async-trait = "0.1"

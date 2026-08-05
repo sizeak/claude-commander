@@ -92,6 +92,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ansi-to-tui"
+version = "8.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e42366bb9d958f042bf58f0a85e1b2d091997c1257ca49bddd7e4827aadc65fd"
+dependencies = [
+ "nom 8.0.0",
+ "ratatui-core",
+ "simdutf8",
+ "smallvec",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -790,6 +803,7 @@ dependencies = [
  "claude-commander-protocol",
  "cpal",
  "crossterm",
+ "diffgrid",
  "directories",
  "figment",
  "filetime",
@@ -887,9 +901,11 @@ dependencies = [
 name = "claude-commander-tui"
 version = "0.31.1"
 dependencies = [
+ "ansi-to-tui",
  "chrono",
  "claude-commander-core",
  "crossterm",
+ "diffgrid",
  "directories",
  "futures",
  "image",
@@ -909,7 +925,10 @@ dependencies = [
  "tracing",
  "tui-input",
  "two-face",
+ "unicode-segmentation",
+ "unicode-width",
  "uuid",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -1331,6 +1350,26 @@ name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
+
+[[package]]
+name = "diffgrid"
+version = "0.1.0"
+source = "git+https://github.com/sizeak/diffgrid?rev=83698a53458868c7c691d89dbb21e89fbc905afa#83698a53458868c7c691d89dbb21e89fbc905afa"
+dependencies = [
+ "diffy",
+ "similar 3.1.1",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "diffy"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10aec8f7f9393bd6a4f2762be0ceb012d3cbe2478987258cc9960de148561914"
+dependencies = [
+ "hashbrown 0.17.1",
+]
 
 [[package]]
 name = "digest"
@@ -2184,7 +2223,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b305d85504de270ad3525d726a6b69cc59ee7b2269b014387651107ab9f0755b"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -3054,7 +3093,7 @@ checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
 dependencies = [
  "console",
  "once_cell",
- "similar",
+ "similar 2.7.0",
  "tempfile",
 ]
 
@@ -5334,6 +5373,12 @@ name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+
+[[package]]
+name = "similar"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6505efef05804732ed8a3f2d4f279429eb485bd69d5b0cc6b19cc02005cda16"
 
 [[package]]
 name = "siphasher"

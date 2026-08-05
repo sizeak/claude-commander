@@ -48,7 +48,9 @@ void main() {
     expect(submitted, isNull);
   });
 
-  testWidgets('a successful probe submits the assembled config', (tester) async {
+  testWidgets('a successful probe submits the assembled config', (
+    tester,
+  ) async {
     api.healthResponse = true;
     api.healthTmuxResponse = true;
     await tester.pumpWidget(wrap());
@@ -82,7 +84,9 @@ void main() {
     // Explicit pumps (not pumpAndSettle): while the confirm dialog is open the
     // save button shows a spinner (_busy), an animation that never settles.
     await tester.pump(); // start _save → probe
-    await tester.pump(const Duration(milliseconds: 50)); // probe resolves, dialog opens
+    await tester.pump(
+      const Duration(milliseconds: 50),
+    ); // probe resolves, dialog opens
 
     // The confirm dialog appears; nothing submitted yet.
     expect(find.text('Connection test failed'), findsOneWidget);

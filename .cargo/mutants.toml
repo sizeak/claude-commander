@@ -12,11 +12,12 @@
 #
 # NB: these are literal paths, and cargo-mutants does not error on a glob that
 # matches nothing — so a stale entry silently shrinks coverage rather than
-# failing. Two entries were already dead before the frontend was extracted
-# (`widgets/preview.rs`, deleted in #260, and `widgets/tree_list/pr_colors.rs`,
-# which #260 moved up to `widgets/pr_colors.rs`); both are corrected here.
-# `widgets/status_glyph.rs` and `widgets/board/` are new pure-logic candidates
-# that are deliberately NOT added yet — widening mutation scope is its own call.
+# failing. `widgets/tree_list/pr_colors.rs` had already gone stale before the
+# frontend was extracted (#260 moved it up to `widgets/pr_colors.rs`), and
+# `widgets/preview.rs` was deleted by #260 then restored by #267 along with the
+# right-hand pane — it is listed again here. `widgets/status_glyph.rs` and
+# `widgets/board/` are pure-logic candidates deliberately NOT added yet:
+# widening mutation scope is its own call.
 
 examine_globs = [
     # Pure parsing, state machines, and pattern matching
@@ -32,6 +33,7 @@ examine_globs = [
     "crates/claude-commander-tui/src/widgets/mod.rs",
     "crates/claude-commander-tui/src/widgets/info_view.rs",
     "crates/claude-commander-tui/src/widgets/pr_colors.rs",
+    "crates/claude-commander-tui/src/widgets/preview.rs",
     "crates/claude-commander-tui/src/widgets/tree_list/mod.rs",
     "crates/claude-commander-tui/src/widgets/tree_list/state.rs",
     "crates/claude-commander-tui/src/widgets/tree_list/render.rs",

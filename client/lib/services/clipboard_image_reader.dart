@@ -67,17 +67,13 @@ class SuperClipboardImageReader implements ClipboardImageReader {
       if (!done.isCompleted) done.complete(value);
     }
 
-    final progress = reader.getFile(
-      format,
-      (file) async {
-        try {
-          finish(await file.readAll());
-        } catch (_) {
-          finish(null);
-        }
-      },
-      onError: (_) => finish(null),
-    );
+    final progress = reader.getFile(format, (file) async {
+      try {
+        finish(await file.readAll());
+      } catch (_) {
+        finish(null);
+      }
+    }, onError: (_) => finish(null));
     if (progress == null) return Future.value(null);
     return done.future.timeout(timeout, onTimeout: () => null);
   }

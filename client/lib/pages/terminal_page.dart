@@ -6,45 +6,15 @@ import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 import 'package:xterm/xterm.dart';
 
+import '../chrome/chrome.dart';
 import '../services/clipboard_image_reader.dart';
 import '../services/commander_api.dart';
 import '../services/image_picker_service.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
-
-/// The xterm palette, built from the app tokens: the deepest terminal bg, the
-/// soft off-white foreground the deck uses for pane text, and the violet accent
-/// for the cursor/selection. The ANSI ramp is nudged toward the palette's
-/// semantic accents (teal/green/amber/red/violet) so agent output reads in the
-/// same colour language as the rest of the app.
-const _terminalTheme = TerminalTheme(
-  cursor: AppColors.accent,
-  selection: Color(0x407C6CFF), // AppColors.accent @ ~25% alpha
-  foreground: AppColors.terminalFg,
-  background: AppColors.bgTerminal,
-  black: Color(0xFF1C1F28), // AppColors.borderSubtle (darkest ANSI slot)
-  red: AppColors.red,
-  green: AppColors.green,
-  yellow: AppColors.amber,
-  blue: AppColors.accentSoft,
-  magenta: AppColors.accent,
-  cyan: AppColors.teal,
-  white: AppColors.textBright,
-  brightBlack: AppColors.textDim,
-  brightRed: AppColors.red,
-  brightGreen: AppColors.green,
-  brightYellow: AppColors.amberText,
-  brightBlue: AppColors.accentSoft,
-  brightMagenta: AppColors.accentSoft,
-  brightCyan: AppColors.teal,
-  brightWhite: AppColors.text,
-  searchHitBackground: Color(0x66F5B545), // AppColors.amber @ ~40% alpha
-  searchHitBackgroundCurrent: AppColors.amber,
-  searchHitForeground: AppColors.bg,
-);
+import '../theme/terminal_theme.dart';
+import '../theme/tokens.dart';
 
 /// Live attached terminal, layout-agnostic (no Scaffold, no route). Streams raw
 /// PTY bytes from the cdylib WS bridge into an `xterm.dart` [Terminal], forwards
@@ -59,6 +29,12 @@ const _terminalTheme = TerminalTheme(
 /// handle. Resize is driven by `xterm`'s [Terminal.onResize], which fires from
 /// the widget's actual laid-out size — so the pane's real cols/rows reach the
 /// server, not a fixed 80x24.
+///
+/// The attach is also re-opened when the app returns to the foreground, because a
+/// backgrounded process cannot keep the attach alive: the server pings every
+/// attached socket and kills the attach once too many pings go unanswered, and a
+/// frozen Android process answers none of them. See [_onResumed] for why the
+/// resume only re-attaches when the attach is *known* dead rather than always.
 class TerminalBody extends StatefulWidget {
   final CommanderApi api;
 
@@ -79,6 +55,11 @@ class TerminalBody extends StatefulWidget {
   final ImagePickerService? imagePicker;
   final ClipboardImageReader? clipboardImages;
 
+  /// Wall clock for the how-long-were-we-away measurement, injectable so a widget
+  /// test can cross the heartbeat deadline without waiting a real minute; `null`
+  /// means [DateTime.now].
+  final DateTime Function()? clock;
+
   const TerminalBody({
     super.key,
     required this.api,
@@ -88,13 +69,15 @@ class TerminalBody extends StatefulWidget {
     this.showModifierBar = true,
     this.imagePicker,
     this.clipboardImages,
+    this.clock,
   });
 
   @override
   State<TerminalBody> createState() => _TerminalBodyState();
 }
 
-class _TerminalBodyState extends State<TerminalBody> {
+class _TerminalBodyState extends State<TerminalBody>
+    with WidgetsBindingObserver {
   late final Terminal _terminal;
 
   /// Owned rather than left to `TerminalView` to create, so the Ctrl+V
@@ -145,6 +128,22 @@ class _TerminalBodyState extends State<TerminalBody> {
   /// type into a pane the user isn't looking at.
   bool get _canAttachImage => widget.kind == AttachKind.agent;
 
+  /// Wall clock, not a [Stopwatch]: on Android a device in deep sleep stops
+  /// advancing the monotonic clock a stopwatch reads, while the server's
+  /// heartbeat teardown happens in real time — so a monotonic measure would
+  /// under-report exactly the long absences this exists to catch.
+  late final DateTime Function() _now = widget.clock ?? DateTime.now;
+
+  /// How long a *silent* client can be away before the server has certainly
+  /// killed the attach, from the shared wire contract. Null until the bridge
+  /// answers (or if it fails), and treated as "don't guess": without it, a resume
+  /// only re-attaches something already reported dead.
+  Duration? _deadAfter;
+
+  /// When the app last dropped out of the foreground, or null while it is in
+  /// front.
+  DateTime? _leftForegroundAt;
+
   // Throughput meter: bytes this second, refreshed on a 1s tick.
   int _totalBytes = 0;
   int _windowBytes = 0;
@@ -180,6 +179,9 @@ class _TerminalBodyState extends State<TerminalBody> {
 
     _connect();
 
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_loadDeadAfter());
+
     _meter = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() {
@@ -187,6 +189,75 @@ class _TerminalBodyState extends State<TerminalBody> {
         _windowBytes = 0;
       });
     });
+  }
+
+  /// Cache the heartbeat deadline. No [setState]: nothing renders from it.
+  Future<void> _loadDeadAfter() async {
+    try {
+      final deadAfter = await widget.api.attachDeadAfter();
+      if (mounted) _deadAfter = deadAfter;
+    } catch (_) {
+      // Leave it null. A resume then only re-attaches an attach we were *told*
+      // had ended — never one we merely suspect, since without the contract's
+      // deadline we'd be guessing at the cost of the user's scrollback position.
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.paused:
+        // `paused` is the marker, not `inactive`: it is the earliest point at
+        // which Android may freeze the process and stop our heartbeat pongs. It
+        // is only an upper bound on when they actually stop (see [_onResumed]).
+        // `inactive` would be worse: it also fires for a pulled-down notification
+        // shade or a permission dialog, where the app keeps answering pings and
+        // the attach is fine, so starting the clock there would re-attach healthy
+        // sockets. `??=` keeps the earliest of a repeated pause.
+        _leftForegroundAt ??= _now();
+      case AppLifecycleState.resumed:
+        _onResumed();
+      // `hidden`/`inactive` are transient steps on the way to and from `paused`,
+      // and `detached` means we're being torn down.
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  /// Back in the foreground: re-open the attach when it is dead, or long enough
+  /// gone that it almost certainly is.
+  ///
+  /// Two triggers. Either the attach already reported detached/error (possibly
+  /// delivered while we were away), which is certain; or we were away longer than
+  /// the server's heartbeat tolerance, which no *silent* attach survives. The
+  /// second is what a half-open socket needs: when the network path vanishes
+  /// without a TCP FIN, no detach frame ever arrives and the UI would otherwise
+  /// sit on a frozen pane that still claims to be attached.
+  ///
+  /// The second trigger is a heuristic, not a proof, because `paused` is not the
+  /// same event as *frozen*: Android does not stop the cdylib's tokio threads at
+  /// `paused`, so they keep answering pings until the cached-app freezer actually
+  /// hits — which can lag by minutes, or never come (a paused-but-visible app in
+  /// legacy split-screen, some OEM/charging configurations). Such a resume
+  /// re-attaches a live socket and costs a scrolled copy-mode position. There is
+  /// no client-observable freeze signal to do better with, and the alternative
+  /// failure — coming back to a permanently dead pane — is the bug being fixed.
+  ///
+  /// A shorter absence deliberately changes nothing: the attach is probably still
+  /// live, and re-attaching spawns a fresh `tmux attach-session` child, so a glance
+  /// at a notification must not cost the user their place in the scrollback.
+  void _onResumed() {
+    final leftAt = _leftForegroundAt;
+    _leftForegroundAt = null;
+    if (_ended) {
+      _connect();
+      return;
+    }
+    final deadAfter = _deadAfter;
+    if (leftAt == null || deadAfter == null) return;
+    if (_now().difference(leftAt) > deadAfter) _connect();
   }
 
   @override
@@ -200,8 +271,21 @@ class _TerminalBodyState extends State<TerminalBody> {
 
   /// Open (or re-open) the WS attach with a fresh attach id. A re-attach replays
   /// tmux's pane, so output simply continues appending.
+  ///
+  /// The outgoing attach is detached explicitly, because cancelling `_sub` alone
+  /// does not stop it: its cdylib registry entry keeps the pump's control sender
+  /// alive, so the pump's `rx.recv()` never ends, and the pump otherwise only
+  /// learns Dart is gone by failing to push an Output frame — which never comes on
+  /// an idle pane, and *never* on the half-open socket the reconnect button exists
+  /// to escape. That left a zombie pump holding the WS open and still answering
+  /// the server's pings, so the server kept its `tmux attach-session` child alive.
+  /// Both callers can now run against a live attach (the always-enabled button, a
+  /// resume past the deadline), so this is no longer a dead-attach-only path.
   void _connect() {
     _sub?.cancel();
+    // A documented no-op for an id that was never attached, which covers both the
+    // initial call from `initState` and an already-ended attach.
+    unawaited(widget.api.terminalDetach(attachId: _attachId));
     _attachId = const Uuid().v4();
     _store?.setActiveTerminalAttach(_attachId);
     setState(() {
@@ -280,7 +364,7 @@ class _TerminalBodyState extends State<TerminalBody> {
   Future<void> _pickAndAttach() async {
     final source = await showModalBottomSheet<_ImageSource>(
       context: context,
-      backgroundColor: AppColors.bgRaised,
+      backgroundColor: CommanderTokens.of(context).canvasRaised,
       builder: (sheetContext) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -318,7 +402,11 @@ class _TerminalBodyState extends State<TerminalBody> {
     String label,
     _ImageSource source,
   ) => ListTile(
-    leading: Icon(icon, color: AppColors.textMuted, size: 20),
+    leading: Icon(
+      icon,
+      color: CommanderTokens.of(sheetContext).textMuted,
+      size: 20,
+    ),
     title: Text(label),
     onTap: () => Navigator.of(sheetContext).pop(source),
   );
@@ -465,6 +553,7 @@ class _TerminalBodyState extends State<TerminalBody> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _meter?.cancel();
     unawaited(widget.api.terminalDetach(attachId: _attachId));
     // Guarded clear: if the wide pane already swapped in another attach (agent↔
@@ -498,9 +587,10 @@ class _TerminalBodyState extends State<TerminalBody> {
     // resizes the pane on a soft keyboard — a known limitation, and a
     // touch-device-only one, since a desktop has no soft keyboard.
     final obscured = MediaQuery.viewInsetsOf(context).bottom;
+    final t = CommanderTokens.of(context);
 
     return ColoredBox(
-      color: AppColors.bgTerminal,
+      color: t.terminalBg,
       child: Column(
         children: [
           // Fixed: the status line stays put while the pane pans beneath it.
@@ -530,10 +620,8 @@ class _TerminalBodyState extends State<TerminalBody> {
                         _terminal,
                         autofocus: true,
                         backgroundOpacity: 1,
-                        theme: _terminalTheme,
-                        textStyle: const TerminalStyle(
-                          fontFamily: AppFonts.mono,
-                        ),
+                        theme: terminalThemeFor(t),
+                        textStyle: TerminalStyle(fontFamily: t.mono),
                         padding: const EdgeInsets.symmetric(
                           horizontal: 14,
                           vertical: 8,
@@ -554,20 +642,23 @@ class _TerminalBodyState extends State<TerminalBody> {
     );
   }
 
-  /// The dot colour reflects the link state: teal while attached, red once the
-  /// attach has ended (reconnect offered), amber while connecting.
+  /// The dot colour reflects the link state: the working accent while attached,
+  /// danger once the attach has ended (reconnect offered), attention while
+  /// connecting.
   Color get _statusColor {
-    if (_ended) return AppColors.red;
-    if (_status.startsWith('attached')) return AppColors.teal;
-    return AppColors.amber;
+    final t = CommanderTokens.of(context);
+    if (_ended) return t.danger;
+    if (_status.startsWith('attached')) return t.working;
+    return t.attention;
   }
 
   Widget _statusBar(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Container(
       padding: const EdgeInsets.only(left: 14, right: 4, top: 4, bottom: 4),
-      decoration: const BoxDecoration(
-        color: AppColors.bgRaised,
-        border: Border(bottom: BorderSide(color: AppColors.borderSubtle)),
+      decoration: BoxDecoration(
+        color: t.canvasRaised,
+        border: Border(bottom: BorderSide(color: t.borderSubtle)),
       ),
       child: Row(
         children: [
@@ -585,12 +676,12 @@ class _TerminalBodyState extends State<TerminalBody> {
               _status,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: AppTheme.mono(size: 10, color: AppColors.textMuted),
+              style: t.meta(size: 10, color: t.textMuted),
             ),
           ),
           Text(
             '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
-            style: AppTheme.mono(size: 10, color: AppColors.textFaint),
+            style: t.meta(size: 10, color: t.textFaint),
           ),
           // Agent attaches only: the server injects the image path into the
           // agent pane, so on a shell attach this would type somewhere the user
@@ -601,24 +692,28 @@ class _TerminalBodyState extends State<TerminalBody> {
               visualDensity: VisualDensity.compact,
               onPressed: _imageBusy || _ended ? null : _attachImage,
               icon: _uploading
-                  ? const SizedBox.square(
+                  ? SizedBox.square(
                       dimension: 18,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: AppColors.textMuted,
+                        color: t.textMuted,
                       ),
                     )
                   : const Icon(Icons.image_outlined, size: 18),
-              color: AppColors.textMuted,
-              disabledColor: AppColors.textDim,
+              color: t.textMuted,
+              disabledColor: t.textDim,
               tooltip: 'Attach image',
             ),
+          // Never gated on [_ended]. A half-open socket — the network path gone
+          // without a TCP FIN, so no detach frame ever arrives — leaves the UI
+          // reading "attached" over a frozen pane, and that is precisely when the
+          // user needs this button. Disabling it there turns a recoverable stall
+          // into a dead end.
           IconButton(
             visualDensity: VisualDensity.compact,
-            onPressed: _ended ? _reconnect : null,
+            onPressed: _reconnect,
             icon: const Icon(Icons.refresh, size: 18),
-            color: AppColors.textMuted,
-            disabledColor: AppColors.textDim,
+            color: t.textMuted,
             tooltip: 'Reconnect',
           ),
         ],
@@ -627,7 +722,7 @@ class _TerminalBodyState extends State<TerminalBody> {
   }
 }
 
-/// The phone (stacked-navigation) terminal screen: a Scaffold titled by the
+/// The phone (stacked-navigation) terminal screen: a [ChromePage] titled by the
 /// session, wrapping a [TerminalBody] with the on-screen modifier bar enabled.
 class TerminalPage extends StatelessWidget {
   final CommanderApi api;
@@ -642,6 +737,10 @@ class TerminalPage extends StatelessWidget {
   final ImagePickerService? imagePicker;
   final ClipboardImageReader? clipboardImages;
 
+  /// Forwarded to [TerminalBody] so a test can drive the foreground-reconnect
+  /// deadline; `null` means [DateTime.now].
+  final DateTime Function()? clock;
+
   const TerminalPage({
     super.key,
     required this.api,
@@ -650,35 +749,29 @@ class TerminalPage extends StatelessWidget {
     this.kind = AttachKind.agent,
     this.imagePicker,
     this.clipboardImages,
+    this.clock,
   });
 
   @override
   Widget build(BuildContext context) {
     final isShell = kind == AttachKind.shell;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          isShell ? '${session.title} · shell' : session.title,
-          overflow: TextOverflow.ellipsis,
-        ),
-      ),
+    return ChromePage(
+      code: '47-T',
+      title: isShell ? '${session.title} · shell' : session.title,
       // The keyboard must not shrink the body: [TerminalBody] insets its own
       // chrome and pans the pane instead, so the remote PTY never sees a resize.
-      resizeToAvoidBottomInset: false,
-      body: SafeArea(
-        // Keep reserving the bottom system chrome even while the keyboard covers
-        // it. Without this, SafeArea's bottom padding collapses to zero when the
-        // keyboard appears and the pane's row count would move with it — the
-        // resize [TerminalBody] exists to avoid.
-        maintainBottomViewPadding: true,
-        child: TerminalBody(
-          api: api,
-          handle: handle,
-          session: session,
-          kind: kind,
-          imagePicker: imagePicker,
-          clipboardImages: clipboardImages,
-        ),
+      // ChromeInsets.pan *is* main's resizeToAvoidBottomInset:false plus
+      // SafeArea(maintainBottomViewPadding: true) — see applyChromeInsets. It
+      // lives in the chrome so LCARS cannot diverge from it.
+      insets: ChromeInsets.pan,
+      body: TerminalBody(
+        api: api,
+        handle: handle,
+        session: session,
+        kind: kind,
+        imagePicker: imagePicker,
+        clipboardImages: clipboardImages,
+        clock: clock,
       ),
     );
   }
@@ -730,13 +823,14 @@ class _ModifierBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     // No SafeArea here: [TerminalBody] already insets the bottom chrome, and a
     // bar whose height changed with the keyboard would change the pane's rows.
     return Container(
       height: 48,
-      decoration: const BoxDecoration(
-        color: AppColors.bgTerminal,
-        border: Border(top: BorderSide(color: AppColors.borderSubtle)),
+      decoration: BoxDecoration(
+        color: t.terminalBg,
+        border: Border(top: BorderSide(color: t.borderSubtle)),
       ),
       child: ListView(
         scrollDirection: Axis.horizontal,
@@ -769,10 +863,11 @@ class _ModifierBar extends StatelessWidget {
   /// tap. Deliberately not a Material button so it matches the deck's flat pills
   /// and stays compact in the horizontal strip.
   Widget _key(BuildContext context, String label, VoidCallback onTap) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3),
       child: Material(
-        color: AppColors.surface,
+        color: t.surface,
         borderRadius: BorderRadius.circular(7),
         child: InkWell(
           onTap: onTap,
@@ -782,14 +877,14 @@ class _ModifierBar extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(7),
-              border: Border.all(color: AppColors.border),
+              border: Border.all(color: t.border),
             ),
             child: Text(
               label,
-              style: AppTheme.mono(
+              style: t.meta(
                 size: 10.5,
                 weight: FontWeight.w600,
-                color: AppColors.textBright,
+                color: t.textBright,
               ),
             ),
           ),

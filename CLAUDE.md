@@ -42,6 +42,7 @@ Corollaries worth knowing before the next split:
 - **Never opportunistically rename anything serde-persisted while moving code.** `config.toml`, `state.json` and `tui.json` shapes must come through untouched by construction. (`config.toml` is never rewritten, so every form its parsers accept is permanently load-bearing — see [Migrations](#migrations).)
 - **A crate leaving core brings or defines its own error type**, and never holds a `#[from]` back into core's. `protocol::paste::ImageRejection` is the precedent: a self-contained error with a hand-written `Display`, so the moved code owes core nothing. `claude_commander_tui::TuiError` is the second: it *does* carry a `Core(claude_commander_core::Error)` variant so the source chain survives, but deliberately without `#[from]`, so every crossing is spelled `.map_err(TuiError::Core)` at the call site. There are two in the whole crate. Functions whose failures are only core's keep returning `claude_commander_core::Result` rather than wrapping for the sake of it.
 - **Cross-crate test scaffolding needs a feature, not `#[cfg(test)]`.** A `cfg(test)` item is invisible to another crate's tests. Core's `test-support` feature exposes `backend::mock::MockBackend` and `api::workspace_snapshot_from_state`; enable it from `[dev-dependencies]` only, so it never reaches a release build.
+- **`cfg!(test)` in core does NOT hold for another crate's tests — and telemetry depended on it.** `telemetry::would_be_enabled` short-circuits on `cfg!(test)`, which is true only while compiling core's *own* test binary. Extracting the frontend therefore made every one of `claude-commander-tui`'s ~826 tests build a live sink and POST `session_start` to the production stream (the extra latency also made timing-sensitive async tests flaky, which is how it was caught — the tests were ~2.5× slower than on main). `would_be_enabled` now also bails under `feature = "test-support"`, so any crate whose tests link core with that feature is inert by construction; `render_tests::telemetry_is_never_live_in_this_crates_tests` pins it against a *default* (telemetry-on) config so the backstop can't be dropped silently. Every fixture that builds a `CommanderService` should ALSO set `config.telemetry.enabled = false` — `test_state`, `create_isolated_config_store` and the TUI's `make_test_app_with_path` all do, each with a guard test. **When adding a crate that tests against core, do both.**
 - **Core cannot intra-doc-link into a downstream crate.** References to `claude_commander_tui::…` in core's docs are plain backticked text on purpose (`backend/mod.rs`, `config/view_mode.rs`, `session/board.rs`); making them links would be a broken-link warning, not a nicety.
 - **`backend/`'s trait side must not grow host-only dependencies.** Splitting `CommanderBackend` out of core is currently not worth it — the trait's *vocabulary* (api DTOs, session types, `comment::Comment`, config, core errors) is what ties `claude-commander-remote` to core, not the trait itself, so freeing it would mean splitting `api.rs` and the error hierarchy for a crate only ever linked beside core. Keeping host-only deps out of the trait's signatures keeps that option open.
 
@@ -118,7 +119,9 @@ Unit tests are co-located in source files (`#[cfg(test)]`). Integration tests in
 
 Both capture **symbols only, not styles** — that's `TestBackend`'s limitation too. Colour and highlighting stay the job of targeted assertions (e.g. `selected_session_row_is_highlighted`). Run `cargo insta review` to accept or update; never blind-accept a diff, because these are the tests that only fail when rendering genuinely changed.
 
-Snapshots are easy to lose by accident: #260 deleted `render_tests.rs` and all 27 snapshots as collateral of removing the preview pane, without saying so, and the orphaned `insta` dependency then looked like dead weight. If a change invalidates a snapshot, re-point it at the new UI — don't delete the file.
+Snapshots are easy to lose by accident, and this repo has the worked example. #260 deleted `render_tests.rs` and all 27 snapshots as collateral of removing the right-hand preview pane, without saying so; the orphaned `insta` dependency then looked like dead weight and was dropped too. #267 promptly restored the pane — so the coverage had been discarded for a change that was itself reverted. All 27 tests are back, and 27 of 27 snapshots reproduce their pre-#260 bytes exactly.
+
+The lesson: **if a change invalidates a snapshot, re-point it at the new UI — don't delete the file.** A deleted snapshot leaves nothing to notice when the UI comes back.
 
 ### Test isolation
 
@@ -155,7 +158,7 @@ When adding or changing config options, hotkeys, or keybindings:
 
 ## Pre-commit hooks
 
-This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and `cargo clippy` on every commit. After cloning, run:
+This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and `cargo clippy` on every commit, and `dart format` (via `client/tool/dart-format.sh`) when the commit touches Dart. After cloning, run:
 
 ```
 pre-commit install

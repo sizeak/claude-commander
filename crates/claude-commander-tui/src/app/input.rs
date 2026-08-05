@@ -1114,8 +1114,8 @@ impl App {
             if self.ui_state.board_state.selected() != Some(pos) {
                 self.ui_state.board_state.select(Some(pos));
                 self.update_selection();
-                self.ui_state.diff_fetch_spawned_at = None;
-                self.spawn_diff_fetch();
+                self.ui_state.preview_update_spawned_at = None;
+                self.spawn_preview_update();
             }
             let cmd = match button {
                 CardButton::Shell => UserCommand::SelectShell,
@@ -1141,8 +1141,8 @@ impl App {
         if self.ui_state.board_state.selected() != Some(pos) {
             self.ui_state.board_state.select(Some(pos));
             self.update_selection();
-            self.ui_state.diff_fetch_spawned_at = None;
-            self.spawn_diff_fetch();
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
         }
 
         if is_double_click {
@@ -1218,8 +1218,8 @@ impl App {
         if self.ui_state.list_state.selected() != Some(idx) {
             self.ui_state.list_state.select(Some(idx));
             self.update_selection();
-            self.ui_state.diff_fetch_spawned_at = None;
-            self.spawn_diff_fetch();
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
         }
 
         if is_double_click {
@@ -1592,18 +1592,22 @@ impl App {
             UserCommand::OpenInEditor => {
                 self.handle_open_in_editor().await;
             }
-            UserCommand::OpenInfo => {
-                // Only meaningful with a session selected (matches OpenInfo's
-                // availability gating); no-op on a sidebar/empty selection.
-                if self.ui_state.selected_session_id.is_some() {
-                    self.ui_state.modal = Modal::Info { scroll: 0 };
-                    // Kick off the enriched-PR + working-tree diff fetches that
-                    // populate the modal; clear the in-flight guard so the diff
-                    // fetch runs even if one fired recently.
-                    self.ui_state.diff_fetch_spawned_at = None;
-                    self.spawn_info_fetch();
-                    self.spawn_diff_fetch();
-                }
+            // Only meaningful with a session selected (matches OpenInfo's
+            // availability gating); no-op on a sidebar/empty selection.
+            UserCommand::OpenInfo if self.ui_state.selected_session_id.is_some() => {
+                self.ui_state.modal = Modal::Info { scroll: 0 };
+                // Opening Info is the discoverable retry for an enriched-PR
+                // fetch that came back empty (before the marker existed, every
+                // reopen retried). Dropping it here keeps the anti-spam property
+                // — the marker still suppresses the per-tick refetch loop while
+                // a surface stays open — without making PR-refresh the only way.
+                self.ui_state.enriched_pr_unavailable = None;
+                // Kick off the enriched-PR + working-tree diff fetches that
+                // populate the modal; clear the in-flight guard so the diff
+                // fetch runs even if one fired recently.
+                self.ui_state.preview_update_spawned_at = None;
+                self.spawn_info_fetch();
+                self.spawn_preview_update();
             }
             UserCommand::OpenPullRequest => {
                 self.handle_open_pull_request().await;
@@ -1612,6 +1616,10 @@ impl App {
                 // Wake every connected backend's PR-status loop; refreshed
                 // results arrive via each backend's change feed.
                 self.refresh_pr_status_all();
+                // This is the retry path for an enriched-PR fetch that came back
+                // empty, so drop the marker suppressing it and re-request.
+                self.ui_state.enriched_pr_unavailable = None;
+                self.spawn_info_fetch();
             }
             UserCommand::AddRemoteServer => {
                 self.handle_add_remote_server();
@@ -1670,6 +1678,26 @@ impl App {
                     self.spawn_ai_summary_if_needed(session_id);
                 }
             }
+            // Right-pane commands are list-view only — the board is full-screen
+            // and draws no right pane, so they would have nothing to act on.
+            UserCommand::TogglePane | UserCommand::TogglePaneReverse
+                if !self.ui_state.view_mode.is_board() =>
+            {
+                let forward = matches!(cmd, UserCommand::TogglePane);
+                self.ui_state.right_pane_view = self
+                    .ui_state
+                    .right_pane_view
+                    .cycled(self.is_project_selected(), forward);
+                // No explicit clear here: `render_right_pane` resets the pane
+                // whenever the effective view changes, which covers this and the
+                // selection-driven swaps a key handler can't see.
+                // Landing on Info needs the enriched-PR / summary fetches that
+                // only run while an Info surface is showing.
+                self.spawn_info_fetch();
+                self.spawn_preview_update();
+            }
+            UserCommand::ShrinkLeftPane => self.resize_left_pane(-2).await,
+            UserCommand::GrowLeftPane => self.resize_left_pane(2).await,
             _ => {}
         }
     }

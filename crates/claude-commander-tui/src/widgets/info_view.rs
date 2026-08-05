@@ -1,9 +1,10 @@
-//! Info modal widget
+//! Info widget
 //!
-//! Displays session metadata, PR details, and AI-generated summaries. The right
-//! pane that used to host this widget was removed with the board rewire; it is
-//! now reconstructed on demand by the Info modal (via
-//! `App::build_session_info_content`).
+//! Displays session metadata, PR details, and AI-generated summaries, or a
+//! project's path/branch/pull status. Two surfaces render it from the same
+//! content (built by `App::build_info_content`): the list views' right-pane
+//! Info tab, and the `i` Info modal — which is the only way to reach it from
+//! the board, where there is no right pane.
 
 use ratatui::{
     buffer::Buffer,
@@ -38,15 +39,27 @@ pub struct InfoSessionData<'a> {
     pub stack_chain: &'a [StackChainEntry],
 }
 
-/// Info modal content — session data, or an empty placeholder.
+/// Data required to render the Info surface for a project row. Projects are
+/// selectable in the list views (and in the board's sidebar), so the Info tab
+/// has to say something useful about them.
+pub struct InfoProjectData {
+    pub name: String,
+    pub repo_path: String,
+    pub main_branch: String,
+    /// When set, the background project-branch pull is currently held back for
+    /// this project. Displayed as a "Pull: " line.
+    pub pull_blocked: Option<String>,
+}
+
+/// Info content — session data, project data, or an empty placeholder.
 ///
-/// A single, short-lived value built once per Info-modal frame and consumed
-/// immediately — never stored in a collection — so the size gap between the
-/// `Session` and `Empty` variants doesn't matter; boxing would only add a
-/// per-frame heap allocation.
+/// A single, short-lived value built once per frame and consumed immediately —
+/// never stored in a collection — so the size gap between the variants doesn't
+/// matter; boxing would only add a per-frame heap allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum InfoContent<'a> {
     Session(InfoSessionData<'a>),
+    Project(InfoProjectData),
     Empty,
 }
 
@@ -85,6 +98,7 @@ impl<'a> InfoView<'a> {
     pub fn build_lines(&self) -> Vec<Line<'static>> {
         match &self.content {
             InfoContent::Session(data) => self.build_session_lines(data),
+            InfoContent::Project(data) => self.build_project_lines(data),
             InfoContent::Empty => vec![Line::from(Span::styled(
                 "Select a session to see info",
                 self.secondary_style(),
@@ -360,6 +374,36 @@ impl<'a> InfoView<'a> {
                 ]));
             }
         }
+    }
+
+    fn build_project_lines(&self, data: &InfoProjectData) -> Vec<Line<'static>> {
+        let label = self.label_style();
+        let value = self.value_style();
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(" Project: ", label),
+                Span::styled(data.name.clone(), value),
+            ]),
+            Line::from(vec![
+                Span::styled(" Path:    ", label),
+                Span::styled(data.repo_path.clone(), value),
+            ]),
+            Line::from(vec![
+                Span::styled(" Branch:  ", label),
+                Span::styled(data.main_branch.clone(), value),
+            ]),
+        ];
+        if let Some(reason) = &data.pull_blocked {
+            lines.push(Line::from(vec![
+                Span::styled(" Pull:    ", label),
+                Span::styled(
+                    format!("\u{26a0} blocked — {reason}"),
+                    Style::default().fg(self.theme.agent_waiting),
+                ),
+            ]));
+        }
+        lines
     }
 
     fn label_style(&self) -> Style {

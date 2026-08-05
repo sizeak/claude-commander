@@ -107,7 +107,8 @@ abstract class ServerListStore {
 class KeyedServerListStore implements ServerListStore {
   final SecretKeyStore _secrets;
   final Uuid _uuid;
-  KeyedServerListStore(this._secrets, {Uuid uuid = const Uuid()}) : _uuid = uuid;
+  KeyedServerListStore(this._secrets, {Uuid uuid = const Uuid()})
+    : _uuid = uuid;
 
   /// The JSON metadata list: `[{id,name,baseUrl}]`.
   static const _kServers = 'servers_v1';

@@ -606,6 +606,7 @@ dependencies = [
  "chrono",
  "claude-commander-protocol",
  "crossterm",
+ "diffgrid",
  "directories",
  "figment",
  "futures",
@@ -959,6 +960,26 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn",
+]
+
+[[package]]
+name = "diffgrid"
+version = "0.1.0"
+source = "git+https://github.com/sizeak/diffgrid?rev=83698a53458868c7c691d89dbb21e89fbc905afa#83698a53458868c7c691d89dbb21e89fbc905afa"
+dependencies = [
+ "diffy",
+ "similar",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "diffy"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10aec8f7f9393bd6a4f2762be0ceb012d3cbe2478987258cc9960de148561914"
+dependencies = [
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -3674,6 +3695,7 @@ dependencies = [
  "claude-commander-core",
  "claude-commander-protocol",
  "claude-commander-test-support",
+ "diffgrid",
  "flutter_rust_bridge",
  "serde_json",
  "tempfile",
@@ -4042,6 +4064,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6505efef05804732ed8a3f2d4f279429eb485bd69d5b0cc6b19cc02005cda16"
 
 [[package]]
 name = "slab"

@@ -33,7 +33,7 @@ use claude_commander_core::session::SessionId;
 use claude_commander_protocol::api::{OperationKind, ProgramInfo};
 use claude_commander_test_support::{create_test_repo, spawn_server, test_state, tmux_available};
 use rust_lib_claude_commander_client::api::mirrors::OperationOutcomeKind;
-use rust_lib_claude_commander_client::api::{registry, review, simple};
+use rust_lib_claude_commander_client::api::{diff, registry, review, simple};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -177,8 +177,7 @@ fn list_create_detail_kill_round_trip() {
         "created session {id} should appear in list_sessions"
     );
 
-    let detail =
-        simple::get_session_detail(fx.handle.clone(), id.clone(), Some(50)).unwrap();
+    let detail = simple::get_session_detail(fx.handle.clone(), id.clone(), Some(50)).unwrap();
     assert!(detail.is_some(), "detail should resolve the full id");
     assert_eq!(detail.unwrap().info.id, id);
 
@@ -213,8 +212,7 @@ fn join_existing_by_prefix() {
     // `SessionId`'s Display is the 8-char prefix a client sees in the UI.
     let prefix = sid.to_string();
 
-    let detail =
-        simple::get_session_detail(fx.handle.clone(), prefix.clone(), Some(20)).unwrap();
+    let detail = simple::get_session_detail(fx.handle.clone(), prefix.clone(), Some(20)).unwrap();
     let detail = detail.expect("an 8-char prefix should resolve the existing session");
     assert!(
         detail.info.id.starts_with(&prefix),
@@ -261,7 +259,9 @@ fn agent_states_snapshot_round_trips() {
     // (0xc03adecc…) is filtered out by the DTO conversion.
     let sentinel = Uuid::from_u128(0xc0_3a_de_cc_00_00_00_00_00_00_00_00_00_00_00_00);
     assert!(
-        snap.states.iter().all(|e| *e.session_id.as_uuid() != sentinel),
+        snap.states
+            .iter()
+            .all(|e| *e.session_id.as_uuid() != sentinel),
         "the commander sentinel must never appear in the flattened states"
     );
 
@@ -400,12 +400,9 @@ fn projects_add_list_branches_and_scan() {
         .iter()
         .find(|p| p.repo_path == fx.repo_path.to_string_lossy())
         .expect("original project present");
-    let branches = simple::list_branches(
-        fx.handle.clone(),
-        original.id.as_uuid().to_string(),
-        false,
-    )
-    .expect("list_branches");
+    let branches =
+        simple::list_branches(fx.handle.clone(), original.id.as_uuid().to_string(), false)
+            .expect("list_branches");
     assert!(
         !branches.is_empty(),
         "a committed repo must have at least one branch"
@@ -515,12 +512,9 @@ fn review_round_trip() {
     );
 
     // -- toggle the file's reviewed mark on --
-    let reviewed = review::toggle_file_reviewed(
-        fx.handle.clone(),
-        id.clone(),
-        "newfile.txt".to_string(),
-    )
-    .expect("toggle_file_reviewed");
+    let reviewed =
+        review::toggle_file_reviewed(fx.handle.clone(), id.clone(), "newfile.txt".to_string())
+            .expect("toggle_file_reviewed");
     assert!(
         reviewed,
         "toggling an un-reviewed file should mark it reviewed"
@@ -547,6 +541,40 @@ fn review_round_trip() {
         "a single fresh comment should apply or defer, not block/no-op"
     );
     assert_eq!(result.count, 1, "exactly one comment should be composed");
+
+    // -- the raw composition reaches the client, and lays out --
+    //
+    // The whole point of shipping `raw`: the client can run the layout engine
+    // itself rather than re-deriving rows from the lossier wire model. Proving
+    // it against a live server is the only place the protocol field, the HTTP
+    // decode and `diff_rows` are exercised together.
+    let snap = review::open_review(fx.handle.clone(), id.clone()).expect("re-open");
+    let raw = snap.raw.clone().expect("the server must ship the raw diff");
+    assert!(
+        raw.contains("+++ b/newfile.txt"),
+        "unexpected raw diff: {raw}"
+    );
+    let file = snap
+        .files
+        .into_iter()
+        .find(|f| f.display_path == "newfile.txt")
+        .expect("newfile.txt is in the diff");
+    let layout = diff::diff_rows(
+        Some(raw),
+        file,
+        diff::DiffLayoutMode::Inline,
+        None,
+        Vec::new(),
+        4,
+    )
+    .expect("diff_rows");
+    let added: Vec<String> = layout
+        .rows
+        .iter()
+        .filter(|r| matches!(r.left.origin, Some(review::ReviewLineOrigin::Addition)))
+        .map(|r| r.left.spans.iter().map(|s| s.text.as_str()).collect())
+        .collect();
+    assert_eq!(added, vec!["hello from test".to_string()]);
 
     // -- an unchanged refresh short-circuits (204 → None) --
     let latest = review::open_review(fx.handle.clone(), id.clone()).unwrap();

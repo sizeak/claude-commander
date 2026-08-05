@@ -15,9 +15,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::app::{centered_rect, confirm_modal_area};
+use crate::app::{centered_rect, confirm_modal_area, pane_tabs};
 use crate::theme::Theme;
-use crate::widgets::TreeList;
+use crate::widgets::{Preview, TreeList};
 use claude_commander_core::git::DiffInfo;
 use claude_commander_core::session::{ProjectId, SessionId, SessionListItem, SessionStatus};
 
@@ -1070,4 +1070,253 @@ fn test_session_list_creating_status() {
         .unwrap();
 
     insta::assert_snapshot!(terminal.backend());
+}
+
+// ── Preview pane (restored with the right-hand pane in #267) ───────
+
+#[test]
+fn test_preview_empty() {
+    let backend = TestBackend::new(60, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("")
+                .block(
+                    Block::default()
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_preview_with_content() {
+    let backend = TestBackend::new(60, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    let content = "$ claude --resume\n\nClaude is thinking...\n\n> I'll help you fix the auth bug.\n> Let me look at the code first.\n\nReading src/auth.rs...";
+
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new(content)
+                .block(
+                    Block::default()
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_preview_scrolled() {
+    let backend = TestBackend::new(60, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    let content = (0..50)
+        .map(|i| format!("Line {}: some content here", i))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new(&content)
+                .block(
+                    Block::default()
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
+                .scroll(20);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_preview_content_replacement_no_clear() {
+    let backend = TestBackend::new(60, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    // Render content A (simulating session 1 selected)
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Session 1 output\nLine 2\nLine 3\nLine 4\nLine 5")
+                .block(
+                    Block::default()
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Render content B WITHOUT clearing (simulating scrolling to session 2)
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Session 2 output\nDifferent content")
+                .block(
+                    Block::default()
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Snapshot should show clean content B with no artifacts from A
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_preview_to_info_view_switch_no_clear() {
+    use crate::widgets::{InfoContent, InfoSessionData, InfoView};
+
+    let backend = TestBackend::new(70, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    // Render Preview pane first
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Preview content here\nLine 2\nLine 3")
+                .block(
+                    Block::default()
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Switch to Info view WITHOUT clearing
+    let diff = DiffInfo::empty();
+    terminal
+        .draw(|frame| {
+            let data = InfoSessionData {
+                title: "test-session".into(),
+                branch: "test-branch".into(),
+                created_at: "2026-04-01 12:00 UTC".into(),
+                status: SessionStatus::Running,
+                program: "claude".into(),
+                worktree_path: "/tmp/wt".into(),
+                diff_info: &diff,
+                pr_number: None,
+                pr_url: None,
+                pr_merged: false,
+                enriched_pr: None,
+                ai_summary: None,
+                summary_key_hint: Some("g".into()),
+                stack_chain: &[],
+            };
+            // `InfoView` lost its `.block()` builder in #260 — the right pane
+            // (and the Info modal) draws the block and renders the view into
+            // `block.inner(...)`. Mirror that so the switch is snapshotted the
+            // way it actually happens.
+            let block = Block::default()
+                .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded);
+            let inner = block.inner(frame.area());
+            frame.render_widget(block, frame.area());
+            frame.render_widget(
+                InfoView::new(InfoContent::Session(data), &theme).scroll(0),
+                inner,
+            );
+        })
+        .unwrap();
+
+    // Snapshot should show clean Info view with no Preview artifacts
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_preview_to_shell_view_switch_no_clear() {
+    let backend = TestBackend::new(60, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    // Render Preview pane first
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Preview content\nWith multiple lines\nOf output")
+                .block(
+                    Block::default()
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Switch to Shell view WITHOUT clearing
+    terminal
+        .draw(|frame| {
+            let shell = Preview::new("$ ls -la\ntotal 42\ndrwxr-xr-x 5 user user 4096")
+                .block(
+                    Block::default()
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 2))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
+                .scroll(0);
+            frame.render_widget(shell, frame.area());
+        })
+        .unwrap();
+
+    // Snapshot should show clean Shell view with no Preview artifacts
+    insta::assert_snapshot!(terminal.backend());
+}
+
+// ── Telemetry must never be live in this crate's tests ─────────────
+
+/// Core's `would_be_enabled` short-circuit is `cfg!(test)`, which is true only
+/// for core's OWN test binary. This crate compiles core as a normal dependency,
+/// so extracting the frontend silently re-enabled telemetry for every test here —
+/// each `App::new` built a live sink and posted `session_start` to the production
+/// stream (the added latency also made timing-sensitive async tests flaky).
+///
+/// The fix is core's `test-support` feature, which this crate enables as a
+/// dev-dependency. This pins it: if that guard is dropped or the dev-dependency
+/// loses the feature, this fails instead of quietly shipping test telemetry.
+///
+/// It asserts on a *default* config — i.e. telemetry nominally on — so it tests
+/// the build-level backstop, not merely a fixture that opts out.
+#[test]
+fn telemetry_is_never_live_in_this_crates_tests() {
+    let nominally_on = claude_commander_core::config::TelemetryConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    assert!(
+        !claude_commander_core::telemetry::would_be_enabled(&nominally_on),
+        "telemetry must be inert when core is built with `test-support`; \
+         otherwise this crate's suite posts events to the live stream"
+    );
 }

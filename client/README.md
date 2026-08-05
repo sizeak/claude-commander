@@ -95,6 +95,17 @@ written to plain shared preferences.
   optional initial prompt.
 - **Live terminal** — WebSocket attach (agent or shell) rendered with the
   `xterm.dart` fork; a desktop pane on wide layouts, a pushed route on phone.
+  Re-attaches on returning to the foreground, since a backgrounded (frozen)
+  process can't answer the server's heartbeat pings and has its attach killed
+  server-side. Only when the attach is *known* dead, though: either it already
+  reported detached/error, or the app was away longer than
+  `protocol::ws::attach_dead_after()` — the deadline no unanswered attach
+  survives, read over the bridge rather than mirrored as a Dart constant. A
+  shorter absence leaves the live socket alone, because re-attaching spawns a
+  fresh `tmux attach-session` child and that loses a scrolled copy-mode view. The
+  status bar's reconnect button is always enabled, so a half-open socket (network
+  path gone without a TCP FIN, so no detach frame ever arrives) is never a dead
+  end.
 - **Image attach** — the terminal status bar's image button (agent attaches only)
   offers the photo library / a file dialog, a camera capture on Android, or a
   clipboard paste; on Linux **Ctrl+V** attaches a clipboard image directly and

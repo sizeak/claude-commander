@@ -354,9 +354,9 @@ mod tests {
 
         let sc = ensure_visible(0, &ranges, 0, row, viewport_h);
         // Row line 10 must sit strictly inside the visible slice's borders:
-        // top border at max(0, sc), bottom border at min(21, sc+7).
+        // top border at sc (unsigned, so never below 0), bottom at min(21, sc+7).
         let line = 10;
-        let top_border = sc.max(0);
+        let top_border = sc;
         let bottom_border = (sc + viewport_h - 1).min(21);
         assert!(
             top_border < line && line < bottom_border,

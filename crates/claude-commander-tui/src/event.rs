@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use claude_commander_core::config::keybindings::{BindableAction, KeyBindings};
 use claude_commander_core::git::{DiffInfo, EnrichedPrInfo};
@@ -90,6 +90,9 @@ pub enum StateUpdate {
     },
     /// Enriched PR info ready from background fetch
     EnrichedPrReady {
+        /// Generation token for the in-flight guard — see
+        /// [`StateUpdate::PreviewReady::spawned_at`].
+        spawned_at: Instant,
         session_id: SessionId,
         info: Option<EnrichedPrInfo>,
     },
@@ -185,12 +188,26 @@ pub enum StateUpdate {
         backend: claude_commander_core::backend::BackendId,
         message: String,
     },
-    /// Diff data ready from a background fetch for the selected session.
-    /// Applied only if that session is still selected (the Info modal is the
-    /// sole consumer). Replaces the old `PreviewReady`, whose per-tick tmux
-    /// preview/shell captures were removed with the right pane.
-    SessionDiffReady {
-        session_id: SessionId,
+    /// Preview / shell / diff data ready from a background fetch, applied only
+    /// if the same thing is still selected. One fetch feeds every consumer: the
+    /// list views' right pane (`preview_content` / `shell_content`) and the Info
+    /// modal's diffstat (`diff_info`) — `backend.preview()` returns all three in
+    /// a single round trip, so splitting them would double the traffic.
+    PreviewReady {
+        /// The value the in-flight guard was set to when this fetch was spawned,
+        /// used as a generation token: the guard is cleared only by the result
+        /// that owns it. Comparing selections instead is not enough — a
+        /// selection can change without a respawn (a `StateUpdate` that shifts
+        /// the cursor), which would strand the guard until its 5s backstop.
+        spawned_at: Instant,
+        /// Selected session at spawn time, or `None` when a project was selected.
+        session_id: Option<SessionId>,
+        /// Selected project at spawn time, or `None` when a session was selected.
+        project_id: Option<ProjectId>,
+        /// Agent-pane capture (empty for a project, which has no agent pane).
+        preview_content: String,
+        /// Shell-pane capture, or a placeholder when no shell session exists.
+        shell_content: String,
         diff_info: Arc<DiffInfo>,
     },
     /// Cascade-merge background task finished (completed, paused on conflict,
@@ -379,6 +396,16 @@ pub enum UserCommand {
     MoveToSection,
     /// Cycle the view: project / sections / stacks / board.
     ToggleViewMode,
+    /// Switch the list views' right pane between Preview and Shell.
+    TogglePane,
+    /// Switch the right pane the other way. With two tabs this is the same
+    /// toggle; kept as its own command so `BackTab` stays bindable and reads
+    /// symmetrically with [`Self::TogglePane`].
+    TogglePaneReverse,
+    /// Narrow the session list (move the pane divider left).
+    ShrinkLeftPane,
+    /// Widen the session list (move the pane divider right).
+    GrowLeftPane,
     /// Collapse or expand the section containing the selected item.
     ToggleSection,
 }
@@ -454,6 +481,8 @@ impl UserCommand {
             | UserCommand::PageDown
             | UserCommand::ListPageUp
             | UserCommand::ListPageDown
+            | UserCommand::ShrinkLeftPane
+            | UserCommand::GrowLeftPane
             | UserCommand::Confirm
             | UserCommand::Cancel
             | UserCommand::Backspace
@@ -484,6 +513,7 @@ impl UserCommand {
             UserCommand::MoveToSection => Some("ui.move_to_section"),
             UserCommand::ToggleViewMode => Some("ui.toggle_view_mode"),
             UserCommand::ToggleSection => Some("ui.toggle_section"),
+            UserCommand::TogglePane | UserCommand::TogglePaneReverse => Some("ui.toggle_pane"),
         }
     }
 }
@@ -539,6 +569,10 @@ impl From<BindableAction> for UserCommand {
             BindableAction::MoveToSection => Self::MoveToSection,
             BindableAction::ToggleViewMode => Self::ToggleViewMode,
             BindableAction::ToggleSection => Self::ToggleSection,
+            BindableAction::TogglePane => Self::TogglePane,
+            BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
+            BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
+            BindableAction::GrowLeftPane => Self::GrowLeftPane,
             BindableAction::AddRemoteServer => Self::AddRemoteServer,
             BindableAction::RemoveRemoteServer => Self::RemoveRemoteServer,
         }
@@ -813,6 +847,43 @@ mod tests {
         assert!(matches!(
             UserCommand::from_key(key, &b),
             Some(UserCommand::TextInput('a'))
+        ));
+    }
+
+    #[test]
+    fn test_pane_resize_keys() {
+        let b = kb();
+
+        // `<` / `>` are shifted characters, and terminals disagree on whether
+        // they also report the SHIFT modifier — both forms must bind.
+        for mods in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+            assert!(
+                matches!(
+                    UserCommand::from_key(KeyEvent::new(KeyCode::Char('<'), mods), &b),
+                    Some(UserCommand::ShrinkLeftPane)
+                ),
+                "`<` must shrink the left pane (mods={mods:?})"
+            );
+            assert!(
+                matches!(
+                    UserCommand::from_key(KeyEvent::new(KeyCode::Char('>'), mods), &b),
+                    Some(UserCommand::GrowLeftPane)
+                ),
+                "`>` must grow the left pane (mods={mods:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tab_toggles_the_right_pane() {
+        let b = kb();
+        assert!(matches!(
+            UserCommand::from_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &b),
+            Some(UserCommand::TogglePane)
+        ));
+        assert!(matches!(
+            UserCommand::from_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &b),
+            Some(UserCommand::TogglePaneReverse)
         ));
     }
 

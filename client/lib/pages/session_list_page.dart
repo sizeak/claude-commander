@@ -1,26 +1,35 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
+import '../chrome/chrome_forms.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
 import '../theme/agent_glyphs.dart';
+import '../theme/tokens.dart';
 import '../util/format.dart';
 import '../util/session_filter.dart';
-import '../widgets/brand_mark.dart';
 import '../widgets/session_chips.dart';
 import 'create_session_page.dart';
 import 'programs_page.dart';
 import 'projects_page.dart';
 import 'servers_page.dart';
+import 'settings_page.dart';
 import 'session_detail_page.dart';
 
 /// Which slice of the sessions the list is showing: everything (grouped by
 /// server → project) or the active ones in MRU order (most recently attached,
 /// or created for one not yet attached).
-enum _SessionView { recent, all }
+enum _SessionView {
+  recent('Recent'),
+  all('All');
+
+  const _SessionView(this.label);
+
+  /// The slice's caption. LCARS uppercases it.
+  final String label;
+}
 
 /// A one-tap "attention" filter layered on top of the search box: the sessions
 /// that need input, the ones actively working, and the ones with an open PR
@@ -41,11 +50,12 @@ bool _isWorking(CommanderStore store, SessionInfo s) =>
 bool _isReview(SessionInfo s) =>
     s.prNumber != null && s.prState == PrState.open;
 
-bool _matchesQuick(_Quick q, CommanderStore store, SessionInfo s) => switch (q) {
-  _Quick.needsInput => _isNeedsInput(store, s),
-  _Quick.working => _isWorking(store, s),
-  _Quick.review => _isReview(s),
-};
+bool _matchesQuick(_Quick q, CommanderStore store, SessionInfo s) =>
+    switch (q) {
+      _Quick.needsInput => _isNeedsInput(store, s),
+      _Quick.working => _isWorking(store, s),
+      _Quick.review => _isReview(s),
+    };
 
 /// Whether a server's base URL points at the local machine (drives the
 /// `local` / `remote` tag in the server node header). Compares the parsed
@@ -58,10 +68,11 @@ bool _isLocalServer(String baseUrl) {
       host == '[::1]';
 }
 
-/// The aggregated session list — layout-agnostic (no Scaffold, no route). A
-/// pinned header carries a live search box (fuzzy-filtering the list in place),
-/// a Recent/All toggle, and a row of quick-filter chips; below it the body is
-/// either the servers' sessions grouped by project (All) or a flat, cross-server
+/// The aggregated session list — layout-agnostic (no Scaffold, no route). It
+/// describes itself to the chrome as a [ChromeViewRail]: a live search box
+/// (fuzzy-filtering the list in place) as its filter, Recent/All as its slices,
+/// and settings as its action — over a body of quick-filter chips and either the
+/// servers' sessions grouped by project (All) or a flat, cross-server
 /// most-recently-attached list (Recent). Enumerates the servers from the
 /// [WorkspaceStore]; in All mode each server section re-provides its own
 /// [CommanderStoreScope] so per-server consumers (detail, cascade banner) keep
@@ -75,9 +86,11 @@ class SessionListBody extends StatefulWidget {
   /// Invoked when a session row is tapped, with the server that owns it.
   final void Function(CommanderStore store, SessionInfo session) onSelect;
 
-  /// Whether to render the branded "Fleet" header (BrandMark + counts + a
-  /// settings button). The phone [PhoneShell] turns this on; the wide layout's
-  /// rail supplies its own header and footer, so it leaves this off.
+  /// Whether the view frames itself with a [ChromeViewRail] — the branded "Fleet"
+  /// header in Mission Control, the deck's elbow rail in LCARS. The phone
+  /// [PhoneShell] turns this on; the wide layout's own chrome titles the fleet
+  /// column and carries the nav, so it leaves this off and gets the controls
+  /// alone.
   final bool showFleetHeader;
 
   const SessionListBody({
@@ -156,151 +169,113 @@ class _SessionListBodyState extends State<SessionListBody> {
         // this needs no rebuild of its own.
         _quick = _liveQuick(needs: needs, working: working, review: review);
 
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (widget.showFleetHeader)
-              _FleetHeader(
-                workspace: workspace,
-                active: active,
-                total: total,
-                serverCount: servers.length,
-              ),
-            _buildControls(needs: needs, working: working, review: review),
-            // With several servers each group header carries its own connection
-            // dot; a lone server has no group header (nor, in the phone shell,
-            // an AppBar), so surface its connection state here when it isn't
-            // healthy — otherwise a degraded/reconnecting sole server is silent.
-            if (servers.length == 1 &&
-                servers.single.connection.kind != ConnectionStateKind.connected)
-              _ConnectionStrip(connection: servers.single.connection),
-            Expanded(
-              child: RefreshIndicator(
-                onRefresh: workspace.refreshAll,
-                child: _view == _SessionView.recent
-                    ? _buildRecent(context, servers)
-                    : _buildAll(servers, multi),
-              ),
+        // Everything under the controls, shared by both framings below: it ends
+        // in an `Expanded`, so it is only ever spread into a `Column`.
+        final tail = <Widget>[
+          // The chips sat inside the controls column's own 16px inset; they keep
+          // it here so the row lines up with the search box either way.
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _quickChips(needs: needs, working: working, review: review),
+          ),
+          // With several servers each group header carries its own connection
+          // dot; a lone server has no group header (nor, in the phone shell,
+          // an AppBar), so surface its connection state here when it isn't
+          // healthy — otherwise a degraded/reconnecting sole server is silent.
+          if (servers.length == 1 &&
+              servers.single.connection.kind != ConnectionStateKind.connected)
+            _ConnectionStrip(connection: servers.single.connection),
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: workspace.refreshAll,
+              child: _view == _SessionView.recent
+                  ? _buildRecent(context, servers)
+                  : _buildAll(servers, multi),
             ),
-          ],
+          ),
+        ];
+
+        if (!widget.showFleetHeader) {
+          // The wide shell's fleet pane: its own chrome already titles the column
+          // and carries the nav, so the view adds controls only.
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ChromeField(_fieldSpec()),
+                    const SizedBox(height: 9),
+                    ChromeSegmented(_sliceSpec()),
+                  ],
+                ),
+              ),
+              ...tail,
+            ],
+          );
+        }
+
+        return ChromeViewRail(
+          ChromeViewRailSpec(
+            code: '47-A',
+            title: 'Fleet',
+            subtitle:
+                '$active active · $total total · ${servers.length} '
+                'server${servers.length == 1 ? '' : 's'}',
+            actions: [
+              ChromeButtonAction(
+                icon: Icons.settings,
+                label: 'Settings',
+                onPressed: () => openSettings(context),
+              ),
+            ],
+            filter: _fieldSpec(),
+            slices: _sliceSpec(),
+            body: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: tail,
+            ),
+          ),
         );
       },
     );
   }
 
-  /// The search box, the Recent/All segmented toggle with a mode indicator, and
-  /// the quick-filter chip row.
-  Widget _buildControls({
-    required int needs,
-    required int working,
-    required int review,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          TextField(
-            controller: _search,
-            onChanged: _setQuery,
-            textInputAction: TextInputAction.search,
-            style: const TextStyle(fontSize: 13.5, color: AppColors.text),
-            decoration: InputDecoration(
-              isDense: true,
-              prefixIcon: const Icon(Icons.search, size: 18),
-              prefixIconColor: AppColors.textFaint,
-              hintText: 'Filter by name, branch, program…',
-              suffixIcon: _search.text.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.clear, size: 18),
-                      tooltip: 'Clear',
-                      onPressed: () {
-                        _search.clear();
-                        _setQuery('');
-                      },
-                    ),
-            ),
-          ),
-          const SizedBox(height: 9),
-          _segmented(),
-          _quickChips(needs: needs, working: working, review: review),
-        ],
-      ),
-    );
-  }
+  /// The live search box. The clear affordance keys off the controller's own text
+  /// rather than [_query], so a whitespace-only query (which trims to empty) can
+  /// still be cleared.
+  ChromeFieldSpec _fieldSpec() => ChromeFieldSpec(
+    controller: _search,
+    icon: Icons.search,
+    hint: 'Filter by name, branch, program…',
+    onChanged: _setQuery,
+    textInputAction: TextInputAction.search,
+    onClear: _search.text.isEmpty
+        ? null
+        : () {
+            _search.clear();
+            _setQuery('');
+          },
+  );
 
-  Widget _segmented() {
-    return Row(
-      children: [
-        Expanded(
-          child: Container(
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(9),
-              border: Border.all(color: AppColors.border),
-            ),
-            padding: const EdgeInsets.all(3),
-            child: Row(
-              children: [
-                _segment('Recent', _SessionView.recent),
-                _segment('All', _SessionView.all),
-              ],
-            ),
-          ),
+  /// The Recent/All slices, noting how the active one is ordered.
+  ChromeSegmentedSpec _sliceSpec() => ChromeSegmentedSpec(
+    segments: [
+      for (final view in _SessionView.values)
+        ChromeSegment(
+          label: view.label,
+          selected: _view == view,
+          onTap: () => setState(() => _view = view),
         ),
-        const SizedBox(width: 9),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(9),
-            border: Border.all(color: AppColors.border),
-          ),
-          child: Text(
-            _view == _SessionView.recent ? '↓ recency' : 'grouped',
-            style: AppTheme.mono(
-              size: 10,
-              weight: FontWeight.w600,
-              color: AppColors.textBright,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _segment(String label, _SessionView view) {
-    final selected = _view == view;
-    return Expanded(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _view = view),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          decoration: selected
-              ? BoxDecoration(
-                  color: AppColors.surfaceSel,
-                  borderRadius: BorderRadius.circular(6),
-                )
-              : null,
-          child: Text(
-            label,
-            textAlign: TextAlign.center,
-            style: AppTheme.mono(
-              size: 11,
-              weight: FontWeight.w600,
-              color: selected ? AppColors.text : AppColors.textMuted,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+    ],
+    note: _view == _SessionView.recent ? '↓ recency' : 'grouped',
+  );
 
   /// The quick-filter chip row. Only chips with a non-zero count show, so a
-  /// filter never dead-ends on an empty set. The needs-input chip is always
-  /// amber-tinted (it's the one that wants attention).
+  /// filter never dead-ends on an empty set. The needs-input chip always takes
+  /// the attention tint (it's the one that wants attention).
   Widget _quickChips({
     required int needs,
     required int working,
@@ -396,11 +371,14 @@ class _SessionListBodyState extends State<SessionListBody> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 2, 12, 12),
       children: [
-        for (final (store, session) in pairs)
-          _RecentTile(
+        // One flat run, so the position is the index in the whole list.
+        for (final (i, (store, session)) in pairs.indexed)
+          _recentRow(
+            context,
             store: store,
             session: session,
             selected: session.id == widget.selectedId,
+            position: _rowPosition(i, pairs.length),
             onTap: () => widget.onSelect(store, session),
           ),
       ],
@@ -429,7 +407,7 @@ class _SessionListBodyState extends State<SessionListBody> {
         icon: Icons.cloud_off,
         text: store.error.toString(),
         action: ('Retry', store.retry),
-        color: AppColors.red,
+        color: CommanderTokens.of(context).danger,
       );
     }
     if (_query.isNotEmpty || _quick != null) {
@@ -439,78 +417,10 @@ class _SessionListBodyState extends State<SessionListBody> {
   }
 }
 
-/// The branded Fleet header: the [BrandMark], a "Fleet" title, a mono line of
-/// aggregate counts, and a settings button that opens the shared [SettingsMenu].
-/// Shown only in the phone shell (the wide/legacy AppBar carries these instead).
-class _FleetHeader extends StatelessWidget {
-  final WorkspaceStore workspace;
-  final int active;
-  final int total;
-  final int serverCount;
-
-  const _FleetHeader({
-    required this.workspace,
-    required this.active,
-    required this.total,
-    required this.serverCount,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
-      child: Row(
-        children: [
-          const BrandMark(size: 32),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Fleet',
-                  style: TextStyle(
-                    fontSize: 23,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.4,
-                    color: AppColors.text,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '$active active · $total total · $serverCount '
-                  'server${serverCount == 1 ? '' : 's'}',
-                  style: AppTheme.mono(size: 10.5),
-                ),
-              ],
-            ),
-          ),
-          SettingsMenu(
-            workspace: workspace,
-            button: Container(
-              width: 34,
-              height: 34,
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.border),
-              ),
-              child: const Icon(
-                Icons.settings,
-                size: 16,
-                color: AppColors.textMuted,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// A tappable quick-filter pill. Selected fills with its active colour (amber
-/// for the needs-input chip, accent otherwise); an unselected needs-input chip
-/// keeps a faint amber tint, other unselected chips are a neutral surface pill.
+/// A tappable quick-filter pill. Selected fills with its active colour (the
+/// attention tint for the needs-input chip, the primary accent otherwise); an
+/// unselected needs-input chip keeps a faint attention tint, other unselected
+/// chips are a neutral surface pill.
 class _QuickChip extends StatelessWidget {
   final String label;
   final bool selected;
@@ -526,20 +436,21 @@ class _QuickChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final active = amber ? AppColors.amber : AppColors.accent;
+    final t = CommanderTokens.of(context);
+    final active = amber ? t.attention : t.primary;
     final Color bg, borderColor, textColor;
     if (selected) {
       bg = active.withValues(alpha: 0.2);
       borderColor = active.withValues(alpha: 0.7);
-      textColor = amber ? AppColors.amberText : AppColors.accentSoft;
+      textColor = amber ? t.attentionOn : t.primarySoft;
     } else if (amber) {
-      bg = AppColors.amber.withValues(alpha: 0.14);
-      borderColor = AppColors.amber.withValues(alpha: 0.4);
-      textColor = AppColors.amberText;
+      bg = t.attention.withValues(alpha: 0.14);
+      borderColor = t.attention.withValues(alpha: 0.4);
+      textColor = t.attentionOn;
     } else {
-      bg = AppColors.surface;
-      borderColor = AppColors.border;
-      textColor = AppColors.textMuted;
+      bg = t.surface;
+      borderColor = t.border;
+      textColor = t.textMuted;
     }
     return Material(
       color: Colors.transparent,
@@ -556,11 +467,7 @@ class _QuickChip extends StatelessWidget {
           ),
           child: Text(
             label,
-            style: AppTheme.mono(
-              size: 10,
-              weight: FontWeight.w600,
-              color: textColor,
-            ),
+            style: t.meta(size: 10, weight: FontWeight.w600, color: textColor),
           ),
         ),
       ),
@@ -621,7 +528,7 @@ class _ServerSection extends StatelessWidget {
             icon: Icons.cloud_off,
             text: store.error.toString(),
             action: ('Retry', store.retry),
-            color: AppColors.red,
+            color: CommanderTokens.of(context).danger,
           ),
         ];
       }
@@ -655,14 +562,20 @@ class _ServerSection extends StatelessWidget {
         )
       else
         for (final group in groups) ...[
-          _ProjectHeader(name: group.project.name, count: group.sessions.length),
-          for (final session in group.sessions)
+          ChromeEyebrow(
+            '${group.project.name.toUpperCase()} · ${group.sessions.length}',
+          ),
+          // Each project group is its own run, so a row's position is its index
+          // within the group rather than within the whole server section.
+          for (final (i, session) in group.sessions.indexed)
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
-              child: _GroupedTile(
+              child: _groupedRow(
+                context,
                 store: store,
                 session: session,
                 selected: session.id == selectedId,
+                position: _rowPosition(i, group.sessions.length),
                 onTap: () => onSelect(store, session),
               ),
             ),
@@ -776,57 +689,10 @@ Future<void> openProjects(
   ).push(MaterialPageRoute(builder: (_) => ProjectsPage(store: store)));
 }
 
-/// True when at least one server has a live handle (per-server actions need one).
-bool _anyConnected(WorkspaceStore workspace) =>
-    workspace.servers.any((s) => s.handle != null);
-
-/// The settings menu shared by both shells: manage servers, plus the per-server
-/// projects/programs editors (which prompt for a server when more than one is
-/// configured). Renders as a plain settings icon by default; pass [button] to
-/// substitute a bespoke trigger (the Fleet header's rounded ⚙ tile).
-class SettingsMenu extends StatelessWidget {
-  final WorkspaceStore workspace;
-
-  /// An optional custom trigger widget. When null the menu shows the default
-  /// settings icon.
-  final Widget? button;
-
-  const SettingsMenu({super.key, required this.workspace, this.button});
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = _anyConnected(workspace);
-    return PopupMenuButton<String>(
-      icon: button == null ? const Icon(Icons.settings) : null,
-      tooltip: 'Settings',
-      position: PopupMenuPosition.under,
-      onSelected: (value) {
-        switch (value) {
-          case 'servers':
-            openServers(context, workspace);
-          case 'projects':
-            openProjects(context, workspace);
-          case 'programs':
-            openPrograms(context, workspace);
-        }
-      },
-      itemBuilder: (context) => [
-        const PopupMenuItem(value: 'servers', child: Text('Servers')),
-        PopupMenuItem(
-          value: 'projects',
-          enabled: enabled,
-          child: const Text('Projects'),
-        ),
-        PopupMenuItem(
-          value: 'programs',
-          enabled: enabled,
-          child: const Text('Programs'),
-        ),
-      ],
-      child: button,
-    );
-  }
-}
+/// Opens the [SettingsPage].
+void openSettings(BuildContext context) => Navigator.of(
+  context,
+).push(MaterialPageRoute(builder: (_) => const SettingsPage()));
 
 /// A slim in-body status strip for the lone-server case, shown while connecting
 /// or degraded (a healthy connection needs no chrome). Rendered by
@@ -839,16 +705,17 @@ class _ConnectionStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final (label, color) = switch (connection.kind) {
       // The call site only renders this strip when kind != connected, so this
       // arm is for exhaustiveness — the strip never shows for a healthy server.
-      ConnectionStateKind.connected => ('Connected', AppColors.teal),
-      ConnectionStateKind.connecting => ('Connecting…', AppColors.amber),
+      ConnectionStateKind.connected => ('Connected', t.working),
+      ConnectionStateKind.connecting => ('Connecting…', t.attention),
       ConnectionStateKind.degraded => (
         connection.reason.isEmpty
             ? 'Connection degraded'
             : 'Degraded: ${connection.reason}',
-        AppColors.red,
+        t.danger,
       ),
     };
     return Container(
@@ -873,11 +740,7 @@ class _ConnectionStrip extends StatelessWidget {
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: AppTheme.mono(
-                size: 10.5,
-                weight: FontWeight.w600,
-                color: color,
-              ),
+              style: t.meta(size: 10.5, weight: FontWeight.w600, color: color),
             ),
           ),
         ],
@@ -935,27 +798,28 @@ class _CascadeBannerState extends State<CascadeBanner> {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AppColors.amber.withValues(alpha: 0.09),
+        color: t.held.withValues(alpha: 0.09),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.amber.withValues(alpha: 0.4)),
+        border: Border.all(color: t.held.withValues(alpha: 0.4)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.pause_circle_outline, color: AppColors.amber),
+              Icon(Icons.pause_circle_outline, color: t.held),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   'Cascade paused — awaiting a decision',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                    color: AppColors.amberText,
-                  ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(color: t.attentionOn),
                 ),
               ),
             ],
@@ -992,19 +856,20 @@ class _ServerHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final conn = store.connection;
     final (dotColor, note, noteColor, degraded) = switch (conn.kind) {
-      ConnectionStateKind.connected => (AppColors.teal, null, null, false),
+      ConnectionStateKind.connected => (t.working, null, null, false),
       ConnectionStateKind.connecting => (
-        AppColors.amber,
+        t.attention,
         'connecting…',
-        AppColors.amberText,
+        t.attentionOn,
         false,
       ),
       ConnectionStateKind.degraded => (
-        AppColors.idle,
+        t.idle,
         conn.reason.isEmpty ? 'unreachable' : conn.reason,
-        AppColors.red,
+        t.danger,
         true,
       ),
     };
@@ -1014,8 +879,8 @@ class _ServerHeader extends StatelessWidget {
       opacity: degraded ? 0.6 : 1,
       child: Container(
         padding: const EdgeInsets.fromLTRB(4, 10, 8, 8),
-        decoration: const BoxDecoration(
-          border: Border(bottom: BorderSide(color: AppColors.divider)),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: t.divider)),
         ),
         child: Row(
           children: [
@@ -1036,10 +901,10 @@ class _ServerHeader extends StatelessWidget {
                 store.config.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: AppColors.text,
+                  color: t.text,
                 ),
               ),
             ),
@@ -1049,10 +914,7 @@ class _ServerHeader extends StatelessWidget {
               note ?? '$count · $tag',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: AppTheme.mono(
-                size: 10,
-                color: noteColor ?? AppColors.textMuted,
-              ),
+              style: t.meta(size: 10, color: noteColor ?? t.textMuted),
             ),
           ],
         ),
@@ -1077,16 +939,17 @@ class _InlineNote extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       child: Column(
         children: [
-          Icon(icon, color: color ?? AppColors.textFaint),
+          Icon(icon, color: color ?? t.textFaint),
           const SizedBox(height: 8),
           Text(
             text,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: AppColors.textMuted),
+            style: TextStyle(color: t.textMuted),
           ),
           if (action != null) ...[
             const SizedBox(height: 8),
@@ -1102,192 +965,98 @@ class _InlineNote extends StatelessWidget {
   }
 }
 
-/// A subtle project sub-header (the deck's `GENIO · 3` eyebrow) naming the
-/// project a run of session tiles belongs to and how many it holds.
-class _ProjectHeader extends StatelessWidget {
-  final String name;
-  final int count;
-  const _ProjectHeader({required this.name, required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 10, 12, 6),
-      child: Text(
-        '${name.toUpperCase()} · $count',
-        style: AppTheme.eyebrow(),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-    );
-  }
+/// Where a row sits in a run of [count] rows. LCARS rounds a run's outer
+/// corners so it reads as one bracketed cluster; Mission Control ignores it.
+ChromeRowPosition _rowPosition(int index, int count) {
+  if (count == 1) return ChromeRowPosition.only;
+  if (index == 0) return ChromeRowPosition.first;
+  if (index == count - 1) return ChromeRowPosition.last;
+  return ChromeRowPosition.middle;
 }
 
-/// A dense MRU row for the Recent tab: the state glyph, the title, a mono
-/// `state · project · server` subtitle, and a trailing PR badge + relative age.
-/// Divider-ruled rather than carded, matching the deck's flat recents list.
-class _RecentTile extends StatelessWidget {
-  final CommanderStore store;
-  final SessionInfo session;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _RecentTile({
-    required this.store,
-    required this.session,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final descriptor = sessionDescriptor(
-      session,
-      store.agentStateFor(session.id),
-    );
-    final waiting = descriptor.color == AppColors.amber;
-    final subtitle =
-        '${descriptor.label} · ${session.projectName} · ${store.config.name}';
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 9),
-          decoration: BoxDecoration(
-            color: selected ? AppColors.surfaceSel : null,
-            border: const Border(
-              bottom: BorderSide(color: AppColors.divider),
-            ),
-          ),
-          child: Row(
-            children: [
-              SessionGlyph(descriptor),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      session.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.text,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: AppTheme.mono(
-                        size: 10,
-                        color: waiting
-                            ? AppColors.amberText
-                            : AppColors.textMuted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (session.prNumber != null) ...[
+/// A dense MRU row for the Recent tab: the state glyph, the title, a
+/// `state · project · server` metadata line, and a trailing PR badge + relative
+/// age.
+///
+/// The subtitle is load-bearing beyond its content: it is what selects Mission
+/// Control's divider-ruled row shape over its carded one, so this row always
+/// passes one.
+Widget _recentRow(
+  BuildContext context, {
+  required CommanderStore store,
+  required SessionInfo session,
+  required bool selected,
+  required ChromeRowPosition position,
+  required VoidCallback onTap,
+}) {
+  final t = CommanderTokens.of(context);
+  final descriptor = sessionDescriptor(
+    session,
+    store.agentStateFor(session.id),
+  );
+  final age = relativeAge(session.lastAttachedAt ?? session.createdAt);
+  final pr = session.prNumber;
+  return ChromeListRow(
+    ChromeListRowSpec(
+      title: session.title,
+      subtitle:
+          '${descriptor.label} · ${session.projectName} · ${store.config.name}',
+      tone: descriptor.tone,
+      glyph: SessionGlyph(descriptor),
+      number: lcarsRowNumber(session.id),
+      selected: selected,
+      position: position,
+      onTap: onTap,
+      // This row wants a PR badge *and* the age, but `trailingWidget`
+      // supersedes `trailing` rather than sitting beside it — so when there is
+      // a PR the pair is composed here instead. The gap and the age's style are
+      // the ones the chrome's own trailing slot uses, which is what keeps a PR
+      // row and a PR-less one identical apart from the badge. Dropping the age
+      // instead would have been a visible change to Mission Control.
+      trailing: pr == null ? age : null,
+      trailingWidget: pr == null
+          ? null
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                prChip(context, pr, session.prState),
                 const SizedBox(width: 8),
-                prChip(context, session.prNumber!, session.prState),
+                Text(age, style: t.meta(size: 10, color: t.textFaint)),
               ],
-              const SizedBox(width: 8),
-              Text(
-                relativeAge(session.lastAttachedAt ?? session.createdAt),
-                style: AppTheme.mono(size: 10, color: AppColors.textFaint),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+            ),
+    ),
+  );
 }
 
-/// A carded session row for the grouped All view: the state glyph, the title,
-/// and a trailing PR badge (or the state word when there's no PR). Selected rows
-/// tint accent; sessions waiting for input tint amber — both pull the eye to the
-/// row that needs it.
-class _GroupedTile extends StatelessWidget {
-  final CommanderStore store;
-  final SessionInfo session;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _GroupedTile({
-    required this.store,
-    required this.session,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final descriptor = sessionDescriptor(
-      session,
-      store.agentStateFor(session.id),
-    );
-    final waiting = descriptor.color == AppColors.amber;
-    final Color bg, borderColor;
-    if (selected) {
-      bg = AppColors.accent.withValues(alpha: 0.1);
-      borderColor = AppColors.accent.withValues(alpha: 0.5);
-    } else if (waiting) {
-      bg = AppColors.amber.withValues(alpha: 0.09);
-      borderColor = AppColors.amber.withValues(alpha: 0.45);
-    } else {
-      bg = AppColors.surface;
-      borderColor = AppColors.border;
-    }
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: borderColor),
-          ),
-          child: Row(
-            children: [
-              SessionGlyph(descriptor, width: 12),
-              const SizedBox(width: 9),
-              Expanded(
-                child: Text(
-                  session.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.text,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (session.prNumber != null)
-                prChip(context, session.prNumber!, session.prState)
-              else
-                Text(
-                  descriptor.label,
-                  style: AppTheme.mono(
-                    size: 10,
-                    color: waiting ? AppColors.amberText : AppColors.textMuted,
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+/// A session row for the grouped All view: the state glyph, the title, and a
+/// trailing PR badge (or the state word when there's no PR).
+///
+/// Deliberately **no subtitle**: that is what selects Mission Control's carded
+/// row shape. See [_recentRow].
+Widget _groupedRow(
+  BuildContext context, {
+  required CommanderStore store,
+  required SessionInfo session,
+  required bool selected,
+  required ChromeRowPosition position,
+  required VoidCallback onTap,
+}) {
+  final descriptor = sessionDescriptor(
+    session,
+    store.agentStateFor(session.id),
+  );
+  final pr = session.prNumber;
+  return ChromeListRow(
+    ChromeListRowSpec(
+      title: session.title,
+      tone: descriptor.tone,
+      glyph: SessionGlyph(descriptor, width: 12),
+      number: lcarsRowNumber(session.id),
+      selected: selected,
+      position: position,
+      onTap: onTap,
+      trailing: pr == null ? descriptor.label : null,
+      trailingWidget: pr == null ? null : prChip(context, pr, session.prState),
+    ),
+  );
 }

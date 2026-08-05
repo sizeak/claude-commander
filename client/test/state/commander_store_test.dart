@@ -68,78 +68,87 @@ void main() {
     expect(store.handle, isNotNull);
   });
 
-  test('connect() acquires the handle and populates workspace + agent states', () async {
-    api.connectServerResponse = 'handle-1';
-    api.listSessionsResponse = [sessionInfo(id: id, title: 'Alpha')];
-    api.agentStatesResponse = statesWith(AgentState.working);
+  test(
+    'connect() acquires the handle and populates workspace + agent states',
+    () async {
+      api.connectServerResponse = 'handle-1';
+      api.listSessionsResponse = [sessionInfo(id: id, title: 'Alpha')];
+      api.agentStatesResponse = statesWith(AgentState.working);
 
-    final store = build();
-    addTearDown(store.dispose);
-    await store.connect();
+      final store = build();
+      addTearDown(store.dispose);
+      await store.connect();
 
-    expect(store.handle, 'handle-1');
-    expect(store.sessions.map((s) => s.title), ['Alpha']);
-    expect(store.agentStateFor(id), AgentState.working);
-    expect(store.commanderRunning, isTrue);
-    expect(store.loading, isFalse);
-    expect(store.error, isNull);
-    // The feeds were subscribed with the acquired handle.
-    expect(api.lastCall('changeFeed')!.args['handle'], 'handle-1');
-    expect(api.lastCall('connectionFeed')!.args['handle'], 'handle-1');
-  });
+      expect(store.handle, 'handle-1');
+      expect(store.sessions.map((s) => s.title), ['Alpha']);
+      expect(store.agentStateFor(id), AgentState.working);
+      expect(store.commanderRunning, isTrue);
+      expect(store.loading, isFalse);
+      expect(store.error, isNull);
+      // The feeds were subscribed with the acquired handle.
+      expect(api.lastCall('changeFeed')!.args['handle'], 'handle-1');
+      expect(api.lastCall('connectionFeed')!.args['handle'], 'handle-1');
+    },
+  );
 
-  test('a change-feed tick triggers a refetch and notifies listeners', () async {
-    api.listSessionsResponse = [sessionInfo(id: id, title: 'Before')];
-    final store = build();
-    addTearDown(store.dispose);
-    await store.connect();
+  test(
+    'a change-feed tick triggers a refetch and notifies listeners',
+    () async {
+      api.listSessionsResponse = [sessionInfo(id: id, title: 'Before')];
+      final store = build();
+      addTearDown(store.dispose);
+      await store.connect();
 
-    var notifications = 0;
-    store.addListener(() => notifications++);
-    final refetchesBefore = api.countOf('workspaceSnapshot');
+      var notifications = 0;
+      store.addListener(() => notifications++);
+      final refetchesBefore = api.countOf('workspaceSnapshot');
 
-    // The server state moved: the next snapshot has a new title.
-    api.listSessionsResponse = [sessionInfo(id: id, title: 'After')];
-    api.emitChange();
-    await pumpEventQueue();
+      // The server state moved: the next snapshot has a new title.
+      api.listSessionsResponse = [sessionInfo(id: id, title: 'After')];
+      api.emitChange();
+      await pumpEventQueue();
 
-    expect(api.countOf('workspaceSnapshot'), greaterThan(refetchesBefore));
-    expect(store.sessions.single.title, 'After');
-    expect(notifications, greaterThan(0));
-  });
+      expect(api.countOf('workspaceSnapshot'), greaterThan(refetchesBefore));
+      expect(store.sessions.single.title, 'After');
+      expect(notifications, greaterThan(0));
+    },
+  );
 
-  test('refresh() does not wait on the follow-up a mid-flight tick queued', () async {
-    final store = build();
-    addTearDown(store.dispose);
-    await store.connect();
+  test(
+    'refresh() does not wait on the follow-up a mid-flight tick queued',
+    () async {
+      final store = build();
+      addTearDown(store.dispose);
+      await store.connect();
 
-    // A poller tick lands while our fetch is in flight, so a follow-up refresh
-    // is coalesced onto it — and that follow-up then parks on a slow server.
-    final gate = Completer<void>();
-    addTearDown(() {
-      if (!gate.isCompleted) gate.complete();
-    });
-    var armed = false;
-    api.onWorkspaceSnapshot = () {
-      if (armed) return;
-      armed = true;
-      api.emitChange(); // queues a follow-up refresh
-      api.workspaceSnapshotGate = gate; // which will park
-    };
+      // A poller tick lands while our fetch is in flight, so a follow-up refresh
+      // is coalesced onto it — and that follow-up then parks on a slow server.
+      final gate = Completer<void>();
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      var armed = false;
+      api.onWorkspaceSnapshot = () {
+        if (armed) return;
+        armed = true;
+        api.emitChange(); // queues a follow-up refresh
+        api.workspaceSnapshotGate = gate; // which will park
+      };
 
-    final before = api.countOf('workspaceSnapshot');
-    var done = false;
-    unawaited(store.refresh().then((_) => done = true));
-    await pumpEventQueue();
+      final before = api.countOf('workspaceSnapshot');
+      var done = false;
+      unawaited(store.refresh().then((_) => done = true));
+      await pumpEventQueue();
 
-    // The caller's refresh completed on its own fetch. Chaining the queued
-    // follow-up onto it instead re-arms the await on every tick — on a busy
-    // server that never unwinds, stranding connect()/reconnect() and every UI
-    // spinner waiting on them (e.g. the Edit server form's Save).
-    expect(done, isTrue);
-    // The follow-up did still fire — it's parked on the gate, not skipped.
-    expect(api.countOf('workspaceSnapshot'), before + 2);
-  });
+      // The caller's refresh completed on its own fetch. Chaining the queued
+      // follow-up onto it instead re-arms the await on every tick — on a busy
+      // server that never unwinds, stranding connect()/reconnect() and every UI
+      // spinner waiting on them (e.g. the Edit server form's Save).
+      expect(done, isTrue);
+      // The follow-up did still fire — it's parked on the gate, not skipped.
+      expect(api.countOf('workspaceSnapshot'), before + 2);
+    },
+  );
 
   test('a connection-feed event updates connection and notifies', () async {
     final store = build();
@@ -162,78 +171,83 @@ void main() {
     expect(notified, isTrue);
   });
 
-  test('reconnect() disconnects the OLD handle before connecting the new one', () async {
-    api.connectServerResponse = 'handle-1';
-    final store = build();
-    addTearDown(store.dispose);
-    await store.connect();
-    expect(store.handle, 'handle-1');
+  test(
+    'reconnect() disconnects the OLD handle before connecting the new one',
+    () async {
+      api.connectServerResponse = 'handle-1';
+      final store = build();
+      addTearDown(store.dispose);
+      await store.connect();
+      expect(store.handle, 'handle-1');
 
-    api.connectServerResponse = 'handle-2';
-    await store.reconnect(otherConfig);
+      api.connectServerResponse = 'handle-2';
+      await store.reconnect(otherConfig);
 
-    expect(store.handle, 'handle-2');
-    expect(store.config, otherConfig);
+      expect(store.handle, 'handle-2');
+      expect(store.config, otherConfig);
 
-    // The old handle was released, and that release happened BEFORE the second
-    // connect — so no handle is ever left dangling in the cdylib registry.
-    final disconnectIdx = api.calls.indexWhere(
-      (c) =>
-          c.method == 'disconnectServer' && c.args['handle'] == 'handle-1',
-    );
-    final connectIdxs = [
-      for (var i = 0; i < api.calls.length; i++)
-        if (api.calls[i].method == 'connectServer') i,
-    ];
-    expect(disconnectIdx, isNonNegative);
-    expect(connectIdxs.length, 2);
-    expect(disconnectIdx, lessThan(connectIdxs[1]));
-    // The new handle's feeds are live; the old one's are gone.
-    expect(api.lastCall('changeFeed')!.args['handle'], 'handle-2');
-  });
+      // The old handle was released, and that release happened BEFORE the second
+      // connect — so no handle is ever left dangling in the cdylib registry.
+      final disconnectIdx = api.calls.indexWhere(
+        (c) => c.method == 'disconnectServer' && c.args['handle'] == 'handle-1',
+      );
+      final connectIdxs = [
+        for (var i = 0; i < api.calls.length; i++)
+          if (api.calls[i].method == 'connectServer') i,
+      ];
+      expect(disconnectIdx, isNonNegative);
+      expect(connectIdxs.length, 2);
+      expect(disconnectIdx, lessThan(connectIdxs[1]));
+      // The new handle's feeds are live; the old one's are gone.
+      expect(api.lastCall('changeFeed')!.args['handle'], 'handle-2');
+    },
+  );
 
-  test('a superseded reconnect does not roll its config back over a newer edit', () async {
-    api.connectServerResponse = 'handle-1';
-    final store = build();
-    addTearDown(store.dispose);
-    await store.connect();
+  test(
+    'a superseded reconnect does not roll its config back over a newer edit',
+    () async {
+      api.connectServerResponse = 'handle-1';
+      final store = build();
+      addTearDown(store.dispose);
+      await store.connect();
 
-    // Edit #1 (the real flow: WorkspaceStore.updateServer applies the config,
-    // persists, then reconnects). Its reconnect parks while releasing handle-1.
-    final gate = Completer<void>();
-    api.disconnectGate = gate;
-    store.applyConfig(otherConfig);
-    final first = store.reconnect(otherConfig);
-    await pumpEventQueue();
+      // Edit #1 (the real flow: WorkspaceStore.updateServer applies the config,
+      // persists, then reconnects). Its reconnect parks while releasing handle-1.
+      final gate = Completer<void>();
+      api.disconnectGate = gate;
+      store.applyConfig(otherConfig);
+      final first = store.reconnect(otherConfig);
+      await pumpEventQueue();
 
-    // updateServer completes at the persist commit point and leaves the
-    // reconnect unawaited, so the Edit server form dismisses immediately: the
-    // user can reopen it and save edit #2 while reconnect #1 is still parked
-    // (easy when the old server is wedged and its disconnect sits on a 30s
-    // timeout). Edit #2 runs to completion.
-    api.disconnectGate = null;
-    api.connectServerResponse = 'handle-3';
-    store.applyConfig(thirdConfig);
-    await store.reconnect(thirdConfig);
+      // updateServer completes at the persist commit point and leaves the
+      // reconnect unawaited, so the Edit server form dismisses immediately: the
+      // user can reopen it and save edit #2 while reconnect #1 is still parked
+      // (easy when the old server is wedged and its disconnect sits on a 30s
+      // timeout). Edit #2 runs to completion.
+      api.disconnectGate = null;
+      api.connectServerResponse = 'handle-3';
+      store.applyConfig(thirdConfig);
+      await store.reconnect(thirdConfig);
 
-    // Reconnect #1 now resumes on a stale epoch. It must not assign its own
-    // (older) config, nor supersede the live connection with a third connect.
-    gate.complete();
-    await first;
-    await pumpEventQueue();
+      // Reconnect #1 now resumes on a stale epoch. It must not assign its own
+      // (older) config, nor supersede the live connection with a third connect.
+      gate.complete();
+      await first;
+      await pumpEventQueue();
 
-    // The persisted list holds edit #2, so the store must too — otherwise the UI
-    // and the keychain disagree until the next launch.
-    expect(store.config.baseUrl, thirdConfig.baseUrl);
-    expect(store.config.token, thirdConfig.token);
-    expect(store.config.name, thirdConfig.name);
-    // Still live on edit #2's connection — a bail must not leave a dead store.
-    expect(store.handle, 'handle-3');
-    expect(api.countOf('connectServer'), 2);
-    expect(api.countOf('changeFeed'), 2);
-    // Reconnect #1 released handle-1 before bailing: no leak, no double-release.
-    expect(api.countOf('disconnectServer'), 1);
-  });
+      // The persisted list holds edit #2, so the store must too — otherwise the UI
+      // and the keychain disagree until the next launch.
+      expect(store.config.baseUrl, thirdConfig.baseUrl);
+      expect(store.config.token, thirdConfig.token);
+      expect(store.config.name, thirdConfig.name);
+      // Still live on edit #2's connection — a bail must not leave a dead store.
+      expect(store.handle, 'handle-3');
+      expect(api.countOf('connectServer'), 2);
+      expect(api.countOf('changeFeed'), 2);
+      // Reconnect #1 released handle-1 before bailing: no leak, no double-release.
+      expect(api.countOf('disconnectServer'), 1);
+    },
+  );
 
   test('dispose() releases the handle', () async {
     api.connectServerResponse = 'handle-1';
@@ -245,8 +259,7 @@ void main() {
 
     expect(
       api.calls.any(
-        (c) =>
-            c.method == 'disconnectServer' && c.args['handle'] == 'handle-1',
+        (c) => c.method == 'disconnectServer' && c.args['handle'] == 'handle-1',
       ),
       isTrue,
     );
