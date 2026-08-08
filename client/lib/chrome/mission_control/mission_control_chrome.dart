@@ -475,6 +475,7 @@ class MissionControlChrome extends Chrome {
   Widget buildFooterNav(BuildContext context, ChromeFooterNavSpec spec) {
     final t = CommanderTokens.of(context);
     final centre = spec.centreAction;
+    final settings = spec.settings;
     // The gap the FAB sits in goes where the shell put it: between the tabs.
     final gapAt = centre == null ? -1 : spec.items.length ~/ 2;
     final bar = BottomAppBar(
@@ -485,10 +486,27 @@ class MissionControlChrome extends Chrome {
         top: false,
         child: Row(
           children: [
+            if (settings != null)
+              SizedBox(
+                width: _barActionWidth,
+                child: IconButton(
+                  icon: Icon(settings.icon),
+                  iconSize: 20,
+                  color: t.textMuted,
+                  tooltip: settings.label,
+                  onPressed: settings.onPressed,
+                ),
+              ),
             for (var i = 0; i < spec.items.length; i++) ...[
               if (i == gapAt) const SizedBox(width: 64),
               Expanded(child: _navTab(context, spec.items[i], t)),
             ],
+            // The counterweight to that leading button. The FAB is centred on the
+            // Scaffold, not on this row, so a leading widget with nothing
+            // opposite it slides the notch — and both tabs — left of the FAB.
+            // Pinned by 'keeps the tabs symmetric about the FAB' in
+            // `phone_shell_test.dart`, which fails by 48px without this box.
+            if (settings != null) const SizedBox(width: _barActionWidth),
           ],
         ),
       ),
@@ -541,7 +559,11 @@ class MissionControlChrome extends Chrome {
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
       bottomNavigationBar: buildFooterNav(
         context,
-        ChromeFooterNavSpec(items: spec.items, centreAction: centre),
+        ChromeFooterNavSpec(
+          items: spec.items,
+          centreAction: centre,
+          settings: spec.settings,
+        ),
       ),
     );
   }
@@ -791,47 +813,7 @@ class MissionControlChrome extends Chrome {
               ],
             ),
           ),
-          // No gap before the first tile: the `Expanded` above absorbs the slack,
-          // which is what the fleet header's settings button sat against.
-          for (var i = 0; i < spec.actions.length; i++) ...[
-            if (i > 0) const SizedBox(width: 8),
-            _viewAction(context, spec.actions[i], t),
-          ],
         ],
-      ),
-    );
-  }
-
-  /// The fleet header's rounded ⚙ tile. A menu action falls back to the app-bar
-  /// rendering, since a `PopupMenuButton` needs to be its own button and no view
-  /// asks for one.
-  Widget _viewAction(
-    BuildContext context,
-    ChromeAction action,
-    CommanderTokens t,
-  ) {
-    if (action is! ChromeButtonAction) return _action(context, action, t);
-    // Tooltip as well as Semantics: the ⚙ tile this replaces was a
-    // `PopupMenuButton(tooltip: 'Settings')`, and the wide shell's equivalent
-    // icon button kept one — dropping it here was an inconsistency, not policy.
-    return Tooltip(
-      message: action.label,
-      child: InkWell(
-        onTap: action.onPressed,
-        child: Semantics(
-          button: true,
-          label: action.label,
-          child: Container(
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(
-              color: t.surface,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: t.border),
-            ),
-            child: Icon(action.icon, size: 16, color: t.textMuted),
-          ),
-        ),
       ),
     );
   }
@@ -946,3 +928,8 @@ class MissionControlChrome extends Chrome {
 /// The app-drawn window bar's height. Matches the GTK header bar it replaces
 /// closely enough that toggling the frame does not reflow the page beneath it.
 const _windowBarHeight = 32.0;
+
+/// The bottom bar's leading action, and the balancing gap opposite it. Wide
+/// enough for a comfortable touch target without eating into the tabs either
+/// side of the notch.
+const _barActionWidth = 48.0;

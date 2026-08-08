@@ -1,4 +1,5 @@
 import 'package:claude_commander_client/pages/adaptive_shell.dart';
+import 'package:claude_commander_client/pages/phone_shell.dart';
 import 'package:claude_commander_client/pages/session_list_page.dart';
 import 'package:claude_commander_client/pages/settings_page.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
@@ -144,6 +145,16 @@ void main() {
     'session_list',
     const Size(420, 720),
     () => SessionListBody(onSelect: (_, _) {}),
+  );
+
+  // The phone shell, whose bottom edge is where the two themes disagree most:
+  // Mission Control docks a FAB over a bar of tabs, LCARS runs the view's rail
+  // down into a single footer run that carries the frame's corner with it.
+  forEachTheme(
+    'phone_shell',
+    const Size(420, 720),
+    () => const PhoneShell(),
+    bareScaffold: false,
   );
 
   // The settings screen, which is also the only visual coverage of the desktop
