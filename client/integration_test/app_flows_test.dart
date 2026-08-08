@@ -146,7 +146,9 @@ void main() {
         theme: ThemeController(store: InMemoryPrefStore()),
       ),
     );
-    await waitFor(tester, find.text('Add server'));
+    // 'Connect' is the add-a-server button's label; it reads 'Save' only when
+    // editing an existing entry (connection_page.dart:286).
+    await waitFor(tester, find.text('Connect'));
     // Focus each field before entering text: under headless xvfb the field
     // isn't auto-focused as on a real display, so a bare enterText can no-op and
     // leave the prefilled default URL. Tap → enterText → pump makes it stick.
@@ -171,8 +173,8 @@ void main() {
           ?.text,
       _baseUrl,
     );
-    await tester.tap(find.widgetWithText(FilledButton, 'Add server'));
-    await waitFor(tester, find.text('Sessions'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Connect'));
+    await waitFor(tester, find.text('Fleet'));
     await waitFor(tester, find.text('No sessions')); // fresh hermetic server
 
     // ---- create a bash session ----
@@ -269,7 +271,7 @@ void main() {
     await confirmAction(tester, Icons.delete_outline, 'Delete');
 
     // delete pops back to the (timer-free) list; the session is gone.
-    await waitFor(tester, find.text('Sessions'));
+    await waitFor(tester, find.text('Fleet'));
     await pumpUntil(
       tester,
       () => find.text('e2e-journey').evaluate().isEmpty,
