@@ -33,6 +33,14 @@ const _fonts = {
 
 var _fontsLoaded = false;
 
+/// Whether [loadCommanderFonts] got `MaterialIcons` loaded.
+///
+/// A test that *measures* an icon must assert this. Without the face an `Icon`
+/// paints a notdef square, whose ink centre is its box centre — so a test
+/// asserting an icon is centred passes on a glyph that was never drawn. See
+/// [_loadMaterialIcons] for why loading it is best-effort.
+var materialIconsLoaded = false;
+
 /// Loads the app's real fonts into the test binding.
 ///
 /// **Mandatory before any golden.** `flutter test` does not load a package's
@@ -60,7 +68,9 @@ Future<void> loadCommanderFonts() async {
 ///
 /// The SDK path is derived from `FLUTTER_ROOT`, which `flutter test` sets for the
 /// test process. Absent (a bare `dart test`, say) this gives up rather than
-/// throwing — the goldens will then differ, which is the honest signal.
+/// throwing — the goldens will then differ, which is the honest signal. A test
+/// that needs the stronger signal reads [materialIconsLoaded], because "the
+/// image differs" is no signal at all outside a golden.
 Future<void> _loadMaterialIcons() async {
   final root = Platform.environment['FLUTTER_ROOT'];
   if (root == null) return;
@@ -71,6 +81,7 @@ Future<void> _loadMaterialIcons() async {
   await (FontLoader('MaterialIcons')
         ..addFont(Future.value(ByteData.sublistView(file.readAsBytesSync()))))
       .load();
+  materialIconsLoaded = true;
 }
 
 /// Known gap in the reference images: the session state glyphs (`○ ● ◆ ◍ ⏸ ⑃ ⬆`,

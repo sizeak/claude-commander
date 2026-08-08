@@ -503,8 +503,10 @@ class LcarsChrome extends Chrome {
     BorderRadius radius,
   ) => SizedBox(
     width: _footerCentreWidth,
-    // The block's own semantic label would be '+', which tells a screen-reader
-    // user nothing, so the action's real label wraps it.
+    // The action's own icon, not a `Text('+')`: a text glyph centres its line
+    // box rather than its ink, which left the cross painting ~2px low (see
+    // ChromeElbow.icon). The block carries no visible label, so the action's
+    // real one wraps it for a screen reader.
     child: Semantics(
       label: centre.label,
       child: ClipRRect(
@@ -512,10 +514,8 @@ class LcarsChrome extends Chrome {
         child: ChromeElbow(
           color: t.attention,
           height: _footerHeight,
-          label: '+',
-          labelAlignment: Alignment.center,
-          labelSize: 18,
-          labelWeight: FontWeight.w700,
+          icon: centre.icon,
+          iconSize: 20,
           onTap: centre.onPressed,
         ),
       ),
@@ -937,9 +937,10 @@ const _segmentHeight = 30.0;
 /// rounded down, and comfortably clear of ChromeElbow's clamped 1.3× scaler.
 const _barHeight = 36.0;
 
-/// Footer block height. The deck's is ~33px, but the 18px '+' overflows that at
-/// the clamped 1.3× text scaler, so the run is 5px taller than the frame — which
-/// also drags the nav closer to a usable touch target.
+/// Footer block height. The deck's is ~33px, but a 13px destination label at
+/// ChromeElbow's clamped 1.3× text scaler leaves that barely any room, so the
+/// run is 5px taller than the frame — which also drags the nav closer to a
+/// usable touch target.
 const _footerHeight = 38.0;
 
 /// The footer's centre action block (deck P2/P3: `width:46px`).
