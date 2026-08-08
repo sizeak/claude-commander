@@ -645,6 +645,8 @@ class FakeCommanderApi implements CommanderApi {
     required String attachId,
     required String sessionId,
     required AttachKind kind,
+    required int cols,
+    required int rows,
   }) {
     attachTerminalCount++;
     _record('attachTerminal', {
@@ -652,6 +654,8 @@ class FakeCommanderApi implements CommanderApi {
       'attachId': attachId,
       'sessionId': sessionId,
       'kind': kind,
+      'cols': cols,
+      'rows': rows,
     });
     // Each attach gets a fresh single-subscription controller: the page cancels
     // its old subscription on reconnect, and a new listen needs a clean stream.

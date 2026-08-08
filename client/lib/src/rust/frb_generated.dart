@@ -105,6 +105,8 @@ abstract class RustLibApi extends BaseApi {
     required String attachId,
     required String sessionId,
     required AttachKind kind,
+    required int cols,
+    required int rows,
   });
 
   Future<String> crateApiSimpleBranchDiff({
@@ -479,6 +481,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String attachId,
     required String sessionId,
     required AttachKind kind,
+    required int cols,
+    required int rows,
   }) {
     final sink = RustStreamSink<TerminalEvent>();
     unawaited(
@@ -490,6 +494,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_encode_String(attachId, serializer);
             sse_encode_String(sessionId, serializer);
             sse_encode_attach_kind(kind, serializer);
+            sse_encode_u_16(cols, serializer);
+            sse_encode_u_16(rows, serializer);
             sse_encode_StreamSink_terminal_event_Sse(sink, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
@@ -503,7 +509,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeErrorData: null,
           ),
           constMeta: kCrateApiTerminalAttachTerminalConstMeta,
-          argValues: [handle, attachId, sessionId, kind, sink],
+          argValues: [handle, attachId, sessionId, kind, cols, rows, sink],
           apiImpl: this,
         ),
       ),
@@ -514,7 +520,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiTerminalAttachTerminalConstMeta =>
       const TaskConstMeta(
         debugName: "attach_terminal",
-        argNames: ["handle", "attachId", "sessionId", "kind", "sink"],
+        argNames: [
+          "handle",
+          "attachId",
+          "sessionId",
+          "kind",
+          "cols",
+          "rows",
+          "sink",
+        ],
       );
 
   @override
