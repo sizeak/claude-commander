@@ -17,6 +17,7 @@ pub mod api;
 pub mod comment;
 pub mod connection;
 pub mod diff;
+pub mod github;
 pub mod paste;
 pub mod pr;
 pub mod session;
