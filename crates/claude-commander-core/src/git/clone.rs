@@ -18,12 +18,31 @@
 //! `the_noninteractive_recipe_stops_git_prompting` pins the env recipe against
 //! a real `git`, and `a_timed_out_run_kills_the_child_and_its_descendants` pins
 //! the kill.
+//!
+//! # Known limitation: `core.sshCommand` is not honoured
+//!
+//! Setting `GIT_SSH_COMMAND` overrides git's `core.sshCommand` config
+//! (`git-config(1)`, `core.sshCommand`: "is overridden when the environment
+//! variable is set"). So a user who configures their ssh identity there rather
+//! than in `~/.ssh/config` will see an ssh clone fail to authenticate here while
+//! the same clone works in their shell. **That is the expected behaviour, not a
+//! bug to re-diagnose.**
+//!
+//! It is accepted rather than fixed because the affected population is narrower
+//! than it first looks: only *global* and *system* config can apply to a clone,
+//! since the repository being cloned does not exist yet and has no local config
+//! to read. Preserving the value would cost a `git config --get core.sshCommand`
+//! subprocess on every clone, to buy back a case where the alternative is a fast,
+//! legible auth error rather than the indefinite hang this module exists to
+//! prevent. An inherited `GIT_SSH_COMMAND` *is* preserved — see [`ssh_command`].
 
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use claude_commander_protocol::github::{CloneSource, validate_clone_url, validate_repo_slug};
+use claude_commander_protocol::github::{
+    CloneSource, redact_credentials, validate_clone_url, validate_repo_slug,
+};
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use tokio::io::AsyncReadExt;
@@ -236,14 +255,17 @@ async fn run_bounded(mut cmd: Command, program: &str, timeout: Duration) -> Resu
         // so what is left here is the actual diagnosis, short enough to pass on
         // whole.
         //
-        // It is passed on rather than logged, deliberately: git echoes the
-        // source in most failure messages, and a hand-typed URL may carry
-        // `user:token@` userinfo. It belongs in front of the person who typed
-        // it, not in a log file, so the decision is the caller's.
+        // Redacted as the error is *built*, not merely kept out of the log: git
+        // echoes the source in most failure messages, and a hand-typed URL may
+        // carry `user:token@` userinfo. From here the string becomes a
+        // `CloneStatus::Failed` message, crosses the wire and is rendered in a
+        // UI, so the secret has to be gone at the one point all of those share.
         let stderr = String::from_utf8_lossy(&stderr);
-        return Err(
-            GitError::OperationFailed(format!("{program} failed: {}", stderr.trim())).into(),
-        );
+        return Err(GitError::OperationFailed(format!(
+            "{program} failed: {}",
+            redact_credentials(stderr.trim())
+        ))
+        .into());
     }
 
     Ok(())
@@ -536,6 +558,33 @@ mod tests {
             stderr.contains("terminal prompts disabled"),
             "git did not refuse the terminal prompt: {stderr}"
         );
+    }
+
+    /// A failing git echoes the source back, and a hand-typed source may carry
+    /// `user:token@`. That string becomes `CloneStatus::Failed { message }`,
+    /// crosses the wire and is rendered in a UI, so the secret must not survive
+    /// contact with the error type — "remember not to log this" does not
+    /// survive four more tasks.
+    ///
+    /// Driven through `run_bounded` with a stub that prints git's real failure
+    /// wording: a genuine credentialed clone would need the network.
+    #[tokio::test]
+    async fn a_failure_message_carries_no_credentials() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(
+            "echo \"fatal: Authentication failed for \
+             'https://sizeak:ghp_s3cr3tt0ken@github.com/o/r.git/'\" >&2; exit 128",
+        );
+
+        let err = run_bounded(cmd, "git clone", Duration::from_secs(60))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(!err.contains("ghp_s3cr3tt0ken"), "token leaked: {err}");
+        assert!(err.contains("https://***@github.com/o/r.git/"), "{err}");
+        // Still a usable diagnosis.
+        assert!(err.contains("Authentication failed"), "{err}");
     }
 
     #[test]

@@ -7,13 +7,19 @@
 //! the user types so a doomed request never leaves the device. One definition,
 //! enforced independently in several places.
 //!
-//! Two of the three functions here are security boundaries, not conveniences:
+//! Three of the four functions here are security boundaries, not conveniences:
 //!
 //! * [`validate_clone_url`] and [`validate_repo_slug`] gate strings that become
 //!   **argv elements** of a `git clone` / `gh repo clone` invocation, and whose
 //!   derived directory name becomes a **path** under the user's projects dir.
 //!   Both hazards (a leading `-` read as a flag; a `..` segment escaping the
 //!   projects dir) are cheap to get wrong and invisible when you do.
+//! * [`redact_credentials`] guards the return trip: git echoes the clone source
+//!   in its failure messages, so a pasted `https://user:token@…` would ride that
+//!   message across the wire and into a UI. The redaction belongs beside the
+//!   validators for the same reason they are here — it is a rule every party
+//!   depends on, applied where the string is built rather than remembered at
+//!   each hop.
 //! * [`canonical_repo_slug`] is not a security boundary — it exists so the repo
 //!   picker can tell "you already have this one" reliably. `gh repo clone`
 //!   honours the user's configured `git_protocol`, so a project cloned by `gh`
@@ -460,6 +466,112 @@ pub fn validate_repo_slug(slug: &str) -> Result<(), CloneRejection> {
     Ok(())
 }
 
+/// What a redacted userinfo component is replaced with.
+const REDACTED_USERINFO: &str = "***";
+
+/// Schemes on which a *bare* userinfo (no colon) is routinely a secret:
+/// `https://<token>@github.com/o/r` is the standard way to clone with a personal
+/// access token.
+///
+/// On any other scheme a bare userinfo is a login name — `ssh://git@github.com`
+/// is the canonical GitHub ssh URL — and redacting it would blank out something
+/// diagnostic (*which* account did this fail as?) to hide nothing. Note this
+/// only governs the no-colon case: a userinfo *with* a colon carries a password
+/// component and is redacted whatever the scheme.
+const TOKEN_BEARING_SCHEMES: &[&str] = &["http", "https"];
+
+/// The scheme immediately preceding a `://`, given everything before it.
+///
+/// The text is a sentence, not a URL, so the scheme is whatever run of
+/// scheme-legal characters (RFC 3986: alphanumerics and `+-.`) ends the prefix —
+/// `fatal: could not read https` yields `https`.
+fn trailing_scheme(head: &str) -> &str {
+    let mut start = head.len();
+    for (i, c) in head.char_indices().rev() {
+        if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') {
+            start = i;
+        } else {
+            break;
+        }
+    }
+    &head[start..]
+}
+
+/// Rewrite the userinfo component of every URL in `text` to `***`.
+///
+/// `https://user:token@github.com/o/r` becomes `https://***@github.com/o/r`.
+/// Text with no userinfo comes back byte-identical, so this is safe to apply
+/// unconditionally.
+///
+/// **This is a rule about what may appear in wire-bound text, which is why it
+/// lives here.** git echoes the clone source in most of its failure messages,
+/// so a user who pastes `https://user:token@…` gets their token embedded in
+/// git's stderr — which becomes a `CloneStatus::Failed` message, crosses the
+/// wire, is rendered in a UI and lands in whatever logs a failed job. Every one
+/// of those hops is a different crate, so the redaction has to happen where the
+/// string is built, not be remembered at each hop.
+///
+/// When a userinfo is redacted the *whole* of it goes, username included: a rule
+/// that tried to keep the username would have to decide which half is the
+/// secret, and `https://ghp_…@host` has no colon at all. What gets redacted is
+/// deliberately narrower than "every userinfo":
+///
+/// * a userinfo containing `:` — a password component — on **any** scheme;
+/// * a bare userinfo only on [`TOKEN_BEARING_SCHEMES`], so the login name in
+///   `ssh://git@github.com/o/r` survives to be read.
+///
+/// **Best-effort, by nature.** This operates on text we do not control, from
+/// tools we do not control, so it recognises the one shape secrets reliably
+/// take — `scheme://[userinfo@]host` — and nothing else. It will not catch a
+/// token quoted on its own, one in a `?access_token=` query parameter, or one a
+/// future git wraps differently. Treat it as a last line of defence, not a
+/// guarantee that a string is safe to publish. git's scp shorthand
+/// (`git@github.com:o/r`) is deliberately left alone: it has no password field,
+/// so redacting it would only obscure legible messages.
+pub fn redact_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(scheme_end) = rest.find("://") {
+        let (head, after) = rest.split_at(scheme_end + "://".len());
+        let scheme = trailing_scheme(&rest[..scheme_end]);
+        out.push_str(head);
+
+        // The authority runs to the first character that cannot be part of it.
+        // `/` ends it in a well-formed URL; the rest are how a URL is wrapped
+        // when it appears inside a sentence (git quotes it, and a paste may be
+        // followed by punctuation).
+        let end = after
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '/' | '?' | '#' | '\'' | '"' | '`' | '<' | '>')
+            })
+            .unwrap_or(after.len());
+        let (authority, tail) = after.split_at(end);
+
+        // rsplit, matching `host_of`: the *last* `@` is the delimiter, so an
+        // email-shaped username inside the userinfo cannot smuggle the secret
+        // past by looking like the end of it.
+        match authority.rsplit_once('@') {
+            Some((userinfo, host))
+                if userinfo.contains(':')
+                    || TOKEN_BEARING_SCHEMES
+                        .iter()
+                        .any(|s| scheme.eq_ignore_ascii_case(s)) =>
+            {
+                out.push_str(REDACTED_USERINFO);
+                out.push('@');
+                out.push_str(host);
+            }
+            _ => out.push_str(authority),
+        }
+
+        rest = tail;
+    }
+
+    out.push_str(rest);
+    out
+}
+
 /// Reduce a clone source to a stable `host/owner/name` identity, or `None` when
 /// it has none.
 ///
@@ -504,6 +616,121 @@ pub fn canonical_repo_slug(source: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two shapes a secret arrives in: `user:token@` and a bare `token@`.
+    #[test]
+    fn redacts_the_userinfo_component_of_a_url() {
+        assert_eq!(
+            redact_credentials("https://user:password@github.com/o/r.git"),
+            "https://***@github.com/o/r.git"
+        );
+        assert_eq!(
+            redact_credentials("https://ghp_16C7e42F292c6912E7710c838347Ae178B4a@github.com/o/r"),
+            "https://***@github.com/o/r"
+        );
+        // The whole userinfo goes, username included: a username is not worth
+        // the risk of a rule that has to decide which half is the secret.
+        assert_eq!(
+            redact_credentials("https://user@github.com/o/r.git"),
+            "https://***@github.com/o/r.git"
+        );
+    }
+
+    /// Text with nothing to hide comes back byte-identical, so this is safe to
+    /// apply unconditionally to every message.
+    #[test]
+    fn leaves_text_without_a_secret_untouched() {
+        for text in [
+            "https://github.com/o/r.git",
+            // A login name, not a credential — see the test below.
+            "ssh://git@github.com/o/r",
+            "fatal: repository '/srv/mirrors/r' does not exist",
+            "git@github.com:o/r.git",
+            "",
+            "no urls here at all",
+            // A bare `://` with no scheme in front of it must not panic or eat
+            // the text around it.
+            "://",
+            "see :// for details",
+        ] {
+            assert_eq!(redact_credentials(text), text, "text: {text}");
+        }
+    }
+
+    /// A password component is a secret on every scheme; a *bare* userinfo is
+    /// only a secret where a bare token is the standard form.
+    ///
+    /// This is what keeps ssh failures legible: `ssh://git@github.com` is the
+    /// canonical GitHub ssh URL, and blanking its login name would hide which
+    /// account a multi-account user just failed as, while hiding no secret. It
+    /// also makes the two spellings of one identity agree — the scp form
+    /// `git@github.com:o/r` has never been touched.
+    #[test]
+    fn redacts_a_password_on_any_scheme_but_keeps_an_ssh_login_name() {
+        // Bare userinfo: redacted on http(s) only.
+        assert_eq!(
+            redact_credentials("http://tok@ghe.internal/o/r"),
+            "http://***@ghe.internal/o/r"
+        );
+        assert_eq!(
+            redact_credentials("HTTPS://tok@ghe.internal/o/r"),
+            "HTTPS://***@ghe.internal/o/r"
+        );
+        assert_eq!(
+            redact_credentials("ssh://git@github.com/o/r"),
+            "ssh://git@github.com/o/r"
+        );
+        assert_eq!(
+            redact_credentials("git://anon@example.com/o/r"),
+            "git://anon@example.com/o/r"
+        );
+        // With a password component, every scheme is redacted.
+        for (text, expected) in [
+            (
+                "ssh://git:s3cret@github.com/o/r",
+                "ssh://***@github.com/o/r",
+            ),
+            ("git://u:p@example.com/o/r", "git://***@example.com/o/r"),
+            ("https://u:p@github.com/o/r", "https://***@github.com/o/r"),
+        ] {
+            assert_eq!(redact_credentials(text), expected, "text: {text}");
+        }
+    }
+
+    /// The real payload: git's stderr, multi-line, with the credential URL
+    /// quoted mid-sentence. Everything but the secret must survive, or the
+    /// message stops being a diagnosis.
+    #[test]
+    fn redacts_a_credential_embedded_in_real_git_stderr() {
+        let stderr = "Cloning into '/home/u/Projects/r'...\n\
+             remote: Invalid username or token. Password authentication is not supported.\n\
+             fatal: Authentication failed for 'https://sizeak:ghp_s3cr3tt0ken@github.com/o/r.git/'\n";
+        let redacted = redact_credentials(stderr);
+        assert!(
+            !redacted.contains("ghp_s3cr3tt0ken") && !redacted.contains("sizeak:"),
+            "secret survived: {redacted}"
+        );
+        assert!(redacted.contains("https://***@github.com/o/r.git/"));
+        assert!(redacted.contains("Password authentication is not supported."));
+        assert!(redacted.contains("Cloning into '/home/u/Projects/r'..."));
+        assert_eq!(redacted.lines().count(), 3);
+    }
+
+    /// Several URLs in one message, and a userinfo that itself contains an `@`.
+    #[test]
+    fn redacts_every_url_in_a_message() {
+        let text = "tried https://a:b@x.com/o/r then https://c:d@y.com/o/r; gave up";
+        assert_eq!(
+            redact_credentials(text),
+            "tried https://***@x.com/o/r then https://***@y.com/o/r; gave up"
+        );
+        // An email-shaped username: the *last* `@` is the delimiter, matching
+        // `host_of`, so the host is preserved and everything before it goes.
+        assert_eq!(
+            redact_credentials("https://me@corp.com:tok@ghe.internal/o/r"),
+            "https://***@ghe.internal/o/r"
+        );
+    }
 
     #[test]
     fn canonicalises_every_url_form_to_one_slug() {
