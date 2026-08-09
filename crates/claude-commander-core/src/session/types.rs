@@ -39,6 +39,18 @@ pub struct Project {
     /// Shell tmux session name (for project-level shell)
     #[serde(default)]
     pub shell_tmux_session_name: Option<String>,
+    /// URL of the repository's `origin` remote, as git resolves it (after any
+    /// `url.<base>.insteadOf` rewrite). `None` when the repo has no `origin` —
+    /// a valid resting state, not a pending fetch.
+    ///
+    /// Persisted rather than derived: the only consumer, the project projection
+    /// [`build_project_info_list`](crate::api), is a pure synchronous fold over
+    /// `AppState` on the workspace-poll path, so deriving it would mean opening
+    /// a `gix` repo per project per poll. Backfilled for projects added before
+    /// this field existed by `SessionManager::sync_worktrees`, which already
+    /// holds an open repo.
+    #[serde(default)]
+    pub origin_url: Option<String>,
 }
 
 impl Project {
@@ -56,6 +68,7 @@ impl Project {
             created_at: Utc::now(),
             worktrees: Vec::new(),
             shell_tmux_session_name: None,
+            origin_url: None,
         }
     }
 
@@ -712,6 +725,23 @@ mod tests {
 
         project.remove_worktree(&session_id);
         assert!(project.worktrees.is_empty());
+    }
+
+    #[test]
+    fn project_deserialises_without_origin_url() {
+        // A `state.json` written by a binary that predates `origin_url` (or by
+        // an older binary still running alongside this one) has no such key.
+        // It must load with the field absent, not fail and wipe the project.
+        let json = r#"{
+            "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+            "name": "r",
+            "repo_path": "/repos/r",
+            "main_branch": "main",
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.name, "r");
+        assert_eq!(project.origin_url, None);
     }
 
     #[test]

@@ -474,6 +474,7 @@ mod tests {
                 repo_path: PathBuf::from("/repo"),
                 main_branch: "main".into(),
                 session_ids: vec![],
+                origin_url: None,
             }],
             sessions: vec![],
             cascade_paused: None,

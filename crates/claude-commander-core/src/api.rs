@@ -2757,6 +2757,7 @@ fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
             repo_path: p.repo_path.clone(),
             main_branch: p.main_branch.clone(),
             session_ids: p.worktrees.clone(),
+            origin_url: p.origin_url.clone(),
         })
         .collect()
 }
@@ -2874,6 +2875,31 @@ mod tests {
             state.sessions.insert(s.id, s);
         }
         state
+    }
+
+    #[test]
+    fn build_project_info_list_projects_origin_url() {
+        // The repo picker badges a row by comparing a project's origin against
+        // the API's clone url, so the persisted value has to reach the wire DTO.
+        // It is projected, never derived here: this is a pure sync projection of
+        // `AppState` on the workspace-poll path, with no repo to open.
+        let mut with_origin = make_project("with-origin");
+        with_origin.origin_url = Some("git@github.com:sizeak/claude-commander.git".to_string());
+        let without_origin = make_project("no-origin");
+
+        let mut state = AppState::new();
+        state.projects.insert(with_origin.id, with_origin.clone());
+        state
+            .projects
+            .insert(without_origin.id, without_origin.clone());
+
+        let infos = build_project_info_list(&state);
+        let find = |id: ProjectId| infos.iter().find(|i| i.id == id).unwrap();
+        assert_eq!(
+            find(with_origin.id).origin_url.as_deref(),
+            Some("git@github.com:sizeak/claude-commander.git")
+        );
+        assert_eq!(find(without_origin.id).origin_url, None);
     }
 
     #[test]

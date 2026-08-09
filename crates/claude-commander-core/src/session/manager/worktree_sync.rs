@@ -11,7 +11,7 @@ impl SessionManager {
     /// recreate the tmux session on demand).
     #[instrument(skip(self))]
     pub async fn sync_worktrees(&self, project_id: &ProjectId) -> Result<usize> {
-        let (repo_path, worktree_paths) = {
+        let (repo_path, worktree_paths, needs_origin_url) = {
             let state = self.store.read().await;
             let project = match state.get_project(project_id) {
                 Some(p) => p,
@@ -19,6 +19,7 @@ impl SessionManager {
             };
 
             let repo_path = project.repo_path.clone();
+            let needs_origin_url = project.origin_url.is_none();
 
             // Snapshot existing session worktree paths to canonicalize off-lock.
             let paths: Vec<PathBuf> = project
@@ -28,7 +29,7 @@ impl SessionManager {
                 .map(|s| s.worktree_path.clone())
                 .collect();
 
-            (repo_path, paths)
+            (repo_path, paths, needs_origin_url)
         };
 
         // Canonicalize existing session paths without holding the state lock.
@@ -56,7 +57,29 @@ impl SessionManager {
         // review diff should be based against. Capture it before the backend is
         // moved into the worktree manager.
         let default_branch = backend.detect_main_branch().ok();
+        // Backfill `origin_url` for projects registered before the field
+        // existed. This is repair-on-every-read, never version-gated:
+        // `state.json` is multi-writer and an older binary can drop the field
+        // again at any time, so a one-shot marker would stop firing exactly
+        // when it is still needed. A repo with no `origin` resolves to `None`
+        // and simply writes nothing — a resting state, not a retry.
+        let backfilled_origin_url = needs_origin_url.then(|| backend.origin_url()).flatten();
         let worktree_manager = WorktreeManager::new(backend, worktrees_dir);
+
+        if let Some(origin_url) = backfilled_origin_url {
+            let pid = *project_id;
+            self.store
+                .mutate(move |state| {
+                    if let Some(project) = state.projects.get_mut(&pid) {
+                        // Re-check under the write lock: a concurrent writer may
+                        // have filled it since we read.
+                        if project.origin_url.is_none() {
+                            project.origin_url = Some(origin_url);
+                        }
+                    }
+                })
+                .await?;
+        }
 
         let worktrees = match worktree_manager.list_worktrees().await {
             Ok(w) => w,

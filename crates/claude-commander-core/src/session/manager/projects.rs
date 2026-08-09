@@ -10,13 +10,17 @@ impl SessionManager {
         let backend = GitBackend::discover(&repo_path)?;
         let main_branch = backend.detect_main_branch()?;
         let name = backend.repo_name();
+        // Read from the backend we already have open — the repo picker needs
+        // this to tell which of the user's GitHub repos are already projects.
+        let origin_url = backend.origin_url();
 
         info!("Adding project '{}' from {:?}", name, repo_path);
 
         let repo_path = tokio::fs::canonicalize(backend.path())
             .await
             .unwrap_or_else(|_| backend.path().to_path_buf());
-        let project = Project::new(name, repo_path, main_branch);
+        let mut project = Project::new(name, repo_path, main_branch);
+        project.origin_url = origin_url;
         let project_id = project.id;
 
         self.store
