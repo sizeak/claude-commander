@@ -524,10 +524,15 @@ fn trailing_scheme(head: &str) -> &str {
 /// tools we do not control, so it recognises the one shape secrets reliably
 /// take — `scheme://[userinfo@]host` — and nothing else. It will not catch a
 /// token quoted on its own, one in a `?access_token=` query parameter, or one a
-/// future git wraps differently. Treat it as a last line of defence, not a
-/// guarantee that a string is safe to publish. git's scp shorthand
-/// (`git@github.com:o/r`) is deliberately left alone: it has no password field,
-/// so redacting it would only obscure legible messages.
+/// future git wraps differently. Nor does it decode percent-escapes, so a
+/// password written as `ssh://user%3Apass@host/o/r` has no literal `:` in its
+/// userinfo and survives on a non-http scheme — narrow exposure (a
+/// password-bearing ssh URL is already exotic, and `BatchMode=yes` refuses to
+/// use one) but a real hole, recorded here rather than left to be rediscovered.
+/// Treat all of this as a last line of defence, not a guarantee that a string is
+/// safe to publish. git's scp shorthand (`git@github.com:o/r`) is deliberately
+/// left alone: it has no password field, so redacting it would only obscure
+/// legible messages.
 pub fn redact_credentials(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -655,6 +660,25 @@ mod tests {
         ] {
             assert_eq!(redact_credentials(text), text, "text: {text}");
         }
+    }
+
+    /// The documented hole, pinned so it is a known limit rather than a
+    /// surprise: percent-escapes are not decoded, so a password written
+    /// `user%3Apass` has no literal `:` and survives on a non-http scheme.
+    /// Narrow exposure — a password-bearing ssh URL is already exotic, and
+    /// `BatchMode=yes` refuses to use one — but real. Change this test, not just
+    /// the doc, if the behaviour is ever tightened.
+    #[test]
+    fn does_not_decode_percent_escaped_userinfo() {
+        assert_eq!(
+            redact_credentials("ssh://user%3Apass@host/o/r"),
+            "ssh://user%3Apass@host/o/r"
+        );
+        // On http(s) the bare-userinfo clause catches it anyway.
+        assert_eq!(
+            redact_credentials("https://user%3Apass@host/o/r"),
+            "https://***@host/o/r"
+        );
     }
 
     /// A password component is a secret on every scheme; a *bare* userinfo is

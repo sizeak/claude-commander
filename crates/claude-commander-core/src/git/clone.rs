@@ -68,14 +68,14 @@ pub async fn run_clone(source: &CloneSource, dest: &Path, timeout: Duration) -> 
     // goes wrong, and the check is pure string inspection.
     let program = match source {
         CloneSource::Github { full_name } => {
-            validate_repo_slug(full_name).map_err(|r| GitError::OperationFailed(r.to_string()))?;
+            validate_repo_slug(full_name).map_err(rejected)?;
             if !is_gh_available().await {
                 return Err(GitError::GhUnavailable.into());
             }
             "gh repo clone"
         }
         CloneSource::Url { url } => {
-            validate_clone_url(url).map_err(|r| GitError::OperationFailed(r.to_string()))?;
+            validate_clone_url(url).map_err(rejected)?;
             "git clone"
         }
     };
@@ -106,6 +106,23 @@ pub async fn run_clone(source: &CloneSource, dest: &Path, timeout: Duration) -> 
     }
 
     result
+}
+
+/// Turn a rejected source into an error that cannot quote a secret back.
+///
+/// Both validators route through here, and the `Url` arm does so even though its
+/// [`CloneRejection`](claude_commander_protocol::github::CloneRejection) variants
+/// look harmless today. That is the point: this module redacts where an error
+/// string is *built*, rather than trusting each variant to stay harmless. The
+/// `Github` arm proves why — `validate_repo_slug` splits on `/`, so a URL pasted
+/// into the slug field always fails as `MalformedSlug`, whose `Display` echoes
+/// the entire raw input. A credentialed URL went straight into an error message
+/// through that path, and the reasoning that missed it was "these variants only
+/// echo a scheme or a directory name", which was true of every variant but one.
+///
+/// Pinned by `a_rejection_message_carries_no_credentials`.
+fn rejected(rejection: impl std::fmt::Display) -> GitError {
+    GitError::OperationFailed(redact_credentials(&rejection.to_string()))
 }
 
 /// Build the clone invocation for `source`, with the non-interactive env applied.
@@ -566,8 +583,13 @@ mod tests {
     /// contact with the error type — "remember not to log this" does not
     /// survive four more tasks.
     ///
-    /// Driven through `run_bounded` with a stub that prints git's real failure
-    /// wording: a genuine credentialed clone would need the network.
+    /// Driven through `run_bounded` with a stub, because a genuine credentialed
+    /// clone would need the network. The stub's wording is *modelled on* git's
+    /// HTTPS auth failure from memory, not captured from a run — what this test
+    /// pins is the redaction, not git's phrasing. Only the shape it depends on
+    /// is verified: git echoes the source URL in failure messages (git 2.53.0,
+    /// `git clone -- /nonexistent /tmp/x` → `fatal: repository
+    /// '/nonexistent' does not exist`).
     #[tokio::test]
     async fn a_failure_message_carries_no_credentials() {
         let mut cmd = Command::new("sh");
@@ -650,6 +672,55 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(!err.to_string().is_empty(), "source: {source:?}");
+            assert!(!dest.exists());
+        }
+    }
+
+    /// Rejecting a source must not quote the secret back.
+    ///
+    /// The `Github` arm is the sharp one: `validate_repo_slug` splits on `/`, so
+    /// a URL pasted into the slug field always fails with
+    /// `CloneRejection::MalformedSlug`, whose `Display` echoes the **whole raw
+    /// input** — the entire credentialed URL. That rejection message is a `400`
+    /// body and a `CloneStatus::Failed` message, so the same four-hop journey
+    /// applies to it as to git's stderr.
+    #[tokio::test]
+    async fn a_rejection_message_carries_no_credentials() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("out");
+        const SECRET: &str = "ghp_s3cr3tt0ken";
+
+        // `echoes_source` records whether the rejection quotes the input back at
+        // all. Only `MalformedSlug` does — no `validate_clone_url` rejection
+        // carries more than a scheme or a directory name, which is why the `Url`
+        // arm is here as a regression guard rather than as a reproduction.
+        for (source, echoes_source) in [
+            (
+                // A URL pasted where a slug belongs — the leak path.
+                CloneSource::Github {
+                    full_name: format!("https://sizeak:{SECRET}@github.com/o/r"),
+                },
+                true,
+            ),
+            (
+                CloneSource::Url {
+                    url: format!("ftp://sizeak:{SECRET}@example.com/o/r"),
+                },
+                false,
+            ),
+        ] {
+            let err = run_clone(&source, &dest, Duration::from_secs(60))
+                .await
+                .unwrap_err()
+                .to_string();
+
+            assert!(!err.contains(SECRET), "token leaked: {err}");
+            assert!(!err.contains("sizeak:"), "userinfo leaked: {err}");
+            if echoes_source {
+                // Redacted, not swallowed: the user still has to be able to see
+                // which source was refused.
+                assert!(err.contains("***@github.com/o/r"), "unusable: {err}");
+            }
             assert!(!dest.exists());
         }
     }
