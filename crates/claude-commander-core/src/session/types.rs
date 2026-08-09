@@ -46,9 +46,10 @@ pub struct Project {
     /// Persisted rather than derived: the only consumer, the project projection
     /// [`build_project_info_list`](crate::api), is a pure synchronous fold over
     /// `AppState` on the workspace-poll path, so deriving it would mean opening
-    /// a `gix` repo per project per poll. Backfilled for projects added before
-    /// this field existed by `SessionManager::sync_worktrees`, which already
-    /// holds an open repo.
+    /// a `gix` repo per project per poll. Kept true to the repo by
+    /// `SessionManager::sync_worktrees`, which already holds an open repo: it
+    /// fills the field for projects added before it existed *and* corrects it
+    /// when a repo is renamed, transferred, or has its remote re-pointed.
     #[serde(default)]
     pub origin_url: Option<String>,
 }

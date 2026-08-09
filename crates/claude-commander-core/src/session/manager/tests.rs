@@ -540,7 +540,83 @@ async fn add_project_without_a_remote_records_no_origin_url() {
         store.read().await.get_project(&id).unwrap().origin_url,
         None
     );
-    // Backfill must tolerate it too, and still leave `None`.
+    // Backfill must tolerate it too, and still leave `None` — *without*
+    // rewriting state on every pass. The store generation counter is the
+    // observable: a repo that genuinely has no `origin` must settle, not churn
+    // a `state.json` write (and a redraw) on every sync.
+    let gen_before = *store.subscribe().borrow();
+    manager.sync_worktrees(&id).await.unwrap();
+    manager.sync_worktrees(&id).await.unwrap();
+    assert_eq!(
+        store.read().await.get_project(&id).unwrap().origin_url,
+        None
+    );
+    assert_eq!(
+        *store.subscribe().borrow(),
+        gen_before,
+        "a repo with no origin must settle at None without writing state"
+    );
+}
+
+#[tokio::test]
+async fn backfill_updates_origin_url_when_the_remote_is_repointed() {
+    // Repos get renamed, transferred between owners, and switched between ssh
+    // and https. A stored origin that never refreshes would silently mis-badge
+    // the repo in the picker this field exists to serve, so the repair has to
+    // *correct* a stale value, not only fill an absent one.
+    let (tmp, _remote, local) = repo_with_remote();
+    let (_cdir, _sdir, store, manager) = manager_for(&tmp);
+    let id = manager.add_project(local.clone()).await.unwrap();
+    assert!(
+        store
+            .read()
+            .await
+            .get_project(&id)
+            .unwrap()
+            .origin_url
+            .is_some()
+    );
+
+    git(
+        &local,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:sizeak/renamed-repo.git",
+        ],
+    );
+    manager.sync_worktrees(&id).await.unwrap();
+
+    let stored = store
+        .read()
+        .await
+        .get_project(&id)
+        .unwrap()
+        .origin_url
+        .clone();
+    assert_eq!(
+        canonical_repo_slug(stored.as_deref().expect("origin still recorded")),
+        canonical_repo_slug("https://github.com/sizeak/renamed-repo"),
+        "stored origin must follow the repo's current remote"
+    );
+
+    // Still idempotent: with the value now current, a further pass writes nothing.
+    let gen_before = *store.subscribe().borrow();
+    manager.sync_worktrees(&id).await.unwrap();
+    assert_eq!(
+        store.read().await.get_project(&id).unwrap().origin_url,
+        stored
+    );
+    assert_eq!(
+        *store.subscribe().borrow(),
+        gen_before,
+        "an unchanged origin must not rewrite state"
+    );
+
+    // Dropping the remote entirely settles back to `None` rather than pinning
+    // an origin the repo no longer has.
+    git(&local, &["remote", "remove", "origin"]);
     manager.sync_worktrees(&id).await.unwrap();
     assert_eq!(
         store.read().await.get_project(&id).unwrap().origin_url,
