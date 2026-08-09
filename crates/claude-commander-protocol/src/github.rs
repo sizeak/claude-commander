@@ -405,7 +405,16 @@ pub fn validate_clone_url(source: &str) -> Result<CloneTarget, CloneRejection> {
             }
             path
         }
-        SourceShape::Scp { path, .. } => path,
+        SourceShape::Scp { host, path } => {
+            // The same rule as the `Url` arm, and for the same reason: `git@:o/r`
+            // is scp-shaped with an empty host. Accepting it here while
+            // `canonical_repo_slug` returns `None` for it is precisely the drift
+            // `SourceShape` exists to prevent.
+            if host.is_empty() {
+                return Err(CloneRejection::MissingHost);
+            }
+            path
+        }
         SourceShape::LocalPath(path) => path,
         SourceShape::Other => return Err(CloneRejection::NotAbsolute),
     };
@@ -421,11 +430,15 @@ pub fn validate_clone_url(source: &str) -> Result<CloneTarget, CloneRejection> {
 
 /// Validate an `owner/name` GitHub slug destined for `gh repo clone`'s argv.
 ///
-/// Exactly two non-empty segments, each restricted to the characters GitHub
-/// actually allows in owner and repository names, and neither starting with `-`
-/// (which would make the slug an option). `.` and `..` are excluded with the
-/// same directory-name check the URL path gets, since a slug's second segment
-/// becomes the clone directory.
+/// Exactly two segments, each restricted to the characters GitHub actually
+/// allows in owner and repository names, and each subject to the same
+/// directory-name check a URL-derived name gets — so neither may be empty,
+/// start with `-` (which would make the slug an option), or be `.`/`..`.
+///
+/// The check is applied to *both* segments, not just the one that becomes the
+/// clone directory. Only `name` builds a path today, but a rule that holds for
+/// half a slug is one refactor away from being wrong, and the asymmetry is
+/// invisible at the call site.
 pub fn validate_repo_slug(slug: &str) -> Result<(), CloneRejection> {
     let malformed = || CloneRejection::MalformedSlug {
         slug: slug.to_string(),
@@ -435,17 +448,16 @@ pub fn validate_repo_slug(slug: &str) -> Result<(), CloneRejection> {
         return Err(malformed());
     }
     for segment in [owner, name] {
-        if segment.is_empty() || segment.starts_with('-') {
-            return Err(malformed());
-        }
         if !segment
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
             return Err(malformed());
         }
+        // Covers empty, a leading `-`, `.`/`..`, and embedded separators.
+        check_dir_name(segment).map_err(|_| malformed())?;
     }
-    check_dir_name(name).map_err(|_| malformed())
+    Ok(())
 }
 
 /// Reduce a clone source to a stable `host/owner/name` identity, or `None` when
@@ -471,14 +483,22 @@ pub fn canonical_repo_slug(source: &str) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    let path = path.trim_matches('/');
+    // Lowercase *before* stripping, not after. Hostnames, GitHub owner/repo
+    // names and the `.git` suffix are all ASCII and case-insensitive, but a
+    // trailing lowercase pass would strip nothing from `repo.GIT` and then lower
+    // it to `repo.git` — a second identity for the same repo, which is exactly
+    // what this function exists to prevent.
+    let host = host.to_ascii_lowercase();
+    let lowered = path.to_ascii_lowercase();
+    let path = lowered.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
+    // A `.git` that was its own trailing segment (`o/repo/.git`) leaves the
+    // separator behind, so trim again.
+    let path = path.trim_end_matches('/');
     if path.is_empty() {
         return None;
     }
-    // Owner and repository names are ASCII and case-insensitive on GitHub, as
-    // are hostnames, so a single lowercase pass canonicalises the whole slug.
-    Some(format!("{host}/{path}").to_ascii_lowercase())
+    Some(format!("{host}/{path}"))
 }
 
 #[cfg(test)]
@@ -732,6 +752,23 @@ mod tests {
         assert!(validate_clone_url("ssh://git@localhost/repo").is_ok());
     }
 
+    /// `git@:o/r` is scp-shaped but has an *empty* host. Accepting it here while
+    /// `canonical_repo_slug` returns `None` for it is exactly the drift
+    /// `SourceShape` exists to prevent — the clone would be attempted and the
+    /// resulting project could never match a picker row. The `Url` arm already
+    /// refused a hostless `https:///o/r`; the `Scp` arm must agree.
+    #[test]
+    fn scp_source_with_an_empty_host_is_rejected_and_has_no_identity() {
+        for source in ["git@:o/r", "git@:o/r.git", "git@:repo"] {
+            assert_eq!(
+                validate_clone_url(source),
+                Err(CloneRejection::MissingHost),
+                "source: {source}"
+            );
+            assert_eq!(canonical_repo_slug(source), None, "source: {source}");
+        }
+    }
+
     /// `canonical_repo_slug` and `validate_clone_url` classify through the same
     /// helper, so a source that validates as a *remote* also has an identity,
     /// and a local one has none. A drift between the two is precisely how the
@@ -758,6 +795,12 @@ mod tests {
 
     /// A port, a trailing slash and mixed case must not split one repo into two
     /// identities.
+    ///
+    /// The `.GIT` cases are the sharp ones: the suffix strip and the lowercase
+    /// pass have to happen in the right order, or `repo.GIT` keeps its suffix
+    /// through the strip and only loses its case afterwards — canonicalising to
+    /// `…/repo.git`, a second identity for one repo, which defeats the badge
+    /// this function exists to power.
     #[test]
     fn canonicalisation_ignores_ports_trailing_slashes_and_case() {
         let expect = Some("example.com/o/repo".to_string());
@@ -769,6 +812,14 @@ mod tests {
             "ssh://git@example.com:2222/o/repo.git",
             "git@example.com:o/repo.git",
             "  https://example.com/o/repo  ",
+            // Case-varying `.git` suffix.
+            "https://example.com/o/repo.GIT",
+            "https://example.com/o/repo.Git",
+            "https://EXAMPLE.COM/O/REPO.GIT",
+            "git@example.com:o/repo.GIT",
+            "https://example.com/o/repo.GIT/",
+            // `.git` as its own trailing segment must not leave the slash behind.
+            "https://example.com/o/repo/.git",
         ] {
             assert_eq!(canonical_repo_slug(form), expect, "form: {form}");
         }
@@ -810,9 +861,14 @@ mod tests {
             "owner/-flag",      // argv hazard in the name
             "/name",            // empty owner
             "owner/",           // empty name
-            "owner/..",         // traversal
-            "owner/na;me",      // shell-ish punctuation
-            "owner/na\nme",     // control character
+            "owner/..",         // traversal in the name
+            // Traversal in the *owner*. Not a path today, but the rule is
+            // stated for the whole slug, so it has to hold for both segments.
+            "../evil",
+            "./evil",
+            "../..",
+            "owner/na;me",  // shell-ish punctuation
+            "owner/na\nme", // control character
         ] {
             assert_eq!(
                 validate_repo_slug(slug),
