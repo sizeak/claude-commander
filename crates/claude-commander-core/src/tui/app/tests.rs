@@ -801,6 +801,52 @@ fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
 }
 
 #[test]
+fn test_projects_dir_row_shows_default_when_none() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows.iter().find(|r| r.field_key == "projects_dir").unwrap();
+    assert_eq!(row.text_value(), "(default)");
+}
+
+#[test]
+fn test_apply_projects_dir_round_trips_through_the_default_sentinel() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "projects_dir", "/my/projects");
+    assert_eq!(
+        app.config.projects_dir,
+        Some(std::path::PathBuf::from("/my/projects"))
+    );
+    app.apply_settings_edit(SettingsTab::General, "projects_dir", "(default)");
+    assert_eq!(app.config.projects_dir, None);
+    app.config.projects_dir = Some(std::path::PathBuf::from("/my/projects"));
+    app.apply_settings_edit(SettingsTab::General, "projects_dir", "");
+    assert_eq!(app.config.projects_dir, None);
+}
+
+#[test]
+fn test_clone_timeout_row_shows_current_value() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "clone_timeout_secs")
+        .unwrap();
+    assert_eq!(row.text_value(), "1800");
+}
+
+#[test]
+fn test_apply_clone_timeout_rejects_implausibly_short_values() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "clone_timeout_secs", "60");
+    assert_eq!(app.config.clone_timeout_secs, 60);
+    // Below the floor and unparseable input both leave the value untouched.
+    app.apply_settings_edit(SettingsTab::General, "clone_timeout_secs", "5");
+    assert_eq!(app.config.clone_timeout_secs, 60);
+    app.apply_settings_edit(SettingsTab::General, "clone_timeout_secs", "soon");
+    assert_eq!(app.config.clone_timeout_secs, 60);
+}
+
+#[test]
 fn test_commander_rows_present_with_defaults() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);

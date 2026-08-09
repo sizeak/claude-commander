@@ -54,6 +54,19 @@ impl App {
                             .unwrap_or_else(|| "(default)".into()),
                         "worktrees_dir",
                     ),
+                    SettingsRow::text(
+                        "Projects Directory",
+                        c.projects_dir
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(default)".into()),
+                        "projects_dir",
+                    ),
+                    SettingsRow::text(
+                        "Clone Timeout (s)",
+                        c.clone_timeout_secs.to_string(),
+                        "clone_timeout_secs",
+                    ),
                     SettingsRow::toggle(
                         "Per-Repo Worktree Dirs",
                         c.per_repo_worktree_dirs,
@@ -963,6 +976,25 @@ impl App {
                         Some(PathBuf::from(value))
                     };
                 }
+                "projects_dir" => {
+                    self.config.projects_dir = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
+                }
+                "clone_timeout_secs" => match value.parse::<u64>() {
+                    Ok(v) if v >= 30 => {
+                        self.config.clone_timeout_secs = v;
+                    }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Clone Timeout must be at least 30 seconds".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
                 "editor" => {
                     self.config.editor = if value.is_empty() || value == "(auto)" {
                         None

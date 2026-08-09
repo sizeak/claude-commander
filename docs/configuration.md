@@ -104,6 +104,15 @@ ui_refresh_fps = 30
 # Custom worktrees directory (default: platform-specific, see Data Storage below)
 # worktrees_dir = "/path/to/worktrees"
 
+# Directory that cloned repositories land in (default: "~/Projects"). Unlike the
+# worktrees directory this lives under your home, not the app's data dir — these
+# are ordinary checkouts you work in directly.
+# projects_dir = "/path/to/projects"
+
+# Timeout (seconds) for a single repository clone before it is abandoned.
+# Default 1800 (30 min).
+# clone_timeout_secs = 1800
+
 # Isolate every tmux command onto a throwaway socket dir (default: unset).
 # For hermetic tests and the e2e harness ONLY — leave unset for normal use.
 # When set, tmux commands run with TMUX_TMPDIR=<dir> and $TMUX/$TMUX_PANE

@@ -41,8 +41,14 @@ fn isolated_tmux_tmpdir(temp_dir: &TempDir) -> PathBuf {
 /// links the core crate as a normal dependency (compiled without `--test`), so
 /// telemetry would otherwise be live here. Centralising the disable means a new
 /// test can't forget it. Guarded by `isolated_config_store_disables_telemetry`.
+///
+/// It also pins `projects_dir`, whose default is the user's REAL `~/Projects`,
+/// so a test that reaches the clone paths checks repositories out under
+/// `temp_dir` instead of the developer's own projects directory. Guarded by
+/// `isolated_config_store_pins_projects_dir`.
 fn create_isolated_config_store(temp_dir: &TempDir, mut config: Config) -> Arc<ConfigStore> {
     config.tmux_tmpdir = Some(isolated_tmux_tmpdir(temp_dir));
+    config.projects_dir = Some(temp_dir.path().join("projects"));
     config.telemetry.enabled = false;
     let config_path = temp_dir.path().join("config.toml");
     let toml = toml::to_string_pretty(&config).unwrap();
@@ -81,6 +87,22 @@ async fn isolated_config_store_disables_telemetry() {
     assert!(
         !service.telemetry().is_active(),
         "integration-test services must not emit telemetry (would pollute production OpenObserve)"
+    );
+}
+
+/// Guard: `create_isolated_config_store` must pin the projects directory into
+/// the temp dir. `projects_dir` defaults to the user's REAL `~/Projects`, and
+/// the repo-clone paths write there — so an unpinned helper would clone into
+/// the developer's own projects directory from `cargo test` / CI. Fails if that
+/// pin is dropped.
+#[tokio::test]
+async fn isolated_config_store_pins_projects_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_store = create_isolated_config_store(&temp_dir, Config::default());
+    let projects_dir = config_store.read().projects_dir().unwrap();
+    assert!(
+        projects_dir.starts_with(temp_dir.path()),
+        "isolated test configs must not clone into the real ~/Projects (got {projects_dir:?})"
     );
 }
 
