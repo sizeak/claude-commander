@@ -7,6 +7,7 @@
 
 mod auto_pull;
 mod backend;
+mod clone;
 mod diff;
 mod github;
 pub(crate) mod lfs;
@@ -18,6 +19,7 @@ mod worktree_include;
 
 pub use auto_pull::*;
 pub use backend::*;
+pub use clone::*;
 pub use diff::*;
 pub use github::*;
 pub use pr::*;

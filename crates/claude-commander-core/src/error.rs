@@ -199,6 +199,15 @@ pub enum GitError {
     /// without seeing gh's own stderr.
     #[error("GitHub CLI (gh) is not installed or not runnable")]
     GhUnavailable,
+
+    /// A clone ran past its time budget and was killed.
+    ///
+    /// Distinct from `OperationFailed` for the same reason as `GhUnavailable`:
+    /// it is actionable (a huge repo on a slow link wants a larger
+    /// `clone_timeout_secs`), and the process was killed, so there is no
+    /// subprocess stderr worth surfacing.
+    #[error("clone timed out after {secs}s")]
+    CloneTimedOut { secs: u64 },
 }
 
 /// Configuration errors
