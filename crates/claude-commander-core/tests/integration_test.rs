@@ -424,6 +424,10 @@ async fn test_session_manager_restart() {
         // This test bypasses `create_isolated_config_store`, so pin the tmux
         // socket dir directly to keep it off the developer's real server.
         tmux_tmpdir: Some(isolated_tmux_tmpdir(&state_temp_dir)),
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
@@ -1503,6 +1507,10 @@ async fn test_failed_finalize_removes_created_worktree() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         tmux_tmpdir: Some(long_socket_dir),
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
     let config_path = state_temp_dir.path().join("config.toml");
@@ -1575,6 +1583,10 @@ async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
@@ -1671,6 +1683,10 @@ async fn test_manual_kill_marks_session_for_resume_on_wake() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
@@ -1852,6 +1868,10 @@ async fn test_fresh_restart_clears_hibernation_marker() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 

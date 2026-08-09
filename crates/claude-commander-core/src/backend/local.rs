@@ -482,14 +482,17 @@ mod tests {
     use std::sync::Arc;
 
     /// Build a hermetic backend over `TempDir`-backed stores: telemetry off,
-    /// tmux isolated onto a throwaway socket dir (per the project's
-    /// test-isolation rules).
+    /// tmux isolated onto a throwaway socket dir, projects dir pinned under
+    /// `dir` (per the project's test-isolation rules).
     fn backend(dir: &tempfile::TempDir) -> LocalBackend {
         let mut config = Config::default();
         config.telemetry.enabled = false;
         let tmux_tmpdir = dir.path().join("tmux");
         std::fs::create_dir_all(&tmux_tmpdir).unwrap();
         config.tmux_tmpdir = Some(tmux_tmpdir);
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it under `dir`.
+        config.projects_dir = Some(dir.path().join("projects"));
         let config_store = Arc::new(ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),

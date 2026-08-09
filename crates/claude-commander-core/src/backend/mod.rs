@@ -730,6 +730,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let mut config = crate::config::Config::default();
         config.telemetry.enabled = false;
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it under the temp dir.
+        config.projects_dir = Some(dir.path().join("projects"));
         let config_store = std::sync::Arc::new(crate::config::ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),

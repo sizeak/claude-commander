@@ -487,6 +487,9 @@ mod tests {
         let mut config = Config {
             worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
             tmux_tmpdir: Some(tmux_tmpdir),
+            // `projects_dir` defaults to the user's REAL `~/Projects`, which
+            // the repo-clone paths write into. Pin it under `data_dir`.
+            projects_dir: Some(data_dir.path().join("projects")),
             ..Config::default()
         };
         config.telemetry.enabled = false;

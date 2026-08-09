@@ -3177,24 +3177,11 @@ mod tests {
     /// injected one (test-isolation regression).
     #[tokio::test]
     async fn comment_writes_stay_under_injected_data_dir() {
-        use crate::config::storage::AppState as CoreState;
-        use crate::config::{ConfigStore, StateStore};
-
         let dir = tempfile::TempDir::new().unwrap();
-        // Telemetry is opt-out by default with a baked ingest token; disable it
-        // so this test never posts events to the production OpenObserve instance.
-        let mut config = Config::default();
-        config.telemetry.enabled = false;
-        let config_store = Arc::new(ConfigStore::with_path(
-            config,
-            dir.path().join("config.toml"),
-        ));
-        let store = Arc::new(StateStore::with_path(
-            CoreState::default(),
-            dir.path().join("state.json"),
-        ));
-        let frontend = FrontendInfo::new("test", "0.0.0");
-        let service = CommanderService::new(config_store, store, frontend);
+        // Built through the shared helper rather than by hand, so this test
+        // inherits every isolation knob it sets (telemetry off, tmux and
+        // projects dir pinned) instead of having to repeat them.
+        let service = service_with_config(&dir, Config::default());
 
         // Write a comment through the public API.
         let session_id = SessionId::new();
@@ -3234,13 +3221,20 @@ mod tests {
     use crate::config::{ConfigStore, StateStore};
 
     /// Build a hermetic service over TempDir-backed stores with the given
-    /// config. Telemetry is disabled and tmux is isolated onto a throwaway
-    /// socket dir, per the project's test-isolation rules.
+    /// config. Telemetry is disabled, tmux is isolated onto a throwaway socket
+    /// dir, and the projects dir is pinned under `dir`, per the project's
+    /// test-isolation rules. The knobs are applied *after* the caller's config
+    /// arrives, so an explicitly-passed `Config` can't silently lose them.
+    /// Guarded by `service_with_config_pins_projects_dir`.
     fn service_with_config(dir: &tempfile::TempDir, mut config: Config) -> CommanderService {
         config.telemetry.enabled = false;
         let tmux_tmpdir = dir.path().join("tmux");
         std::fs::create_dir_all(&tmux_tmpdir).unwrap();
         config.tmux_tmpdir = Some(tmux_tmpdir);
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it so no service built here can
+        // clone outside the temp tree.
+        config.projects_dir = Some(dir.path().join("projects"));
         let config_store = Arc::new(ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),
@@ -3254,6 +3248,31 @@ mod tests {
 
     fn service(dir: &tempfile::TempDir) -> CommanderService {
         service_with_config(dir, Config::default())
+    }
+
+    /// Guard: the core service helper must pin the projects directory into the
+    /// temp dir. `projects_dir` defaults to the user's REAL `~/Projects` and the
+    /// repo-clone paths write there, so an unpinned helper would check
+    /// repositories out into the developer's own projects directory from
+    /// `cargo test` / CI. The caller-supplied config must not be able to defeat
+    /// the pin either, so this asserts it for an explicitly-passed `Config` too.
+    #[test]
+    fn service_with_config_pins_projects_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for config in [
+            Config::default(),
+            Config {
+                projects_dir: Some(PathBuf::from("/definitely/not/a/temp/dir")),
+                ..Config::default()
+            },
+        ] {
+            let svc = service_with_config(&dir, config);
+            let projects_dir = svc.read_config().projects_dir().unwrap();
+            assert!(
+                projects_dir.starts_with(dir.path()),
+                "core test services must not clone into the real ~/Projects (got {projects_dir:?})"
+            );
+        }
     }
 
     /// Seed one project with one session and return their ids.

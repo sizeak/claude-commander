@@ -802,10 +802,23 @@ fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
 
 #[test]
 fn test_projects_dir_row_shows_default_when_none() {
-    let app = make_test_app();
+    let mut app = make_test_app();
+    // The fixture pins `projects_dir` into its temp dir so no test can clone
+    // into the real `~/Projects`; clear it here, since the unset case is
+    // exactly what this test is about.
+    app.config.projects_dir = None;
     let rows = app.build_settings_rows(SettingsTab::General);
     let row = rows.iter().find(|r| r.field_key == "projects_dir").unwrap();
     assert_eq!(row.text_value(), "(default)");
+}
+
+#[test]
+fn test_projects_dir_row_shows_custom_path() {
+    let mut app = make_test_app();
+    app.config.projects_dir = Some(std::path::PathBuf::from("/custom/projects"));
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows.iter().find(|r| r.field_key == "projects_dir").unwrap();
+    assert_eq!(row.text_value(), "/custom/projects");
 }
 
 #[test]
@@ -1991,7 +2004,13 @@ fn make_test_app_with_path() -> (App, std::path::PathBuf) {
     let tmp = tempfile::TempDir::new().unwrap();
     let config_path = tmp.path().join("config.toml");
     let state_path = tmp.path().join("state.json");
-    let config = Config::default();
+    // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+    // repo-clone paths write into. Pin it under `tmp` so no App built here can
+    // clone outside the temp tree.
+    let config = Config {
+        projects_dir: Some(tmp.path().join("projects")),
+        ..Config::default()
+    };
     let config_store = Arc::new(ConfigStore::with_path(config, config_path.clone()));
     let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
     // Leak the TempDir so paths stay valid for the lifetime of the test.
@@ -3163,6 +3182,9 @@ fn build_app_with_mock_remotes(servers: Vec<(&str, WorkspaceSnapshot)>) -> App {
     let state_path = tmp.path().join("state.json");
     let mut config = Config::default();
     config.telemetry.enabled = false;
+    // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+    // repo-clone paths write into. Pin it under `tmp`.
+    config.projects_dir = Some(tmp.path().join("projects"));
     let mut snapshots: std::collections::HashMap<String, WorkspaceSnapshot> = Default::default();
     for (name, snap) in servers {
         config
@@ -3421,6 +3443,9 @@ async fn factory_failure_yields_degraded_placeholder() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mut config = Config::default();
     config.telemetry.enabled = false;
+    // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+    // repo-clone paths write into. Pin it under `tmp`.
+    config.projects_dir = Some(tmp.path().join("projects"));
     config
         .remote_servers
         .push(crate::config::RemoteServerConfig {

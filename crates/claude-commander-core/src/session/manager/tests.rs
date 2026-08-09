@@ -9,8 +9,12 @@ fn test_store() -> (TempDir, Arc<StateStore>) {
     (dir, store)
 }
 
-fn test_config_store(config: Config) -> (TempDir, Arc<ConfigStore>) {
+fn test_config_store(mut config: Config) -> (TempDir, Arc<ConfigStore>) {
     let dir = TempDir::new().unwrap();
+    // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+    // repo-clone paths write into. Pin it under `dir` — applied after the
+    // caller's config arrives, so an explicitly-passed `Config` can't lose it.
+    config.projects_dir = Some(dir.path().join("projects"));
     let path = dir.path().join("config.toml");
     let toml = toml::to_string_pretty(&config).unwrap();
     std::fs::write(&path, toml).unwrap();
