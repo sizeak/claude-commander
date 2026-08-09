@@ -190,6 +190,15 @@ pub enum GitError {
 
     #[error("Invalid reference: {0}")]
     InvalidRef(String),
+
+    /// The `gh` CLI is not installed or not runnable.
+    ///
+    /// Distinct from `OperationFailed` on purpose: the repo picker renders this
+    /// as its own state ("install the GitHub CLI to browse your repos") rather
+    /// than as a generic failure, and it is the one gh outcome a user can fix
+    /// without seeing gh's own stderr.
+    #[error("GitHub CLI (gh) is not installed or not runnable")]
+    GhUnavailable,
 }
 
 /// Configuration errors
