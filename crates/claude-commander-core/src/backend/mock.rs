@@ -81,6 +81,10 @@ pub struct MockBackend {
     /// clone to finish, and a test that wants a terminal status sets one with
     /// [`Self::set_clone_status`].
     clone_jobs: Mutex<Vec<CloneJob>>,
+    /// Paths passed to [`Self::add_project`], for call-recording asserts — the
+    /// "register the existing checkout" answer to an occupied clone destination
+    /// has to be shown to hit the right backend's disk.
+    added_projects: Mutex<Vec<std::path::PathBuf>>,
     conn_tx: watch::Sender<ConnectionState>,
     conn_rx: watch::Receiver<ConnectionState>,
     gen_tx: watch::Sender<u64>,
@@ -122,6 +126,7 @@ impl MockBackend {
             github_repos: Mutex::new(Vec::new()),
             clone_requests: Mutex::new(Vec::new()),
             clone_jobs: Mutex::new(Vec::new()),
+            added_projects: Mutex::new(Vec::new()),
             conn_tx,
             conn_rx,
             gen_tx,
@@ -234,6 +239,11 @@ impl MockBackend {
     /// Requests passed to [`Self::start_clone`], in call order.
     pub fn clone_requests(&self) -> Vec<CloneRequest> {
         self.clone_requests.lock().unwrap().clone()
+    }
+
+    /// Paths passed to [`Self::add_project`], in call order.
+    pub fn added_projects(&self) -> Vec<std::path::PathBuf> {
+        self.added_projects.lock().unwrap().clone()
     }
 
     /// Force an issued job's status, so a test can drive a poll loop to a
@@ -430,8 +440,9 @@ impl CommanderBackend for MockBackend {
         Ok(())
     }
 
-    async fn add_project(&self, _path: std::path::PathBuf) -> BResult<ProjectId> {
+    async fn add_project(&self, path: std::path::PathBuf) -> BResult<ProjectId> {
         self.guard()?;
+        self.added_projects.lock().unwrap().push(path);
         Ok(ProjectId::new())
     }
 
