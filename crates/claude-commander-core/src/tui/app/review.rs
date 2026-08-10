@@ -2320,7 +2320,10 @@ impl App {
         let inner_width = area.width.saturating_sub(2) as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
-            let on_cursor = focused && i == state.tree_cursor;
+            // The cursor row is banded whether or not this pane has focus —
+            // unfocused it wears a muted band (see `selection_bg_unfocused`), so
+            // the file the body is showing stays identifiable while reading it.
+            let on_cursor = i == state.tree_cursor;
             let line = match row {
                 TreeRow::Dir {
                     depth,
@@ -2336,7 +2339,7 @@ impl App {
                     )];
                     spans.extend(comment_badge_span(state.dir_comment_count(path), &pal));
                     if on_cursor {
-                        spans = select_spans(spans, &pal);
+                        spans = select_spans(spans, &pal, focused);
                     }
                     Line::from(spans)
                 }
@@ -2372,7 +2375,7 @@ impl App {
                     // selection still wins on the focused row.
                     spans = apply_reviewed_bg(spans, reviewed, inner_width, &pal);
                     if on_cursor {
-                        spans = select_spans(spans, &pal);
+                        spans = select_spans(spans, &pal, focused);
                     }
                     Line::from(spans)
                 }
@@ -3329,12 +3332,25 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 /// The file-list pane only: inside the diff body, selection is a flag on a
 /// [`SpanStyle`] that the palette resolves, so the two never disagree about
 /// precedence.
-fn select_spans(spans: Vec<Span<'static>>, pal: &ReviewPalette) -> Vec<Span<'static>> {
+fn select_spans(
+    spans: Vec<Span<'static>>,
+    pal: &ReviewPalette,
+    focused: bool,
+) -> Vec<Span<'static>> {
+    let bg = if focused {
+        pal.selection_bg
+    } else {
+        pal.selection_bg_unfocused
+    };
     spans
         .into_iter()
         .map(|s| {
-            let mut style = s.style.bg(pal.selection_bg);
-            if let Some(fg) = pal.selection_fg {
+            let mut style = s.style.bg(bg);
+            // The selection foreground belongs to the *focused* row: forcing it
+            // on the muted band would make an inactive cursor row shout as loud
+            // as the focused one, and would flatten the status-letter colour
+            // (and a reviewed row's dim) that the muted band is happy to keep.
+            if let Some(fg) = pal.selection_fg.filter(|_| focused) {
                 style = style.fg(fg);
             }
             Span::styled(s.content, style)
