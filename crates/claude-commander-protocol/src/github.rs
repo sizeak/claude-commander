@@ -57,6 +57,60 @@ use crate::session::ProjectId;
 /// accepts rather than maintaining its own copy of the list.
 pub const CLONE_SCHEMES: &[&str] = &["https", "http", "ssh", "git", "file"];
 
+/// Default wall-clock budget, in seconds, for the server-side repo listing
+/// (`gh api --paginate`) before the process group is killed.
+///
+/// This is the default for `Config::repo_list_timeout_secs`, which a user may
+/// raise; the constant lives here rather than in core because the *other* half
+/// of the contract — [`REPO_LIST_HTTP_TIMEOUT_SECS`] — is a client-side value,
+/// and the two only mean anything relative to each other.
+///
+/// **Why the timeout exists at all, and why it is generous.** It is not there to
+/// keep the picker responsive — the picker never blocks on this call, it renders
+/// a dismissible loading state — it is there so an abandoned request cannot
+/// leave an unbounded `gh` running. So the ceiling is set high enough that it
+/// should never fire on a legitimate account: a timeout that fires means the
+/// feature simply does not work for that user, and there is no page cap to fall
+/// back on (capping would silently hide repos). 90s admits ~180 pages of 100 at
+/// half a second each, well past any plausible account size — though per-page
+/// latency is an assumption, not a figure measured here, which is precisely why
+/// the value is a config knob rather than a constant in core.
+pub const DEFAULT_REPO_LIST_TIMEOUT_SECS: u64 = 90;
+
+/// Wall-clock budget, in seconds, a client gives its `GET /github/repos`
+/// request.
+///
+/// **This must stay strictly greater than [`DEFAULT_REPO_LIST_TIMEOUT_SECS`],
+/// and that ordering is the whole contract** — pinned by
+/// `the_client_budget_outlasts_the_server_budget`. The server kills `gh` and
+/// answers with a real error ("listing GitHub repos timed out after 90s"); if
+/// the client gave up first it would report its own connection timeout instead,
+/// which reads to a user as "the server is down" rather than "the listing
+/// overran". Worse, the client's own timeout does nothing about the `gh` process
+/// on the far side, so every retry would stack another one.
+///
+/// The margin over the server budget covers connecting, transferring a large
+/// JSON body, and the server's own overhead around the subprocess.
+///
+/// **Known limitation:** a user who raises `repo_list_timeout_secs` above this
+/// value re-introduces the symptom for remote frontends, because the client
+/// cannot know the server's configured budget without asking for it. Documented
+/// in `docs/configuration.md` beside the knob.
+pub const REPO_LIST_HTTP_TIMEOUT_SECS: u64 = 120;
+
+/// The repo-list timeout contract, enforced at compile time.
+///
+/// A runtime test would do, but this is an invariant between two constants in one
+/// file, so a violation should be unbuildable rather than merely caught by a
+/// suite someone has to run. Strict `>`: equal budgets race, and a client that
+/// loses that race reports its own transport timeout ("the server is down")
+/// instead of the server's real reason — while leaving the `gh` it was waiting on
+/// alive, so every retry stacks another.
+const _: () = assert!(
+    REPO_LIST_HTTP_TIMEOUT_SECS > DEFAULT_REPO_LIST_TIMEOUT_SECS,
+    "the client's repo-list HTTP budget must strictly outlast the server's gh budget"
+);
+
 /// A GitHub repository as offered by the repo picker.
 ///
 /// Field names match the GitHub REST API's repo object so a `gh api` / `gh repo

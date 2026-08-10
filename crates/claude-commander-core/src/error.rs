@@ -209,6 +209,20 @@ pub enum GitError {
     #[error("clone timed out after {secs}s")]
     CloneTimedOut { secs: u64 },
 
+    /// A GitHub repo listing ran past its time budget and was killed.
+    ///
+    /// **Deliberately not folded into `GhUnavailable`.** That variant means "gh
+    /// is missing or unauthenticated", and the picker answers it with "install /
+    /// log in to the GitHub CLI" — advice that is actively wrong for a user whose
+    /// working `gh` merely took too long over a large account. Nor is it
+    /// `OperationFailed`: the process was killed, so there is no subprocess
+    /// stderr to pass on, and the actionable answer is a larger
+    /// `repo_list_timeout_secs`. Same reasoning as [`Self::CloneTimedOut`],
+    /// separate variant because the two carry different budgets and different
+    /// remedies.
+    #[error("listing GitHub repos timed out after {secs}s")]
+    RepoListTimedOut { secs: u64 },
+
     /// A clone source or destination name was refused by the
     /// [`claude_commander_protocol::github`] validators.
     ///

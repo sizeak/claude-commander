@@ -67,6 +67,11 @@ impl App {
                         c.clone_timeout_secs.to_string(),
                         "clone_timeout_secs",
                     ),
+                    SettingsRow::text(
+                        "Repo List Timeout (s)",
+                        c.repo_list_timeout_secs.to_string(),
+                        "repo_list_timeout_secs",
+                    ),
                     SettingsRow::toggle(
                         "Per-Repo Worktree Dirs",
                         c.per_repo_worktree_dirs,
@@ -990,6 +995,23 @@ impl App {
                     Ok(_) => {
                         self.ui_state.status_message = Some((
                             "Clone Timeout must be at least 30 seconds".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
+                // Same 30s floor as the clone timeout, and for the same reason: a
+                // sub-30s budget cannot list a large account, and there is no page
+                // cap to fall back on, so it would produce an empty picker rather
+                // than a short one. No zero-disables case — the whole point of the
+                // bound is that an abandoned `gh api --paginate` gets killed.
+                "repo_list_timeout_secs" => match value.parse::<u64>() {
+                    Ok(v) if v >= 30 => {
+                        self.config.repo_list_timeout_secs = v;
+                    }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Repo List Timeout must be at least 30 seconds".into(),
                             std::time::Instant::now() + std::time::Duration::from_secs(4),
                         ));
                     }

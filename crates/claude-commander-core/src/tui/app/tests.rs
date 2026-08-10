@@ -860,6 +860,36 @@ fn test_apply_clone_timeout_rejects_implausibly_short_values() {
 }
 
 #[test]
+fn test_repo_list_timeout_row_shows_current_value() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "repo_list_timeout_secs")
+        .unwrap();
+    assert_eq!(
+        row.text_value(),
+        claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS.to_string()
+    );
+}
+
+#[test]
+fn test_apply_repo_list_timeout_rejects_implausibly_short_values() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "repo_list_timeout_secs", "600");
+    assert_eq!(app.config.repo_list_timeout_secs, 600);
+    // Below the floor and unparseable input both leave the value untouched. There
+    // is deliberately no zero-disables case: `0` is just below the floor.
+    for rejected in ["5", "0", "soon"] {
+        app.apply_settings_edit(SettingsTab::General, "repo_list_timeout_secs", rejected);
+        assert_eq!(
+            app.config.repo_list_timeout_secs, 600,
+            "{rejected} should not have been accepted"
+        );
+    }
+}
+
+#[test]
 fn test_commander_rows_present_with_defaults() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
@@ -1654,7 +1684,14 @@ fn render_general_tab_draws_section_headers() {
         search: None,
     });
 
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    // Tall enough that every General section fits on one screen with room to
+    // spare. At 40 rows this test asserted three headers were visible while the
+    // third sat exactly on the bottom edge, so *adding a General row* broke it —
+    // a false failure, since the list scrolls (`list_scroll_offset`) and the
+    // header was still reachable. The height is deliberately generous so the next
+    // added row does not resurrect that coupling; what the test is for is that
+    // headers are drawn *at all*, interleaved with their settings.
+    let mut terminal = Terminal::new(TestBackend::new(100, 60)).unwrap();
     terminal.draw(|f| app.render(f)).unwrap();
 
     let text = buffer_text(&terminal);

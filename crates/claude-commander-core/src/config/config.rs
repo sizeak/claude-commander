@@ -135,6 +135,18 @@ pub struct Config {
     #[serde(default = "default_clone_timeout_secs")]
     pub clone_timeout_secs: u64,
 
+    /// Timeout in seconds for listing GitHub repos in the clone picker
+    /// (`gh api --paginate`) before the process group is killed. Default 90 —
+    /// see [`DEFAULT_REPO_LIST_TIMEOUT_SECS`] for why it is generous rather than
+    /// snappy, and note that raising it past
+    /// [`REPO_LIST_HTTP_TIMEOUT_SECS`] hands the race back to a remote client's
+    /// own request timeout.
+    ///
+    /// [`DEFAULT_REPO_LIST_TIMEOUT_SECS`]: claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+    /// [`REPO_LIST_HTTP_TIMEOUT_SECS`]: claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS
+    #[serde(default = "default_repo_list_timeout_secs")]
+    pub repo_list_timeout_secs: u64,
+
     /// Socket directory to isolate every tmux command commander spawns onto.
     ///
     /// For hermetic tests and the e2e harness only — leave unset (`None`) for
@@ -538,6 +550,7 @@ impl Default for Config {
             worktrees_dir: None,
             projects_dir: None,
             clone_timeout_secs: default_clone_timeout_secs(),
+            repo_list_timeout_secs: default_repo_list_timeout_secs(),
             tmux_tmpdir: None,
             paste_images_dir: None,
             per_repo_worktree_dirs: false,
@@ -600,6 +613,14 @@ fn default_recent_sessions_limit() -> u32 {
 
 fn default_clone_timeout_secs() -> u64 {
     1800
+}
+
+/// The default repo-list budget, taken from the protocol crate rather than
+/// spelled out here: its counterpart is the client's HTTP budget, and the two
+/// only mean anything relative to each other (see
+/// `claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS`).
+fn default_repo_list_timeout_secs() -> u64 {
+    claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
 }
 
 fn default_hibernate_idle_timeout_secs() -> u64 {
@@ -1584,14 +1605,36 @@ show_session_program = false
         assert_eq!(Config::default().clone_timeout_secs, 1800);
     }
 
-    /// `clone_timeout_secs` is a new field, so every existing `config.toml` —
-    /// which is never rewritten — omits it. Deserialising must fall back to the
-    /// default rather than failing the whole load.
+    #[test]
+    fn repo_list_timeout_defaults_to_the_protocol_budget() {
+        assert_eq!(
+            Config::default().repo_list_timeout_secs,
+            claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+        );
+    }
+
+    /// `clone_timeout_secs` and `repo_list_timeout_secs` are new fields, so every
+    /// existing `config.toml` — which is never rewritten — omits them.
+    /// Deserialising must fall back to the defaults rather than failing the whole
+    /// load.
     #[test]
     fn clone_fields_absent_from_toml_fall_back_to_defaults() {
         let config: Config = toml::from_str("branch_prefix = \"cc/\"\n").unwrap();
         assert_eq!(config.clone_timeout_secs, 1800);
+        assert_eq!(
+            config.repo_list_timeout_secs,
+            claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+        );
         assert!(config.projects_dir.is_none());
+    }
+
+    /// A user who sets the knob gets their value, not the default — the whole
+    /// point of the knob being the escape hatch for an account the default
+    /// cannot list.
+    #[test]
+    fn repo_list_timeout_is_read_from_toml() {
+        let config: Config = toml::from_str("repo_list_timeout_secs = 600\n").unwrap();
+        assert_eq!(config.repo_list_timeout_secs, 600);
     }
 
     #[test]

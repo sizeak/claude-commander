@@ -47,6 +47,22 @@ const REVIEW_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// re-anchors every comment, then detects the agent's state and sends keys into
 /// tmux — but still well under [`REQUEST_TIMEOUT`].
 const APPLY_COMMENTS_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per-request bound for `GET /github/repos`, the one route that runs *longer*
+/// than [`REQUEST_TIMEOUT`] rather than shorter.
+///
+/// The value is
+/// [`REPO_LIST_HTTP_TIMEOUT_SECS`](claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS),
+/// which the protocol crate defines alongside the server's own `gh` budget so the
+/// ordering between them is stated and tested in one place — see
+/// [`RemoteClient::github_repos`] for why the ordering matters.
+///
+/// A per-request bound may exceed the client-wide one: reqwest 0.13's
+/// `RequestBuilder::timeout` "affects only this request and overrides the timeout
+/// configured using `ClientBuilder::timeout()`" — it replaces it rather than
+/// tightening it. Pinned by `a_repo_list_request_outlasts_the_client_ceiling`,
+/// which would otherwise fail at 30s.
+const REPO_LIST_TIMEOUT: Duration =
+    Duration::from_secs(claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS);
 
 /// The transport client for one remote `claude-commander-server`: the HTTP
 /// client, the resolved base URL, and the (redacted) bearer token. Cloneable via
@@ -580,8 +596,21 @@ impl RemoteClient {
     /// a picker. An absent `gh` surfaces as [`ClientError::Unavailable`] (the
     /// server's 503 for a missing backing tool, as with tmux), which a frontend can
     /// word as "install gh on the server" rather than as a generic failure.
+    ///
+    /// **The only route that outlasts [`REQUEST_TIMEOUT`], and it has to.** The
+    /// server runs `gh api --paginate` under its own budget
+    /// ([`DEFAULT_REPO_LIST_TIMEOUT_SECS`], 90s by default) — more than the 30s
+    /// ceiling every other request gets. Under that ceiling a large account's
+    /// listing surfaced as a transport timeout, i.e. "the server is down", when
+    /// the server was merely still paginating; and giving up here does nothing
+    /// about the `gh` on the far side, so each retry stacked another one. So this
+    /// request is given [`REPO_LIST_TIMEOUT`], which outlasts the server's budget
+    /// and lets the server win the race and answer with its real reason.
+    ///
+    /// [`DEFAULT_REPO_LIST_TIMEOUT_SECS`]: claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
     pub async fn github_repos(&self) -> ClientResult<Vec<GithubRepo>> {
-        self.get_json(self.endpoint(&["github", "repos"])).await
+        self.get_json_within(self.endpoint(&["github", "repos"]), REPO_LIST_TIMEOUT)
+            .await
     }
 
     /// `POST /projects/clone` — start a clone, returning the created job.
@@ -812,6 +841,77 @@ mod tests {
             REVIEW_WRITE_TIMEOUT >= CONNECT_TIMEOUT,
             "review-write budget must at least cover the connect budget"
         );
+    }
+
+    /// The repo listing is the one request allowed to run *past* the ceiling, and
+    /// it must outlast the server's own `gh` budget or the client reports its own
+    /// transport timeout ("the server is down") while a `gh` keeps paginating on
+    /// the far side.
+    #[test]
+    fn the_repo_list_budget_outlasts_both_the_ceiling_and_the_server() {
+        assert!(
+            REPO_LIST_TIMEOUT > REQUEST_TIMEOUT,
+            "the repo listing needs more than the {REQUEST_TIMEOUT:?} ceiling"
+        );
+        assert!(
+            REPO_LIST_TIMEOUT.as_secs()
+                > claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS,
+            "the client must not give up before the server kills gh"
+        );
+    }
+
+    /// Pins the reqwest semantic the line above rests on: a per-request timeout
+    /// **replaces** the client-wide one, so it may be *longer*. Were it clamped to
+    /// the minimum of the two, `github_repos` would still die at
+    /// [`REQUEST_TIMEOUT`] and the fix would be silently inert.
+    ///
+    /// Deliberately scaled down (50ms ceiling, 5s override, ~300ms server) so it
+    /// proves the ordering in a third of a second rather than in half a minute.
+    /// Loopback only, no external network.
+    #[tokio::test]
+    async fn a_per_request_timeout_may_exceed_the_client_ceiling() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Answer two requests, each after a delay that outlasts the client-wide
+        // ceiling but fits inside the per-request override.
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n[]")
+                    .await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let url = format!("http://{addr}/github/repos");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+
+        // Without an override the client-wide ceiling bites: this is the shape of
+        // the bug being fixed.
+        assert!(
+            client.get(&url).send().await.is_err(),
+            "the client-wide ceiling should have expired at 50ms"
+        );
+        // With one, the request outlives that ceiling.
+        let response = client
+            .get(&url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("a per-request timeout must be able to exceed the client-wide one");
+        assert!(response.status().is_success());
     }
 
     #[test]

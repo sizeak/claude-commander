@@ -229,4 +229,29 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }
+
+    /// A repo listing that overran is a 500 carrying its own reason, **not** the
+    /// 503 a missing `gh` gets.
+    ///
+    /// The client maps 503 to `Unavailable`, which frontends word as "install gh
+    /// on the server" — actively wrong for a user whose working `gh` just had a
+    /// lot to paginate. What matters as much as the code is that a reason reaches
+    /// the client at all: this route is the reason the client gives the request a
+    /// budget longer than the server's `gh` budget, so the server wins the race
+    /// and answers with this instead of the client reporting a transport timeout.
+    #[test]
+    fn a_timed_out_repo_listing_is_a_500_not_the_503_for_a_missing_gh() {
+        let err = ApiError(CoreError::Git(GitError::RepoListTimedOut { secs: 90 }));
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_ne!(
+            err.status(),
+            ApiError(CoreError::Git(GitError::GhUnavailable)).status(),
+            "a slow listing must not be reported as a missing gh"
+        );
+        assert!(
+            err.0.to_string().contains("timed out"),
+            "the body must carry the real reason: {}",
+            err.0
+        );
+    }
 }

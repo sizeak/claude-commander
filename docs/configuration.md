@@ -113,6 +113,16 @@ ui_refresh_fps = 30
 # Default 1800 (30 min).
 # clone_timeout_secs = 1800
 
+# Timeout (seconds) for listing your GitHub repos in the clone picker, which
+# runs `gh api --paginate`. Default 90. Raise it if a very large account times
+# out — the repo list is never truncated to fit, so a timeout means an empty
+# picker rather than a short one.
+#
+# Note for remote (server) use: a client gives this request 120 seconds. Raising
+# repo_list_timeout_secs past that means the client gives up first and reports a
+# connection error instead of the server's real reason.
+# repo_list_timeout_secs = 90
+
 # Isolate every tmux command onto a throwaway socket dir (default: unset).
 # For hermetic tests and the e2e harness ONLY — leave unset for normal use.
 # When set, tmux commands run with TMUX_TMPDIR=<dir> and $TMUX/$TMUX_PANE

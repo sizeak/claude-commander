@@ -37,19 +37,16 @@
 //! prevent. An inherited `GIT_SSH_COMMAND` *is* preserved — see [`ssh_command`].
 
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
 
 use claude_commander_protocol::github::{
     CloneSource, redact_credentials, validate_clone_url, validate_repo_slug,
 };
-use nix::sys::signal::{Signal, killpg};
-use nix::unistd::Pid;
-use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tracing::{debug, warn};
 
 use crate::error::{GitError, Result};
+use crate::git::bounded::{self, Bounded};
 use crate::git::is_gh_available;
 
 /// Clone `source` into `dest`, non-interactively, within `timeout`.
@@ -229,53 +226,25 @@ fn ssh_command(inherited: Option<&str>) -> String {
 /// Run `cmd` to completion within `timeout`, killing it and everything it
 /// spawned if it overruns.
 ///
-/// `program` names the command for the error message ("git clone", …).
-async fn run_bounded(mut cmd: Command, program: &str, timeout: Duration) -> Result<()> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        // A new process group, so the timeout can take the whole tree down:
-        // `gh repo clone` spawns `git clone`, which spawns `ssh` or
-        // `git-remote-https`. Killing only the process we spawned would leave a
-        // live git writing into the destination that the failure path is about
-        // to delete. `process_group(0)` is setpgid(0, 0), so the child's pgid
-        // equals its own pid.
-        .process_group(0);
-
-    let mut child = cmd
-        .spawn()
+/// `program` names the command for the error message ("git clone", …). The
+/// timeout, the process-group kill and the output capture all live in
+/// [`super::bounded`], shared with the repo listing, which needs the same
+/// guarantee for the same reason; what stays here is *clone's* reading of the
+/// outcome — a `CloneTimedOut` rather than a `RepoListTimedOut`, and stderr
+/// redacted before it becomes an error string.
+async fn run_bounded(cmd: Command, program: &str, timeout: Duration) -> Result<()> {
+    let outcome = bounded::run_bounded(cmd, program, timeout)
+        .await
         .map_err(|e| GitError::OperationFailed(format!("failed to run {program}: {e}")))?;
-    // Read once, before the wait: `Child::id` returns `None` after the child
-    // has been reaped.
-    let pgid = child.id().map(|id| Pid::from_raw(id as i32));
 
-    // Drain stderr concurrently. Waiting on the child while its stderr pipe
-    // fills would deadlock the pair.
-    let mut pipe = child.stderr.take();
-    let drain = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(pipe) = pipe.as_mut() {
-            let _ = pipe.read_to_end(&mut buf).await;
+    let Bounded::Finished { status, stderr, .. } = outcome else {
+        return Err(GitError::CloneTimedOut {
+            secs: timeout.as_secs(),
         }
-        buf
-    });
-
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(status) => {
-            status.map_err(|e| GitError::OperationFailed(format!("{program} failed: {e}")))?
-        }
-        Err(_) => {
-            warn!("{program} exceeded {}s; killing", timeout.as_secs());
-            kill_tree(&mut child, pgid).await;
-            return Err(GitError::CloneTimedOut {
-                secs: timeout.as_secs(),
-            }
-            .into());
-        }
+        .into());
     };
 
     if !status.success() {
-        let stderr = drain.await.unwrap_or_default();
         // git suppresses its progress meter when stderr is not a terminal
         // ("Progress status is reported on the standard error stream by default
         // when it is attached to a terminal" — `git help clone`, `--progress`),
@@ -296,25 +265,6 @@ async fn run_bounded(mut cmd: Command, program: &str, timeout: Duration) -> Resu
     }
 
     Ok(())
-}
-
-/// SIGKILL the child's process group, then reap the child itself.
-///
-/// The group kill covers every descendant that did not put itself into a group
-/// of its own; neither `git` nor `ssh` is known to do so, but that is an
-/// assumption, not a verified claim. `Child::kill` is still called afterwards:
-/// it waits, which is what actually reaps the child rather than leaving a
-/// zombie.
-async fn kill_tree(child: &mut Child, pgid: Option<Pid>) {
-    if let Some(pgid) = pgid
-        && let Err(e) = killpg(pgid, Signal::SIGKILL)
-    {
-        // ESRCH just means it exited between the timeout firing and this call.
-        debug!("killpg({pgid}) failed: {e}");
-    }
-    if let Err(e) = child.kill().await {
-        debug!("failed to reap timed-out child: {e}");
-    }
 }
 
 #[cfg(test)]

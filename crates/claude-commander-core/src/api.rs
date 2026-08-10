@@ -305,9 +305,15 @@ impl CommanderService {
     /// is computed once per process, so a user who installs `gh` and reopens the
     /// picker would keep being told it is missing. This call is user-initiated and
     /// infrequent, so it can afford a fresh probe.
+    ///
+    /// Bounded by `Config::repo_list_timeout_secs`: `gh api --paginate` is
+    /// open-ended, and an unbounded run leaked a `gh` per abandoned request.
+    /// Overrunning it is [`GitError::RepoListTimedOut`](crate::error::GitError::RepoListTimedOut),
+    /// distinct from a missing `gh`.
     pub async fn list_github_repos(&self) -> Result<Vec<GithubRepo>> {
         self.telemetry.feature("github.list_repos");
-        list_repos().await
+        let timeout = Duration::from_secs(self.config_store.read().repo_list_timeout_secs);
+        list_repos(timeout).await
     }
 
     /// Start cloning a repository into the projects directory, returning the

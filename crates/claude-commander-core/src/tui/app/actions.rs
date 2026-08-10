@@ -1867,9 +1867,11 @@ impl App {
     /// and kick off the listing in the background.
     ///
     /// The picker opens *immediately*, showing its loading state, because
-    /// `list_github_repos` shells out to `gh api --paginate` with no server-side
-    /// timeout: a large account takes many seconds, and awaiting it here would
-    /// freeze the event loop for the whole listing.
+    /// `list_github_repos` shells out to `gh api --paginate`: a large account takes
+    /// many seconds, and awaiting it here would freeze the event loop for the whole
+    /// listing. The listing is bounded server-side by `repo_list_timeout_secs`
+    /// (90s by default), so a wedged one reports a timeout rather than spinning
+    /// forever — but that bound is far too long to hold the event loop for.
     pub(super) fn handle_clone_repository(&mut self) {
         // Freeze the target backend now: the clone runs on that host's disk, so
         // it must not drift if the tree selection moves while the picker is open.

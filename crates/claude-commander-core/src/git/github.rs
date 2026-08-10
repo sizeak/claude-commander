@@ -12,12 +12,26 @@
 //! indistinguishable from a user with no repos. So failures propagate, with
 //! "gh is not installed" carved out as its own [`GitError::GhUnavailable`]
 //! because it is the one case the user can act on directly.
+//!
+//! **The run is bounded, and the bound kills the process group.** `--paginate`
+//! over a large account is open-ended, and an unbounded run here was not merely
+//! slow: a remote frontend's HTTP request gives up first and reports a transport
+//! error, which reads as "the server is down" rather than "still listing"; and
+//! abandoning that request does nothing about the `gh` on the far side, so each
+//! press of the picker's retry button stacked another live `gh` on the server.
+//! The budget is [`Config::repo_list_timeout_secs`](crate::config::Config), the
+//! mechanism is [`crate::git::bounded`], and a timeout is its own
+//! [`GitError::RepoListTimedOut`] rather than a `GhUnavailable` — telling a user
+//! to install a `gh` they already have is worse than saying nothing.
+
+use std::time::Duration;
 
 use claude_commander_protocol::github::GithubRepo;
 use tokio::process::Command;
 use tracing::debug;
 
 use crate::error::{GitError, Result};
+use crate::git::bounded::{self, Bounded};
 use crate::git::is_gh_available;
 
 /// jq projection mapping a REST repo object onto [`GithubRepo`]'s fields.
@@ -43,25 +57,44 @@ archived, default_branch, clone_url, ssh_url, pushed_at}";
 const REPOS_ENDPOINT: &str = "/user/repos\
 ?affiliation=owner,collaborator,organization_member&per_page=100&sort=pushed";
 
-/// List every GitHub repo the authenticated user can clone.
+/// List every GitHub repo the authenticated user can clone, within `timeout`.
 ///
-/// Returns [`GitError::GhUnavailable`] when `gh` is missing; any other failure
-/// (not authenticated, network, rate limit) surfaces as
+/// Returns [`GitError::GhUnavailable`] when `gh` is missing,
+/// [`GitError::RepoListTimedOut`] when the listing overran `timeout` (and was
+/// killed, along with anything it spawned); any other failure (not
+/// authenticated, network, rate limit) surfaces as
 /// [`GitError::OperationFailed`] carrying gh's own stderr, which is already
 /// phrased for a human.
+///
+/// The timeout is a parameter rather than a config read, as in
+/// [`run_clone`](crate::git::run_clone), so this stays callable from a test with
+/// a 300ms budget; `CommanderService` passes `Config::repo_list_timeout_secs`.
 ///
 /// The availability probe is [`is_gh_available`], the same one the PR poller
 /// uses. `CommanderService` caches that answer in a `OnceCell` and callers
 /// there should keep gating on the cached value; the check here is a backstop
 /// for direct callers and costs one `gh --version` per picker open.
-pub async fn list_repos() -> Result<Vec<GithubRepo>> {
+pub async fn list_repos(timeout: Duration) -> Result<Vec<GithubRepo>> {
     if !is_gh_available().await {
         return Err(GitError::GhUnavailable.into());
     }
+    repos_from(gh_api_command(), timeout).await
+}
 
-    let output = Command::new("gh")
-        .args(["api", "--paginate", "--jq", REPO_PROJECTION, REPOS_ENDPOINT])
-        .output()
+/// The `gh api --paginate` invocation that produces the listing.
+fn gh_api_command() -> Command {
+    let mut cmd = Command::new("gh");
+    cmd.args(["api", "--paginate", "--jq", REPO_PROJECTION, REPOS_ENDPOINT]);
+    cmd
+}
+
+/// Run a prepared listing command and project its stdout into repos.
+///
+/// Separated from [`list_repos`] so the run can be exercised with a stand-in
+/// command: a test that called the real `gh` would hit the GitHub API on any
+/// authenticated machine.
+async fn repos_from(cmd: Command, timeout: Duration) -> Result<Vec<GithubRepo>> {
+    let outcome = bounded::run_bounded(cmd, "gh api", timeout)
         .await
         .map_err(|e| {
             // gh passed `--version` moments ago, so a spawn failure here means
@@ -70,8 +103,23 @@ pub async fn list_repos() -> Result<Vec<GithubRepo>> {
             GitError::GhUnavailable
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let Bounded::Finished {
+        status,
+        stdout,
+        stderr,
+    } = outcome
+    else {
+        // Emphatically *not* `GhUnavailable`: gh is present and probably fine,
+        // it just had more to fetch than the budget allowed. See
+        // `GitError::RepoListTimedOut`.
+        return Err(GitError::RepoListTimedOut {
+            secs: timeout.as_secs(),
+        }
+        .into());
+    };
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         return Err(GitError::OperationFailed(format!(
             "gh api {REPOS_ENDPOINT} failed: {}",
             stderr.trim()
@@ -79,7 +127,7 @@ pub async fn list_repos() -> Result<Vec<GithubRepo>> {
         .into());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&stdout);
     let repos = parse_repo_stream(&stdout)?;
     debug!("gh api listed {} repos", repos.len());
     Ok(repos)
@@ -110,6 +158,116 @@ fn parse_repo_stream(output: &str) -> Result<Vec<GithubRepo>> {
 mod tests {
     use super::*;
     use crate::error::GitError;
+
+    use std::time::{Duration, Instant};
+
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    use tempfile::TempDir;
+
+    /// A stand-in listing command that never finishes, and whose backgrounded
+    /// grandchild outlives its parent unless the *group* is killed.
+    ///
+    /// Shaped after `clone.rs`'s
+    /// `a_timed_out_run_kills_the_child_and_its_descendants`, and for the same
+    /// reason: `gh api` spawns nothing here, but the real one does under a proxy
+    /// or credential helper, and killing only the direct child leaves the
+    /// descendant running.
+    fn hanging_command(pidfile: &std::path::Path) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("sleep 300 & echo $! > {}; wait", pidfile.display()));
+        cmd
+    }
+
+    /// The defect this bound exists to close: an abandoned listing must not leave
+    /// `gh` running, or a picker's retry button stacks one process per press.
+    #[tokio::test]
+    async fn a_timed_out_listing_kills_gh_and_its_descendants() {
+        let tmp = TempDir::new().unwrap();
+        let pidfile = tmp.path().join("grandchild.pid");
+
+        let started = Instant::now();
+        let err = repos_from(hanging_command(&pidfile), Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the listing waited {elapsed:?} on a 300ms budget"
+        );
+        assert!(
+            matches!(
+                err,
+                crate::error::Error::Git(GitError::RepoListTimedOut { .. })
+            ),
+            "not reported as a repo-list timeout: {err}"
+        );
+
+        let grandchild: i32 = std::fs::read_to_string(&pidfile)
+            .expect("sh never recorded its grandchild pid")
+            .trim()
+            .parse()
+            .unwrap();
+
+        // Poll: the kill is asynchronous, and the reparented `sleep` has to be
+        // reaped by init before its pid stops resolving.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if kill(Pid::from_raw(grandchild), None).is_err() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grandchild {grandchild} survived the timeout kill"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A timeout is its own condition, not "gh is missing": the two get different
+    /// wording in the picker, so collapsing them would tell a user to install a
+    /// `gh` they already have.
+    #[tokio::test]
+    async fn a_timeout_is_not_reported_as_gh_being_unavailable() {
+        let tmp = TempDir::new().unwrap();
+        let err = repos_from(
+            hanging_command(&tmp.path().join("pid")),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            !matches!(err, crate::error::Error::Git(GitError::GhUnavailable)),
+            "a timeout must not masquerade as GhUnavailable"
+        );
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    /// The bound must not cost the happy path: a command that finishes inside its
+    /// budget still has its stdout captured and parsed.
+    #[tokio::test]
+    async fn a_listing_that_finishes_in_budget_parses_its_stdout() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(
+            r#"printf '{"full_name":"me/a","owner":"me","name":"a","private":false,"fork":false,"archived":false,"default_branch":"main","clone_url":"c","ssh_url":"s","pushed_at":null}'"#,
+        );
+        let repos = repos_from(cmd, Duration::from_secs(30)).await.unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].full_name, "me/a");
+    }
+
+    /// A non-zero exit still carries the subprocess's own stderr, which is
+    /// already phrased for a human — the bound must not swallow it.
+    #[tokio::test]
+    async fn a_failing_listing_surfaces_its_stderr() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo 'gh: not authenticated' >&2; exit 1");
+        let err = repos_from(cmd, Duration::from_secs(30)).await.unwrap_err();
+        assert!(err.to_string().contains("not authenticated"), "{err}");
+    }
 
     #[test]
     fn parses_the_concatenated_per_page_object_stream() {

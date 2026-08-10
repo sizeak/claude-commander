@@ -203,6 +203,20 @@ mod tests {
         ));
     }
 
+    /// A repo listing that overran must **not** join it there. `Unavailable` is
+    /// what frontends word as "install gh", so a timeout landing in that bucket
+    /// would tell a user to install a `gh` they demonstrably have. It falls to
+    /// `Local`, carrying its own message, exactly as `CloneTimedOut` does.
+    #[test]
+    fn a_timed_out_repo_listing_is_not_unavailable() {
+        let err = BackendError::from(CoreError::Git(GitError::RepoListTimedOut { secs: 90 }));
+        assert!(
+            matches!(err, BackendError::Local(_)),
+            "a timeout is a failure with a reason, not a missing tool: {err:?}"
+        );
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
     #[test]
     fn run_local_inner_classifies_and_worker_lost_is_server() {
         let inner =

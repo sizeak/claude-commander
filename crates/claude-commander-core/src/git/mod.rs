@@ -7,6 +7,7 @@
 
 mod auto_pull;
 mod backend;
+mod bounded;
 mod clone;
 mod clone_jobs;
 mod diff;
