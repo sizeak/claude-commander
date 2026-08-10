@@ -447,6 +447,31 @@ pub fn validate_clone_url(source: &str) -> Result<CloneTarget, CloneRejection> {
     })
 }
 
+/// Validate a caller-supplied destination directory name, returning it trimmed.
+///
+/// [`CloneRequest::dest_name`] is an *override* for the name derived from the
+/// source, and it is joined onto the projects directory exactly as a derived name
+/// is — so it has to clear the same bar. Without this the derived-name rules
+/// ([`validate_clone_url`] rejects a source whose last segment is `..`) would
+/// protect only the path the caller did not choose.
+///
+/// Returns the trimmed name rather than `()` so there is no second question about
+/// which string the caller should join: it is this one. A leading/trailing space
+/// is a paste artefact, not a directory the user wants.
+///
+/// A control character is refused on its own reason. A derived name cannot
+/// contain one (its source was screened first), but this string is raw user
+/// input, and a newline in a directory name corrupts every log line that mentions
+/// the path.
+pub fn validate_dest_name(name: &str) -> Result<&str, CloneRejection> {
+    let name = name.trim();
+    if name.chars().any(char::is_control) {
+        return Err(CloneRejection::ControlCharacter);
+    }
+    check_dir_name(name)?;
+    Ok(name)
+}
+
 /// Validate an `owner/name` GitHub slug destined for `gh repo clone`'s argv.
 ///
 /// Exactly two segments, each restricted to the characters GitHub actually
@@ -896,6 +921,56 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!msg.is_empty());
+    }
+
+    /// A caller-supplied `dest_name` is subject to the same rules as a derived
+    /// one — the point of exposing the check at all. `..` and an embedded
+    /// separator are the hazards that matter: `CommanderService::start_clone`
+    /// joins this name onto the projects directory, so either one escapes it.
+    #[test]
+    fn validates_a_caller_supplied_destination_name() {
+        for name in ["repo", "my-repo", ".github", "repo.git", "  repo  "] {
+            assert_eq!(validate_dest_name(name), Ok(name.trim()), "name: {name}");
+        }
+        for name in ["", "   ", ".", "..", "../evil", "a/b", "a\\b", "-flag"] {
+            assert_eq!(
+                validate_dest_name(name),
+                Err(CloneRejection::UnsafeDirectoryName {
+                    name: name.trim().to_string()
+                }),
+                "name: {name}"
+            );
+        }
+        // A control character is rejected on its own reason: unlike a derived
+        // name (whose source was already screened for them) this string is raw
+        // user input, and a newline in a directory name corrupts logs downstream.
+        assert_eq!(
+            validate_dest_name("re\npo"),
+            Err(CloneRejection::ControlCharacter)
+        );
+        assert_eq!(
+            validate_dest_name("re\0po"),
+            Err(CloneRejection::ControlCharacter)
+        );
+    }
+
+    /// The override and the derived name agree about what is safe: whatever
+    /// `validate_clone_url` would refuse to derive, `validate_dest_name` refuses
+    /// to accept. A rule that held for only one of the two paths would be no rule
+    /// at all, since the caller chooses which path runs.
+    #[test]
+    fn destination_name_rules_match_the_derived_ones() {
+        for name in ["..", ".", "-flag"] {
+            let derived = validate_clone_url(&format!("https://example.com/o/{name}"));
+            assert!(derived.is_err(), "derived accepted {name:?}");
+            assert!(
+                validate_dest_name(name).is_err(),
+                "override accepted {name:?}"
+            );
+        }
+        // The empty name, whose derived spelling is a source with no path at all.
+        assert!(validate_clone_url("https://example.com").is_err());
+        assert!(validate_dest_name("").is_err());
     }
 
     /// Each rejection is a *distinct* reason, not just "is_err". Without this the

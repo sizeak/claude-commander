@@ -68,14 +68,14 @@ pub async fn run_clone(source: &CloneSource, dest: &Path, timeout: Duration) -> 
     // goes wrong, and the check is pure string inspection.
     let program = match source {
         CloneSource::Github { full_name } => {
-            validate_repo_slug(full_name).map_err(rejected)?;
+            validate_repo_slug(full_name).map_err(clone_source_rejected)?;
             if !is_gh_available().await {
                 return Err(GitError::GhUnavailable.into());
             }
             "gh repo clone"
         }
         CloneSource::Url { url } => {
-            validate_clone_url(url).map_err(rejected)?;
+            validate_clone_url(url).map_err(clone_source_rejected)?;
             "git clone"
         }
     };
@@ -110,6 +110,10 @@ pub async fn run_clone(source: &CloneSource, dest: &Path, timeout: Duration) -> 
 
 /// Turn a rejected source into an error that cannot quote a secret back.
 ///
+/// `pub(crate)` because `CommanderService::start_clone` validates the same
+/// strings one layer up and owes the same guarantee; a second copy of a
+/// *security* helper is the last thing this feature needs.
+///
 /// Both validators route through here, and the `Url` arm does so even though its
 /// [`CloneRejection`](claude_commander_protocol::github::CloneRejection) variants
 /// look harmless today. That is the point: this module redacts where an error
@@ -121,7 +125,7 @@ pub async fn run_clone(source: &CloneSource, dest: &Path, timeout: Duration) -> 
 /// echo a scheme or a directory name", which was true of every variant but one.
 ///
 /// Pinned by `a_rejection_message_carries_no_credentials`.
-fn rejected(rejection: impl std::fmt::Display) -> GitError {
+pub(crate) fn clone_source_rejected(rejection: impl std::fmt::Display) -> GitError {
     GitError::OperationFailed(redact_credentials(&rejection.to_string()))
 }
 
