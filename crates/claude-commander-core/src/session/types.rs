@@ -191,6 +191,14 @@ pub struct WorktreeSession {
     /// has been idle. Toggled per-session from the TUI/CLI.
     #[serde(default)]
     pub keep_alive: bool,
+    /// When this session adopted its *current* branch name, if that happened
+    /// after creation (a rename picked up by `reconcile_session_branches`).
+    /// `None` means the session has held [`Self::branch`] since it was created.
+    /// Feeds [`Self::branch_owned_since`], which bounds how far back a PR
+    /// matched by branch *name* may be — see
+    /// [`crate::git::check_pr_for_branch`].
+    #[serde(default)]
+    pub branch_adopted_at: Option<DateTime<Utc>>,
     /// Set when this session was stopped non-destructively — by the
     /// auto-hibernation policy or a manual kill that kept the worktree.
     /// Drives the wake path to resume the prior agent conversation *even
@@ -247,6 +255,7 @@ impl WorktreeSession {
             entered_section_at: now,
             last_attached_at: None,
             keep_alive: false,
+            branch_adopted_at: None,
             hibernated: false,
         }
     }
@@ -296,6 +305,7 @@ impl WorktreeSession {
             entered_section_at: now,
             last_attached_at: None,
             keep_alive: false,
+            branch_adopted_at: None,
             hibernated: false,
         }
     }
@@ -341,6 +351,19 @@ impl WorktreeSession {
         .iter()
         .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
         .max()
+    }
+
+    /// The instant from which this session has held its current branch name:
+    /// [`Self::branch_adopted_at`] when a rename was adopted, else
+    /// [`Self::created_at`]. Never earlier than creation, so a stale adoption
+    /// stamp can't widen the window.
+    ///
+    /// A PR is matched to a session by branch *name*, so anything that already
+    /// settled before this instant belongs to some earlier occupant of the name
+    /// — see [`crate::git::check_pr_for_branch`].
+    pub fn branch_owned_since(&self) -> DateTime<Utc> {
+        self.branch_adopted_at
+            .map_or(self.created_at, |adopted| adopted.max(self.created_at))
     }
 
     /// True when the session's PR is merged on GitHub. Honours the legacy
@@ -762,6 +785,50 @@ mod tests {
         assert_eq!(session.program, "claude");
         assert!(session.tmux_session_name.starts_with("cc-"));
         assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn test_branch_owned_since_defaults_to_creation() {
+        let session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        assert!(session.branch_adopted_at.is_none());
+        assert_eq!(session.branch_owned_since(), session.created_at);
+    }
+
+    #[test]
+    fn test_branch_owned_since_uses_adoption_when_later() {
+        // A rename adopted mid-life moves the window forward: PRs that settled
+        // on the new name before the adoption belong to its previous occupant.
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        let adopted = session.created_at + chrono::Duration::days(7);
+        session.branch_adopted_at = Some(adopted);
+        assert_eq!(session.branch_owned_since(), adopted);
+    }
+
+    #[test]
+    fn test_branch_owned_since_never_predates_creation() {
+        // A nonsensical stamp (clock step, hand-edited state.json) must not widen
+        // the window back past creation.
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        session.branch_adopted_at = Some(session.created_at - chrono::Duration::days(30));
+        assert_eq!(session.branch_owned_since(), session.created_at);
     }
 
     #[test]

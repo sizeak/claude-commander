@@ -353,6 +353,125 @@ async fn ws_agent_attach_revives_dead_tmux_session() {
     drop(worktrees_dir);
 }
 
+/// The `attach` frame's `cols`/`rows` must size the PTY *before*
+/// `tmux attach-session` is spawned — proven here by never sending a `resize`
+/// frame at all, so the only way tmux can end up at the requested size is the
+/// handshake.
+///
+/// Why it has to happen this early: tmux paints a full screen into the socket
+/// the moment the attach starts, and every later repaint is incremental with no
+/// full-screen clear. A client that could only announce its size afterwards
+/// therefore always received one paint at the server's fallback 80x24, wrapped
+/// it at its own (narrower) width, and had no way back — the pane stayed
+/// desynchronised for the life of the attach, and reconnecting merely replayed
+/// it. Red against a handler that spawns at `DEFAULT_COLS`/`DEFAULT_ROWS` and
+/// waits for a `resize`.
+#[tokio::test]
+async fn ws_attach_handshake_size_reaches_tmux_without_any_resize() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let data_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let state = test_state(&data_dir, &worktrees_dir);
+    let service = state.service.clone();
+    let addr = spawn_server(state).await;
+
+    service.add_project(repo_path.clone()).await.unwrap();
+    let session_id = service
+        .create_session(claude_commander_core::api::CreateSessionOpts {
+            project_path: repo_path.clone(),
+            title: "ws-attach-size".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        })
+        .await
+        .unwrap();
+    let tmux_name = service
+        .resolve_tmux_session(&session_id.to_string())
+        .await
+        .unwrap()
+        .expect("session should resolve to a tmux name");
+
+    // A phone-shaped viewport, deliberately nothing like the 80x24 fallback.
+    const COLS: u16 = 39;
+    const ROWS: u16 = 40;
+
+    let url = format!("ws://{addr}/ws/attach");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws.send(Message::Text(
+        r#"{"type":"auth","token":"unused"}"#.to_string().into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "attach",
+            "session_id": session_id.to_string(),
+            "cols": COLS,
+            "rows": ROWS,
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    let ready = next_text_frame(&mut ws)
+        .await
+        .expect("should receive a control frame after handshake");
+    assert!(ready.contains("ready"), "expected `ready`, got: {ready}");
+
+    // Poll: the size is set on the PTY before the child is spawned, but tmux
+    // still has to start and register the client.
+    let tmux = TmuxExecutor::new().with_tmux_tmpdir(service.read_config().tmux_tmpdir);
+    let mut seen = String::new();
+    let mut matched = false;
+    for _ in 0..60 {
+        seen = tmux
+            .execute(&[
+                "list-clients",
+                "-t",
+                &tmux_name,
+                "-F",
+                "#{client_width}x#{client_height}",
+            ])
+            .await
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if seen == format!("{COLS}x{ROWS}") {
+            matched = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        matched,
+        "the attach frame's {COLS}x{ROWS} must size the PTY with no `resize` \
+         frame ever sent; tmux reported the client as {seen:?}"
+    );
+
+    ws.send(Message::Text(r#"{"type":"detach"}"#.to_string().into()))
+        .await
+        .unwrap();
+    drain_until_close(&mut ws, Duration::from_secs(5)).await;
+    service.kill_session(&session_id).await.unwrap();
+
+    drop(repo_temp_dir);
+    drop(data_dir);
+    drop(worktrees_dir);
+}
+
 /// A WS attach must stamp `last_attached_at` (server-side MRU), matching
 /// `LocalBackend::attach`'s `mark_attached`. Freshly created it is `None`; after
 /// a successful WS attach it must be `Some`. Red against a handler that resolves

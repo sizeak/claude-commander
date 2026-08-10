@@ -64,11 +64,13 @@ void main() {
     ) async {
       await connect(tester, fleet());
 
-      // The header `_FleetHeader` used to build: brand mark, title, counts, ⚙.
+      // The header `_FleetHeader` used to build: brand mark, title, counts.
       expect(find.byType(BrandMark), findsOneWidget);
       expect(find.text('Fleet'), findsOneWidget);
       expect(find.text('1 active · 1 total · 1 server'), findsOneWidget);
-      expect(find.byIcon(Icons.settings), findsOneWidget);
+      // Its ⚙ is not here any more: settings is a shell action, carried by the
+      // phone shell's bottom bar so both tabs reach the same one.
+      expect(find.byIcon(Icons.settings), findsNothing);
 
       // The search box and the Recent/All toggle with its mode indicator.
       expect(find.byType(TextField), findsOneWidget);
@@ -104,14 +106,16 @@ void main() {
     ) async {
       await connect(tester, fleet(tokens: lcarsTokens));
 
-      // The rail: the view identifier, a block per slice, the mode readout, and
-      // the settings action closing it — with the content column's cap opposite.
+      // The rail: the view identifier, a block per slice, and the mode readout —
+      // with the content column's cap opposite.
       expect(find.text('47-A'), findsOneWidget);
       expect(find.widgetWithText(ChromeElbow, 'RECENT'), findsOneWidget);
       expect(find.widgetWithText(ChromeElbow, 'ALL'), findsOneWidget);
       expect(find.widgetWithText(ChromeElbow, 'GROUPED'), findsOneWidget);
-      expect(find.widgetWithText(ChromeElbow, 'SETTINGS'), findsOneWidget);
       expect(find.byType(ChromeElbowCap), findsOneWidget);
+      // The rail no longer closes with a settings elbow: the shell's footer
+      // carries that block, and its bottom-left corner with it.
+      expect(find.widgetWithText(ChromeElbow, 'SETTINGS'), findsNothing);
 
       // The content column carries the uppercased title and its count line.
       expect(find.text('FLEET'), findsOneWidget);

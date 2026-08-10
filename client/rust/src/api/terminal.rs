@@ -188,6 +188,8 @@ pub fn attach_terminal(
     attach_id: String,
     session_id: String,
     kind: AttachKind,
+    cols: u16,
+    rows: u16,
     sink: StreamSink<TerminalEvent>,
 ) {
     let client = match with_client(&handle) {
@@ -217,9 +219,12 @@ pub fn attach_terminal(
     );
 
     runtime().spawn(async move {
-        // The server starts the PTY at a default size; the Dart page re-announces
-        // its real size on the Ready event, so this initial size is transient.
-        match client.attach(sid, 80, 24, kind).await {
+        // `cols`/`rows` are the Dart page's real, laid-out viewport, which it now
+        // waits for its first frame to know. They ride in the handshake, so the
+        // server sizes the PTY before spawning `tmux attach-session` and tmux's
+        // first paint is already at our width — a paint at any other width would
+        // be wrapped by the emulator and never cleared (see `ClientControl::Attach`).
+        match client.attach(sid, cols, rows, kind).await {
             Ok(conn) => {
                 let _ = sink.add(TerminalEvent::ready(session_id));
                 pump(conn.split(), &sink, rx).await;

@@ -213,6 +213,8 @@ fn wire__crate__api__terminal__attach_terminal_impl(
             let api_attach_id = <String>::sse_decode(&mut deserializer);
             let api_session_id = <String>::sse_decode(&mut deserializer);
             let api_kind = <crate::api::mirrors::AttachKind>::sse_decode(&mut deserializer);
+            let api_cols = <u16>::sse_decode(&mut deserializer);
+            let api_rows = <u16>::sse_decode(&mut deserializer);
             let api_sink = <StreamSink<
                 crate::api::terminal::TerminalEvent,
                 flutter_rust_bridge::for_generated::SseCodec,
@@ -226,6 +228,8 @@ fn wire__crate__api__terminal__attach_terminal_impl(
                             api_attach_id,
                             api_session_id,
                             api_kind,
+                            api_cols,
+                            api_rows,
                             api_sink,
                         );
                     })?;

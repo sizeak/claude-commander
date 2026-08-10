@@ -1,4 +1,5 @@
 import 'package:claude_commander_client/pages/adaptive_shell.dart';
+import 'package:claude_commander_client/pages/phone_shell.dart';
 import 'package:claude_commander_client/pages/session_list_page.dart';
 import 'package:claude_commander_client/pages/settings_page.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
@@ -145,6 +146,34 @@ void main() {
     const Size(420, 720),
     () => SessionListBody(onSelect: (_, _) {}),
   );
+
+  // The phone shell, whose bottom edge is where the two themes disagree most:
+  // Mission Control docks a FAB over a bar of tabs, LCARS runs the view's rail
+  // down into a single footer run that carries the frame's corner with it.
+  //
+  // **Mission Control only** — deliberately not `forEachTheme`. The LCARS twin
+  // cannot be pinned from here: its four footer labels rasterise differently on
+  // the CI runner than on a workstation, 1179px in one 13-row band, with the
+  // geometry byte-identical (same size, no shift, no wrap, fills and radii
+  // matching exactly). So the reference disagrees without anything having
+  // changed, which is a broken pin rather than a strict one. What makes *that*
+  // text sensitive is unexplained: `button_bar_lcars` draws centred Antonio
+  // labels inside the same kind of `ClipRRect` run and matches CI exactly, as
+  // does every other string on this very page. Measured from the comparator's
+  // own images (CI run 31333637408); do not re-add the LCARS golden without
+  // reproducing that first. Its geometry is pinned behaviourally instead — see
+  // 'LCARS makes it the leading block of the footer run' and 'LCARS keeps the
+  // run on the screen edge at 1.3× text' in `phone_shell_test.dart`.
+  testWidgets('phone_shell · mission_control', (tester) async {
+    await pumpPage(
+      tester,
+      tokens: missionControlTokens,
+      size: const Size(420, 720),
+      child: const PhoneShell(),
+      bareScaffold: false,
+    );
+    await expectGolden(tester, 'phone_shell_mission_control');
+  });
 
   // The settings screen, which is also the only visual coverage of the desktop
   // WINDOW section's rows and their state words.

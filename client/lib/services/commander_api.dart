@@ -274,11 +274,19 @@ abstract class CommanderApi {
   /// (a fresh UUID) that keys the control channel — so several attaches can be
   /// live against one server (e.g. a persistent desktop terminal pane). The
   /// server is resolved via [handle]; the control calls below key by [attachId].
+  ///
+  /// [cols]/[rows] are the caller's *laid-out* terminal size. They ride in the
+  /// WS handshake so the server can size the PTY before spawning
+  /// `tmux attach-session`, which puts tmux's very first paint at the width
+  /// that will render it; a size announced only afterwards arrives too late to
+  /// prevent that paint (see [terminalResize]).
   Stream<terminal.TerminalEvent> attachTerminal({
     required String handle,
     required String attachId,
     required String sessionId,
     required AttachKind kind,
+    required int cols,
+    required int rows,
   });
 
   Future<void> terminalSendInput({
@@ -666,11 +674,15 @@ class RustCommanderApi implements CommanderApi {
     required String attachId,
     required String sessionId,
     required AttachKind kind,
+    required int cols,
+    required int rows,
   }) => terminal.attachTerminal(
     handle: handle,
     attachId: attachId,
     sessionId: sessionId,
     kind: kind,
+    cols: cols,
+    rows: rows,
   );
 
   @override
