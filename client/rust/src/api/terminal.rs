@@ -252,6 +252,10 @@ async fn pump(
         mut reader,
         mut writer,
         resizer,
+        // The Flutter client renders the terminal itself and never draws over the
+        // remote screen, so it has nothing to ask tmux to repaint. Only the TUI's
+        // in-session switcher needs the `refresh` frame this would send.
+        refresher: _,
         mut terminator,
     } = streams;
     let mut buf = [0u8; READ_CHUNK];
