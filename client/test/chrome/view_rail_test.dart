@@ -223,8 +223,20 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // The `top == 0` pair holds even without any bleed wired to these two
+      // widgets — nothing in this harness holds the rail off the physical
+      // edge to begin with (there is no `SafeArea` here, deliberately: see
+      // `buildShell`'s doc comment). They are regression guards against one
+      // being reintroduced anywhere in the view rail's subtree, not proof the
+      // bleed reached anything.
       expect(tester.getRect(find.byType(ChromeElbowCap)).top, 0);
       expect(tester.getRect(find.byType(ChromeElbow).first).top, 0);
+      // These two are what actually pin the bleed: the cap and the identifier
+      // block grow by exactly the top inset (16 and 74 are their unbled
+      // heights), which is only true once `_viewContent`/`_viewRail` pass
+      // `bleed` through to them.
+      expect(tester.getSize(find.byType(ChromeElbowCap)).height, 16 + 24);
+      expect(tester.getRect(find.byType(ChromeElbow).first).height, 74 + 24);
     });
 
     // Same rule as the footer, mirrored: the identifier is bottom-aligned in its
