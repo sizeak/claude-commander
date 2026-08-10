@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -965,6 +966,7 @@ impl CommanderService {
         if updates.is_empty() {
             return Ok(());
         }
+        let adopted_at = Utc::now();
         self.store
             .mutate(move |state| {
                 for (id, expected_old, new_branch) in updates {
@@ -974,6 +976,10 @@ impl CommanderService {
                         // between snapshot and mutate is never clobbered.
                         if session.branch == expected_old {
                             session.branch = new_branch;
+                            // Stamp the adoption so the PR poll doesn't credit
+                            // this session with a PR that settled on the new
+                            // name before it held it.
+                            session.branch_adopted_at = Some(adopted_at);
                         }
                     }
                 }
@@ -2027,14 +2033,18 @@ impl CommanderService {
         })
     }
 
-    /// The `(session id, branch, repo path)` triples the PR poll fans out over:
-    /// every non-`Creating` session paired with its project's repo path. Reads a
-    /// snapshot under the lock so the poll's per-branch `gh` calls run off-lock.
+    /// The `(session id, branch, repo path, branch-owned-since)` tuples the PR
+    /// poll fans out over: every non-`Creating` session paired with its project's
+    /// repo path. Reads a snapshot under the lock so the poll's per-branch `gh`
+    /// calls run off-lock. The timestamp is
+    /// [`WorktreeSession::branch_owned_since`], which lets the check discard PRs
+    /// that had already settled on this branch name before the session held it
+    /// (see [`crate::git::check_pr_for_branch`]).
     ///
     /// Extracted from the poll loop so the reconcile→poll ordering is testable:
     /// after [`Self::reconcile_session_branches`] adopts a rename, the targets
     /// returned here carry the corrected `--head` branch on the same tick.
-    async fn pr_poll_targets(&self) -> Vec<(SessionId, String, PathBuf)> {
+    async fn pr_poll_targets(&self) -> Vec<(SessionId, String, PathBuf, DateTime<Utc>)> {
         let state = self.store.read().await;
         state
             .sessions
@@ -2042,7 +2052,12 @@ impl CommanderService {
             .filter(|s| s.status != SessionStatus::Creating)
             .filter_map(|s| {
                 let project = state.projects.get(&s.project_id)?;
-                Some((s.id, s.branch.clone(), project.repo_path.clone()))
+                Some((
+                    s.id,
+                    s.branch.clone(),
+                    project.repo_path.clone(),
+                    s.branch_owned_since(),
+                ))
             })
             .collect()
     }
@@ -2092,10 +2107,11 @@ impl CommanderService {
                 }
                 let results: Vec<(SessionId, PrCheckResult)> =
                     futures::stream::iter(sessions_to_check.into_iter().map(
-                        |(id, branch, repo_path)| async move {
+                        |(id, branch, repo_path, created_at)| async move {
                             (
                                 id,
-                                crate::git::check_pr_for_branch(&repo_path, &branch).await,
+                                crate::git::check_pr_for_branch(&repo_path, &branch, created_at)
+                                    .await,
                             )
                         },
                     ))
@@ -4013,10 +4029,97 @@ mod tests {
         svc.reconcile_session_branches().await.unwrap();
         let targets = svc.pr_poll_targets().await;
 
-        let target = targets.iter().find(|(id, _, _)| *id == sid).unwrap();
+        let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
         assert_eq!(
             target.1, "renamed-feature",
             "the tick that reconciles must poll GitHub with the corrected branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_poll_targets_carry_branch_ownership_time() {
+        // The PR check discards PRs that had already settled on this branch name
+        // before the session held it, so the poll must hand it each session's
+        // `branch_owned_since` — not just the branch.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let repo = dir.path().join("repo");
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(pid, "feature", "feature", repo.join("wt"), "claude");
+        let sid = session.id;
+        let owned_since = session.created_at;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        let targets = svc.pr_poll_targets().await;
+        let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
+        assert_eq!(target.3, owned_since);
+    }
+
+    #[tokio::test]
+    async fn reconcile_stamps_branch_adoption_and_moves_the_pr_window() {
+        // Adopting a rename re-points the PR query at a name this session has
+        // only just taken. Without stamping the adoption, the poll would still
+        // vouch for the whole span back to session creation, so an unrelated PR
+        // that settled on the new name during that span would be adopted.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt-feature");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        );
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let mut session = WorktreeSession::new(pid, "feature", "feature", wt.clone(), "claude");
+        // Backdate creation so the adoption stamp is unambiguously later.
+        session.created_at = Utc::now() - chrono::Duration::days(30);
+        let sid = session.id;
+        let created_at = session.created_at;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        run_git(&wt, &["branch", "-m", "feature", "renamed-feature"]);
+        svc.reconcile_session_branches().await.unwrap();
+
+        let adopted_at = {
+            let state = svc.store().read().await;
+            state.get_session(&sid).unwrap().branch_adopted_at
+        };
+        let adopted_at = adopted_at.expect("adopting a rename must stamp branch_adopted_at");
+        assert!(
+            adopted_at > created_at,
+            "the adoption stamp must be the moment of adoption, not creation"
+        );
+
+        let targets = svc.pr_poll_targets().await;
+        let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
+        assert_eq!(target.1, "renamed-feature");
+        assert_eq!(
+            target.3, adopted_at,
+            "the poll must only vouch for PRs settling after the rename was adopted"
         );
     }
 
