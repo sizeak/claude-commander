@@ -144,11 +144,15 @@ class ChromeElbow extends StatelessWidget {
     // the padding would slide the label into the bezel.
     final grown = height == null ? null : height! + bleed.vertical;
     // A labelled block may need to grow past `height`; an unlabelled one (a rail
-    // filler or a colour band) is exactly the height it was given. Both use
-    // SizedBox to enforce an exact height (for labelled: minHeight, for unlabelled: exact height).
+    // filler or a colour band) is exactly the height it was given.
     final content = grown == null
         ? decorated
-        : SizedBox(height: grown, child: decorated);
+        : label == null
+        ? SizedBox(height: grown, child: decorated)
+        : ConstrainedBox(
+            constraints: BoxConstraints(minHeight: grown),
+            child: decorated,
+          );
     if (onTap == null) return content;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,

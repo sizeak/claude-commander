@@ -12,7 +12,10 @@ void main() {
   Widget host(Widget child) => MaterialApp(
     theme: themeDataFor(lcarsTokens),
     home: Scaffold(
-      body: Align(alignment: Alignment.topLeft, child: child),
+      body: Align(
+        alignment: Alignment.topLeft,
+        child: IntrinsicHeight(child: child),
+      ),
     ),
   );
 
