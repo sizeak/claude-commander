@@ -2320,9 +2320,12 @@ impl App {
         let inner_width = area.width.saturating_sub(2) as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
-            // The cursor row is banded whether or not this pane has focus —
-            // unfocused it wears a muted band (see `selection_bg_unfocused`), so
-            // the file the body is showing stays identifiable while reading it.
+            // The cursor row is highlighted whether or not this pane has focus —
+            // unfocused it wears a muted one (see `selection_bg_unfocused`), so
+            // the row you navigated to stays identifiable while you read the
+            // body. (The cursor can rest on a directory, in which case it marks
+            // that row and not the file the body is showing — same as when the
+            // list is focused; moving onto a directory never changes the body.)
             let on_cursor = i == state.tree_cursor;
             let line = match row {
                 TreeRow::Dir {
@@ -3337,20 +3340,18 @@ fn select_spans(
     pal: &ReviewPalette,
     focused: bool,
 ) -> Vec<Span<'static>> {
-    let bg = if focused {
-        pal.selection_bg
+    // Unfocused, the row wears the same selection at 70% — both halves, since a
+    // theme may carry its selection mostly in the foreground.
+    let (bg, sel_fg) = if focused {
+        (pal.selection_bg, pal.selection_fg)
     } else {
-        pal.selection_bg_unfocused
+        (pal.selection_bg_unfocused, pal.selection_fg_unfocused)
     };
     spans
         .into_iter()
         .map(|s| {
             let mut style = s.style.bg(bg);
-            // The selection foreground belongs to the *focused* row: forcing it
-            // on the muted band would make an inactive cursor row shout as loud
-            // as the focused one, and would flatten the status-letter colour
-            // (and a reviewed row's dim) that the muted band is happy to keep.
-            if let Some(fg) = pal.selection_fg.filter(|_| focused) {
+            if let Some(fg) = sel_fg {
                 style = style.fg(fg);
             }
             Span::styled(s.content, style)

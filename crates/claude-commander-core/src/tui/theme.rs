@@ -218,11 +218,17 @@ pub struct ReviewPalette {
     pub selection_bg: Color,
     pub selection_fg: Option<Color>,
     /// Selection highlight for the file list while focus sits in the diff body:
-    /// the same band, muted toward the surface. The cursor row keeps a band at
-    /// all times — without one there is nothing on screen saying which file the
-    /// body is showing — and muting it (plus dropping [`Self::selection_fg`])
-    /// keeps "which pane has the keys" readable.
+    /// the focused selection, background *and* foreground, muted toward the
+    /// surface. The cursor row keeps a highlight at all times — without one
+    /// there is nothing on screen saying which file the body is showing — and
+    /// muting the whole selection keeps "which pane has the keys" readable.
+    ///
+    /// Both halves move together deliberately. A theme is free to carry its
+    /// selection mostly in the foreground (LCARS' band is `Rgb(36, 24, 9)`,
+    /// barely off black, under tan text), so muting only the background would
+    /// erase the row's only signal on exactly those themes.
     pub selection_bg_unfocused: Color,
+    pub selection_fg_unfocused: Option<Color>,
     /// Subtle background band laid across file-tree rows marked reviewed, so a
     /// "read" file is obvious at a glance beyond the ` ✓` check alone.
     pub reviewed_bg: Color,
@@ -375,14 +381,20 @@ impl Theme {
             ColorMode::Indexed => Color::Indexed(22),
             ColorMode::Basic => Color::Reset,
         };
-        // Muted band for the unfocused file list. Only true-color can express
-        // "the selection colour, but weaker"; below that the palette keeps the
-        // full selection band (the border colour and the dropped `selection_fg`
-        // still mark focus) rather than emitting an RGB escape the terminal
-        // would render as something arbitrary.
-        let selection_bg_unfocused = match self.mode {
-            ColorMode::TrueColor => toward_surface(self.selection_bg, 0.7, self.appearance),
-            ColorMode::Indexed | ColorMode::Basic => self.selection_bg,
+        // The unfocused file list's highlight: the selection at 70% strength,
+        // both halves scaled together so the rule is simply "the same row,
+        // quieter". Only true-color can express that; below it the palette
+        // keeps the full selection (the pane border still marks focus) rather
+        // than emitting an RGB escape the terminal would render as something
+        // arbitrary.
+        const UNFOCUSED: f32 = 0.7;
+        let (selection_bg_unfocused, selection_fg_unfocused) = match self.mode {
+            ColorMode::TrueColor => (
+                toward_surface(self.selection_bg, UNFOCUSED, self.appearance),
+                self.selection_fg
+                    .map(|fg| toward_surface(fg, UNFOCUSED, self.appearance)),
+            ),
+            ColorMode::Indexed | ColorMode::Basic => (self.selection_bg, self.selection_fg),
         };
         // Named theme bands for the review diff view.
         let context_bg = self.diff_expand_bg;
@@ -411,6 +423,7 @@ impl Theme {
             selection_bg: self.selection_bg,
             selection_fg: self.selection_fg,
             selection_bg_unfocused,
+            selection_fg_unfocused,
             reviewed_bg,
             context_bg,
             hunk_header_bg,
@@ -1644,10 +1657,10 @@ mod tests {
         );
     }
 
-    /// The unfocused file-list band is the selection colour, muted — present
-    /// (so the file being read stays identifiable) but not the focused row.
+    /// The unfocused file-list highlight is the selection, muted — present (so
+    /// the row being read stays identifiable) but not the focused row.
     #[test]
-    fn unfocused_selection_band_is_a_muted_selection() {
+    fn unfocused_selection_is_a_muted_selection() {
         let theme = Theme::truecolor();
         let pal = theme.review_palette();
         assert_eq!(pal.selection_bg, theme.selection_bg);
@@ -1657,10 +1670,44 @@ mod tests {
             Color::Reset,
             "the unfocused cursor row must still be banded"
         );
+        assert_ne!(
+            pal.selection_fg_unfocused, pal.selection_fg,
+            "the foreground is muted too, not dropped or left at full strength"
+        );
+        assert!(pal.selection_fg_unfocused.is_some());
         // Below true-color the palette can't express a weaker shade, so it
-        // keeps the full band rather than emitting an RGB escape.
+        // keeps the full selection rather than emitting an RGB escape.
         let indexed = Theme::for_color_mode(ColorMode::Indexed).review_palette();
         assert_eq!(indexed.selection_bg_unfocused, indexed.selection_bg);
+        assert_eq!(indexed.selection_fg_unfocused, indexed.selection_fg);
+    }
+
+    /// Every built-in preset must still show its unfocused cursor row: on a
+    /// theme whose band is already near-black (LCARS: `Rgb(36, 24, 9)`) the
+    /// muted background alone is not a signal, so the muted *foreground* has to
+    /// stay well clear of the surface. Guards the whole preset list, since the
+    /// failure is invisible on the themes that carry selection in the band.
+    #[test]
+    fn every_preset_keeps_a_visible_unfocused_selection() {
+        for preset in [
+            "truecolor",
+            "monokai-dimmed",
+            "zedokai",
+            "rose-pine",
+            "lcars",
+        ] {
+            let theme = Theme::from_preset(preset).expect("preset name from `from_preset`'s docs");
+            let pal = theme.review_palette();
+            let Some(Color::Rgb(r, g, b)) = pal.selection_fg_unfocused else {
+                panic!("{preset}: truecolor presets all set an RGB selection foreground");
+            };
+            let level = r.max(g).max(b);
+            assert!(
+                level > 96,
+                "{preset}: unfocused row text ({r}, {g}, {b}) is too close to the \
+                 surface to read as selected"
+            );
+        }
     }
 
     /// The role → colour mapping the review view renders every row through.
