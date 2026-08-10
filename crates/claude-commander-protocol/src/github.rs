@@ -238,6 +238,19 @@ pub enum CloneRejection {
     /// is empty, or it would escape the projects directory.
     UnsafeDirectoryName { name: String },
     /// Not a plain `owner/name` GitHub slug.
+    ///
+    /// **`slug` is stored already passed through [`redact_credentials`].** This
+    /// is the one variant that captures the caller's *raw input* rather than a
+    /// fragment derived from it, and a URL pasted into a slug field always lands
+    /// here — [`validate_repo_slug`] splits on `/`, so `https://user:token@…`
+    /// can never be anything but malformed. Redacting where the value is built
+    /// rather than where it is rendered is deliberate: this rejection becomes a
+    /// `400` body, a `CloneStatus::Failed` message, an on-screen string and a
+    /// log line, each written by a different implementer, and relying on all of
+    /// them to remember has already failed once.
+    ///
+    /// For an ordinary malformed slug the redaction is a no-op — there is no
+    /// userinfo to rewrite — so nothing diagnostic is lost.
     MalformedSlug { slug: String },
 }
 
@@ -445,9 +458,16 @@ pub fn validate_clone_url(source: &str) -> Result<CloneTarget, CloneRejection> {
 /// clone directory. Only `name` builds a path today, but a rule that holds for
 /// half a slug is one refactor away from being wrong, and the asymmetry is
 /// invisible at the call site.
+///
+/// The rejection carries the slug **redacted** — see
+/// [`CloneRejection::MalformedSlug`] for why that happens here rather than at
+/// each of the four places the message is eventually rendered.
 pub fn validate_repo_slug(slug: &str) -> Result<(), CloneRejection> {
+    // Redacted at construction, not at render: a pasted URL is always malformed
+    // (the `/` split guarantees it), so this variant is the natural resting
+    // place for a credential the user typed into the wrong box.
     let malformed = || CloneRejection::MalformedSlug {
-        slug: slug.to_string(),
+        slug: redact_credentials(slug),
     };
     let (owner, name) = slug.split_once('/').ok_or_else(malformed)?;
     if name.contains('/') {
@@ -659,6 +679,60 @@ mod tests {
             "see :// for details",
         ] {
             assert_eq!(redact_credentials(text), text, "text: {text}");
+        }
+    }
+
+    /// The guarantee that makes the redaction structural rather than remembered:
+    /// a credentialed input is already redacted **when the rejection is built**,
+    /// so no caller can leak it by forgetting to redact — and none has to.
+    ///
+    /// The `Debug` assertion matters as much as the `Display` one: a server that
+    /// logs `{err:?}` would otherwise print the field verbatim, and that is
+    /// exactly the kind of hop nobody remembers to audit.
+    #[test]
+    fn a_rejected_slug_is_redacted_before_it_reaches_any_caller() {
+        let err = validate_repo_slug("https://sizeak:ghp_s3cr3tt0ken@github.com/o/r").unwrap_err();
+
+        assert_eq!(
+            err,
+            CloneRejection::MalformedSlug {
+                slug: "https://***@github.com/o/r".to_string()
+            }
+        );
+        assert!(!err.to_string().contains("ghp_s3cr3tt0ken"));
+        assert!(!format!("{err:?}").contains("ghp_s3cr3tt0ken"));
+    }
+
+    /// The cost of the guarantee, pinned: for a legitimately malformed slug
+    /// there is no userinfo to rewrite, so redaction is a no-op and the message
+    /// keeps its full diagnostic value. Fidelity is lost only in the one case
+    /// where we do not want it.
+    #[test]
+    fn redacting_at_construction_does_not_blunt_an_ordinary_rejection() {
+        for slug in ["owner/name/extra", "owner/na me", "-flag/name", "owner"] {
+            assert_eq!(
+                validate_repo_slug(slug),
+                Err(CloneRejection::MalformedSlug {
+                    slug: slug.to_string()
+                }),
+                "slug: {slug}"
+            );
+        }
+    }
+
+    /// Redaction is idempotent, which is what makes the belt-and-braces
+    /// arrangement safe: `git::clone` redacts again at its call sites, and an
+    /// already-redacted message must survive that second pass unchanged rather
+    /// than collecting `***`s.
+    #[test]
+    fn redaction_is_idempotent() {
+        for text in [
+            "https://u:p@host/o/r",
+            "fatal: could not read 'https://tok@host/o/r'",
+            "ssh://git@github.com/o/r",
+        ] {
+            let once = redact_credentials(text);
+            assert_eq!(redact_credentials(&once), once, "text: {text}");
         }
     }
 
