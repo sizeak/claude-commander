@@ -86,6 +86,20 @@ pub enum ClientControl {
     /// Resize the remote PTY. Sent whenever the client's terminal viewport
     /// changes.
     Resize { cols: u16, rows: u16 },
+    /// Force the remote tmux client to repaint its whole visible screen.
+    ///
+    /// Sent when a client has drawn something *over* the terminal — the TUI's
+    /// in-session switcher paints the palette on top of the live pane — and
+    /// needs the region it covered restored. The server answers it with
+    /// `tmux refresh-client`, which repaints without disturbing a scrolled
+    /// copy-mode view (a resize round-trip would lose that anchor, which is why
+    /// this is its own message rather than a resize to the same size).
+    ///
+    /// Purely additive: a server that predates it takes the `Err` arm of its
+    /// control-frame match and logs the frame as malformed, leaving the attach
+    /// up. A new client against an old server therefore just keeps a stale
+    /// rectangle until the pane next emits output.
+    Refresh,
     /// Explicitly detach: kill the `tmux attach-session` child but leave the
     /// tmux session (and the program inside it) running.
     Detach,
@@ -245,6 +259,25 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"resize","cols":120,"rows":40}"#);
         assert_eq!(ClientControl::from_text(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn client_refresh_round_trip() {
+        let msg = ClientControl::Refresh;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"refresh"}"#);
+        assert_eq!(ClientControl::from_text(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn an_unknown_control_tag_is_an_error_not_a_panic() {
+        // `refresh` was added after the first servers shipped. Its safety as an
+        // additive change rests on the receiver treating an unrecognised frame
+        // as a *parse error* it can log and ignore (see the server's steady-state
+        // match) rather than something that tears the attach down. Pin that:
+        // a new client against an old server must only lose the repaint.
+        let err = ClientControl::from_text(r#"{"type":"not_a_real_control"}"#);
+        assert!(err.is_err(), "unknown tags must not deserialize");
     }
 
     #[test]

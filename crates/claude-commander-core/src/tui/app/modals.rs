@@ -612,170 +612,18 @@ impl App {
                 selected_idx,
                 scroll,
             } => {
-                let max_visible = super::actions::LIST_MAX_VISIBLE;
                 let (modal_area, rows_area) = quick_switch_areas(area, matches.len());
-
                 frame.render_widget(Clear, modal_area);
-
-                // Switch the modal title by effective mode so a `>`-prefixed
-                // query in unified mode reads as "Commands" while we type.
-                let effective_mode = App::effective_palette_mode(*mode, query.value());
-                let title = match effective_mode {
-                    PaletteMode::Unified => " Quick Switch ",
-                    PaletteMode::CommandOnly => " Commands ",
-                    PaletteMode::SectionPicker { .. } => " Move to Section ",
-                    PaletteMode::RemoteServerPicker => " Remove Remote Server ",
-                    PaletteMode::ProgramPicker { .. } => " Change Program ",
-                };
-                let block = Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_type(self.border_type())
-                    .border_style(Style::default().fg(self.theme.modal_info));
-
-                let inner = block.inner(modal_area);
-                frame.render_widget(block, modal_area);
-
-                if inner.height == 0 {
-                    return;
-                }
-
-                // Input line
-                let input_line = Line::from(format!("❯ {}", query.value()));
-                let input_area = Rect { height: 1, ..inner };
-                frame.render_widget(Paragraph::new(input_line), input_area);
-                place_input_cursor(
+                self.render_quick_switch(
                     frame,
+                    modal_area,
+                    rows_area,
+                    *mode,
                     query,
-                    input_area.x + 2,
-                    input_area.y,
-                    input_area.width.saturating_sub(2),
+                    matches,
+                    *selected_idx,
+                    *scroll,
                 );
-
-                // Match lines. The `scroll` offset lets us page through a
-                // list longer than `max_visible`; rows below `scroll` are
-                // off the top of the window, rows at/after
-                // `scroll + max_visible` are off the bottom.
-                let start = (*scroll).min(matches.len());
-                for (i, item) in matches.iter().skip(start).take(max_visible).enumerate() {
-                    let row = rows_area.y + i as u16;
-                    if row >= rows_area.y + rows_area.height {
-                        break;
-                    }
-                    let abs_idx = start + i;
-                    let is_selected = abs_idx == *selected_idx;
-
-                    let line_area = Rect {
-                        y: row,
-                        height: 1,
-                        ..inner
-                    };
-
-                    match item {
-                        QuickSwitchItem::Session(m) => {
-                            let status_icon = match m.status {
-                                SessionStatus::Creating
-                                | SessionStatus::Merging
-                                | SessionStatus::Pushing => "⠋",
-                                SessionStatus::Running => "●",
-                                SessionStatus::Stopped => "○",
-                                SessionStatus::CascadePaused => "⏸",
-                            };
-                            let status_color = match m.status {
-                                SessionStatus::Creating
-                                | SessionStatus::Merging
-                                | SessionStatus::Pushing => self.theme.status_creating,
-                                SessionStatus::Running => self.theme.status_running,
-                                SessionStatus::Stopped => self.theme.status_stopped,
-                                SessionStatus::CascadePaused => self.theme.agent_waiting,
-                            };
-
-                            let mut spans = vec![
-                                Span::styled(
-                                    format!(" {} ", status_icon),
-                                    Style::default().fg(status_color),
-                                ),
-                                Span::styled(
-                                    m.title.clone(),
-                                    if is_selected {
-                                        self.theme.selection()
-                                    } else {
-                                        Style::default()
-                                    },
-                                ),
-                            ];
-                            if let Some(shown_branch) =
-                                crate::session::display_branch(&m.title, &m.branch)
-                            {
-                                spans.push(Span::styled(
-                                    format!(" [{}]", shown_branch),
-                                    Style::default().fg(self.theme.text_accent),
-                                ));
-                            }
-                            spans.push(Span::styled(
-                                format!(" ({})", m.project_name),
-                                Style::default().fg(self.theme.text_secondary),
-                            ));
-                            frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
-                        }
-                        QuickSwitchItem::Command(entry) => {
-                            // Full-row background distinguishes commands from
-                            // sessions at a glance. Selection highlight takes
-                            // precedence over the command background.
-                            let row_style = if is_selected {
-                                self.theme.selection()
-                            } else {
-                                Style::default()
-                                    .bg(self.theme.palette_command_bg)
-                                    .fg(self.theme.palette_command_fg)
-                            };
-
-                            // Reserve trailing space for the right-aligned
-                            // key hint; keep one space margin on each side.
-                            let available = line_area.width as usize;
-                            let glyph = " ❯ ";
-                            let keys = &entry.keys;
-                            let keys_width = keys.chars().count();
-                            let label = entry.label;
-                            let label_width = label.chars().count();
-                            let glyph_width = glyph.chars().count();
-                            let padding = available
-                                .saturating_sub(glyph_width)
-                                .saturating_sub(label_width)
-                                .saturating_sub(keys_width)
-                                // Leave a 1-char gutter before the key hint
-                                // when it's non-empty.
-                                .saturating_sub(if keys.is_empty() { 0 } else { 1 });
-
-                            let gutter = if keys.is_empty() {
-                                String::new()
-                            } else {
-                                " ".to_string()
-                            };
-                            let content = format!(
-                                "{glyph}{label}{pad}{gutter}{keys}",
-                                glyph = glyph,
-                                label = label,
-                                pad = " ".repeat(padding),
-                                gutter = gutter,
-                                keys = keys,
-                            );
-                            let line = Line::from(Span::styled(content, row_style));
-                            frame.render_widget(Paragraph::new(line).style(row_style), line_area);
-                        }
-                        QuickSwitchItem::SectionMove { label, .. }
-                        | QuickSwitchItem::RemoteServerRemove { label, .. }
-                        | QuickSwitchItem::ProgramChange { label, .. } => {
-                            let style = if is_selected {
-                                self.theme.selection()
-                            } else {
-                                Style::default()
-                            };
-                            let line = Line::from(Span::styled(format!(" ❯ {label}"), style));
-                            frame.render_widget(Paragraph::new(line).style(style), line_area);
-                        }
-                    }
-                }
             }
 
             Modal::CheckoutBranch {
@@ -948,7 +796,7 @@ impl App {
             width = key_col_width,
         )));
         lines.push(Line::from(format!(
-            "  {:<width$}Quick switch (same as in-session switcher)",
+            "  {:<width$}Quick switch (same palette as the in-session switcher)",
             "Ctrl+Space",
             width = key_col_width,
         )));
@@ -1291,6 +1139,188 @@ pub(crate) fn confirm_modal_area(message: &str, area: Rect) -> Rect {
         y: area.y + (area.height.saturating_sub(modal_height)) / 2,
         width: modal_width,
         height: modal_height,
+    }
+}
+
+impl App {
+    /// Render the quick-switch palette into a caller-supplied geometry.
+    ///
+    /// Split out of [`Self::render_modal`] because the palette has two callers
+    /// with different ideas of where it lives: the in-TUI modal derives its
+    /// areas from the full screen, while the in-session switcher overlay draws
+    /// into a fixed rectangle it has reserved over a live tmux pane. Sharing the
+    /// renderer is what makes them the *same* palette rather than two that drift.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_quick_switch(
+        &self,
+        frame: &mut Frame<'_>,
+        modal_area: Rect,
+        rows_area: Rect,
+        mode: PaletteMode,
+        query: &Input,
+        matches: &[QuickSwitchItem],
+        selected_idx: usize,
+        scroll: usize,
+    ) {
+        let max_visible = super::actions::LIST_MAX_VISIBLE;
+        // Switch the modal title by effective mode so a `>`-prefixed
+        // query in unified mode reads as "Commands" while we type.
+        let effective_mode = App::effective_palette_mode(mode, query.value());
+        let title = match effective_mode {
+            PaletteMode::Unified => " Quick Switch ",
+            PaletteMode::CommandOnly => " Commands ",
+            PaletteMode::SectionPicker { .. } => " Move to Section ",
+            PaletteMode::RemoteServerPicker => " Remove Remote Server ",
+            PaletteMode::ProgramPicker { .. } => " Change Program ",
+        };
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_type(self.border_type())
+            .border_style(Style::default().fg(self.theme.modal_info));
+
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+
+        if inner.height == 0 {
+            return;
+        }
+
+        // Input line
+        let input_line = Line::from(format!("❯ {}", query.value()));
+        let input_area = Rect { height: 1, ..inner };
+        frame.render_widget(Paragraph::new(input_line), input_area);
+        place_input_cursor(
+            frame,
+            query,
+            input_area.x + 2,
+            input_area.y,
+            input_area.width.saturating_sub(2),
+        );
+
+        // Match lines. The `scroll` offset lets us page through a
+        // list longer than `max_visible`; rows below `scroll` are
+        // off the top of the window, rows at/after
+        // `scroll + max_visible` are off the bottom.
+        let start = scroll.min(matches.len());
+        for (i, item) in matches.iter().skip(start).take(max_visible).enumerate() {
+            let row = rows_area.y + i as u16;
+            if row >= rows_area.y + rows_area.height {
+                break;
+            }
+            let abs_idx = start + i;
+            let is_selected = abs_idx == selected_idx;
+
+            let line_area = Rect {
+                y: row,
+                height: 1,
+                ..inner
+            };
+
+            match item {
+                QuickSwitchItem::Session(m) => {
+                    let status_icon = match m.status {
+                        SessionStatus::Creating
+                        | SessionStatus::Merging
+                        | SessionStatus::Pushing => "⠋",
+                        SessionStatus::Running => "●",
+                        SessionStatus::Stopped => "○",
+                        SessionStatus::CascadePaused => "⏸",
+                    };
+                    let status_color = match m.status {
+                        SessionStatus::Creating
+                        | SessionStatus::Merging
+                        | SessionStatus::Pushing => self.theme.status_creating,
+                        SessionStatus::Running => self.theme.status_running,
+                        SessionStatus::Stopped => self.theme.status_stopped,
+                        SessionStatus::CascadePaused => self.theme.agent_waiting,
+                    };
+
+                    let mut spans = vec![
+                        Span::styled(
+                            format!(" {} ", status_icon),
+                            Style::default().fg(status_color),
+                        ),
+                        Span::styled(
+                            m.title.clone(),
+                            if is_selected {
+                                self.theme.selection()
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ];
+                    if let Some(shown_branch) = crate::session::display_branch(&m.title, &m.branch)
+                    {
+                        spans.push(Span::styled(
+                            format!(" [{}]", shown_branch),
+                            Style::default().fg(self.theme.text_accent),
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        format!(" ({})", m.project_name),
+                        Style::default().fg(self.theme.text_secondary),
+                    ));
+                    frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
+                }
+                QuickSwitchItem::Command(entry) => {
+                    // Full-row background distinguishes commands from
+                    // sessions at a glance. Selection highlight takes
+                    // precedence over the command background.
+                    let row_style = if is_selected {
+                        self.theme.selection()
+                    } else {
+                        Style::default()
+                            .bg(self.theme.palette_command_bg)
+                            .fg(self.theme.palette_command_fg)
+                    };
+
+                    // Reserve trailing space for the right-aligned
+                    // key hint; keep one space margin on each side.
+                    let available = line_area.width as usize;
+                    let glyph = " ❯ ";
+                    let keys = &entry.keys;
+                    let keys_width = keys.chars().count();
+                    let label = entry.label;
+                    let label_width = label.chars().count();
+                    let glyph_width = glyph.chars().count();
+                    let padding = available
+                        .saturating_sub(glyph_width)
+                        .saturating_sub(label_width)
+                        .saturating_sub(keys_width)
+                        // Leave a 1-char gutter before the key hint
+                        // when it's non-empty.
+                        .saturating_sub(if keys.is_empty() { 0 } else { 1 });
+
+                    let gutter = if keys.is_empty() {
+                        String::new()
+                    } else {
+                        " ".to_string()
+                    };
+                    let content = format!(
+                        "{glyph}{label}{pad}{gutter}{keys}",
+                        glyph = glyph,
+                        label = label,
+                        pad = " ".repeat(padding),
+                        gutter = gutter,
+                        keys = keys,
+                    );
+                    let line = Line::from(Span::styled(content, row_style));
+                    frame.render_widget(Paragraph::new(line).style(row_style), line_area);
+                }
+                QuickSwitchItem::SectionMove { label, .. }
+                | QuickSwitchItem::RemoteServerRemove { label, .. }
+                | QuickSwitchItem::ProgramChange { label, .. } => {
+                    let style = if is_selected {
+                        self.theme.selection()
+                    } else {
+                        Style::default()
+                    };
+                    let line = Line::from(Span::styled(format!(" ❯ {label}"), style));
+                    frame.render_widget(Paragraph::new(line).style(style), line_area);
+                }
+            }
+        }
     }
 }
 

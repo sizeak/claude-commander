@@ -81,6 +81,7 @@ pub enum AttachEnd {
 /// channel.
 enum WsControl {
     Resize { cols: u16, rows: u16 },
+    Refresh,
     Detach,
 }
 
@@ -95,6 +96,13 @@ impl ControlTx {
     /// channel means the pump already ended, so the resize is moot.
     fn resize(&self, cols: u16, rows: u16) {
         let _ = self.0.send(WsControl::Resize { cols, rows });
+    }
+
+    /// Ask the pump to send a `refresh` control frame, so the remote tmux client
+    /// repaints a region the caller drew over. Fire-and-forget for the same
+    /// reason as [`Self::resize`].
+    fn refresh(&self) {
+        let _ = self.0.send(WsControl::Refresh);
     }
 
     /// Ask the pump to detach (send a `detach` frame, close the socket).
@@ -141,6 +149,9 @@ impl AttachConnection {
             resizer: AttachResizer {
                 control: self.control.clone(),
             },
+            refresher: AttachRefresher {
+                control: self.control.clone(),
+            },
             terminator: AttachTerminator {
                 control: self.control,
                 end: self.end,
@@ -156,6 +167,7 @@ pub struct AttachStreams {
     pub reader: DuplexStream,
     pub writer: DuplexStream,
     pub resizer: AttachResizer,
+    pub refresher: AttachRefresher,
     pub terminator: AttachTerminator,
 }
 
@@ -170,6 +182,22 @@ impl AttachResizer {
     /// Resize to `cols`×`rows`. Fire-and-forget: a failed resize is non-fatal.
     pub fn resize(&self, cols: u16, rows: u16) {
         self.control.resize(cols, rows);
+    }
+}
+
+/// Asks the remote tmux client to repaint its whole visible screen, restoring a
+/// region the caller drew over (the TUI's in-session switcher paints the palette
+/// on top of the live pane). Cheaply cloneable, like [`AttachResizer`].
+#[derive(Clone)]
+pub struct AttachRefresher {
+    control: ControlTx,
+}
+
+impl AttachRefresher {
+    /// Repaint. Fire-and-forget: a dropped refresh leaves a stale rectangle,
+    /// which the pane's next output overwrites anyway.
+    pub fn refresh(&self) {
+        self.control.refresh();
     }
 }
 
@@ -436,6 +464,12 @@ async fn run_pump(
                         let _ = ws_write.send(Message::Text(text.into())).await;
                     }
                 }
+                Some(WsControl::Refresh) => {
+                    if let Ok(text) = ClientControl::Refresh.to_text() {
+                        // A failed refresh is non-fatal; keep pumping.
+                        let _ = ws_write.send(Message::Text(text.into())).await;
+                    }
+                }
                 Some(WsControl::Detach) => break (AttachEnd::Detached, true),
                 // All senders dropped (streams dropped without an explicit
                 // detach): tear down as a client detach.
@@ -587,15 +621,17 @@ mod tests {
             reader,
             writer,
             resizer,
+            refresher,
             mut terminator,
         } = conn.split();
 
-        // Drop the byte streams + resizer, but KEEP the terminator (so its
-        // Drop-abort can't be what stops the pump). The writer's EOF must drive
-        // the pump to close the socket on its own.
+        // Drop the byte streams + control handles, but KEEP the terminator (so
+        // its Drop-abort can't be what stops the pump). The writer's EOF must
+        // drive the pump to close the socket on its own.
         drop(reader);
         drop(writer);
         drop(resizer);
+        drop(refresher);
 
         // The server must observe the socket close promptly.
         tokio::time::timeout(Duration::from_secs(5), closed_rx)

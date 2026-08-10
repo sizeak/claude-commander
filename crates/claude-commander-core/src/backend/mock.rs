@@ -238,7 +238,6 @@ impl CommanderBackend for MockBackend {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             open_editor: *self.open_editor.lock().unwrap(),
-            switcher_popup: false,
             commander_session: false,
             shell_toggle: false,
             client_side_image_paste: false,

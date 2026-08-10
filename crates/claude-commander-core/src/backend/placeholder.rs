@@ -73,7 +73,6 @@ impl CommanderBackend for PlaceholderBackend {
         // A never-connected backend has no operator-local affordances.
         BackendCapabilities {
             open_editor: false,
-            switcher_popup: false,
             commander_session: false,
             shell_toggle: false,
             client_side_image_paste: false,
@@ -273,7 +272,6 @@ mod tests {
         let b = PlaceholderBackend::new("x", "y");
         let caps = b.capabilities();
         assert!(!caps.open_editor);
-        assert!(!caps.switcher_popup);
         assert!(!caps.commander_session);
         assert!(!caps.shell_toggle);
     }

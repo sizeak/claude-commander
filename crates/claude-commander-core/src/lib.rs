@@ -32,7 +32,6 @@ pub mod error;
 pub mod fuzzy;
 pub mod git;
 pub mod paste_image;
-pub mod picker;
 pub mod reviewed;
 pub mod session;
 pub mod telemetry;
