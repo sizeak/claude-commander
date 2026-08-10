@@ -615,7 +615,7 @@ mod tests {
     /// session's PR. `--head` matches by name, and GitHub frees the name when it
     /// deletes the merged head branch, so name collisions are routine.
     #[test]
-    fn test_parse_pr_list_ignores_pr_merged_before_session() {
+    fn test_parse_pr_list_ignores_pr_merged_before_branch_owned() {
         let json = r#"[{
             "number": 28147,
             "url": "https://github.com/o/r/pull/28147",
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_pr_list_ignores_pr_closed_before_session() {
+    fn test_parse_pr_list_ignores_pr_closed_before_branch_owned() {
         let json = r#"[{
             "number": 12,
             "url": "u",
@@ -648,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_pr_list_keeps_pr_merged_after_session_started() {
+    fn test_parse_pr_list_keeps_pr_merged_after_branch_owned() {
         // The session's own PR: opened and merged during its lifetime.
         let json = r#"[{
             "number": 30,
@@ -689,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_pr_list_keeps_pr_that_settled_after_session_started() {
+    fn test_parse_pr_list_keeps_pr_that_settled_after_branch_owned() {
         // Same Checkout Branch flow, carried through to a merge: opened before
         // the session, merged after it started.
         let json = r#"[{
