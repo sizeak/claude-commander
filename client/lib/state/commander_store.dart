@@ -288,6 +288,49 @@ class CommanderStore extends ChangeNotifier {
   Future<ScanResultDto> scanDirectory(String path) =>
       _api.scanDirectory(handle: _requireHandle, path: path);
 
+  /// Register a project by path, or return the existing one if that path is
+  /// already registered.
+  ///
+  /// The idempotence is done here rather than through a route because there is
+  /// no `ensure_project` binding: the server has `POST /projects/ensure`, but
+  /// `claude-commander-client` never grew a method for it and the frb bridge
+  /// therefore exposes only `add_project`. Adding one means regenerating the
+  /// bridge, which this layer must not do. The dedupe rule is copied exactly
+  /// from `CommanderService::ensure_project` — "a project whose `repo_path`
+  /// equals this path" — and reads it off the snapshot the store already holds,
+  /// so the behaviour matches the route it stands in for, including its
+  /// no-canonicalisation caveat. `add_project` does **not** dedupe, so calling
+  /// it blind would register the same checkout twice.
+  Future<String> ensureProject(String path) async {
+    for (final p in projects) {
+      if (p.repoPath == path) return p.id.field0.uuid;
+    }
+    return addProject(path);
+  }
+
+  /// Every repo the server-side `gh` user can clone, for the repo picker.
+  /// Throws when the server has no `gh`, or when listing outruns the client's
+  /// request ceiling — the picker words both inline.
+  Future<List<GithubRepo>> githubRepos() =>
+      _api.githubRepos(handle: _requireHandle);
+
+  /// Start a clone. The returned job's status is not terminal; poll [cloneJob].
+  Future<CloneJobDto> startClone(CloneRequestDto request) =>
+      _api.startClone(handle: _requireHandle, request: request);
+
+  /// One poll of a clone job. Null means the server has pruned it, which is a
+  /// normal answer rather than a failure.
+  Future<CloneJobDto?> cloneJob(CloneJobId id) =>
+      _api.cloneJob(handle: _requireHandle, id: id);
+
+  /// A clone source's stable `host/owner/name` identity, or null when it has
+  /// none. No handle: it is pure string work in the shared protocol crate.
+  ///
+  /// **A null on either side of a comparison is never a match.** See
+  /// [CommanderApi.canonicalRepoSlug].
+  Future<String?> canonicalRepoSlug(String url) =>
+      _api.canonicalRepoSlug(url: url);
+
   /// List a project's branches (local, plus remotes when [fetch] is set).
   Future<List<BranchInfo>> listBranches(
     String projectId, {
