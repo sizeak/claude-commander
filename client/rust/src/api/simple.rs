@@ -293,6 +293,20 @@ pub fn add_project(handle: String, path: String) -> Result<String> {
     Ok(id.as_uuid().to_string())
 }
 
+/// Register a project by server-side path, or return the id of the project
+/// already registered for it; returns a full-id string either way.
+///
+/// The idempotent counterpart to [`add_project`], and what a "register this
+/// existing checkout" offer must call: the path it was handed is frequently
+/// already a project, and `add_project` would register a second entry for the
+/// same repository. The dedupe (including how a path is resolved to a repository)
+/// is the server's — no client restates the rule.
+pub fn ensure_project(handle: String, path: String) -> Result<String> {
+    let client = with_client(&handle)?;
+    let id = call(client.ensure_project(PathBuf::from(path)))?;
+    Ok(id.as_uuid().to_string())
+}
+
 /// Remove a project (its sessions must already be gone).
 pub fn remove_project(handle: String, id: String) -> Result<()> {
     let client = with_client(&handle)?;
@@ -462,5 +476,71 @@ mod tests {
             !slug.contains("ghp_") && !slug.contains("sizeak:"),
             "the userinfo component must not reach the slug, got {slug}"
         );
+    }
+
+    /// A credentialed clone source must not reach Dart through a *failed* call.
+    ///
+    /// **Why this goes through the generated codec rather than asserting on the
+    /// error's `Display`.** frb hands an `anyhow::Error` to Dart by serializing
+    /// `format!("{:?}", self)` — `Debug`, i.e. the whole `Caused by:` chain
+    /// (`frb_generated.rs`, `impl SseEncode for anyhow::Error`). So a
+    /// `.context("cloning {url}")` added anywhere on this path would be invisible
+    /// to a test that read `err.to_string()` (which prints only the outermost
+    /// context) while being fully visible in the page's generic error render.
+    /// Encoding through the real `SseEncode` impl is what closes that gap, and
+    /// asserting on the serialized *bytes* means nothing between here and the
+    /// wire can be the place the secret is dropped.
+    ///
+    /// Network-free and server-free: the handle points at a port nothing listens
+    /// on, so the call fails on connect. Any route on this path errors the same
+    /// way, and the request carrying the credential is what matters.
+    #[test]
+    fn a_failed_clone_never_encodes_the_credential_for_dart() {
+        use crate::api::mirrors::{CloneRequestDto, CloneSourceDto, CloneSourceKind};
+        use crate::frb_generated::SseEncode;
+        use flutter_rust_bridge::for_generated::SseSerializer;
+
+        const USERINFO_SECRET: &str = "ghp_dart_visible_leak_9f3a1c";
+        const BEARER_SECRET: &str = "bearer_dart_visible_leak_4b7e2d";
+
+        // Grab a free port and drop the listener, so connecting is refused.
+        let addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let handle = crate::api::registry::connect_server(
+            format!("http://{addr}"),
+            Some(BEARER_SECRET.to_string()),
+        )
+        .expect("connect_server does not probe reachability");
+
+        let err = start_clone(
+            handle.clone(),
+            CloneRequestDto {
+                source: CloneSourceDto {
+                    kind: CloneSourceKind::Url,
+                    value: format!(
+                        "https://sizeak:{USERINFO_SECRET}@github.com/sizeak/claude-commander.git"
+                    ),
+                },
+                dest_name: None,
+            },
+        );
+        crate::api::registry::disconnect_server(handle);
+        let Err(err) = err else {
+            panic!("a refused connection must be an error, not a job")
+        };
+
+        // The exact bytes the bridge would put on the wire for Dart.
+        let mut serializer = SseSerializer::new();
+        err.sse_encode(&mut serializer);
+        let encoded = String::from_utf8_lossy(&serializer.cursor.into_inner()).to_string();
+
+        for secret in [USERINFO_SECRET, BEARER_SECRET, "sizeak:"] {
+            assert!(
+                !encoded.contains(secret),
+                "the Dart-visible error carries {secret:?}: {encoded}"
+            );
+        }
     }
 }

@@ -2075,3 +2075,74 @@ async fn test_paste_image_writes_file_and_injects_path() {
     drop(state_temp_dir);
     drop(worktrees_dir);
 }
+
+/// Build a service over an isolated config/state pair, for the project-registration
+/// tests below. No tmux is touched, but the config still pins the isolated socket
+/// dir and `projects_dir` (see `create_isolated_config_store`).
+fn service_for(temp_dir: &TempDir) -> claude_commander_core::api::CommanderService {
+    use claude_commander_core::api::CommanderService;
+    use claude_commander_core::telemetry::FrontendInfo;
+
+    let config_store = create_isolated_config_store(temp_dir, Config::default());
+    let store = create_isolated_store(temp_dir);
+    CommanderService::new(
+        config_store,
+        store,
+        FrontendInfo::new("integration-test", "0.0.0"),
+    )
+}
+
+/// `ensure_project` is the idempotent counterpart to `add_project`: a path that is
+/// already registered answers with the existing id instead of registering the same
+/// checkout twice.
+///
+/// This is the behaviour both frontends' "register this existing checkout" flows
+/// depend on, so it is pinned here rather than left to the callers.
+#[tokio::test]
+async fn ensure_project_returns_the_existing_id_for_a_registered_path() {
+    let (_repo, repo_path) = create_test_repo().await;
+    let temp_dir = TempDir::new().unwrap();
+    let service = service_for(&temp_dir);
+
+    let first = service.ensure_project(repo_path.clone()).await.unwrap();
+    let second = service.ensure_project(repo_path.clone()).await.unwrap();
+
+    assert_eq!(first, second, "the same path must answer with the same id");
+    assert_eq!(
+        service.list_projects().await.len(),
+        1,
+        "a repeated ensure must not register a second project"
+    );
+}
+
+/// The same guarantee for a path that is *not* the repo's canonical spelling.
+///
+/// `add_project` stores `fs::canonicalize`d paths (`session/manager/projects.rs`),
+/// so a dedupe that compared the caller's raw path against the stored one would
+/// miss every non-canonical spelling and register a duplicate — and the callers
+/// hand over exactly such paths: a server-reported clone destination under a
+/// symlinked projects dir, or anything under a symlinked `TMPDIR`/`/var` (macOS).
+/// A symlink is the portable way to produce a second spelling of one directory.
+#[tokio::test]
+async fn ensure_project_deduplicates_a_non_canonical_spelling_of_the_same_repo() {
+    let (_repo, repo_path) = create_test_repo().await;
+    let temp_dir = TempDir::new().unwrap();
+    let link = temp_dir.path().join("link-to-repo");
+    std::os::unix::fs::symlink(&repo_path, &link).unwrap();
+    let service = service_for(&temp_dir);
+
+    // Register through the canonical path, then ensure through the symlink: one
+    // checkout, two spellings.
+    let first = service.add_project(repo_path.clone()).await.unwrap();
+    let second = service.ensure_project(link.clone()).await.unwrap();
+
+    assert_eq!(
+        first, second,
+        "a symlinked spelling of a registered repo must resolve to the same project"
+    );
+    assert_eq!(
+        service.list_projects().await.len(),
+        1,
+        "the symlinked spelling must not register a second project"
+    );
+}

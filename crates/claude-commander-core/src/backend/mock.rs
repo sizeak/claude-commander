@@ -8,6 +8,7 @@
 //! [`Unavailable`](BackendError::Unavailable) so a degraded backend can be
 //! exercised.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -85,6 +86,15 @@ pub struct MockBackend {
     /// "register the existing checkout" answer to an occupied clone destination
     /// has to be shown to hit the right backend's disk.
     added_projects: Mutex<Vec<std::path::PathBuf>>,
+    /// Paths passed to [`Self::ensure_project`], one entry per call (so a test can
+    /// see a repeat), kept separate from `added_projects` because *which* of the
+    /// two a caller used is the thing worth asserting: only `ensure_project`
+    /// deduplicates.
+    ensured_projects: Mutex<Vec<std::path::PathBuf>>,
+    /// The id [`Self::ensure_project`] issued for each distinct path, so a repeat
+    /// answers with the first id rather than a fresh one — the contract a real
+    /// backend's `POST /projects/ensure` provides.
+    ensured_ids: Mutex<HashMap<std::path::PathBuf, ProjectId>>,
     conn_tx: watch::Sender<ConnectionState>,
     conn_rx: watch::Receiver<ConnectionState>,
     gen_tx: watch::Sender<u64>,
@@ -127,6 +137,8 @@ impl MockBackend {
             clone_requests: Mutex::new(Vec::new()),
             clone_jobs: Mutex::new(Vec::new()),
             added_projects: Mutex::new(Vec::new()),
+            ensured_projects: Mutex::new(Vec::new()),
+            ensured_ids: Mutex::new(HashMap::new()),
             conn_tx,
             conn_rx,
             gen_tx,
@@ -244,6 +256,11 @@ impl MockBackend {
     /// Paths passed to [`Self::add_project`], in call order.
     pub fn added_projects(&self) -> Vec<std::path::PathBuf> {
         self.added_projects.lock().unwrap().clone()
+    }
+
+    /// Paths passed to [`Self::ensure_project`], in call order (repeats included).
+    pub fn ensured_projects(&self) -> Vec<std::path::PathBuf> {
+        self.ensured_projects.lock().unwrap().clone()
     }
 
     /// Force an issued job's status, so a test can drive a poll loop to a
@@ -444,6 +461,16 @@ impl CommanderBackend for MockBackend {
         self.guard()?;
         self.added_projects.lock().unwrap().push(path);
         Ok(ProjectId::new())
+    }
+
+    async fn ensure_project(&self, path: std::path::PathBuf) -> BResult<ProjectId> {
+        self.guard()?;
+        self.ensured_projects.lock().unwrap().push(path.clone());
+        // Idempotent like the route it stands in for: a repeated path answers with
+        // the id issued the first time. A mock that returned a fresh id each call
+        // would let a caller that used the *non*-idempotent `add_project` pass a
+        // test about not duplicating.
+        Ok(*self.ensured_ids.lock().unwrap().entry(path).or_default())
     }
 
     async fn remove_project(&self, _id: ProjectId) -> BResult<()> {

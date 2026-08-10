@@ -336,6 +336,11 @@ impl CommanderBackend for LocalBackend {
         Ok(run_local(move || async move { svc.add_project(path).await }).await?)
     }
 
+    async fn ensure_project(&self, path: PathBuf) -> BResult<ProjectId> {
+        let svc = self.service.clone();
+        Ok(run_local(move || async move { svc.ensure_project(path).await }).await?)
+    }
+
     async fn remove_project(&self, id: ProjectId) -> BResult<()> {
         let svc = self.service.clone();
         Ok(run_local(move || async move { svc.remove_project(&id).await }).await?)

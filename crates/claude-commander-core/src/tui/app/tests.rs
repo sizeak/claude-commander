@@ -8256,8 +8256,51 @@ async fn registering_an_existing_clone_adds_it_as_a_project_on_that_backend() {
     })
     .await;
     assert_eq!(
-        eventually(|| remote_mock(&app, id).added_projects()).await,
+        eventually(|| remote_mock(&app, id).ensured_projects()).await,
         vec![std::path::PathBuf::from("/srv/projects/diffgrid")]
+    );
+}
+
+/// Registering a checkout that is *already* a project must not add a second
+/// entry for it.
+///
+/// The offer is only ever made because the clone destination was occupied, so the
+/// path frequently is already registered — and `add_project` registers
+/// unconditionally, so accepting twice (or accepting once for an
+/// already-registered path) duplicated the project. The fix is which method the
+/// handler calls, so that is what this asserts: `ensure_project` for every
+/// attempt, `add_project` never, and one id across both attempts.
+#[tokio::test]
+async fn registering_an_already_registered_checkout_does_not_duplicate_it() {
+    let (mut app, id) = app_with_remote_repo_picker().await;
+    let dest = std::path::PathBuf::from("/srv/projects/diffgrid");
+    for _ in 0..2 {
+        app.handle_confirm(ConfirmAction::RegisterExistingClone {
+            backend: id,
+            dest: dest.clone(),
+        })
+        .await;
+    }
+    let mock = remote_mock(&app, id);
+    assert_eq!(
+        eventually(|| {
+            let ensured = mock.ensured_projects();
+            // `eventually` waits on a non-empty answer, so hold back until both
+            // spawned attempts have landed rather than settling for the first.
+            if ensured.len() == 2 {
+                ensured
+            } else {
+                Vec::new()
+            }
+        })
+        .await,
+        vec![dest.clone(), dest.clone()],
+        "both attempts must go through the idempotent route"
+    );
+    assert!(
+        mock.added_projects().is_empty(),
+        "the non-idempotent add_project must not be used: {:?}",
+        mock.added_projects()
     );
 }
 

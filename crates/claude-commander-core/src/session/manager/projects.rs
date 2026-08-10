@@ -2,6 +2,36 @@
 
 use super::*;
 
+/// Canonicalize `path`, keeping it unchanged when it can't be resolved (it may
+/// not exist yet, or sit behind a permission the caller will fail on anyway).
+async fn canonical_or_keep(path: &Path) -> PathBuf {
+    let path = path.to_path_buf();
+    tokio::fs::canonicalize(&path).await.unwrap_or(path)
+}
+
+/// The identity a project is *stored* under: the canonicalized root of the git
+/// repository containing `path`.
+///
+/// [`SessionManager::add_project`] writes this, and
+/// [`CommanderService::ensure_project`](crate::api::CommanderService::ensure_project)
+/// looks projects up by it. One function so the read and the write cannot
+/// disagree: a lookup that resolved differently from the write would miss every
+/// other spelling of the same checkout — a symlinked projects dir, macOS's
+/// `/var` → `/private/var`, or a path pointing *inside* the work tree — and each
+/// miss registers a duplicate project for one repository, which is exactly what
+/// `ensure_project` exists to prevent.
+///
+/// Falls back to `path` when the repository can't be discovered; resolving is not
+/// this function's place to report an error, and `add_project` produces the real
+/// one a moment later.
+///
+/// The discovered `GitBackend` is dropped before the `await` — deliberately, so
+/// this stays `Send` even though `gix::Repository` is not.
+pub(crate) async fn repo_identity(path: &Path) -> PathBuf {
+    let root = GitBackend::discover(path).map(|backend| backend.path().to_path_buf());
+    canonical_or_keep(root.as_deref().unwrap_or(path)).await
+}
+
 impl SessionManager {
     /// Add a new project (git repository)
     #[instrument(skip(self))]
@@ -16,9 +46,9 @@ impl SessionManager {
 
         info!("Adding project '{}' from {:?}", name, repo_path);
 
-        let repo_path = tokio::fs::canonicalize(backend.path())
-            .await
-            .unwrap_or_else(|_| backend.path().to_path_buf());
+        // Shared with `repo_identity`, which is how `ensure_project` recognises a
+        // path that is already registered.
+        let repo_path = canonical_or_keep(backend.path()).await;
         let mut project = Project::new(name, repo_path, main_branch);
         project.origin_url = origin_url;
         let project_id = project.id;

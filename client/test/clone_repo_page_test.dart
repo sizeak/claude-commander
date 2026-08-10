@@ -151,6 +151,43 @@ void main() {
       expect(find.text('acme/widget'), findsOneWidget);
       expect(find.text('Added'), findsNothing);
     });
+
+    testWidgets('an origin that is present but unslugged is not a match', (
+      tester,
+    ) async {
+      // The sibling case to the test above, and the sharper one: there the
+      // project has *no* origin at all, so it is dropped before canonicalisation
+      // is even attempted. Here the origin is present and simply has no GitHub
+      // identity ('relative/local/path' → null), so it reaches the
+      // canonicalisation and comes back null — as does the repo's `clone_url`,
+      // deliberately given the same shape. If a null were allowed to stand in as
+      // an identity on either side of the comparison, these two would "match" and
+      // the row would wear a false Added badge, blocking a clone the user can
+      // legitimately make. Asserted on the badge *and* on the row still being
+      // clonable, because that is the actual harm.
+      api.projectsResponse = [
+        projectInfo(
+          name: 'mirror',
+          repoPath: '/srv/projects/mirror',
+          originUrl: 'relative/local/path',
+        ),
+      ];
+      api.githubReposResponse = [
+        githubRepo(
+          owner: 'acme',
+          name: 'widget',
+          cloneUrl: 'relative/local/path',
+        ),
+      ];
+      await pump(tester);
+
+      expect(find.text('acme/widget'), findsOneWidget);
+      expect(find.text('Added'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('repo-row-acme/widget')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('clone-dest-name-field')), findsOneWidget);
+    });
   });
 
   group('grouping', () {
@@ -402,14 +439,23 @@ void main() {
       await tester.tap(find.text('Register existing'));
       await tester.pumpAndSettle();
 
-      expect(api.countOf('addProject'), 1);
-      expect(api.lastCall('addProject')!.args['path'], '/srv/projects/widget');
+      // The idempotent route, not `addProject`: the offer only appears because
+      // the destination was occupied, so the checkout is frequently already a
+      // project and `addProject` would register a second entry for it.
+      expect(api.countOf('ensureProject'), 1);
+      expect(
+        api.lastCall('ensureProject')!.args['path'],
+        '/srv/projects/widget',
+      );
+      expect(api.countOf('addProject'), 0);
     });
 
     testWidgets('Register existing reuses an already-registered project', (
       tester,
     ) async {
-      // `ensureProject` must not double-register: `addProject` does not dedupe.
+      // The dedupe is the server's: the page calls `ensureProject`, which answers
+      // with the existing project's id, and never `addProject` — which does not
+      // dedupe and would leave two entries for one checkout.
       api.projectsResponse = [
         projectInfo(name: 'widget', repoPath: '/srv/projects/widget'),
       ];
@@ -432,6 +478,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(api.countOf('addProject'), 0);
+      expect(api.countOf('ensureProject'), 1);
     });
 
     testWidgets('a non-repo directory returns to the sheet to rename', (

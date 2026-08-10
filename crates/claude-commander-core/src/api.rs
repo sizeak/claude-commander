@@ -1195,13 +1195,26 @@ impl CommanderService {
             .await
     }
 
+    /// Register `path` as a project, or answer with the id of the project already
+    /// registered for it.
+    ///
+    /// The idempotent counterpart to [`Self::add_project`], and what both
+    /// frontends' "register this existing checkout" offer calls: the destination
+    /// they hand over is frequently one that *is* already a project, and
+    /// `add_project` would register it a second time.
+    ///
+    /// The lookup is by
+    /// [`repo_identity`](crate::session::repo_identity), not by the
+    /// caller's string — see there for why comparing raw paths silently
+    /// duplicates.
     pub async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
+        let identity = crate::session::repo_identity(&path).await;
         let existing = {
             let state = self.store.read().await;
             state
                 .projects
                 .values()
-                .find(|p| p.repo_path == path)
+                .find(|p| p.repo_path == identity)
                 .map(|p| p.id)
         };
         match existing {

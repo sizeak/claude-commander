@@ -509,6 +509,22 @@ class FakeCommanderApi implements CommanderApi {
   }
 
   @override
+  Future<String> ensureProject({
+    required String handle,
+    required String path,
+  }) async {
+    _record('ensureProject', {'path': path});
+    // Idempotent like the route it stands in for: a path already in the snapshot
+    // answers with that project's id. A fake that always returned a fresh id
+    // would let a caller that used the non-idempotent `addProject` pass a test
+    // about not duplicating.
+    for (final p in workspaceSnapshotResponse.projects) {
+      if (p.repoPath == path) return p.id.field0.uuid;
+    }
+    return addProjectResponse;
+  }
+
+  @override
   Future<void> removeProject({
     required String handle,
     required String id,

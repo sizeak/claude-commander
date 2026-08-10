@@ -146,6 +146,15 @@ abstract class CommanderApi {
 
   Future<String> addProject({required String handle, required String path});
 
+  /// Register a project by server-side path, or return the id of the project
+  /// already registered for it.
+  ///
+  /// The idempotent counterpart to [addProject], which registers
+  /// unconditionally. The dedupe rule — and how a path is resolved to a
+  /// repository root before comparing — belongs to the server; a client that
+  /// reimplemented it would be a second definition free to drift.
+  Future<String> ensureProject({required String handle, required String path});
+
   Future<void> removeProject({required String handle, required String id});
 
   Future<ScanResultDto> scanDirectory({
@@ -494,6 +503,12 @@ class RustCommanderApi implements CommanderApi {
   @override
   Future<String> addProject({required String handle, required String path}) =>
       simple.addProject(handle: handle, path: path);
+
+  @override
+  Future<String> ensureProject({
+    required String handle,
+    required String path,
+  }) => simple.ensureProject(handle: handle, path: path);
 
   @override
   Future<void> removeProject({required String handle, required String id}) =>

@@ -177,6 +177,10 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
+    async fn ensure_project(&self, _path: std::path::PathBuf) -> BResult<ProjectId> {
+        self.unavailable()
+    }
+
     async fn remove_project(&self, _id: ProjectId) -> BResult<()> {
         self.unavailable()
     }

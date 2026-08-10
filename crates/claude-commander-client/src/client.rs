@@ -577,6 +577,23 @@ impl RemoteClient {
         Ok(env.id)
     }
 
+    /// `POST /projects/ensure` — register `path`, or answer with the id of the
+    /// project already registered for it.
+    ///
+    /// The idempotent counterpart to [`Self::add_project`], which registers
+    /// unconditionally. Callers offering "register this existing checkout" want
+    /// this one: the path they were handed is frequently already a project, and a
+    /// second `add_project` would leave two entries for one repository. The
+    /// dedupe rule (and the path resolution behind it) is the server's, so no
+    /// client re-states it.
+    pub async fn ensure_project(&self, path: PathBuf) -> ClientResult<ProjectId> {
+        let body = serde_json::json!({ "path": path });
+        let env: IdEnvelope<ProjectId> = self
+            .post_json(self.endpoint(&["projects", "ensure"]), &body)
+            .await?;
+        Ok(env.id)
+    }
+
     pub async fn remove_project(&self, id: ProjectId) -> ClientResult<()> {
         self.delete_ok(self.project_url(id, &[])).await
     }

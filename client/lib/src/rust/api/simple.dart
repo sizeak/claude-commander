@@ -238,6 +238,20 @@ Future<int> attachDeadAfterMillis() =>
 Future<String> addProject({required String handle, required String path}) =>
     RustLib.instance.api.crateApiSimpleAddProject(handle: handle, path: path);
 
+/// Register a project by server-side path, or return the id of the project
+/// already registered for it; returns a full-id string either way.
+///
+/// The idempotent counterpart to [`add_project`], and what a "register this
+/// existing checkout" offer must call: the path it was handed is frequently
+/// already a project, and `add_project` would register a second entry for the
+/// same repository. The dedupe (including how a path is resolved to a repository)
+/// is the server's — no client restates the rule.
+Future<String> ensureProject({required String handle, required String path}) =>
+    RustLib.instance.api.crateApiSimpleEnsureProject(
+      handle: handle,
+      path: path,
+    );
+
 /// Remove a project (its sessions must already be gone).
 Future<void> removeProject({required String handle, required String id}) =>
     RustLib.instance.api.crateApiSimpleRemoveProject(handle: handle, id: id);

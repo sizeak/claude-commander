@@ -2854,8 +2854,11 @@ impl App {
             }
             ConfirmAction::RegisterExistingClone { backend, dest } => {
                 // The occupied path is on `backend`'s disk, so the project has to
-                // be added there — `add_project` on the trait, not the local
-                // service's `ensure_project` (which only exists locally).
+                // be registered there — hence the trait rather than the local
+                // service. `ensure_project`, not `add_project`: the offer exists
+                // *because* the destination was occupied, so the checkout is often
+                // already a project and `add_project` would register a second
+                // entry for it.
                 let shown = dest.display().to_string();
                 self.ui_state.status_message = Some((
                     format!("Adding existing checkout {shown}…"),
@@ -2864,7 +2867,7 @@ impl App {
                 let handle = self.backend_arc(backend);
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
-                    let update = match handle.add_project(dest).await {
+                    let update = match handle.ensure_project(dest).await {
                         Ok(project_id) => StateUpdate::ProjectAdded {
                             backend_id: backend.0,
                             project_id,

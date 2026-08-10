@@ -591,6 +591,21 @@ pub trait CommanderBackend: Send + Sync {
     // -- Projects --
 
     async fn add_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+
+    /// Register `path` as a project, or answer with the id of the project already
+    /// registered for it.
+    ///
+    /// The idempotent counterpart to [`Self::add_project`], and the one a
+    /// "register this existing checkout" offer must use — the path it was handed
+    /// is frequently already a project (that is *why* the destination was
+    /// occupied), and `add_project` would register a second entry for the same
+    /// repository.
+    ///
+    /// No default: the dedupe belongs where the projects live, so a backend has to
+    /// route it to its own host rather than inherit an answer composed from a
+    /// snapshot a frontend happens to hold.
+    async fn ensure_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+
     async fn remove_project(&self, id: ProjectId) -> BResult<()>;
     async fn scan_directory(&self, dir: std::path::PathBuf) -> BResult<crate::session::ScanResult>;
 

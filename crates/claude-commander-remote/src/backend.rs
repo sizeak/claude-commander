@@ -290,6 +290,13 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
+    async fn ensure_project(&self, path: PathBuf) -> BResult<ProjectId> {
+        self.client
+            .ensure_project(path)
+            .await
+            .map_err(into_backend_error)
+    }
+
     async fn remove_project(&self, id: ProjectId) -> BResult<()> {
         self.client
             .remove_project(id)
@@ -856,6 +863,42 @@ mod tests {
         assert!(
             matches!(err, BackendError::InvalidRequest(_)),
             "got {err:?}"
+        );
+    }
+
+    // -- Projects --
+
+    /// `ensure_project` is idempotent *across the wire*: registering a path the
+    /// server already knows must answer with the existing id rather than a second
+    /// project for the same checkout.
+    ///
+    /// This is what `add_project` cannot do — it registers unconditionally — and
+    /// the reason the trait carries both. Asserted on the id **and** on the
+    /// server's project list, because an equal id alone would also hold if the
+    /// route had somehow returned the right id while still adding a duplicate.
+    #[tokio::test]
+    async fn ensure_project_is_idempotent_over_http() {
+        let (addr, service, _d, _w) = serve_disabled().await;
+        let (_repo, repo_path) = create_test_repo().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+
+        let first = backend.ensure_project(repo_path.clone()).await.unwrap();
+        let second = backend.ensure_project(repo_path.clone()).await.unwrap();
+        assert_eq!(
+            first, second,
+            "the second ensure must return the id the first created"
+        );
+
+        let projects = service.list_projects().await;
+        let matching: Vec<_> = projects
+            .iter()
+            .filter(|p| p.repo_path == repo_path)
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            matching,
+            vec![first],
+            "exactly one project must exist for the path, got {projects:?}"
         );
     }
 

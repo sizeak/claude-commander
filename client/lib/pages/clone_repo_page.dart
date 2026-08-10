@@ -181,6 +181,12 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
       final slug = await _store.canonicalRepoSlug(origin);
       // Never insert null. A set containing null is precisely how a project
       // with no origin comes to "match" a source with no GitHub identity.
+      //
+      // Redundant with [_isAdded]'s null check by design — either alone prevents
+      // the false badge, which is why no test can fail on this line being
+      // relaxed on its own (verified by mutation). What *is* pinned is the pair:
+      // `an origin that is present but unslugged is not a match` fails as soon as
+      // both are gone.
       if (slug != null) slugs.add(slug);
     }
     if (!mounted || epoch != _addedEpoch) return;
@@ -572,9 +578,20 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
   Widget _errorBanner(Object error) {
     final t = CommanderTokens.of(context);
     final message = _message(error);
-    // `gh api --paginate` has no server-side timeout, so a large account can
-    // outrun the client's 30s request ceiling and arrive here looking like a
-    // dead server. Say so rather than let the user conclude the server is down.
+    // A timeout on this route is nearly always the *listing* overrunning, not a
+    // dead server, so word it that way. The server bounds its `gh api --paginate`
+    // (`repo_list_timeout_secs`, 90s by default —
+    // `crates/claude-commander-core/src/git/bounded.rs`) and answers with
+    // "listing GitHub repos timed out after 90s"
+    // (`GitError::RepoListTimedOut`), while the client deliberately gives this
+    // one route a longer budget than the server's so the server wins the race
+    // and its real reason arrives instead of a transport timeout
+    // (`REPO_LIST_HTTP_TIMEOUT_SECS` > `DEFAULT_REPO_LIST_TIMEOUT_SECS`,
+    // compile-asserted in `protocol/src/github.rs`). The one case that still
+    // reads as "the server is down" is a user who raises
+    // `repo_list_timeout_secs` past the client budget — matching on the message
+    // rather than on a variant covers both, since either way the text says
+    // "timed out".
     final slow =
         message.toLowerCase().contains('timed out') ||
         message.toLowerCase().contains('timeout');
