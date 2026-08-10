@@ -60,6 +60,13 @@ class ChromeElbow extends StatelessWidget {
   /// [icon]'s size, ignored when there is none.
   final double iconSize;
 
+  /// Bezel this block eats. Added to the block's fill **and** to its padding in
+  /// one expression, so a block can reach the screen edge without its label
+  /// leaving the safe region — the two numbers cannot drift because they are the
+  /// same number. Supplied by `LcarsBleedScope`; zero everywhere else, which is
+  /// why an unbled block is exactly the block it was.
+  final EdgeInsets bleed;
+
   const ChromeElbow({
     super.key,
     required this.color,
@@ -73,6 +80,7 @@ class ChromeElbow extends StatelessWidget {
     this.labelSize = 11,
     this.labelWeight = FontWeight.w600,
     this.iconSize = 18,
+    this.bleed = EdgeInsets.zero,
   }) : assert(
          label == null || icon == null,
          'a block carries one or the other',
@@ -99,9 +107,11 @@ class ChromeElbow extends StatelessWidget {
       // content has no edge to sit against, and the bias would push it 1.5px
       // off the block's own centre line — visible on the footer's create block,
       // which is only 46px wide.
-      padding: centred
-          ? const EdgeInsets.symmetric(horizontal: 8, vertical: 6)
-          : const EdgeInsets.fromLTRB(6, 6, 9, 6),
+      padding:
+          (centred
+              ? const EdgeInsets.symmetric(horizontal: 8, vertical: 6)
+              : const EdgeInsets.fromLTRB(6, 6, 9, 6)) +
+          bleed,
       alignment: icon != null
           ? Alignment.center
           : (label == null ? null : labelAlignment),
@@ -130,16 +140,15 @@ class ChromeElbow extends StatelessWidget {
               ),
             ),
     );
+    // The same bleed again, and deliberately so: growing the box without growing
+    // the padding would slide the label into the bezel.
+    final grown = height == null ? null : height! + bleed.vertical;
     // A labelled block may need to grow past `height`; an unlabelled one (a rail
-    // filler or a colour band) is exactly the height it was given.
-    final content = height == null
+    // filler or a colour band) is exactly the height it was given. Both use
+    // SizedBox to enforce an exact height (for labelled: minHeight, for unlabelled: exact height).
+    final content = grown == null
         ? decorated
-        : label == null
-        ? SizedBox(height: height, child: decorated)
-        : ConstrainedBox(
-            constraints: BoxConstraints(minHeight: height!),
-            child: decorated,
-          );
+        : SizedBox(height: grown, child: decorated);
     if (onTap == null) return content;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -156,13 +165,25 @@ class ChromeElbowCap extends StatelessWidget {
   final Color color;
   final double height;
 
-  const ChromeElbowCap({super.key, required this.color, this.height = 16});
+  /// Bezel this block eats. Added to the block's fill **and** to its padding in
+  /// one expression, so a block can reach the screen edge without its label
+  /// leaving the safe region — the two numbers cannot drift because they are the
+  /// same number. Supplied by `LcarsBleedScope`; zero everywhere else, which is
+  /// why an unbled block is exactly the block it was.
+  final EdgeInsets bleed;
+
+  const ChromeElbowCap({
+    super.key,
+    required this.color,
+    this.height = 16,
+    this.bleed = EdgeInsets.zero,
+  });
 
   @override
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
     return Container(
-      height: height,
+      height: height + bleed.vertical,
       decoration: BoxDecoration(
         color: color,
         // A smaller radius than a rail elbow: the deck caps content columns at
