@@ -251,6 +251,72 @@ Future<ScanResultDto> scanDirectory({
   path: path,
 );
 
+/// Every repo the server-side `gh` user can clone, for the repo picker.
+///
+/// The list is the *server's* to produce: `gh` runs where the checkout will land,
+/// so a phone with no `gh` and no GitHub credentials still gets a picker. A server
+/// without `gh` answers 503, which arrives here as an error a UI can word as
+/// "install gh on the server" rather than as a generic failure.
+Future<List<GithubRepo>> githubRepos({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleGithubRepos(handle: handle);
+
+/// Start a clone, returning the created job (the route answers 202 with the whole
+/// job, so the id, the destination and the first status arrive together).
+///
+/// **The returned status is not a terminal status.** Every outcome — success,
+/// failure, and an already-occupied destination — is reported through
+/// [`clone_job`], so this reads `Running` essentially always. Poll from here; the
+/// cadence is the caller's (nothing in this crate loops).
+///
+/// An unusable source or destination name is refused with a 400, which surfaces
+/// as an error carrying the server's *already-redacted* reason. Nothing on this
+/// path builds a message out of the request's source: a hand-pasted URL can carry
+/// `user:token@` userinfo, and the rejection strings are redacted where they are
+/// constructed in `claude-commander-protocol` precisely so no hop has to remember
+/// to.
+Future<CloneJobDto> startClone({
+  required String handle,
+  required CloneRequestDto request,
+}) => RustLib.instance.api.crateApiSimpleStartClone(
+  handle: handle,
+  request: request,
+);
+
+/// One poll of a clone job.
+///
+/// **`None` is a normal answer, not an error.** The server prunes jobs a while
+/// after they finish, so a client that keeps polling (or resumes with an id it
+/// stored across a restart) must read "gone" rather than a failure it would
+/// surface as a broken connection.
+///
+/// Takes the typed [`CloneJobId`] straight off the job [`start_clone`] returned,
+/// unlike the session/project routes above which take a full-UUID `String`. Those
+/// ids reach Dart as strings already (`SessionInfo.id`, `create_session`); a clone
+/// job id only ever comes from a `CloneJobDto`, so a `String` parameter would add
+/// a stringify-and-reparse round trip that can only introduce failures.
+Future<CloneJobDto?> cloneJob({
+  required String handle,
+  required CloneJobId id,
+}) => RustLib.instance.api.crateApiSimpleCloneJob(handle: handle, id: id);
+
+/// Reduce a clone source to a stable `host/owner/name` identity, or `None` when it
+/// has none (a local path or a `file://` URL — a local checkout has no GitHub
+/// identity, so it never earns an "already added" badge).
+///
+/// Pure string work with no server involved, so it needs no handle. Exposed so
+/// the repo picker's badge compares canonical forms through
+/// [`claude_commander_protocol::github::canonical_repo_slug`] — the single
+/// definition the server and the Rust client already use — rather than through a
+/// second Dart implementation of the rule. Raw strings would miss most matches:
+/// `gh repo clone` honours the user's configured `git_protocol`, so a repo cloned
+/// by `gh` typically has an `ssh://` origin while the API reports `https://`.
+///
+/// Safe to feed a credentialed URL: the host is taken after the userinfo
+/// delimiter (`github.rs`'s `host_of` splits on the last `@`), so a
+/// `user:token@` component never reaches the returned slug.
+Future<String?> canonicalRepoSlug({required String url}) =>
+    RustLib.instance.api.crateApiSimpleCanonicalRepoSlug(url: url);
+
 /// Cascade-merge a session down its stack; returns the recorded operation.
 Future<OperationStatusDto> cascadeMerge({
   required String handle,

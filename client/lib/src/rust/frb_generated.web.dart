@@ -75,7 +75,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw);
 
   @protected
+  CloneJobDto dco_decode_box_autoadd_clone_job_dto(dynamic raw);
+
+  @protected
+  CloneJobId dco_decode_box_autoadd_clone_job_id(dynamic raw);
+
+  @protected
+  CloneRequestDto dco_decode_box_autoadd_clone_request_dto(dynamic raw);
+
+  @protected
   DiffStatDto dco_decode_box_autoadd_diff_stat_dto(dynamic raw);
+
+  @protected
+  ProjectId dco_decode_box_autoadd_project_id(dynamic raw);
 
   @protected
   PullBlockReason dco_decode_box_autoadd_pull_block_reason(dynamic raw);
@@ -103,6 +115,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BranchInfo dco_decode_branch_info(dynamic raw);
+
+  @protected
+  CloneJobDto dco_decode_clone_job_dto(dynamic raw);
+
+  @protected
+  CloneJobId dco_decode_clone_job_id(dynamic raw);
+
+  @protected
+  CloneRequestDto dco_decode_clone_request_dto(dynamic raw);
+
+  @protected
+  CloneSourceDto dco_decode_clone_source_dto(dynamic raw);
+
+  @protected
+  CloneSourceKind dco_decode_clone_source_kind(dynamic raw);
+
+  @protected
+  CloneStatusDto dco_decode_clone_status_dto(dynamic raw);
+
+  @protected
+  CloneStatusKind dco_decode_clone_status_kind(dynamic raw);
 
   @protected
   CommentDto dco_decode_comment_dto(dynamic raw);
@@ -147,6 +180,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DiffStatDto dco_decode_diff_stat_dto(dynamic raw);
 
   @protected
+  GithubRepo dco_decode_github_repo(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
@@ -172,6 +208,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<DiffSpanDto> dco_decode_list_diff_span_dto(dynamic raw);
+
+  @protected
+  List<GithubRepo> dco_decode_list_github_repo(dynamic raw);
 
   @protected
   List<OperationStatusDto> dco_decode_list_operation_status_dto(dynamic raw);
@@ -225,7 +264,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime? dco_decode_opt_box_autoadd_Chrono_Utc(dynamic raw);
 
   @protected
+  CloneJobDto? dco_decode_opt_box_autoadd_clone_job_dto(dynamic raw);
+
+  @protected
   DiffStatDto? dco_decode_opt_box_autoadd_diff_stat_dto(dynamic raw);
+
+  @protected
+  ProjectId? dco_decode_opt_box_autoadd_project_id(dynamic raw);
 
   @protected
   PullBlockReason? dco_decode_opt_box_autoadd_pull_block_reason(dynamic raw);
@@ -401,9 +446,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
 
   @protected
+  CloneJobDto sse_decode_box_autoadd_clone_job_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  CloneJobId sse_decode_box_autoadd_clone_job_id(SseDeserializer deserializer);
+
+  @protected
+  CloneRequestDto sse_decode_box_autoadd_clone_request_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DiffStatDto sse_decode_box_autoadd_diff_stat_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  ProjectId sse_decode_box_autoadd_project_id(SseDeserializer deserializer);
 
   @protected
   PullBlockReason sse_decode_box_autoadd_pull_block_reason(
@@ -443,6 +504,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BranchInfo sse_decode_branch_info(SseDeserializer deserializer);
+
+  @protected
+  CloneJobDto sse_decode_clone_job_dto(SseDeserializer deserializer);
+
+  @protected
+  CloneJobId sse_decode_clone_job_id(SseDeserializer deserializer);
+
+  @protected
+  CloneRequestDto sse_decode_clone_request_dto(SseDeserializer deserializer);
+
+  @protected
+  CloneSourceDto sse_decode_clone_source_dto(SseDeserializer deserializer);
+
+  @protected
+  CloneSourceKind sse_decode_clone_source_kind(SseDeserializer deserializer);
+
+  @protected
+  CloneStatusDto sse_decode_clone_status_dto(SseDeserializer deserializer);
+
+  @protected
+  CloneStatusKind sse_decode_clone_status_kind(SseDeserializer deserializer);
 
   @protected
   CommentDto sse_decode_comment_dto(SseDeserializer deserializer);
@@ -491,6 +573,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DiffStatDto sse_decode_diff_stat_dto(SseDeserializer deserializer);
 
   @protected
+  GithubRepo sse_decode_github_repo(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
@@ -520,6 +605,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<DiffSpanDto> sse_decode_list_diff_span_dto(SseDeserializer deserializer);
+
+  @protected
+  List<GithubRepo> sse_decode_list_github_repo(SseDeserializer deserializer);
 
   @protected
   List<OperationStatusDto> sse_decode_list_operation_status_dto(
@@ -591,7 +679,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime? sse_decode_opt_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
 
   @protected
+  CloneJobDto? sse_decode_opt_box_autoadd_clone_job_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DiffStatDto? sse_decode_opt_box_autoadd_diff_stat_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ProjectId? sse_decode_opt_box_autoadd_project_id(
     SseDeserializer deserializer,
   );
 
@@ -804,8 +902,32 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_clone_job_dto(
+    CloneJobDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_clone_job_id(
+    CloneJobId self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_clone_request_dto(
+    CloneRequestDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_diff_stat_dto(
     DiffStatDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_project_id(
+    ProjectId self,
     SseSerializer serializer,
   );
 
@@ -856,6 +978,42 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_branch_info(BranchInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_clone_job_dto(CloneJobDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_clone_job_id(CloneJobId self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_clone_request_dto(
+    CloneRequestDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_clone_source_dto(
+    CloneSourceDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_clone_source_kind(
+    CloneSourceKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_clone_status_dto(
+    CloneStatusDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_clone_status_kind(
+    CloneStatusKind self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_comment_dto(CommentDto self, SseSerializer serializer);
@@ -912,6 +1070,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_diff_stat_dto(DiffStatDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_github_repo(GithubRepo self, SseSerializer serializer);
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
@@ -953,6 +1114,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_diff_span_dto(
     List<DiffSpanDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_github_repo(
+    List<GithubRepo> self,
     SseSerializer serializer,
   );
 
@@ -1050,8 +1217,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_clone_job_dto(
+    CloneJobDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_diff_stat_dto(
     DiffStatDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_project_id(
+    ProjectId? self,
     SseSerializer serializer,
   );
 

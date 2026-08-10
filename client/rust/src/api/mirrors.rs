@@ -20,6 +20,7 @@ pub use claude_commander_protocol::api::{
     BranchInfo, CreateOptions, OperationKind, ProgramInfo, PullBlockReason, ServerStatus,
     SessionDetail, SessionInfo,
 };
+pub use claude_commander_protocol::github::{CloneJobId, GithubRepo};
 pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
 pub use claude_commander_protocol::session::{AgentState, ProjectId, SessionId, SessionStatus};
 pub use claude_commander_protocol::ws::AttachKind;
@@ -29,9 +30,10 @@ use claude_commander_protocol::api::{
     PullStatus, WorkspaceSnapshot,
 };
 use claude_commander_protocol::connection::ConnectionState;
+use claude_commander_protocol::github::{CloneJob, CloneRequest, CloneSource, CloneStatus};
 
-// Both id newtypes are a single `Uuid`, so one mirror covers both.
-#[frb(mirror(SessionId, ProjectId))]
+// All three id newtypes are a single `Uuid`, so one mirror covers them all.
+#[frb(mirror(SessionId, ProjectId, CloneJobId))]
 pub struct _Id(pub Uuid);
 
 #[frb(mirror(SessionStatus))]
@@ -176,6 +178,12 @@ pub struct ProjectInfoDto {
     pub repo_path: String,
     pub main_branch: String,
     pub session_ids: Vec<SessionId>,
+    /// The repo's `origin` remote URL, or `None` when it has none (or when the
+    /// server predates the field). The repo picker's "already added" badge runs
+    /// this and a candidate's clone URL through
+    /// [`crate::api::simple::canonical_repo_slug`] and compares the results —
+    /// never the raw strings, since one repo has several spellings.
+    pub origin_url: Option<String>,
 }
 
 impl From<ProjectInfo> for ProjectInfoDto {
@@ -186,6 +194,7 @@ impl From<ProjectInfo> for ProjectInfoDto {
             repo_path: p.repo_path.to_string_lossy().into_owned(),
             main_branch: p.main_branch,
             session_ids: p.session_ids,
+            origin_url: p.origin_url,
         }
     }
 }
@@ -435,6 +444,166 @@ impl From<ConnectionState> for ConnectionStateDto {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GitHub repo picker + repository clone (`claude_commander_protocol::github`).
+//
+// [`GithubRepo`] is all plain fields, so it is a direct mirror the picker can
+// render unchanged. The clone types are not: [`CloneSource`] and [`CloneStatus`]
+// carry data in their variants and [`CloneJob`] carries a `PathBuf`, so they get
+// the same flattened-DTO treatment as `OperationOutcome`/`PullStatus` above.
+// ---------------------------------------------------------------------------
+
+/// One repo offered by the picker. Compare `clone_url` against a project's
+/// `origin_url` via [`crate::api::simple::canonical_repo_slug`] to tell whether
+/// it is already registered — `gh repo clone` honours the user's `git_protocol`,
+/// so an added repo's origin is often `ssh://` where this reports `https://`.
+#[frb(mirror(GithubRepo))]
+pub struct _GithubRepo {
+    pub full_name: String,
+    pub owner: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub private: bool,
+    pub fork: bool,
+    pub archived: bool,
+    pub default_branch: String,
+    pub clone_url: String,
+    pub ssh_url: String,
+    pub pushed_at: Option<DateTime<Utc>>,
+}
+
+/// Which kind of [`CloneSourceDto`] this is (flattens the data-carrying
+/// [`CloneSource`]).
+pub enum CloneSourceKind {
+    Github,
+    Url,
+}
+
+/// Where a clone should come from — the Dart-constructible form of
+/// [`CloneSource`]. `value` is the `owner/name` slug for
+/// [`CloneSourceKind::Github`] and the clone URL for [`CloneSourceKind::Url`].
+///
+/// The two arms stay distinct because they are different *invocations* server
+/// side (`gh repo clone` vs `git clone`), not two spellings of one.
+pub struct CloneSourceDto {
+    pub kind: CloneSourceKind,
+    pub value: String,
+}
+
+impl From<CloneSourceDto> for CloneSource {
+    fn from(s: CloneSourceDto) -> Self {
+        match s.kind {
+            CloneSourceKind::Github => CloneSource::Github { full_name: s.value },
+            CloneSourceKind::Url => CloneSource::Url { url: s.value },
+        }
+    }
+}
+
+/// Request body for [`crate::api::simple::start_clone`] — the Dart-constructible
+/// form of [`CloneRequest`]. `dest_name: None` means "derive the directory name
+/// from the source".
+pub struct CloneRequestDto {
+    pub source: CloneSourceDto,
+    pub dest_name: Option<String>,
+}
+
+impl From<CloneRequestDto> for CloneRequest {
+    fn from(r: CloneRequestDto) -> Self {
+        Self {
+            source: r.source.into(),
+            dest_name: r.dest_name,
+        }
+    }
+}
+
+/// Which kind of [`CloneStatusDto`] this is (flattens the data-carrying
+/// [`CloneStatus`]).
+///
+/// `DestinationExists` is its own arm rather than a `Failed` message because it
+/// is the one outcome a frontend can act on: whether the occupied directory is
+/// already a git repo decides whether the sensible offer is "add that checkout as
+/// a project" or "pick another name".
+pub enum CloneStatusKind {
+    Running,
+    Succeeded,
+    Failed,
+    DestinationExists,
+}
+
+/// How a clone is going. Only the fields belonging to `kind` are populated.
+pub struct CloneStatusDto {
+    pub kind: CloneStatusKind,
+    /// The registered project (`Succeeded` only).
+    pub project_id: Option<ProjectId>,
+    /// User-facing reason (`Failed` only); empty otherwise. Already redacted
+    /// where it was built, so it never carries `user:token@` userinfo.
+    pub message: String,
+    /// The occupied destination path reported by `DestinationExists`; `None`
+    /// otherwise.
+    pub dest: Option<String>,
+    /// Whether that occupied path is itself a git repo (`DestinationExists`
+    /// only); `false` otherwise.
+    pub is_git_repo: bool,
+}
+
+impl From<CloneStatus> for CloneStatusDto {
+    fn from(s: CloneStatus) -> Self {
+        // Start from the "no payload" shape so each arm only names what it has.
+        let base = Self {
+            kind: CloneStatusKind::Running,
+            project_id: None,
+            message: String::new(),
+            dest: None,
+            is_git_repo: false,
+        };
+        match s {
+            CloneStatus::Running => base,
+            CloneStatus::Succeeded { project_id } => Self {
+                kind: CloneStatusKind::Succeeded,
+                project_id: Some(project_id),
+                ..base
+            },
+            CloneStatus::Failed { message } => Self {
+                kind: CloneStatusKind::Failed,
+                message,
+                ..base
+            },
+            CloneStatus::DestinationExists { dest, is_git_repo } => Self {
+                kind: CloneStatusKind::DestinationExists,
+                dest: Some(dest.to_string_lossy().into_owned()),
+                is_git_repo,
+                ..base
+            },
+        }
+    }
+}
+
+/// A clone in flight, as polled by a frontend. `dest` is flattened `PathBuf` →
+/// `String` (as `ProjectInfoDto::repo_path` is).
+///
+/// The status carried by the job [`crate::api::simple::start_clone`] returns is
+/// **not** terminal — every outcome is reported through
+/// [`crate::api::simple::clone_job`].
+pub struct CloneJobDto {
+    pub id: CloneJobId,
+    /// What to show the user as the source — the `owner/name` slug or the URL.
+    pub source_label: String,
+    /// Absolute destination path the clone is writing to.
+    pub dest: String,
+    pub status: CloneStatusDto,
+}
+
+impl From<CloneJob> for CloneJobDto {
+    fn from(j: CloneJob) -> Self {
+        Self {
+            id: j.id,
+            source_label: j.source_label,
+            dest: j.dest.to_string_lossy().into_owned(),
+            status: j.status.into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,6 +681,135 @@ mod tests {
             OperationOutcomeKind::Paused
         ));
         assert_eq!(dto.operations[0].outcome.detail, "2 merged");
+    }
+
+    /// The repo picker's "already added" badge reads `origin_url` off the
+    /// snapshot's projects, so the flattening must carry it. `ProjectInfo` names
+    /// its fields explicitly in `From`, which is why a missing field here
+    /// compiles rather than failing — hence this test.
+    #[test]
+    fn project_dto_carries_the_origin_url() {
+        let with_origin: ProjectInfoDto = ProjectInfo {
+            id: ProjectId::new(),
+            name: "repo".into(),
+            repo_path: PathBuf::from("/repo"),
+            main_branch: "main".into(),
+            session_ids: vec![],
+            origin_url: Some("git@github.com:sizeak/claude-commander.git".into()),
+        }
+        .into();
+        assert_eq!(
+            with_origin.origin_url.as_deref(),
+            Some("git@github.com:sizeak/claude-commander.git")
+        );
+
+        // A repo with no remote (or an older server) stays `None` rather than
+        // becoming an empty string the badge would have to special-case.
+        let without: ProjectInfoDto = ProjectInfo {
+            id: ProjectId::new(),
+            name: "local".into(),
+            repo_path: PathBuf::from("/local"),
+            main_branch: "main".into(),
+            session_ids: vec![],
+            origin_url: None,
+        }
+        .into();
+        assert_eq!(without.origin_url, None);
+    }
+
+    /// Every arm of the clone status, since the flattening is the only place the
+    /// per-arm payloads can go missing.
+    #[test]
+    fn clone_status_dto_flattens_every_arm() {
+        let running: CloneStatusDto = CloneStatus::Running.into();
+        assert!(matches!(running.kind, CloneStatusKind::Running));
+        assert_eq!(running.project_id, None);
+        assert!(running.message.is_empty());
+        assert_eq!(running.dest, None);
+        assert!(!running.is_git_repo);
+
+        let pid = ProjectId::new();
+        let ok: CloneStatusDto = CloneStatus::Succeeded { project_id: pid }.into();
+        assert!(matches!(ok.kind, CloneStatusKind::Succeeded));
+        assert_eq!(ok.project_id, Some(pid));
+
+        let failed: CloneStatusDto = CloneStatus::Failed {
+            message: "fatal: repository not found".into(),
+        }
+        .into();
+        assert!(matches!(failed.kind, CloneStatusKind::Failed));
+        assert_eq!(failed.message, "fatal: repository not found");
+        assert_eq!(failed.project_id, None);
+
+        let occupied: CloneStatusDto = CloneStatus::DestinationExists {
+            dest: PathBuf::from("/projects/repo"),
+            is_git_repo: true,
+        }
+        .into();
+        assert!(matches!(occupied.kind, CloneStatusKind::DestinationExists));
+        assert_eq!(occupied.dest.as_deref(), Some("/projects/repo"));
+        assert!(
+            occupied.is_git_repo,
+            "is_git_repo decides which recovery the UI offers, so it must survive"
+        );
+    }
+
+    /// The job flattening: `PathBuf` → `String`, id and label untouched, and the
+    /// nested status flattened rather than dropped.
+    #[test]
+    fn clone_job_dto_flattens_dest_and_status() {
+        let id = CloneJobId::new();
+        let pid = ProjectId::new();
+        let dto: CloneJobDto = CloneJob {
+            id,
+            source_label: "sizeak/claude-commander".into(),
+            dest: PathBuf::from("/projects/claude-commander"),
+            status: CloneStatus::Succeeded { project_id: pid },
+        }
+        .into();
+        assert_eq!(dto.id, id);
+        assert_eq!(dto.source_label, "sizeak/claude-commander");
+        assert_eq!(dto.dest, "/projects/claude-commander");
+        assert!(matches!(dto.status.kind, CloneStatusKind::Succeeded));
+        assert_eq!(dto.status.project_id, Some(pid));
+    }
+
+    /// The request direction: Dart builds the DTO, so the mapping onto the wire
+    /// enum is what decides whether the server runs `gh repo clone` or `git
+    /// clone`. Getting the arms crossed would send a slug to `git clone`.
+    #[test]
+    fn clone_request_dto_maps_onto_the_wire_source() {
+        let github: CloneRequest = CloneRequestDto {
+            source: CloneSourceDto {
+                kind: CloneSourceKind::Github,
+                value: "sizeak/claude-commander".into(),
+            },
+            dest_name: None,
+        }
+        .into();
+        assert_eq!(
+            github.source,
+            CloneSource::Github {
+                full_name: "sizeak/claude-commander".into()
+            }
+        );
+        assert_eq!(github.dest_name, None);
+
+        let url: CloneRequest = CloneRequestDto {
+            source: CloneSourceDto {
+                kind: CloneSourceKind::Url,
+                value: "https://github.com/sizeak/claude-commander.git".into(),
+            },
+            dest_name: Some("cc".into()),
+        }
+        .into();
+        assert_eq!(
+            url.source,
+            CloneSource::Url {
+                url: "https://github.com/sizeak/claude-commander.git".into()
+            }
+        );
+        assert_eq!(url.dest_name.as_deref(), Some("cc"));
     }
 
     #[test]

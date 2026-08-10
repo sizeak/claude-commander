@@ -6,7 +6,7 @@
 //!
 //! ## Why a plain `#[test]` holding a `Runtime` (not `#[tokio::test]`)
 //!
-//! The cdylib's route fns now resolve a [`RemoteClient`] from the server handle
+//! The cdylib's route fns now resolve a `RemoteClient` from the server handle
 //! and `block_on` its async call on the cdylib's *own* shared runtime. A nested
 //! `block_on` (calling one from inside another runtime's `block_on`) panics, so
 //! each test owns a multi-thread `Runtime` used **only** for async setup/teardown
@@ -29,17 +29,17 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use claude_commander_client::{RemoteClient, RemoteServerSpec, SecretString};
 use claude_commander_core::api::CreateSessionOpts;
 use claude_commander_core::session::SessionId;
 use claude_commander_protocol::api::{OperationKind, ProgramInfo};
-use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneRequest, CloneSource, CloneStatus,
-};
+use claude_commander_protocol::github::CloneJobId;
 use claude_commander_test_support::{
     create_test_repo, run_git, spawn_server, test_state, tmux_available,
 };
-use rust_lib_claude_commander_client::api::mirrors::OperationOutcomeKind;
+use rust_lib_claude_commander_client::api::mirrors::{
+    CloneJobDto, CloneRequestDto, CloneSourceDto, CloneSourceKind, CloneStatusKind,
+    OperationOutcomeKind,
+};
 use rust_lib_claude_commander_client::api::{diff, registry, review, simple};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
@@ -122,21 +122,6 @@ impl Fixture {
     /// Best-effort tmux cleanup for a session left running by a test.
     fn kill(&self, id: &SessionId) {
         let _ = self.rt.block_on(self.service.kill_session(id));
-    }
-
-    /// A [`RemoteClient`] pointed at this fixture's server.
-    ///
-    /// The clone flow below drives the transport crate directly rather than a
-    /// cdylib `api::` fn, because Task 9 adds the `RemoteClient` methods and the
-    /// frb bridge that wraps them is Task 10's. It is still the same server, the
-    /// same routes and the same DTO decode this file exists to pin.
-    fn remote_client(&self) -> RemoteClient {
-        RemoteClient::new(RemoteServerSpec {
-            name: "fixture".to_string(),
-            base_url: self.base.clone(),
-            token: Some(SecretString::new(token())),
-        })
-        .expect("build RemoteClient")
     }
 }
 
@@ -476,29 +461,38 @@ async fn seed_bare_repo(dir: &TempDir) -> PathBuf {
     remote
 }
 
-/// Poll a clone job through the client until it leaves `Running`, bounded so a
-/// wedged clone fails the test rather than hanging it (~20s of real time).
+/// Poll a clone job through the cdylib's `clone_job` route until it leaves
+/// `Running`, bounded so a wedged clone fails the test rather than hanging it
+/// (~20s of real time).
 ///
-/// The polling lives here, not in the client: `clone_job` is a single request by
+/// A plain fn using `std::thread::sleep`, not an `async` one: `simple::clone_job`
+/// `block_on`s the cdylib's own runtime, so like every other route call here it
+/// must run on the test thread rather than inside the fixture runtime (see the
+/// module docs).
+///
+/// The polling lives here, not in the bridge: `clone_job` is a single request by
 /// design, and every frontend drives its own cadence.
-async fn await_clone(client: &RemoteClient, id: CloneJobId) -> CloneJob {
+fn await_clone(handle: &str, id: CloneJobId) -> CloneJobDto {
     for _ in 0..1_000 {
-        let job = client
-            .clone_job(id)
-            .await
+        let job = simple::clone_job(handle.to_string(), id)
             .expect("clone_job must not error")
             .expect("an in-flight job must not read as absent");
-        if !matches!(job.status, CloneStatus::Running) {
+        if !matches!(job.status.kind, CloneStatusKind::Running) {
             return job;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        std::thread::sleep(Duration::from_millis(20));
     }
     panic!("clone job {id} never reached a terminal status");
 }
 
-/// The clone route group end to end: start a clone from a local bare repo, poll
-/// it to `Succeeded`, and confirm the checkout was registered as a project the
-/// client can see.
+/// The clone route group end to end **through the frb bridge**: start a clone
+/// from a local bare repo, poll it to `Succeeded`, and confirm the checkout was
+/// registered as a project the client can see.
+///
+/// Driving `simple::` rather than `RemoteClient` is the point — it is the exact
+/// surface Dart calls, so it also pins the DTO flattening (`CloneJobDto.dest`
+/// stringified, `CloneStatusDto.project_id` populated for `Succeeded`) that the
+/// clone page reads.
 ///
 /// Also pins the two answers a poller depends on: an unknown job id is
 /// `Ok(None)` (not an error — Task 6's registry prunes terminal jobs, so a client
@@ -507,22 +501,23 @@ async fn await_clone(client: &RemoteClient, id: CloneJobId) -> CloneJob {
 #[test]
 fn clone_from_a_local_bare_repo_registers_a_project() {
     let Some(fx) = Fixture::start() else { return };
-    let client = fx.remote_client();
 
     let remote_dir = TempDir::new().unwrap();
     let remote = fx.rt.block_on(seed_bare_repo(&remote_dir));
 
     // -- 202 Accepted carries the whole job, so the first status arrives with the
     // id rather than needing a second round trip.
-    let started = fx
-        .rt
-        .block_on(client.start_clone(CloneRequest {
-            source: CloneSource::Url {
-                url: remote.to_string_lossy().into_owned(),
+    let started = simple::start_clone(
+        fx.handle.clone(),
+        CloneRequestDto {
+            source: CloneSourceDto {
+                kind: CloneSourceKind::Url,
+                value: remote.to_string_lossy().into_owned(),
             },
             dest_name: Some("cloned-by-client".to_string()),
-        }))
-        .expect("start_clone");
+        },
+    )
+    .expect("start_clone");
     assert!(
         started.dest.ends_with("cloned-by-client"),
         "the job must report the destination it is writing to, got {:?}",
@@ -530,12 +525,18 @@ fn clone_from_a_local_bare_repo_registers_a_project() {
     );
 
     // -- poll to a terminal status --
-    let done = fx.rt.block_on(await_clone(&client, started.id));
-    let CloneStatus::Succeeded { project_id } = done.status else {
-        panic!("clone did not succeed: {:?}", done.status)
-    };
+    let done = await_clone(&fx.handle, started.id);
+    assert!(
+        matches!(done.status.kind, CloneStatusKind::Succeeded),
+        "clone did not succeed: message {:?}",
+        done.status.message
+    );
+    let project_id = done
+        .status
+        .project_id
+        .expect("a Succeeded status must carry the registered project id");
     assert_eq!(
-        std::fs::read_to_string(done.dest.join("README")).unwrap(),
+        std::fs::read_to_string(PathBuf::from(&done.dest).join("README")).unwrap(),
         "v1\n",
         "the checkout must contain the seeded commit's content"
     );
@@ -548,26 +549,47 @@ fn clone_from_a_local_bare_repo_registers_a_project() {
     let snap = simple::workspace_snapshot(fx.handle.clone()).expect("workspace_snapshot");
     // `ProjectInfoDto` is not `Debug` (it is an frb mirror), so report the paths.
     let paths: Vec<&str> = snap.projects.iter().map(|p| p.repo_path.as_str()).collect();
+    let cloned = snap
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .unwrap_or_else(|| {
+            panic!("the cloned repo must be registered as a project, got {paths:?}")
+        });
+
+    // The badge's input, end to end: the origin the clone recorded survives the
+    // DTO flattening into the shape Dart reads. Asserted on the *content* rather
+    // than through `canonical_repo_slug` because this source is a local path, for
+    // which canonicalisation is `None` by design — comparing two `None`s would
+    // pass even with the field dropped.
+    let origin = cloned
+        .origin_url
+        .as_deref()
+        .expect("a cloned project must carry the origin it was cloned from");
     assert!(
-        snap.projects.iter().any(|p| p.id == project_id),
-        "the cloned repo must be registered as a project, got {paths:?}"
+        origin.ends_with("remote.git"),
+        "the origin must name the source repo, got {origin}"
     );
 
     // -- an unknown (or pruned) job id is a normal `None`, not an error --
-    let unknown = fx
-        .rt
-        .block_on(client.clone_job(CloneJobId::new()))
+    let unknown = simple::clone_job(fx.handle.clone(), CloneJobId::new())
         .expect("an unknown job id must not be an error");
     assert!(unknown.is_none(), "an unknown job id must read as absent");
 
     // -- `GET /github/repos` resolves. Its *contents* need an authenticated `gh`,
-    // which a CI box need not have, so assert only that the route exists: a
-    // `NotFound` would mean the client and the server disagree on the path,
-    // which is exactly the drift this file catches.
-    if let Err(err) = fx.rt.block_on(client.github_repos()) {
-        assert!(
-            !matches!(err, claude_commander_client::ClientError::NotFound),
-            "GET /github/repos must resolve to the repos route, got {err:?}"
+    // which a CI box need not have, so assert only that the route exists: a 404
+    // would mean the client and the server disagree on the path, which is exactly
+    // the drift this file catches.
+    //
+    // Matched on the message rather than the variant because the bridge flattens
+    // `ClientError` to an `anyhow::Error` (`registry::map_client_err`);
+    // `ClientError::NotFound`'s `Display` is exactly "not found"
+    // (`crates/claude-commander-client/src/error.rs:39`).
+    if let Err(err) = simple::github_repos(fx.handle.clone()) {
+        assert_ne!(
+            err.to_string(),
+            "not found",
+            "GET /github/repos must resolve to the repos route"
         );
     }
 }
