@@ -9,6 +9,9 @@
 # Requires: tmux, git, cargo, uv (for the Rich renderer), python3.
 set -euo pipefail
 
+# SCRIPTDIR, not the invocation dir: this script is run from anywhere.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=fixture.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fixture.sh"
 
 COLS="${CC_COLS:-130}"

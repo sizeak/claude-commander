@@ -306,18 +306,30 @@ therefore no window bar and no key handler, without a platform check in the UI.
 
 ## Build and run
 
+`scripts/dev-run.sh` wraps both flows below, including the AVD boot-and-wait and
+the build → install → launch chain; it enters the right dev shell itself, so it
+works from a bare terminal. The raw commands are kept here because they are what
+the script runs and what you need when debugging a step of it.
+
 ### Linux desktop
 
 ```sh
-cd client
-flutter run -d linux
+scripts/dev-run.sh linux          # or, by hand:
+cd client && flutter run -d linux
 ```
 
 Requires a display (`DISPLAY` or `WAYLAND_DISPLAY`). The `release → debug` symlink in the shellHook means `flutter run` (debug mode) finds the cdylib without a separate `cargo build` step.
 
 ### Android emulator
 
-Boot the AVD the shellHook created (KVM-accelerated, Linux only):
+```sh
+scripts/dev-run.sh android              # boot if needed, build, install, launch
+scripts/dev-run.sh android --release    # the release APK instead
+scripts/dev-run.sh android --device 1A2B3C4D   # a physical handset
+scripts/dev-run.sh emulator start|stop|status  # AVD lifecycle on its own
+```
+
+By hand, boot the AVD the shellHook created (KVM-accelerated, Linux only):
 
 ```sh
 emulator -avd cctest -no-window -gpu swiftshader_indirect \
@@ -367,6 +379,10 @@ slim `.#clientCi` used by CI):
 | cdylib ↔ server integration | `client/rust/tests/server_flows.rs` | every blocking HTTP fn against a real in-process server (connect, create/list/detail/kill, restart/delete, join-by-prefix, review round-trip) |
 | Dart widget | `client/test/*_test.dart` | each page with a hand-rolled `FakeCommanderApi` (no live bridge), plus `CommanderStore` unit tests |
 | Full-stack e2e | `client/integration_test/app_flows_test.dart` | the real app on `-d linux` against a hermetic server |
+
+`scripts/verify.sh --client` runs the first three layers (plus `dart format` and
+`flutter analyze`) in one go; `scripts/verify.sh --e2e` adds the fourth. The
+per-layer commands:
 
 ```sh
 # Dart widget tests (fast; no Rust bridge, no server):
