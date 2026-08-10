@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -2027,14 +2028,17 @@ impl CommanderService {
         })
     }
 
-    /// The `(session id, branch, repo path)` triples the PR poll fans out over:
-    /// every non-`Creating` session paired with its project's repo path. Reads a
-    /// snapshot under the lock so the poll's per-branch `gh` calls run off-lock.
+    /// The `(session id, branch, repo path, created at)` tuples the PR poll fans
+    /// out over: every non-`Creating` session paired with its project's repo
+    /// path. Reads a snapshot under the lock so the poll's per-branch `gh` calls
+    /// run off-lock. `created_at` lets the check discard PRs that were already
+    /// settled before the session existed (a reused branch name — see
+    /// [`crate::git::check_pr_for_branch`]).
     ///
     /// Extracted from the poll loop so the reconcile→poll ordering is testable:
     /// after [`Self::reconcile_session_branches`] adopts a rename, the targets
     /// returned here carry the corrected `--head` branch on the same tick.
-    async fn pr_poll_targets(&self) -> Vec<(SessionId, String, PathBuf)> {
+    async fn pr_poll_targets(&self) -> Vec<(SessionId, String, PathBuf, DateTime<Utc>)> {
         let state = self.store.read().await;
         state
             .sessions
@@ -2042,7 +2046,12 @@ impl CommanderService {
             .filter(|s| s.status != SessionStatus::Creating)
             .filter_map(|s| {
                 let project = state.projects.get(&s.project_id)?;
-                Some((s.id, s.branch.clone(), project.repo_path.clone()))
+                Some((
+                    s.id,
+                    s.branch.clone(),
+                    project.repo_path.clone(),
+                    s.created_at,
+                ))
             })
             .collect()
     }
@@ -2092,10 +2101,11 @@ impl CommanderService {
                 }
                 let results: Vec<(SessionId, PrCheckResult)> =
                     futures::stream::iter(sessions_to_check.into_iter().map(
-                        |(id, branch, repo_path)| async move {
+                        |(id, branch, repo_path, created_at)| async move {
                             (
                                 id,
-                                crate::git::check_pr_for_branch(&repo_path, &branch).await,
+                                crate::git::check_pr_for_branch(&repo_path, &branch, created_at)
+                                    .await,
                             )
                         },
                     ))
@@ -4013,11 +4023,38 @@ mod tests {
         svc.reconcile_session_branches().await.unwrap();
         let targets = svc.pr_poll_targets().await;
 
-        let target = targets.iter().find(|(id, _, _)| *id == sid).unwrap();
+        let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
         assert_eq!(
             target.1, "renamed-feature",
             "the tick that reconciles must poll GitHub with the corrected branch"
         );
+    }
+
+    #[tokio::test]
+    async fn pr_poll_targets_carry_session_creation_time() {
+        // The PR check discards PRs that were already settled before the session
+        // existed (a reused branch name), so the poll must hand it each
+        // session's `created_at` — not just the branch.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let repo = dir.path().join("repo");
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(pid, "feature", "feature", repo.join("wt"), "claude");
+        let sid = session.id;
+        let created_at = session.created_at;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        let targets = svc.pr_poll_targets().await;
+        let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
+        assert_eq!(target.3, created_at);
     }
 
     #[tokio::test]
