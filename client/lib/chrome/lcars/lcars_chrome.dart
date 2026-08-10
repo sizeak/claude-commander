@@ -22,15 +22,27 @@ class LcarsChrome extends Chrome {
   const LcarsChrome();
 
   /// LCARS is `nav: #CC99CC` and `primary: #F7A01D` — both bright, so the system
-  /// icons over the band must be dark. Transparent bar colours as well as
-  /// brightness: on a pre-15 three-button device the navigation bar keeps an
-  /// opaque background otherwise, and the footer's bleed would sit behind it.
+  /// icons over the band must be dark. `systemNavigationBarColor: transparent`
+  /// is kept for older devices, but on a three-button Pixel 8a (Android 17) it
+  /// painted an opaque light scrim across the nav bar regardless — that colour
+  /// property appears to be a no-op on a modern build, and clashed with the
+  /// black LCARS canvas besides. `systemNavigationBarContrastEnforced: false`
+  /// is what actually governs that scrim: per Flutter's own doc on the property
+  /// (`system_chrome.dart:265-274`, pinned 3.41.5), SDK 29+ may apply a
+  /// translucent body scrim behind a transparent nav bar to keep it readable,
+  /// and setting this to `false` overrides it — which is what let the footer's
+  /// bleed show through. `systemStatusBarContrastEnforced: false` is set for
+  /// the same reason on the status bar's matching property, even though only
+  /// the nav bar was seen scrimmed on device: the status bar's band is bled
+  /// into identically and the same SDK 29+ scrim policy applies to it.
   static const _systemBars = SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.dark,
     statusBarBrightness: Brightness.light,
+    systemStatusBarContrastEnforced: false,
     systemNavigationBarColor: Colors.transparent,
     systemNavigationBarIconBrightness: Brightness.dark,
+    systemNavigationBarContrastEnforced: false,
   );
 
   /// A pushed route's frame. LCARS draws to the edges, so instead of the
@@ -64,7 +76,7 @@ class LcarsChrome extends Chrome {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _rail(context, spec, t, bleed),
-          const SizedBox(width: _railPitch),
+          _railGutter(bleed, shouldShowBack(context, spec) ? t.primary : t.nav),
           Expanded(child: _content(context, spec, t, bleed)),
           const SizedBox(width: 10),
         ],
@@ -160,6 +172,27 @@ class LcarsChrome extends Chrome {
           if (i > 0) const SizedBox(height: _railPitch),
           blocks[i],
         ],
+      ],
+    ),
+  );
+
+  /// The seam between the rail and the content column: filled across the
+  /// status-bar inset, open below it.
+  ///
+  /// The band behind the status bar has to be *continuous*. The system clock
+  /// sits at a fixed horizontal offset and on a Pixel 8a it lands exactly on
+  /// this seam, so leaving it open painted a black column through the middle of
+  /// the time. Below the inset the seam is the frame's own gutter and stays as
+  /// it was — which is also why an unbled frame is pixel-identical to before.
+  Widget _railGutter(EdgeInsets bleed, Color color) => SizedBox(
+    width: _railPitch,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(
+          height: bleed.top,
+          child: ColoredBox(color: color),
+        ),
       ],
     ),
   );
@@ -836,7 +869,7 @@ class LcarsChrome extends Chrome {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _viewRail(spec, t, bleed),
-        const SizedBox(width: _railPitch),
+        _railGutter(bleed, t.nav),
         Expanded(child: _viewContent(context, spec, t, bleed)),
         const SizedBox(width: 10),
       ],

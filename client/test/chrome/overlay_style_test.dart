@@ -42,9 +42,13 @@ void main() {
     final style = styleOf(tester);
     expect(style.statusBarIconBrightness, Brightness.dark);
     expect(style.systemNavigationBarIconBrightness, Brightness.dark);
-    // Brightness alone is not enough: a pre-15 three-button device keeps an
-    // opaque navigation bar, which would hide the footer's bleed behind it.
+    // A transparent colour alone is not enough: measured on a Pixel 8a
+    // (three-button, Android 17), the platform still painted an opaque light
+    // scrim across the navigation bar and hid the footer's bleed behind it.
+    // `...ContrastEnforced: false` is what actually turns that scrim off.
     expect(style.systemNavigationBarColor, Colors.transparent);
+    expect(style.systemNavigationBarContrastEnforced, isFalse);
+    expect(style.systemStatusBarContrastEnforced, isFalse);
   });
 
   testWidgets('the phone shell declares the same overlay as a page', (

@@ -368,6 +368,37 @@ void main() {
       expect(tester.getSize(id).height, 74 + 24);
     });
 
+    // Regression for a device-only defect: the rail/content gutter used to run
+    // the full height of the frame including the status-bar inset, cutting a
+    // black column through it. On a Pixel 8a the system clock's last digit
+    // sat exactly on that seam.
+    testWidgets(
+      'the rail/content gutter is filled across the top inset, and open below it',
+      (tester) async {
+        seed();
+        useInsets(tester, top: 24);
+        await pumpLcars(tester);
+
+        final rail = tester.getRect(find.widgetWithText(ChromeElbow, '47-A'));
+        final gutterX = rail.right + 2;
+
+        expect(
+          await pixelAt(tester, Offset(gutterX, 12)),
+          lcarsTokens.nav,
+          reason:
+              'inside the inset the seam must be filled with the same colour '
+              'as the blocks it joins, or a black column shows through',
+        );
+        expect(
+          await pixelAt(tester, Offset(gutterX, 40)),
+          lcarsTokens.canvas,
+          reason:
+              'below the inset the gutter is the ordinary frame gap, not a '
+              'stripe painted down the whole page',
+        );
+      },
+    );
+
     testWidgets('a horizontal inset is held, not bled', (tester) async {
       seed();
       useInsets(tester, left: 30);
