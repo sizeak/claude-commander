@@ -121,12 +121,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{id}/branches", get(projects::branches))
         .route("/projects/{id}/preview", get(projects::preview))
         // -- repo picker + clone --
-        // `/projects/clone` sits alongside `/projects/{id}`, so the literal
-        // "clone" must not be read as a project id. Nothing here relies on
-        // matchit's static-beats-capture preference to sort that out: the two
-        // never collide on method either (`/projects/{id}` is DELETE-only, this is
-        // POST), and `routes_reach_the_clone_handlers` pins that both resolve to
-        // these handlers rather than to a neighbour.
+        // `/projects/clone` sits alongside `/projects/{id}`, and it **does** rely
+        // on the router preferring a static segment over a capture: without that,
+        // "clone" binds to `{id}` and a POST here reaches a path that only
+        // registers DELETE, i.e. a 405 rather than this handler. The differing
+        // methods do not save it — they are what the failure would look like.
+        // `routes_reach_the_clone_handlers` is the receipt: it drives the real
+        // router and identifies the handler by a message only it produces, so a
+        // capture match shows up as a wrong status/body rather than passing
+        // quietly.
         .route("/github/repos", get(github::repos))
         .route("/projects/clone", post(github::clone))
         .route("/projects/clone/{job}", get(github::clone_status))

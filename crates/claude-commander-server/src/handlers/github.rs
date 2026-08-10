@@ -22,6 +22,7 @@ use axum::{
 use claude_commander_protocol::github::{CloneJobId, CloneRequest, GithubRepo};
 
 use crate::error::{ApiError, error_response};
+use crate::extract::SafeJson;
 use crate::handlers::parse_id;
 use crate::state::AppState;
 
@@ -63,7 +64,11 @@ pub async fn repos(State(state): State<AppState>) -> Result<Json<Vec<GithubRepo>
 /// starting a second one.
 pub async fn clone(
     State(state): State<AppState>,
-    Json(req): Json<CloneRequest>,
+    // `SafeJson`, not `Json`: `source` routinely carries a credential, and axum's
+    // own extractor rejection quotes the offending value verbatim — below every
+    // redaction in this codebase, since a `FromRequest` rejection short-circuits
+    // before the handler runs. See `crate::extract::SafeJson`.
+    SafeJson(req): SafeJson<CloneRequest>,
 ) -> Result<Response, ApiError> {
     // The 400 for a rejected source comes from `start_clone`'s own validation,
     // rendered through `ApiError`. Deliberately not re-derived here from
@@ -294,6 +299,50 @@ mod tests {
                 "uri={uri} body={}",
                 String::from_utf8_lossy(&body)
             );
+        }
+    }
+
+    /// A body that never reaches the handler must not echo a credential either.
+    ///
+    /// This is the hop *below* every redaction this feature built. A body that is
+    /// valid JSON but the wrong shape — `source` as a bare string instead of the
+    /// tagged object, an ordinary client mistake — is rejected by the `Json`
+    /// extractor's `FromRequest`, which short-circuits with its own
+    /// `IntoResponse`. `ApiError`, `clone_source_rejected` and
+    /// `redact_credentials` never run, and serde_json's message quotes the
+    /// offending value in full. Verified against axum 0.8.9: before `SafeJson`
+    /// this returned 422 with
+    /// `invalid type: string "https://sizeak:ghp_s3cr3tt0ken@github.com/o/r"`.
+    ///
+    /// Both shapes below are the same hazard through different serde paths: a
+    /// wrong *type* for a field, and an unknown tag value.
+    #[tokio::test]
+    async fn a_malformed_body_is_400_without_the_token() {
+        const SECRET: &str = "ghp_s3cr3tt0ken";
+        let credentialed = format!("https://sizeak:{SECRET}@github.com/o/r");
+        let dir = TempDir::new().unwrap();
+
+        for body in [
+            // `source` as a bare string rather than the tagged object.
+            serde_json::json!({ "source": credentialed }),
+            // Right shape, unrecognised tag — serde echoes the whole variant.
+            serde_json::json!({ "source": { "kind": "clone_url", "url": credentialed } }),
+            // A credential in a field that is not `source` at all.
+            serde_json::json!({
+                "source": { "kind": "url", "url": "https://example.com/o/r" },
+                "dest_name": { "unexpected": credentialed },
+            }),
+        ] {
+            let req = Request::post(CLONE_PATH)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let (status, raw) = send(clone_router(test_state(&dir)), req).await;
+            let text = String::from_utf8_lossy(&raw);
+
+            assert_eq!(status, 400, "body={body} response={text}");
+            assert!(!text.contains(SECRET), "token leaked: {text}");
+            assert!(!text.contains("sizeak:"), "userinfo leaked: {text}");
         }
     }
 
