@@ -19,6 +19,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'support/fake_commander_api.dart';
 import 'support/fixtures.dart';
+import 'support/golden.dart';
+import 'support/ink.dart';
+import 'support/insets.dart';
 
 void main() {
   late FakeCommanderApi api;
@@ -40,25 +43,32 @@ void main() {
   ///
   /// [textScale] rescales through a `copyWith` on the inherited data rather than
   /// a fresh `MediaQueryData`, which would drop the surface size along with it.
-  Widget wrap({CommanderTokens? tokens, double? textScale}) => WorkspaceScope(
-    workspace: workspace,
-    child: WindowScope(
-      controller: null,
-      child: ThemeScope(
-        // Never the device's real preferences.
-        controller: ThemeController(store: InMemoryPrefStore()),
-        child: MaterialApp(
-          theme: tokens == null ? null : themeDataFor(tokens),
-          home: textScale == null
-              ? const PhoneShell()
-              : Builder(
-                  builder: (context) => MediaQuery(
-                    data: MediaQuery.of(
-                      context,
-                    ).copyWith(textScaler: TextScaler.linear(textScale)),
-                    child: const PhoneShell(),
+  ///
+  /// The whole tree sits under the [inkBoundary] repaint boundary so a test can
+  /// measure painted pixels ([inkCentre]); it is a proxy box over the surface,
+  /// so it changes no geometry for the tests that do not.
+  Widget wrap({CommanderTokens? tokens, double? textScale}) => RepaintBoundary(
+    key: inkBoundary,
+    child: WorkspaceScope(
+      workspace: workspace,
+      child: WindowScope(
+        controller: null,
+        child: ThemeScope(
+          // Never the device's real preferences.
+          controller: ThemeController(store: InMemoryPrefStore()),
+          child: MaterialApp(
+            theme: tokens == null ? null : themeDataFor(tokens),
+            home: textScale == null
+                ? const PhoneShell()
+                : Builder(
+                    builder: (context) => MediaQuery(
+                      data: MediaQuery.of(
+                        context,
+                      ).copyWith(textScaler: TextScaler.linear(textScale)),
+                      child: const PhoneShell(),
+                    ),
                   ),
-                ),
+          ),
         ),
       ),
     ),
@@ -216,6 +226,139 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(SettingsPage), findsOneWidget);
+    });
+  });
+
+  /// The footer run grows into the gesture inset while its labels stay put, so
+  /// the coloured blocks meet the physical edge of the screen instead of ending
+  /// in a black band above it.
+  group('LCARS safe-area bleed', () {
+    /// A footer label. Scoped to its block because the Fleet *view* also titles
+    /// itself 'FLEET' (`session_list_page.dart:222`, uppercased by the rail), so
+    /// a bare `find.text` matches two widgets on this shell.
+    Finder footerLabel(String text) => find.descendant(
+      of: find.byType(ChromeElbow),
+      matching: find.text(text),
+    );
+
+    /// The block behind a footer label.
+    Finder footerBlock(String text) => find.widgetWithText(ChromeElbow, text);
+
+    /// The screen-space centre of a footer label.
+    double labelCentre(WidgetTester tester, String text) =>
+        tester.getRect(footerLabel(text)).center.dy;
+
+    void seed() {
+      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+      unawaited(store.connect());
+    }
+
+    Future<void> pumpLcars(WidgetTester tester) async {
+      await tester.pumpWidget(wrap(tokens: lcarsTokens));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the footer run reaches the physical bottom edge', (
+      tester,
+    ) async {
+      seed();
+      useInsets(tester, bottom: 48);
+      await pumpLcars(tester);
+
+      expect(
+        tester.getRect(footerLabel('FLEET')).bottom,
+        lessThan(surfaceHeight(tester) - 48),
+        reason: 'the label itself must stay clear of the gesture strip',
+      );
+      // The block behind that label, however, must meet the edge.
+      expect(
+        tester.getRect(footerBlock('FLEET')).bottom,
+        surfaceHeight(tester),
+      );
+    });
+
+    // The load-bearing assertion, and it takes both halves. Edge-reaching alone
+    // is also satisfied by "labels follow the fill down", which is the
+    // treatment this design rejected, so only the shift pins "held relative to
+    // the safe region" — but the shift alone is satisfied by the `SafeArea`
+    // this replaces, which moves label *and* fill up together. The pair is
+    // "the label moved off the edge and the fill did not".
+    testWidgets('footer labels hold the safe region, shifting by the inset', (
+      tester,
+    ) async {
+      seed();
+      await pumpLcars(tester);
+      final flat = labelCentre(tester, 'FLEET');
+      final edge = tester.getRect(footerBlock('FLEET')).bottom;
+
+      useInsets(tester, bottom: 48);
+      await pumpLcars(tester);
+
+      expect(labelCentre(tester, 'FLEET'), flat - 48);
+      expect(
+        tester.getRect(footerBlock('FLEET')).bottom,
+        edge,
+        reason: 'the fill must not retreat with the label',
+      );
+    });
+
+    // The bled half of the ink-centroid pin. `footer_nav_test.dart` already
+    // holds the unbled case (ink on the block's centre); bled, "centre" means
+    // the centre of the *padded* box, which is the visible part of the block.
+    testWidgets('the create glyph centres on the visible part when bled', (
+      tester,
+    ) async {
+      // The shell's own tests do not load the app's faces, and an `Icon`
+      // without one is a notdef square whose ink is centred on its box whatever
+      // the padding — which would pass this on a glyph that was never drawn.
+      await loadCommanderFonts();
+      seed();
+      useInsets(tester, bottom: 48);
+      await pumpLcars(tester);
+      expect(
+        materialIconsLoaded,
+        isTrue,
+        reason: 'MaterialIcons did not load; this test cannot measure an icon',
+      );
+
+      final block = tester.getRect(
+        find
+            .ancestor(
+              of: find.byIcon(Icons.add),
+              matching: find.byType(ChromeElbow),
+            )
+            .first,
+      );
+      final centre = await inkCentre(tester, block, lcarsTokens.attention);
+
+      expect(centre.dy, closeTo(block.top + (block.height - 48) / 2, 0.6));
+    });
+
+    // The bleed is a function of `padding`, which the platform collapses on any
+    // edge the keyboard covers — so it disappears exactly when the footer is no
+    // longer against the bezel. This pins *the app's response to a given
+    // padding*; it does not assert the platform's collapse, which is
+    // `FlutterView.padding`'s documented contract, not something a widget test
+    // can hold. `terminal_page_test.dart:36` fakes the same collapse by hand.
+    testWidgets('no bleed while the keyboard covers the bottom edge', (
+      tester,
+    ) async {
+      seed();
+      useInsets(tester);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 320);
+      await pumpLcars(tester);
+
+      expect(tester.getRect(footerBlock('FLEET')).height, 38);
+    });
+
+    testWidgets('a horizontal inset is held, not bled', (tester) async {
+      seed();
+      useInsets(tester, left: 30);
+      await pumpLcars(tester);
+
+      // A cutout occludes; the rail must sit inboard of it rather than paint
+      // under it.
+      expect(tester.getRect(footerLabel('SETTINGS')).left, greaterThan(30));
     });
   });
 }

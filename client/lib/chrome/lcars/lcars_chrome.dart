@@ -4,6 +4,7 @@ import '../../theme/tokens.dart';
 import '../chrome.dart';
 import '../chrome_forms.dart';
 import '../chrome_wide.dart';
+import 'bleed.dart';
 import 'elbow.dart';
 
 /// The LCARS chrome: a black canvas, an elbow rail down the left holding
@@ -448,6 +449,8 @@ class LcarsChrome extends Chrome {
     final t = CommanderTokens.of(context);
     final settings = spec.settings;
     final centre = spec.centreAction;
+    // Bottom only: the run meets the screen's edge, not its sides.
+    final bleed = EdgeInsets.only(bottom: LcarsBleedScope.of(context).bottom);
     // The nav blocks start one slot in when the settings block leads, so every
     // run position below is offset by it.
     final lead = settings == null ? 0 : 1;
@@ -463,12 +466,13 @@ class LcarsChrome extends Chrome {
       final ends = _runEnds(i + lead, count, t.pillRadius, bottom: true);
       blocks.add(
         i == centreSlot
-            ? _navCentre(t, centre!, ends)
+            ? _navCentre(t, centre!, ends, bleed)
             : Expanded(
                 child: _navBlock(
                   t,
                   spec.items[i < centreSlot ? i : i - 1],
                   ends,
+                  bleed,
                 ),
               ),
       );
@@ -487,6 +491,7 @@ class LcarsChrome extends Chrome {
             t,
             settings,
             _runEnds(0, count, t.pillRadius, bottom: true),
+            bleed,
           ),
           // The rail's own pitch, not the run's tighter seam: this gap continues
           // the gutter between the rail and the content column straight down.
@@ -507,9 +512,11 @@ class LcarsChrome extends Chrome {
     CommanderTokens t,
     ChromeNavItem item,
     BorderRadius radius,
+    EdgeInsets bleed,
   ) => ClipRRect(
     borderRadius: radius,
     child: ChromeElbow(
+      bleed: bleed,
       color: item.selected ? t.primary : t.borderSubtle,
       labelColor: item.selected ? t.canvas : t.nav,
       height: _footerHeight,
@@ -537,11 +544,13 @@ class LcarsChrome extends Chrome {
     CommanderTokens t,
     ChromeButtonAction settings,
     BorderRadius radius,
+    EdgeInsets bleed,
   ) => SizedBox(
     width: t.railWidth,
     child: ClipRRect(
       borderRadius: radius,
       child: ChromeElbow(
+        bleed: bleed,
         color: t.nav,
         height: _footerHeight,
         label: t.caseLabel(settings.label),
@@ -556,6 +565,7 @@ class LcarsChrome extends Chrome {
     CommanderTokens t,
     ChromeButtonAction centre,
     BorderRadius radius,
+    EdgeInsets bleed,
   ) => SizedBox(
     width: _footerCentreWidth,
     // The action's own icon, not a `Text('+')`: a text glyph centres its line
@@ -567,6 +577,7 @@ class LcarsChrome extends Chrome {
       child: ClipRRect(
         borderRadius: radius,
         child: ChromeElbow(
+          bleed: bleed,
           color: t.attention,
           height: _footerHeight,
           icon: centre.icon,
@@ -588,29 +599,52 @@ class LcarsChrome extends Chrome {
   /// own: flush left, where the rail is, and 10 off the right, where the content
   /// column ends. That is what lets the footer read as the rail turning its
   /// corner — the two are one bracket, not a frame with a bar under it.
+  ///
+  /// **No `SafeArea`, deliberately.** One would hold the whole column off the
+  /// bezel, which on a gesture-navigation phone leaves a black band under a run
+  /// whose entire premise is meeting the edge of the screen. The vertical insets
+  /// are published as an [LcarsBleedScope] instead, so each block grows its fill
+  /// *and* its padding by them and the labels end up exactly where a `SafeArea`
+  /// put them. The horizontal ones stay ordinary padding.
   @override
   Widget buildShell(BuildContext context, ChromeShellSpec spec) {
     final t = CommanderTokens.of(context);
-    return Scaffold(
-      backgroundColor: t.canvas,
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(child: spec.body),
-            Padding(
-              // Top gap at the rail's pitch, so the rail's filler meets the
-              // settings block on the same seam its own blocks are stacked on.
-              padding: const EdgeInsets.fromLTRB(0, _railPitch, 10, 0),
-              child: buildFooterNav(
-                context,
-                ChromeFooterNavSpec(
-                  items: spec.items,
-                  centreAction: spec.centreAction,
-                  settings: spec.settings,
+    // Read *here*, above the `Scaffold` this returns, so whether a `Scaffold`
+    // republishes its body's padding never has to be assumed.
+    final insets = MediaQuery.paddingOf(context);
+    return LcarsBleedScope(
+      bleed: EdgeInsets.only(top: insets.top, bottom: insets.bottom),
+      child: Scaffold(
+        backgroundColor: t.canvas,
+        body: Padding(
+          // Held, not bled: a cutout is an occlusion, not a bezel to decorate.
+          // A sub-900dp phone stays on this shell in landscape
+          // (`adaptive_shell.dart:25`), where the notch lands on the rail's edge.
+          padding: EdgeInsets.only(left: insets.left, right: insets.right),
+          child: Column(
+            children: [
+              Expanded(child: spec.body),
+              Padding(
+                // Top gap at the rail's pitch, so the rail's filler meets the
+                // settings block on the same seam its own blocks are stacked on.
+                padding: const EdgeInsets.fromLTRB(0, _railPitch, 10, 0),
+                // A `Builder`, because `context` here is the one this method was
+                // called with — above the scope it is returning. The footer has
+                // to read the bleed from *below* it, exactly as the body's own
+                // blocks do.
+                child: Builder(
+                  builder: (context) => buildFooterNav(
+                    context,
+                    ChromeFooterNavSpec(
+                      items: spec.items,
+                      centreAction: spec.centreAction,
+                      settings: spec.settings,
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
