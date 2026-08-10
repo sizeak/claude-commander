@@ -77,8 +77,10 @@ class LcarsChrome extends Chrome {
         children: [
           _rail(context, spec, t, bleed),
           _railGutter(bleed, shouldShowBack(context, spec) ? t.primary : t.nav),
+          // No trailing margin: the frame runs flush to the right bezel at every
+          // height. A 10dp gap there read as the frame stopping short of the
+          // screen once the top and bottom bands met the edge — see [buildShell].
           Expanded(child: _content(context, spec, t, bleed)),
-          const SizedBox(width: 10),
         ],
       ),
     );
@@ -177,20 +179,29 @@ class LcarsChrome extends Chrome {
   );
 
   /// The seam between the rail and the content column: filled across the
-  /// status-bar inset, open below it.
+  /// status-bar inset *and* down to the bottom of the elbow cap it continues
+  /// into, open below that.
   ///
   /// The band behind the status bar has to be *continuous*. The system clock
   /// sits at a fixed horizontal offset and on a Pixel 8a it lands exactly on
   /// this seam, so leaving it open painted a black column through the middle of
-  /// the time. Below the inset the seam is the frame's own gutter and stays as
-  /// it was — which is also why an unbled frame is pixel-identical to before.
+  /// the time. Stopping the fill at `bleed.top` fixed that but left a second,
+  /// shorter black tab poking up into the band the moment the inset ends —
+  /// also measured on device — because the rail's top block and the cap below
+  /// the seam are two more colour patches the fill needs to bridge. Filling to
+  /// [kElbowCapHeight] past the inset closes that gap too, so the rail's top
+  /// block, the seam and the cap read as one solid mass with a clean bottom
+  /// edge. Below the cap the seam resumes as the frame's own gutter, which is
+  /// also why an unbled frame is pixel-identical to before — the fill is zero
+  /// height when there is no inset to bleed into, rather than a bare
+  /// [kElbowCapHeight] stripe with nothing above it.
   Widget _railGutter(EdgeInsets bleed, Color color) => SizedBox(
     width: _railPitch,
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SizedBox(
-          height: bleed.top,
+          height: bleed.top == 0 ? 0 : bleed.top + kElbowCapHeight,
           child: ColoredBox(color: color),
         ),
       ],
@@ -689,9 +700,16 @@ class LcarsChrome extends Chrome {
   /// middle block rather than something overlapping the bar.
   ///
   /// The run is inset to the body's own margins rather than to margins of its
-  /// own: flush left, where the rail is, and 10 off the right, where the content
-  /// column ends. That is what lets the footer read as the rail turning its
-  /// corner — the two are one bracket, not a frame with a bar under it.
+  /// own: flush left, where the rail is, and flush right too. That is what lets
+  /// the footer read as the rail turning its corner — the two are one bracket,
+  /// not a frame with a bar under it.
+  ///
+  /// The right margin used to be 10, matching the gap [buildPage] and
+  /// [buildViewRail] left beside their content columns. All three are zero now.
+  /// Compared side by side on a Pixel 8a against a variant that filled only the
+  /// bled bands, running flush at every height was the one that read as a
+  /// frame: a 10dp strip of canvas down the right made the bracket look like it
+  /// had stopped short of a screen its other three edges were already meeting.
   ///
   /// **No `SafeArea`, deliberately.** One would hold the whole column off the
   /// bezel, which on a gesture-navigation phone leaves a black band under a run
@@ -722,7 +740,7 @@ class LcarsChrome extends Chrome {
                 Padding(
                   // Top gap at the rail's pitch, so the rail's filler meets the
                   // settings block on the same seam its own blocks are stacked on.
-                  padding: const EdgeInsets.fromLTRB(0, _railPitch, 10, 0),
+                  padding: const EdgeInsets.only(top: _railPitch),
                   // A `Builder`, because `context` here is the one this method was
                   // called with — above the scope it is returning. The footer has
                   // to read the bleed from *below* it, exactly as the body's own
@@ -870,8 +888,9 @@ class LcarsChrome extends Chrome {
       children: [
         _viewRail(spec, t, bleed),
         _railGutter(bleed, t.nav),
+        // Flush right, like [buildPage] and the shell's footer — see
+        // [buildShell] for why the 10dp margin all three used to carry went.
         Expanded(child: _viewContent(context, spec, t, bleed)),
-        const SizedBox(width: 10),
       ],
     );
   }

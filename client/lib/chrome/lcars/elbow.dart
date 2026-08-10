@@ -170,6 +170,11 @@ class ChromeElbow extends StatelessWidget {
   }
 }
 
+/// [ChromeElbowCap]'s default height. Public so a caller that needs to fill
+/// in behind the cap — the rail/content gutter's seam-filler, in particular —
+/// can match it without a second hardcoded `16`.
+const kElbowCapHeight = 16.0;
+
 /// The short horizontal bar that caps the top of an LCARS content column,
 /// closing the bracket the rail opens. Rounded on its bottom-left so it flows
 /// out of the rail's top elbow.
@@ -184,7 +189,7 @@ class ChromeElbowCap extends StatelessWidget {
   const ChromeElbowCap({
     super.key,
     required this.color,
-    this.height = 16,
+    this.height = kElbowCapHeight,
     this.bleed = EdgeInsets.zero,
   });
 
@@ -197,8 +202,20 @@ class ChromeElbowCap extends StatelessWidget {
         color: color,
         // A smaller radius than a rail elbow: the deck caps content columns at
         // roughly 12–14px against the rail's 30–44px.
+        //
+        // Square once bled, though. That radius exists so the cap *flows out of*
+        // the rail's top elbow, which needs a gap between the two to curve
+        // across — and a bled cap has none: the rail/content gutter is filled
+        // down past this cap's bottom edge (`lcars_chrome.dart`'s `_railGutter`)
+        // so the rail block, the seam and the cap are one solid band. Rounded,
+        // the curve then bites a black wedge *into* that band instead of out of
+        // the canvas. Measured on a Pixel 8a: canvas appeared at x=176 — the
+        // cap's left edge, exactly where the gutter fill ends — from y=138 down,
+        // widening as the corner curved away.
         borderRadius: BorderRadius.only(
-          bottomLeft: Radius.circular(t.elbowRadius * 0.4),
+          bottomLeft: bleed.top > 0
+              ? Radius.zero
+              : Radius.circular(t.elbowRadius * 0.4),
         ),
       ),
     );

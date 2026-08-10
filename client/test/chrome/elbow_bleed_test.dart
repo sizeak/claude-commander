@@ -76,4 +76,38 @@ void main() {
     await tester.pumpWidget(host(block(EdgeInsets.zero)));
     expect(tester.getRect(find.byType(ChromeElbow)).height, 38);
   });
+
+  /// The cap's bottom-left radius is conditional on the bleed, and the two cases
+  /// have to be pinned together: the rounding is the desktop/zero-inset shape
+  /// and must survive, while a bled cap has to give it up. On a Pixel 8a the
+  /// rounded bled cap cut a black wedge out of the top band, at the cap's own
+  /// left edge — the rail/content gutter is filled past the cap there, so the
+  /// curve had nothing to flow out of and bit into a solid band instead.
+  group('the elbow cap corner', () {
+    Radius capCorner(WidgetTester tester) {
+      final container = tester.widget<Container>(
+        find.descendant(
+          of: find.byType(ChromeElbowCap),
+          matching: find.byType(Container),
+        ),
+      );
+      final decoration = container.decoration as BoxDecoration;
+      return (decoration.borderRadius! as BorderRadius).bottomLeft;
+    }
+
+    Widget cap(EdgeInsets bleed) =>
+        ChromeElbowCap(color: const Color(0xFFCC99CC), bleed: bleed);
+
+    testWidgets('rounds when there is nothing to bleed into', (tester) async {
+      await tester.pumpWidget(host(cap(EdgeInsets.zero)));
+
+      expect(capCorner(tester), Radius.circular(lcarsTokens.elbowRadius * 0.4));
+    });
+
+    testWidgets('is square once the cap is bled', (tester) async {
+      await tester.pumpWidget(host(cap(const EdgeInsets.only(top: 24))));
+
+      expect(capCorner(tester), Radius.zero);
+    });
+  });
 }
