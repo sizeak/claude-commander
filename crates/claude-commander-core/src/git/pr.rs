@@ -193,12 +193,14 @@ pub async fn retarget_pr_base(repo_path: &Path, pr_number: u32, new_base: &str) 
 /// don't wipe UI state (notably the PR-stack topology).
 ///
 /// Prefers open PRs over closed/merged when a branch has multiple PRs (rare,
-/// but possible after a reopen). PRs that were already settled before
-/// `session_created_at` are ignored — see [`pr_settled_before`].
+/// but possible after a reopen). PRs that had already settled before
+/// `branch_owned_since` — the instant the session took this branch name, per
+/// [`WorktreeSession::branch_owned_since`](crate::session::WorktreeSession::branch_owned_since)
+/// — are ignored; see [`pr_settled_before`].
 pub async fn check_pr_for_branch(
     repo_path: &Path,
     branch: &str,
-    session_created_at: DateTime<Utc>,
+    branch_owned_since: DateTime<Utc>,
 ) -> PrCheckResult {
     let output = match Command::new("gh")
         .args([
@@ -236,7 +238,7 @@ pub async fn check_pr_for_branch(
     let Ok(json) = String::from_utf8(output.stdout) else {
         return PrCheckResult::FetchFailed;
     };
-    parse_pr_list_json(&json, session_created_at)
+    parse_pr_list_json(&json, branch_owned_since)
 }
 
 /// Parse the JSON array returned by the `gh pr list --json …` query in
@@ -248,7 +250,7 @@ pub async fn check_pr_for_branch(
 /// reverse-creation order) — considering only entries that survive
 /// [`pr_settled_before`]. When every entry is filtered out the branch has no PR
 /// of its own, which is `NotFound`.
-fn parse_pr_list_json(json: &str, session_created_at: DateTime<Utc>) -> PrCheckResult {
+fn parse_pr_list_json(json: &str, branch_owned_since: DateTime<Utc>) -> PrCheckResult {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return PrCheckResult::FetchFailed;
     };
@@ -259,9 +261,9 @@ fn parse_pr_list_json(json: &str, session_created_at: DateTime<Utc>) -> PrCheckR
     let candidates: Vec<&serde_json::Value> = arr
         .iter()
         .filter(|p| {
-            if pr_settled_before(p, session_created_at) {
+            if pr_settled_before(p, branch_owned_since) {
                 debug!(
-                    "ignoring PR #{} — settled before this session existed",
+                    "ignoring PR #{} — settled before this session held the branch",
                     p["number"]
                 );
                 false
@@ -286,8 +288,9 @@ fn parse_pr_list_json(json: &str, session_created_at: DateTime<Utc>) -> PrCheckR
     }
 }
 
-/// True when this PR entry was already closed or merged before `session_start`,
-/// meaning it cannot be the session's own PR.
+/// True when this PR entry was already closed or merged before `owned_since` —
+/// the instant the session took its current branch name — meaning it cannot be
+/// the session's own PR.
 ///
 /// `gh pr list --head <branch>` matches by branch *name*, not identity, so a
 /// name reused after an unrelated PR merged and its head branch was deleted
@@ -305,11 +308,11 @@ fn parse_pr_list_json(json: &str, session_created_at: DateTime<Utc>) -> PrCheckR
 ///   opened earlier, which is the same Checkout Branch flow carried through to
 ///   a merge.
 ///
-/// One genuine case is filtered deliberately: checking out a branch whose PR
-/// had already merged or closed before the session existed reports no PR. A
-/// merged PR can't be reopened, and surfacing "merged" on a session created
-/// afterwards would enrol it in the delete-merged-PR-sessions sweep — the exact
-/// harm this filter exists to prevent.
+/// One genuine case is filtered deliberately: checking out a branch whose PR had
+/// already merged or closed before the session took the name reports no PR. A
+/// merged PR can't be reopened, and surfacing "merged" on a session that only
+/// later took the branch would enrol it in the delete-merged-PR-sessions sweep —
+/// the exact harm this filter exists to prevent.
 ///
 /// `closedAt` is set for merged PRs too (verified against
 /// `gh pr list --head ts-7 --state all --json state,closedAt,mergedAt` on
@@ -317,14 +320,14 @@ fn parse_pr_list_json(json: &str, session_created_at: DateTime<Utc>) -> PrCheckR
 /// `mergedAt` and then `createdAt` are fallbacks so a missing field can't make
 /// a settled PR look current. An unparseable/absent timestamp keeps the PR —
 /// filtering is the destructive direction.
-fn pr_settled_before(entry: &serde_json::Value, session_start: DateTime<Utc>) -> bool {
+fn pr_settled_before(entry: &serde_json::Value, owned_since: DateTime<Utc>) -> bool {
     if entry["state"].as_str() == Some("OPEN") {
         return false;
     }
     ["closedAt", "mergedAt", "createdAt"]
         .iter()
         .find_map(|field| parse_timestamp(&entry[field]))
-        .is_some_and(|settled| settled < session_start)
+        .is_some_and(|settled| settled < owned_since)
 }
 
 /// Parse a gh JSON timestamp (RFC 3339) into UTC, ignoring null/absent/garbage.
@@ -508,17 +511,17 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    /// Session-creation instant for fixtures that carry no PR timestamps at all
+    /// Branch-ownership instant for fixtures that carry no PR timestamps at all
     /// — those can't be classified as stale, so the value is irrelevant to them.
     /// Staleness itself is covered by the `settled_before` tests below.
-    fn session_start() -> DateTime<Utc> {
+    fn owned_since() -> DateTime<Utc> {
         ts("2026-01-01T00:00:00Z")
     }
 
     #[test]
     fn test_parse_pr_list_open() {
         let json = r#"[{"number":42,"url":"https://github.com/owner/repo/pull/42","state":"OPEN","isDraft":false,"labels":[]}]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().unwrap();
         assert_eq!(info.number, 42);
         assert_eq!(info.url, "https://github.com/owner/repo/pull/42");
@@ -540,7 +543,7 @@ mod tests {
             "labels":[],
             "baseRefName":"feature-login"
         }]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().unwrap();
         assert_eq!(info.base_ref_name.as_deref(), Some("feature-login"));
     }
@@ -550,7 +553,7 @@ mod tests {
         // Older gh responses / tests that omit baseRefName should leave the
         // field as None rather than failing.
         let json = r#"[{"number":9,"url":"u","state":"OPEN","isDraft":false,"labels":[]}]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().unwrap();
         assert!(info.base_ref_name.is_none());
     }
@@ -558,7 +561,7 @@ mod tests {
     #[test]
     fn test_parse_pr_list_merged() {
         let json = r#"[{"number":7,"url":"https://x/pull/7","state":"MERGED","isDraft":false,"labels":[]}]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().unwrap();
         assert_eq!(info.state, PrState::Merged);
         assert!(info.merged());
@@ -573,7 +576,7 @@ mod tests {
             "isDraft":true,
             "labels":[{"name":"dev-review-required","color":"abc"},{"name":"trivial","color":"def"}]
         }]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().unwrap();
         assert!(info.is_draft);
         assert_eq!(info.labels, vec!["dev-review-required", "trivial"]);
@@ -585,7 +588,7 @@ mod tests {
             {"number":1,"url":"u1","state":"MERGED","isDraft":false,"labels":[]},
             {"number":2,"url":"u2","state":"OPEN","isDraft":false,"labels":[]}
         ]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().unwrap();
         assert_eq!(info.number, 2);
         assert_eq!(info.state, PrState::Open);
@@ -594,7 +597,7 @@ mod tests {
     #[test]
     fn test_parse_pr_list_closed_when_no_open() {
         let json = r#"[{"number":9,"url":"u","state":"CLOSED","isDraft":false,"labels":[]}]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().unwrap();
         assert_eq!(info.state, PrState::Closed);
     }
@@ -604,7 +607,7 @@ mod tests {
         // Empty array is an authoritative "no PR" — must be NotFound, not
         // FetchFailed. Callers rely on this to clear stale PR state when a PR
         // is deleted upstream.
-        assert!(parse_pr_list_json("[]", session_start()).is_not_found());
+        assert!(parse_pr_list_json("[]", owned_since()).is_not_found());
     }
 
     /// A merged PR from a *previous* life of this branch name (someone else's
@@ -799,7 +802,7 @@ mod tests {
                     "reviewDecision": "{raw}"
                 }}]"#
             );
-            let result = parse_pr_list_json(&json, session_start());
+            let result = parse_pr_list_json(&json, owned_since());
             let info = result.info().expect("parses");
             assert_eq!(info.review_decision, expected, "for raw={raw}");
         }
@@ -814,7 +817,7 @@ mod tests {
             "isDraft": false,
             "labels": []
         }]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().expect("parses");
         assert_eq!(info.review_decision, None);
     }
@@ -839,7 +842,7 @@ mod tests {
                 {"author": {"login": "alice"}, "state": "APPROVED"}
             ]
         }]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().expect("parses");
         let mut reviewers = info.reviewers.clone();
         reviewers.sort();
@@ -855,7 +858,7 @@ mod tests {
             "isDraft": false,
             "labels": []
         }]"#;
-        let result = parse_pr_list_json(json, session_start());
+        let result = parse_pr_list_json(json, owned_since());
         let info = result.info().expect("parses");
         assert!(info.reviewers.is_empty());
     }
@@ -864,12 +867,12 @@ mod tests {
     fn test_parse_pr_list_garbage() {
         // Malformed JSON → FetchFailed, so a gh regression/panic doesn't wipe
         // cached PR state on every poll.
-        assert!(parse_pr_list_json("not json", session_start()).is_fetch_failed());
+        assert!(parse_pr_list_json("not json", owned_since()).is_fetch_failed());
     }
 
     #[test]
     fn test_parse_pr_list_not_an_array() {
-        assert!(parse_pr_list_json(r#"{"oops":1}"#, session_start()).is_fetch_failed());
+        assert!(parse_pr_list_json(r#"{"oops":1}"#, owned_since()).is_fetch_failed());
     }
 
     #[test]
@@ -878,7 +881,7 @@ mod tests {
         // None; now it's explicitly FetchFailed so we don't mistake it for
         // "no PR" and wipe stack metadata.
         let json = r#"[{"number":1,"url":"u","state":"NEW_STATE","isDraft":false,"labels":[]}]"#;
-        assert!(parse_pr_list_json(json, session_start()).is_fetch_failed());
+        assert!(parse_pr_list_json(json, owned_since()).is_fetch_failed());
     }
 
     #[test]
