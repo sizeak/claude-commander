@@ -21,6 +21,9 @@ use crate::api::{
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::github::{
+    CloneJob, CloneJobId, CloneRequest, CloneSource, CloneStatus, GithubRepo, redact_credentials,
+};
 
 use super::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
@@ -68,6 +71,16 @@ pub struct MockBackend {
     /// remote backend). Set by [`Self::set_open_editor`] so a test can exercise
     /// the local-editor launch path through the review view.
     open_editor: Mutex<bool>,
+    /// Repo list served by [`Self::list_github_repos`], set by
+    /// [`Self::set_github_repos`].
+    github_repos: Mutex<Vec<GithubRepo>>,
+    /// Requests passed to [`Self::start_clone`], for call-recording asserts.
+    clone_requests: Mutex<Vec<CloneRequest>>,
+    /// Jobs [`Self::start_clone`] has issued, served back by
+    /// [`Self::clone_job`]. Nothing ever advances their status: a mock has no
+    /// clone to finish, and a test that wants a terminal status sets one with
+    /// [`Self::set_clone_status`].
+    clone_jobs: Mutex<Vec<CloneJob>>,
     conn_tx: watch::Sender<ConnectionState>,
     conn_rx: watch::Receiver<ConnectionState>,
     gen_tx: watch::Sender<u64>,
@@ -106,6 +119,9 @@ impl MockBackend {
             toggled_reviewed: Mutex::new(Vec::new()),
             fetched_blobs: Mutex::new(Vec::new()),
             open_editor: Mutex::new(false),
+            github_repos: Mutex::new(Vec::new()),
+            clone_requests: Mutex::new(Vec::new()),
+            clone_jobs: Mutex::new(Vec::new()),
             conn_tx,
             conn_rx,
             gen_tx,
@@ -208,6 +224,31 @@ impl MockBackend {
     /// `(session, side, path)` tuples passed to [`Self::fetch_diff_blob`].
     pub fn fetched_diff_blobs(&self) -> Vec<(SessionId, DiffSide, String)> {
         self.fetched_blobs.lock().unwrap().clone()
+    }
+
+    /// Set the repo list served by [`Self::list_github_repos`].
+    pub fn set_github_repos(&self, repos: Vec<GithubRepo>) {
+        *self.github_repos.lock().unwrap() = repos;
+    }
+
+    /// Requests passed to [`Self::start_clone`], in call order.
+    pub fn clone_requests(&self) -> Vec<CloneRequest> {
+        self.clone_requests.lock().unwrap().clone()
+    }
+
+    /// Force an issued job's status, so a test can drive a poll loop to a
+    /// terminal outcome (success, failure, occupied destination) without a real
+    /// clone. Ignores an id this mock never issued.
+    pub fn set_clone_status(&self, id: CloneJobId, status: CloneStatus) {
+        if let Some(job) = self
+            .clone_jobs
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|j| j.id == id)
+        {
+            job.status = status;
+        }
     }
 
     fn guard(&self) -> BResult<()> {
@@ -400,6 +441,45 @@ impl CommanderBackend for MockBackend {
 
     async fn scan_directory(&self, _dir: std::path::PathBuf) -> BResult<ScanResult> {
         self.unimpl()
+    }
+
+    async fn list_github_repos(&self) -> BResult<Vec<GithubRepo>> {
+        self.guard()?;
+        Ok(self.github_repos.lock().unwrap().clone())
+    }
+
+    async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
+        self.guard()?;
+        // The label goes through the protocol's redaction like a real backend's:
+        // `req.source` may be a credentialed URL, and a mock that echoed it raw
+        // would make it the one path in the codebase where that is fine to do.
+        let source_label = redact_credentials(match &req.source {
+            CloneSource::Github { full_name } => full_name,
+            CloneSource::Url { url } => url,
+        });
+        let job = CloneJob {
+            id: CloneJobId::new(),
+            source_label,
+            // No filesystem is touched, so this is a plausible destination rather
+            // than a resolved one — nothing in the mock reads it back.
+            dest: std::path::PathBuf::from("/mock/projects")
+                .join(req.dest_name.as_deref().unwrap_or("clone")),
+            status: CloneStatus::Running,
+        };
+        self.clone_requests.lock().unwrap().push(req);
+        self.clone_jobs.lock().unwrap().push(job.clone());
+        Ok(job)
+    }
+
+    async fn clone_job(&self, id: CloneJobId) -> BResult<Option<CloneJob>> {
+        self.guard()?;
+        Ok(self
+            .clone_jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|j| j.id == id)
+            .cloned())
     }
 
     async fn cascade_merge(&self, _id: SessionId) -> BResult<OperationStatus> {

@@ -24,6 +24,7 @@ use crate::api::{
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 
 use super::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
@@ -184,6 +185,21 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
+    async fn list_github_repos(&self) -> BResult<Vec<GithubRepo>> {
+        self.unavailable()
+    }
+
+    async fn start_clone(&self, _req: CloneRequest) -> BResult<CloneJob> {
+        self.unavailable()
+    }
+
+    async fn clone_job(&self, _id: CloneJobId) -> BResult<Option<CloneJob>> {
+        // `Unavailable`, not `Ok(None)`: this backend never connected, so it
+        // cannot know the job is absent — reporting absence would tell a poll
+        // loop to stop when the truth is that nothing was ever asked.
+        self.unavailable()
+    }
+
     async fn cascade_merge(&self, _id: SessionId) -> BResult<OperationStatus> {
         self.unavailable()
     }
@@ -266,6 +282,32 @@ mod tests {
             BackendError::Unavailable { reason } => assert_eq!(reason, "invalid url"),
             other => panic!("expected Unavailable, got {other:?}"),
         }
+    }
+
+    /// The clone surface is refused like everything else, carrying the same
+    /// construction reason — a repo picker opened against a never-connected
+    /// server must say *why*, not show an empty list.
+    #[tokio::test]
+    async fn placeholder_refuses_the_clone_surface() {
+        use claude_commander_protocol::github::{CloneJobId, CloneRequest, CloneSource};
+
+        let b = PlaceholderBackend::new("buildbox", "invalid url");
+        let expect_unavailable = |err: BackendError| match err {
+            BackendError::Unavailable { reason } => assert_eq!(reason, "invalid url"),
+            other => panic!("expected Unavailable, got {other:?}"),
+        };
+        expect_unavailable(b.list_github_repos().await.unwrap_err());
+        expect_unavailable(
+            b.start_clone(CloneRequest {
+                source: CloneSource::Github {
+                    full_name: "octo/widget".to_string(),
+                },
+                dest_name: None,
+            })
+            .await
+            .unwrap_err(),
+        );
+        expect_unavailable(b.clone_job(CloneJobId::new()).await.unwrap_err());
     }
 
     #[test]

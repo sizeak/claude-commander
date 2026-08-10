@@ -310,14 +310,32 @@ impl CommanderService {
         list_repos().await
     }
 
-    /// Start cloning a repository into the projects directory, returning the id
-    /// of the job to poll with [`Self::clone_job`].
+    /// Start cloning a repository into the projects directory, returning the
+    /// created job — poll it with [`Self::clone_job`] until its status leaves
+    /// [`CloneStatus::Running`](claude_commander_protocol::github::CloneStatus::Running).
     ///
-    /// Returns `Err` only for what is wrong with the *request* — an unusable
-    /// source or destination name, or a projects directory that cannot be created.
-    /// Everything that can only go wrong once the clone is running is reported
-    /// through the job, because a clone takes minutes and no caller can wait for
-    /// it.
+    /// **The whole job rather than just its id** because that is what both callers
+    /// need: the server answers `POST /projects/clone` with a 202 carrying this
+    /// body, and the [`CommanderBackend`](crate::backend::CommanderBackend) seam
+    /// mirrors that shape so a TUI gets the id, the destination and the redacted
+    /// label in one call whichever transport it is on. Returning the id alone
+    /// would leave every caller doing the same follow-up read.
+    ///
+    /// **The status in the returned job is not a terminal status.** Every outcome
+    /// — including the occupied destination this method detects before it returns
+    /// — is reported through the job registry, and the spawned future has not been
+    /// scheduled yet, so this reads `Running` essentially always. Use it for the
+    /// id and the destination; take the *outcome* from [`Self::clone_job`].
+    ///
+    /// A repeat call for a destination already being cloned returns the *in-flight*
+    /// job: `CloneJobs::spawn` dedupes by destination, so a double-submit joins the
+    /// running clone rather than starting a second one.
+    ///
+    /// Returns `Err` for what is wrong with the *request* — an unusable source or
+    /// destination name, or a projects directory that cannot be created (plus one
+    /// unreachable internal case noted at the read below). Everything that can only
+    /// go wrong once the clone is running is reported through the job, because a
+    /// clone takes minutes and no caller can wait for it.
     ///
     /// Three things happen before a subprocess does:
     ///
@@ -335,7 +353,7 @@ impl CommanderService {
     ///    "register the existing checkout" instead of only "pick another name".
     ///
     /// [`CloneStatus::DestinationExists`]: claude_commander_protocol::github::CloneStatus::DestinationExists
-    pub async fn start_clone(&self, req: CloneRequest) -> Result<CloneJobId> {
+    pub async fn start_clone(&self, req: CloneRequest) -> Result<CloneJob> {
         let dir_name = clone_dir_name(&req)?;
         let config = self.read_config();
         let projects_dir = config.projects_dir()?;
@@ -354,26 +372,35 @@ impl CommanderService {
         // logged here — the destination is safe to log, the source is not.
         let source_label = clone_source_label(&req.source).to_string();
 
-        if let Some(is_git_repo) = occupied_destination(&dest) {
+        let id = if let Some(is_git_repo) = occupied_destination(&dest) {
             debug!("clone destination {} already exists", dest.display());
             let occupied = dest.clone();
-            return Ok(self
-                .clone_jobs
+            self.clone_jobs
                 .spawn(dest, source_label, async move {
                     CloneOutcome::destination_exists(occupied, is_git_repo)
                 })
-                .await);
-        }
+                .await
+        } else {
+            let service = self.clone();
+            let timeout = Duration::from_secs(config.clone_timeout_secs);
+            let job_dest = dest.clone();
+            self.clone_jobs
+                .spawn(dest, source_label, async move {
+                    clone_then_register(service, req.source, job_dest, timeout).await
+                })
+                .await
+        };
 
-        let service = self.clone();
-        let timeout = Duration::from_secs(config.clone_timeout_secs);
-        let job_dest = dest.clone();
-        Ok(self
-            .clone_jobs
-            .spawn(dest, source_label, async move {
-                clone_then_register(service, req.source, job_dest, timeout).await
-            })
-            .await)
+        // Unreachable in practice: the registry only misses an id that was never
+        // issued or has been pruned, and pruning is TTL-based on *finished* jobs,
+        // so a job spawned a moment ago is still there. An error rather than an
+        // `expect` because an internal failure is the honest answer if that ever
+        // stops holding — the server renders it as a 500, the backend seam as
+        // `BackendError::Local`.
+        self.clone_job(id).await.ok_or_else(|| {
+            GitError::OperationFailed(format!("clone job {id} vanished before it could be read"))
+                .into()
+        })
     }
 
     /// The clone job with this id, as a frontend polls it, or `None` once it has
@@ -5045,7 +5072,8 @@ mod tests {
                 dest_name: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .id;
 
         let job = await_clone(&svc, id).await;
         let CloneStatus::Succeeded { project_id } = job.status else {
@@ -5080,7 +5108,8 @@ mod tests {
                 dest_name: Some("renamed".to_string()),
             })
             .await
-            .unwrap();
+            .unwrap()
+            .id;
 
         let job = await_clone(&svc, id).await;
         assert!(matches!(job.status, CloneStatus::Succeeded { .. }));
@@ -5117,7 +5146,8 @@ mod tests {
                     dest_name: Some(name.to_string()),
                 })
                 .await
-                .unwrap();
+                .unwrap()
+                .id;
             let job = await_clone(&svc, id).await;
             assert_eq!(
                 job.status,
@@ -5151,7 +5181,8 @@ mod tests {
                 dest_name: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .id;
 
         let job = await_clone(&svc, id).await;
         let CloneStatus::Failed { message } = &job.status else {
@@ -5190,7 +5221,8 @@ mod tests {
                 dest_name: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .id;
 
         let job = await_clone(&svc, id).await;
         assert!(
@@ -5304,7 +5336,8 @@ mod tests {
                 dest_name: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .id;
         let job = svc.clone_job(id).await.unwrap();
         assert_eq!(
             job.source_label,
@@ -5355,7 +5388,8 @@ mod tests {
                 dest_name: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .id;
 
         assert!(projects_dir.exists());
         assert!(matches!(

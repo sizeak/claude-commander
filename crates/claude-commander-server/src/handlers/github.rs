@@ -76,14 +76,11 @@ pub async fn clone(
     // messages are redacted where they are *built* (in protocol) precisely so no
     // hop like this one has to remember to do it. The raw request is likewise
     // never logged.
-    let id = state.service.start_clone(req).await?;
-    let job = state.service.clone_job(id).await.ok_or_else(|| {
-        // Unreachable in practice: `clone_job` only misses an id that was never
-        // issued or has been pruned, and pruning is TTL-based on *finished* jobs,
-        // so a job created on the line above still exists. Mapped rather than
-        // unwrapped because a 500 is the honest answer if that ever stops holding.
-        ApiError::internal(format!("clone job {id} vanished before it could be read"))
-    })?;
+    // `start_clone` answers with the whole job, not just its id: the 202 body and
+    // the `CommanderBackend` seam need the same shape, so the service owns that
+    // read (including the documented-unreachable "job vanished" case) rather than
+    // each caller repeating it.
+    let job = state.service.start_clone(req).await?;
     Ok((StatusCode::ACCEPTED, Json(job)).into_response())
 }
 
