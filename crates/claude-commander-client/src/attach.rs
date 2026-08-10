@@ -286,12 +286,30 @@ pub(crate) async fn connect(
         },
     )
     .await?;
-    send_control(&mut write, ClientControl::Attach { session_id, kind }).await?;
+    // The size rides in the handshake so the server opens the PTY at it before
+    // spawning `tmux attach-session` — tmux's very first paint is then already
+    // at our width. Announcing it only afterwards leaves one paint at the
+    // server's fallback geometry, which this end wraps at its own width and
+    // tmux's incremental repaint never clears.
+    send_control(
+        &mut write,
+        ClientControl::Attach {
+            session_id,
+            kind,
+            cols: Some(cols),
+            rows: Some(rows),
+        },
+    )
+    .await?;
 
     await_ready(&mut read, &mut write).await?;
 
-    // The server starts the PTY at a default size; correct it immediately so the
-    // remote pane matches the operator's terminal before the first SIGWINCH.
+    // Belt and braces for an older server, which ignores the handshake's
+    // dimensions and starts the PTY at its own default. Against a current
+    // server the PTY already has this size, so the ioctl changes nothing and no
+    // SIGWINCH is raised — on Linux `tty_do_resize` (drivers/tty/tty_ioctl.c)
+    // returns early when the winsize is unchanged, before it signals. It costs
+    // one frame and nothing else.
     send_control(&mut write, ClientControl::Resize { cols, rows }).await?;
 
     // Steady-state plumbing: one duplex per direction + the control channel.

@@ -26,9 +26,17 @@ import '../theme/tokens.dart';
 /// in the cdylib, so several attaches can be live against one server. The id is
 /// registered with the [CommanderStore] (when one is in scope) so a
 /// reconnect/dispose of the store tears the attach down before releasing the
-/// handle. Resize is driven by `xterm`'s [Terminal.onResize], which fires from
-/// the widget's actual laid-out size — so the pane's real cols/rows reach the
-/// server, not a fixed 80x24.
+/// handle.
+///
+/// The pane's size reaches the server twice over. The *initial* size rides in
+/// the attach handshake, which is why the attach waits for the first frame
+/// before opening: the server sizes the PTY before spawning
+/// `tmux attach-session`, so tmux's very first paint is already at the width
+/// that will render it. (It has to be this early — tmux paints a whole screen
+/// the moment the attach starts, and its later repaints are incremental with no
+/// full-screen clear, so a paint that arrived too wide is wrapped here and never
+/// corrected.) Subsequent changes come from `xterm`'s [Terminal.onResize],
+/// which fires from the widget's actual laid-out size.
 ///
 /// The attach is also re-opened when the app returns to the foreground, because a
 /// backgrounded process cannot keep the attach alive: the server pings every
@@ -78,7 +86,23 @@ class TerminalBody extends StatefulWidget {
 
 class _TerminalBodyState extends State<TerminalBody>
     with WidgetsBindingObserver {
-  late final Terminal _terminal;
+  late Terminal _terminal;
+
+  /// Bumped whenever [_terminal] is replaced, and used as the [TerminalView]'s
+  /// key so Flutter tears the old view state down and builds a fresh one.
+  ///
+  /// Not needed for *rebinding*: an ordinary rebuild already follows a swapped
+  /// terminal, because `_TerminalView.updateRenderObject` assigns
+  /// `renderObject.terminal` (terminal_view.dart:517-533) and `RenderTerminal`'s
+  /// setter moves the change listener, re-resizes and marks needs-layout
+  /// (ui/render.dart:54-61). What the key buys is the view *state* that a
+  /// rebuild keeps: `_TerminalViewState` owns its `ScrollController`
+  /// (terminal_view.dart:164,173 — replaced only when the *widget's* changes)
+  /// and its IME `_composingText` (terminal_view.dart:160,390). Carrying a
+  /// scroll offset from the buffer we just discarded, or a half-composed IME
+  /// string, into a blank grid is exactly the stale state this reset exists to
+  /// clear.
+  int _terminalGeneration = 0;
 
   /// Owned rather than left to `TerminalView` to create, so the Ctrl+V
   /// text-paste fallback can clear the selection the way xterm's own paste
@@ -94,7 +118,9 @@ class _TerminalBodyState extends State<TerminalBody>
 
   // Stateful UTF-8 decoder: PTY chunks can split a multibyte codepoint across
   // WS frames, so a chunked decoder buffers the partial tail until it completes.
-  late final ByteConversionSink _decoder;
+  // Replaced alongside [_terminal], since a stream cut mid-codepoint would
+  // otherwise prefix the fresh attach's output with the old one's dangling tail.
+  late ByteConversionSink _decoder;
 
   String _status = 'connecting…';
 
@@ -153,7 +179,41 @@ class _TerminalBodyState extends State<TerminalBody>
   @override
   void initState() {
     super.initState();
+    _resetEmulator();
+    _connect();
+
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_loadDeadAfter());
+
+    _meter = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        _bytesPerSec = _windowBytes;
+        _windowBytes = 0;
+      });
+    });
+  }
+
+  /// Install a blank terminal emulator and a matching UTF-8 decoder, discarding
+  /// whatever the previous one held.
+  ///
+  /// Call sites are [initState] and the explicit reconnect. It is the escape
+  /// hatch from a *desynchronised* pane: tmux repaints incrementally and its
+  /// stream carries no full-screen clear, so once this end's grid stops matching
+  /// tmux's model of the screen — anything from a dropped frame to a paint that
+  /// arrived at the wrong width — nothing in the byte stream ever puts it right.
+  /// A fresh attach repaints the whole screen, so a blank grid to paint it onto
+  /// is all that is needed; the emulator cannot do it for us, as this fork's
+  /// parser leaves RIS (`ESC c`) unimplemented (core/escape/parser.dart:104).
+  void _resetEmulator() {
     _terminal = Terminal(maxLines: 10000);
+    // The controller outlives the terminal (we own it), but its selection is a
+    // pair of `CellAnchor`s holding `BufferLine`s of the buffer being discarded
+    // (ui/controller.dart:21-22, core/buffer/line.dart:367-381). Nothing
+    // detaches them when the terminal goes, so a selection made before the
+    // reset would keep reporting a live range — painting a phantom highlight
+    // over unrelated content on the new grid, and pinning the old lines.
+    _terminalController.clearSelection();
     // Forward each decoded chunk to the terminal as it arrives. A plain
     // `Sink<String>` emits per-`add` (unlike `StringConversionSink.withCallback`,
     // which only fires its callback on `close`), while the chunked UTF-8 decoder
@@ -162,7 +222,6 @@ class _TerminalBodyState extends State<TerminalBody>
     _decoder = utf8.decoder.startChunkedConversion(
       _ChunkSink((str) => _terminal.write(str)),
     );
-
     _terminal.onOutput = (data) {
       unawaited(
         widget.api.terminalSendInput(
@@ -176,19 +235,6 @@ class _TerminalBodyState extends State<TerminalBody>
         widget.api.terminalResize(attachId: _attachId, cols: cols, rows: rows),
       );
     };
-
-    _connect();
-
-    WidgetsBinding.instance.addObserver(this);
-    unawaited(_loadDeadAfter());
-
-    _meter = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() {
-        _bytesPerSec = _windowBytes;
-        _windowBytes = 0;
-      });
-    });
   }
 
   /// Cache the heartbeat deadline. No [setState]: nothing renders from it.
@@ -292,12 +338,35 @@ class _TerminalBodyState extends State<TerminalBody>
       _status = 'connecting…';
       _ended = false;
     });
+    // Open the attach only once the view has been laid out, because the
+    // handshake carries our cols/rows and a `Terminal` that has never been laid
+    // out still reports xterm's default 80x24 (terminal.dart:116-118). That
+    // default is not merely stale, it is *exactly* the server's own fallback
+    // geometry — so handing it over would reproduce the pre-fix bug byte for
+    // byte, which is what makes this deferral load-bearing rather than tidy.
+    // Announcing a size after the handshake is not good enough: the server
+    // spawns `tmux attach-session` on the spot and tmux paints a whole screen
+    // into the socket, so a wrong size in the handshake means one paint at that
+    // wrong width — which this end wraps at its own width and tmux's
+    // incremental repaint never clears.
+    final id = _attachId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // A second `_connect` may have superseded us between the two frames (a
+      // resume racing the button); that call owns the attach now.
+      if (!mounted || _attachId != id) return;
+      _openAttach(id);
+    });
+  }
+
+  void _openAttach(String id) {
     _sub = widget.api
         .attachTerminal(
           handle: widget.handle,
-          attachId: _attachId,
+          attachId: id,
           sessionId: widget.session.id,
           kind: widget.kind,
+          cols: _terminal.viewWidth,
+          rows: _terminal.viewHeight,
         )
         .listen(
           _onEvent,
@@ -308,7 +377,19 @@ class _TerminalBodyState extends State<TerminalBody>
         );
   }
 
-  void _reconnect() => _connect();
+  /// The user-driven reconnect. Unlike the lifecycle-driven [_connect], this
+  /// also throws away the emulator: the button's job is to rescue a pane that is
+  /// wrong on screen, and a stale grid is one of the ways it gets that way. The
+  /// automatic resume path deliberately keeps its buffer — re-attaching already
+  /// costs the scrollback position, and wiping it on every glance at a
+  /// notification would compound that.
+  void _reconnect() {
+    setState(() {
+      _resetEmulator();
+      _terminalGeneration++;
+    });
+    _connect();
+  }
 
   void _onEvent(TerminalEvent e) {
     switch (e.kind) {
@@ -318,10 +399,15 @@ class _TerminalBodyState extends State<TerminalBody>
         _decoder.add(e.bytes);
       case TerminalEventKind.ready:
         setState(() => _status = 'attached: ${e.text}');
-        // The server spawns each attach at its default 80x24 and only ever
-        // learns our size from an explicit Resize. xterm's onResize fires only
-        // when dimensions change, so on a same-size (re)connect it never does —
-        // re-announce our current size on every ready.
+        // Belt and braces. The handshake already carried our size, so against a
+        // current server the PTY has it and this changes nothing — on Linux an
+        // ioctl setting the size a PTY already has raises no SIGWINCH
+        // (`tty_do_resize` in drivers/tty/tty_ioctl.c returns early when the
+        // winsize is unchanged, before it signals). It still matters
+        // against a server predating the handshake's cols/rows, which starts
+        // the PTY at its own default and learns our size only from a Resize —
+        // and xterm's onResize fires only on a *change*, so on a same-size
+        // (re)connect nothing else would announce it.
         unawaited(
           widget.api.terminalResize(
             attachId: _attachId,
@@ -618,6 +704,7 @@ class _TerminalBodyState extends State<TerminalBody>
                     Expanded(
                       child: TerminalView(
                         _terminal,
+                        key: ValueKey(_terminalGeneration),
                         autofocus: true,
                         backgroundOpacity: 1,
                         theme: terminalThemeFor(t),

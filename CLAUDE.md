@@ -4,12 +4,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-- `cargo build` — debug build
-- `cargo build --release` — release build (LTO enabled, symbols stripped, single codegen unit)
-- `cargo test` — all tests (integration tests require tmux installed)
-- `cargo test <test_name>` — single test
-- `cargo clippy` — lint
-- `cargo run -- --debug` — run TUI with debug logging to `/tmp/claude-commander.log`
+**Use `scripts/verify.sh` and `scripts/dev-run.sh` rather than improvising the underlying commands.** They exist because the raw invocations were being retyped — and subtly varied — hundreds of times: an audit of this repo's session history found 1,033 `cargo` calls, 407 `flutter` calls (335 of them hand-wrapped in `nix develop .#client…`) and 205 `adb` calls, with the same six-step Android chain reassembled from memory each time. The scripts encode the correct form once. Reach for a raw command only when doing something the scripts do not cover, and if it's something you'll want twice, add a lane or target instead.
+
+### Verifying
+
+`scripts/verify.sh`'s lanes mirror `.github/workflows/ci.yml`, so a green `--all` means a green PR. `--all` is a *superset* of CI, though: it also runs `shellcheck`, the script `selftest`, and the `e2e` that CI cannot. A red lane there does not imply red CI.
+
+- `scripts/verify.sh` — the Rust lanes: fmt, clippy, build, test
+- `scripts/verify.sh --fast` — fmt + clippy only (seconds; the pre-commit hook's shape)
+- `scripts/verify.sh --client` — Rust lanes plus pub get / dart format / flutter analyze / flutter test / cdylib tests
+- `scripts/verify.sh --all` — every CI job, plus shellcheck, the script self-tests, and the Flutter e2e
+- `scripts/verify.sh --nix` — Rust lanes plus `nix build` and the Homebrew-path packaging install
+- `scripts/verify.sh -p core <filter>` — one crate: `cargo test -p claude-commander-core <filter>`. Aliases: `core`, `cli`/`commander`, `server`, `protocol`, `remote`, `client`, `test-support`
+- `scripts/verify.sh --list` — the lane / exit-code table
+
+Every selected lane runs even after an earlier one fails; output goes to `target/verify-logs/<lane>.log` and only a 40-line tail is printed on failure. **The process exits with the first failing lane's reserved code**, so you can tell what broke without reading logs: 10 fmt, 11 clippy, 12 build, 13 test, 20 pub-get, 21 dart-format, 22 analyze, 23 flutter-test, 24 cdylib, 25 e2e, 30 nix-build, 31 packaging, 32 shellcheck, 33 selftest. Plus 2 for bad arguments and 3 for a missing toolchain. The `e2e` lane reports `SKIP` with a reason when there's no display and no `xvfb-run` — CI has never been able to run it, so a local run is the only coverage the full stack gets (`--e2e` forces it).
+
+The `pub-get` lane is a precondition, not a check, and it is load-bearing: `dart format` reads each file's language version from the nearest `.dart_tool/package_config.json`, and `client/rust_builder/cargokit/build_tool` is a *vendored* Dart package with its own `pubspec.yaml` and no `.dart_tool`. Against a stale package config the formatter falls back to a different language version and rewrites 15 vendored files — `dart-format` reports `120 files (15 changed)` locally where CI reports `0 changed`. So the client lanes resolve packages first, exactly as CI's Fetch Flutter Packages step does. If you ever see `dart-format` fail on files you didn't touch, that's this.
+
+### Running
+
+- `scripts/dev-run.sh tui [--debug]` — the TUI (`--debug` logs to `/tmp/claude-commander.log`)
+- `scripts/dev-run.sh server [--port N] [--token T] [--isolated]` — the headless server. `--isolated` runs it over a throwaway XDG tree with `TMUX_TMPDIR` set and `$TMUX` unset, so a dev run cannot touch real state or the developer's tmux server
+- `scripts/dev-run.sh linux [--log FILE]` — the Flutter Linux desktop app
+- `scripts/dev-run.sh android [--device SERIAL] [--release] [--no-launch] [--window]` — boots the AVD if no device is attached, builds the APK, installs with `-r -g`, launches, then greps logcat for startup crashes (a monkey launch reports success even when the app dies). Failures are located by exit code: 40 emulator boot, 41 APK build, 42 install, 43 launch
+- `scripts/dev-run.sh emulator start|stop|status` — headless AVD lifecycle on its own
+
+Both scripts resolve their own toolchain: they use the tool already on PATH, else re-enter the nix dev shell that provides it — the rule `client/tool/dart-format.sh` already followed. So they work from a bare terminal and cost nothing extra inside `nix develop .#client`. **The caveat is toolchain drift:** CI runs its Rust lanes under `nix develop -c`, so an ambient `cargo`/`clippy` of a different version can disagree with CI in either direction. Set `CC_FORCE_NIX=1` to route every lane through `nix develop` the way CI does. `CC_CLIENT_SHELL`, `CC_ANDROID_SHELL` and `CC_AVD` override the shell refs and AVD name; `CC_E2E_TIMEOUT` bounds the e2e lane (default 1800s).
+
+`verify.sh` exports `DO_NOT_TRACK=1` for its whole run — the same backstop `ci.yml` sets workflow-wide, because `cfg!(test)` only suppresses core's *own* unit tests and downstream crates' `cargo test`/`cargo run` would otherwise report to the live endpoint. A verification sweep is not usage. `dev-run.sh` deliberately does *not* set it for its non-isolated targets, which are genuine usage; `--isolated` does.
+
+Shared logic lives in `scripts/lib/dev-common.sh`; its pure helpers are covered by `scripts/tests/run.sh` (plain bash assertions, no framework), which runs as the `selftest` lane. When you add a lane, add it to `cc_lanes_for_tier`, `cc_exit_code_for_lane` and `cc_lane_description` — the self-tests assert every lane has a distinct code that doesn't collide with the reserved statuses.
+
+## Verification discipline
+
+- Never pipe command output through `| tail` / `| head` when checking pass/fail — it masks exit codes. Use `set -o pipefail` or run the command bare and report the real exit status.
+- Do not claim tests, CI, or builds are green unless you have the actual exit code / CI conclusion in front of you. If verification was blocked, say so explicitly instead of inferring success.
+- After any rebase or merge, re-run a full build before declaring done (stale `crate::` paths and missing deps have broken builds repeatedly).
+
+## Workflow: TDD then review then merge
+
+For every bug fix or behaviour change: (1) write a failing test that reproduces the issue, (2) implement the minimal fix, (3) run the full suite + lint + typecheck, (4) request a peer/Fable review and address findings, (5) open the PR with the required label, watch CI, merge only when all checks are green.
 
 ## Coding conventions
 
@@ -145,7 +180,8 @@ The `cargo fmt` hook auto-fixes formatting. If `cargo clippy` fails, fix the war
 - Pull request labels include `dev-review-required`, `ready-for-test`, `trivial`, `tidy`, `merge-on-ci-green`. Do not add labels unless instructed.
 - Never skip GPG commit signing
 - Precommit hooks may autoformat files while failing the commit; these changes will need to be restaged and the commit reattempted.
-- Before committing, always ensure `cargo clippy` and `cargo build` pass with no warnings or errors. Fix any issues before creating the commit.
+- Before committing, always ensure `scripts/verify.sh` passes (fmt, clippy, build, test — no warnings or errors). Fix any issues before creating the commit. Add `--client` when the commit touches `client/`.
 - Bug fixes need a regression test too, not just features: follow the red-green TDD rule under [Testing](#testing) — add a test that fails without the fix and passes with it. If the fix lives somewhere untestable (e.g. `main.rs`), push the logic down into testable library code rather than skipping the test.
 - Cutting a release: `cargo release {patch,minor,major} --execute` (see CONTRIBUTING.md). Never bump `Cargo.toml` manually.
+- The end-to-end sequence for a change — failing test, minimal fix, full suite, review, PR, green CI, merge — is [Workflow: TDD then review then merge](#workflow-tdd-then-review-then-merge). Follow it in order; the bullets above are its repo-specific details.
 

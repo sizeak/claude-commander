@@ -13,13 +13,17 @@ import 'session_list_page.dart';
 ///
 /// The frame itself comes from [ChromeShell], because the two themes build it
 /// very differently — Mission Control docks a `FloatingActionButton` over a
-/// `BottomAppBar`, while LCARS has neither and renders three contiguous footer
+/// `BottomAppBar`, while LCARS has neither and renders a run of contiguous footer
 /// blocks instead. This page only says *what* the destinations are.
+///
+/// Settings hangs off the shell rather than off the Fleet view that used to carry
+/// it, so it is reachable from either tab — and, in LCARS, so the footer owns the
+/// frame's bottom-left corner instead of the rail terminating above it.
 ///
 /// Reuses the same layout-agnostic bodies as the wide shell — [SessionListBody]
 /// (with its branded Fleet header enabled) and [ActivityBody] — and the shared
-/// [openSessionDetail] / [openCreateSession] helpers, so navigation, session
-/// creation, and settings all behave as they do elsewhere.
+/// [openSessionDetail] / [openCreateSession] / [openSettings] helpers, so
+/// navigation, session creation, and settings all behave as they do elsewhere.
 class PhoneShell extends StatefulWidget {
   const PhoneShell({super.key});
 
@@ -55,6 +59,12 @@ class _PhoneShellState extends State<PhoneShell> {
           icon: Icons.add,
           label: 'New session',
           onPressed: () => openCreateSession(context, workspace),
+        ),
+        // A shell action, not the Fleet view's: both tabs reach the same one.
+        settings: ChromeButtonAction(
+          icon: Icons.settings,
+          label: 'Settings',
+          onPressed: () => openSettings(context),
         ),
         body: IndexedStack(
           index: _index,

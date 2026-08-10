@@ -5015,6 +5015,106 @@ fn review_footer_surfaces_live_status_message() {
     );
 }
 
+/// The buffer cell where `needle` starts, searching row by row from the
+/// top-left. `buffer_text` carries glyphs only, so a highlight — which is
+/// colour, not text — needs its own probe.
+///
+/// A file name alone is not a unique needle in the review view (the body's
+/// title carries it too); the tree row's status marker — `"M a.rs"` — is.
+fn cell_at_text<'a>(
+    terminal: &'a ratatui::Terminal<ratatui::backend::TestBackend>,
+    needle: &str,
+) -> &'a ratatui::buffer::Cell {
+    let buffer = terminal.backend().buffer();
+    let width = buffer.area.width as usize;
+    let cells = buffer.content();
+    let needle: Vec<String> = needle.chars().map(|c| c.to_string()).collect();
+    for y in 0..buffer.area.height as usize {
+        // A needle ending on the last column is still a match, hence `..=`.
+        for x in 0..=width.saturating_sub(needle.len()) {
+            let start = y * width + x;
+            if (0..needle.len()).all(|k| cells[start + k].symbol() == needle[k]) {
+                return &cells[start];
+            }
+        }
+    }
+    panic!("{needle:?} was never drawn");
+}
+
+#[test]
+fn review_file_list_keeps_a_muted_cursor_highlight_when_the_body_has_focus() {
+    // Dropping the cursor highlight the moment focus moved to the diff body
+    // left nothing saying *which* file the body was showing. It stays when the
+    // file list is unfocused — muted rather than removed — so the answer
+    // survives the focus change while "which pane has the keys" is unambiguous.
+    use crate::tui::theme::{ColorMode, Theme};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    // Pin the colour mode: the palette degrades by terminal capability, and
+    // `Theme::default()` sniffs the environment the test happens to run in.
+    app.theme = Theme::for_color_mode(ColorMode::TrueColor);
+    let mut state = review_state_for(SessionId::new());
+    state.focus = ReviewFocus::Body;
+    app.ui_state.modal = Modal::ReviewDiff(state);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let pal = app.theme.review_palette();
+    let cell = cell_at_text(&terminal, "M a.rs");
+    assert_eq!(
+        cell.bg, pal.selection_bg_unfocused,
+        "the cursor row must keep a (muted) band while the body has focus"
+    );
+    assert_ne!(
+        pal.selection_bg_unfocused, pal.selection_bg,
+        "the unfocused band must be visibly muted, not the focused selection"
+    );
+    // Both halves are muted together: a theme whose selection lives mostly in
+    // the foreground (LCARS) would lose the row entirely to a bg-only mute.
+    assert_eq!(
+        Some(cell.fg),
+        pal.selection_fg_unfocused,
+        "the unfocused row must wear the muted selection foreground"
+    );
+    assert_ne!(
+        pal.selection_fg_unfocused, pal.selection_fg,
+        "the unfocused foreground must be muted, not the focused selection's"
+    );
+}
+
+#[test]
+fn review_file_list_uses_the_full_selection_when_focused() {
+    // The other half of the pair: with the file list focused the cursor row
+    // wears the full selection colours, so focus is readable at a glance.
+    use crate::tui::theme::{ColorMode, Theme};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.theme = Theme::for_color_mode(ColorMode::TrueColor);
+    let mut state = review_state_for(SessionId::new());
+    state.focus = ReviewFocus::FileList;
+    app.ui_state.modal = Modal::ReviewDiff(state);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let pal = app.theme.review_palette();
+    let cell = cell_at_text(&terminal, "M a.rs");
+    assert_eq!(
+        cell.bg, pal.selection_bg,
+        "the focused cursor row must wear the full selection band"
+    );
+    assert_eq!(
+        Some(cell.fg),
+        pal.selection_fg,
+        "the focused cursor row must wear the full selection foreground"
+    );
+}
+
 #[test]
 fn review_footer_truncates_a_long_status_message_instead_of_blanking() {
     // A status message wider than the footer must be truncated to fit, not

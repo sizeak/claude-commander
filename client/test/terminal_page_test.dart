@@ -249,6 +249,129 @@ void main() {
     expect(api.attachTerminalCount, 2);
   });
 
+  // The attach handshake carries the size, so the server can open the PTY at it
+  // *before* spawning `tmux attach-session`. Getting this wrong is not a
+  // cosmetic first frame: tmux paints a whole screen into the socket the moment
+  // the attach starts, and its later repaints are incremental with no
+  // full-screen clear — so a paint that arrived at the wrong width is wrapped by
+  // the emulator at its own width and never corrected, desynchronising the pane
+  // for the life of the attach. Against a page that attached from `initState`
+  // this is red: the terminal has not been laid out yet, so it hands over
+  // xterm's 80x24 default instead of the view's real size — which is precisely
+  // the server's own fallback geometry, so the bug would reproduce exactly.
+  testWidgets('the attach announces the laid-out size, not xterm defaults', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 2.75;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(wrap());
+    await tester.pump(); // run the post-frame callback that opens the attach
+    await tester.pump();
+
+    final call = api.lastCall('attachTerminal')!;
+    final laidOut = readTerminal(tester);
+    expect(
+      [call.args['cols'], call.args['rows']],
+      [laidOut.viewWidth, laidOut.viewHeight],
+      reason:
+          'the handshake must carry the view size the emulator will render '
+          'at, or tmux paints its first screen at a width we then re-wrap',
+    );
+    // Guard the specific regression: xterm's un-laid-out default is 80x24
+    // (terminal.dart:116-118), the very geometry the server falls back to.
+    expect(call.args['cols'], isNot(80));
+  });
+
+  // The reconnect button is the rescue path, and it installs a *fresh*
+  // `Terminal` — which reports 80x24 until the re-keyed view lays out. If that
+  // ordering ever slipped, reconnect would hand the server exactly the broken
+  // geometry and silently restore the reported symptom ("reconnect doesn't fix
+  // it"), while the initial-attach test above stayed green.
+  testWidgets('a reconnect also announces the laid-out size', (tester) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 2.75;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+    await tester.pump();
+    final first = api.lastCall('attachTerminal')!;
+
+    await tester.tap(find.widgetWithIcon(IconButton, Icons.refresh));
+    await tester.pump();
+    await tester.pump();
+
+    expect(api.attachTerminalCount, 2, reason: 'precondition: it re-attached');
+    final second = api.lastCall('attachTerminal')!;
+    expect(second.args['attachId'], isNot(first.args['attachId']));
+    final laidOut = readTerminal(tester);
+    expect(
+      [second.args['cols'], second.args['rows']],
+      [laidOut.viewWidth, laidOut.viewHeight],
+    );
+    expect(second.args['cols'], isNot(80));
+  });
+
+  // The reconnect button is the only way out of a desynchronised pane: tmux's
+  // stream carries no full-screen clear, so a grid that has stopped matching
+  // tmux's screen model is never repaired by anything that arrives on it. A
+  // fresh attach repaints the whole screen, but only onto a blank grid.
+  testWidgets('an explicit reconnect clears the emulator', (tester) async {
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+    await tester.pump();
+
+    await emitAndPump(tester, output(utf8.encode('stale-content-marker')));
+    String bufferText() {
+      final buffer = readTerminal(tester).buffer;
+      return [
+        for (var i = 0; i < buffer.lines.length; i++) buffer.lines[i].getText(),
+      ].join();
+    }
+
+    expect(bufferText(), contains('stale-content-marker'));
+
+    await tester.tap(find.widgetWithIcon(IconButton, Icons.refresh));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      bufferText(),
+      isNot(contains('stale-content-marker')),
+      reason:
+          'reconnect must start from a blank grid for the fresh attach\'s '
+          'full-screen repaint to land on',
+    );
+  });
+
+  // ...but the automatic resume path must NOT wipe the buffer: re-attaching
+  // already costs the user their scrolled position, and doing it on every glance
+  // at a notification would compound the loss this path exists to avoid.
+  testWidgets('an automatic re-attach keeps the existing buffer', (
+    tester,
+  ) async {
+    var now = DateTime(2026, 8, 3, 12);
+    await tester.pumpWidget(wrap(clock: () => now));
+    await tester.pump();
+    await tester.pump();
+
+    await emitAndPump(tester, output(utf8.encode('keep-me-marker')));
+
+    await background(tester);
+    now = now.add(const Duration(minutes: 5)); // past the heartbeat deadline
+    await foreground(tester);
+    await tester.pump();
+
+    expect(api.attachTerminalCount, 2, reason: 'precondition: it re-attached');
+    final buffer = readTerminal(tester).buffer;
+    final text = [
+      for (var i = 0; i < buffer.lines.length; i++) buffer.lines[i].getText(),
+    ].join();
+    expect(text, contains('keep-me-marker'));
+  });
+
   testWidgets('a ready event re-announces the terminal size', (tester) async {
     await tester.pumpWidget(wrap());
     await tester.pump(); // subscribe

@@ -37,9 +37,18 @@ use crate::state::AppState;
 /// upgrade open indefinitely.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default PTY size used until the client sends its first `resize`. tmux clamps
-/// a shared session to its smallest attached client, so this is only a starting
-/// guess.
+/// Fallback PTY size, used only when the `attach` frame carries no geometry —
+/// i.e. for a client that predates the handshake's `cols`/`rows` fields.
+///
+/// A client that *does* send its size gets the PTY opened at it before
+/// `tmux attach-session` is spawned, which matters more than it looks: tmux
+/// paints a full screen into the socket as soon as the attach starts, and a
+/// client that could only announce its size afterwards (a round trip after
+/// `ready`) always received that first paint at this fallback geometry. Its
+/// emulator then wrapped those over-wide lines at its own width, and because
+/// tmux's post-resize repaint is incremental — no full-screen clear — the
+/// mis-wrapped content was never corrected. On a phone-width viewport that
+/// desynchronised the pane for the life of the attach.
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
@@ -128,8 +137,18 @@ async fn attach_session(
     socket: &mut WebSocket,
     state: &AppState,
 ) -> Option<(String, HeadlessAttach)> {
-    let (session_query, kind) = match next_control(socket).await {
-        Some(ClientControl::Attach { session_id, kind }) => (session_id, kind),
+    let (session_query, kind, cols, rows) = match next_control(socket).await {
+        Some(ClientControl::Attach {
+            session_id,
+            kind,
+            cols,
+            rows,
+        }) => (
+            session_id,
+            kind,
+            cols.unwrap_or(DEFAULT_COLS),
+            rows.unwrap_or(DEFAULT_ROWS),
+        ),
         Some(_) => {
             let _ = send_control(
                 socket,
@@ -183,12 +202,7 @@ async fn attach_session(
     // Honour the socket-dir isolation knob so a hermetic test attaches to the
     // same throwaway tmux server its session was created on, not the real one.
     let tmux_tmpdir = state.service.read_config().tmux_tmpdir;
-    match HeadlessAttach::spawn(
-        &tmux_name,
-        DEFAULT_COLS,
-        DEFAULT_ROWS,
-        tmux_tmpdir.as_deref(),
-    ) {
+    match HeadlessAttach::spawn(&tmux_name, cols, rows, tmux_tmpdir.as_deref()) {
         Ok(bridge) => Some((tmux_name, bridge)),
         Err(e) => {
             let _ = send_control(
