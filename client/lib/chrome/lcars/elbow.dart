@@ -62,9 +62,13 @@ class ChromeElbow extends StatelessWidget {
 
   /// Bezel this block eats. Added to the block's fill **and** to its padding in
   /// one expression, so a block can reach the screen edge without its label
-  /// leaving the safe region — the two numbers cannot drift because they are the
-  /// same number. Supplied by `LcarsBleedScope`; zero everywhere else, which is
-  /// why an unbled block is exactly the block it was.
+  /// leaving the safe region — for a *vertical* bleed the two numbers cannot
+  /// drift because they are the same number: the padding takes the whole
+  /// [EdgeInsets] (below) but the fill only grows by its `vertical` getter
+  /// (`grown`, below), so a horizontal component would pad without widening —
+  /// asserted away rather than merely documented, since every call site today
+  /// is vertical-only anyway. Supplied by `LcarsBleedScope`; zero everywhere
+  /// else, which is why an unbled block is exactly the block it was.
   final EdgeInsets bleed;
 
   const ChromeElbow({
@@ -88,6 +92,10 @@ class ChromeElbow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Dart cannot evaluate `EdgeInsets` field access inside a const
+    // constructor's initializer list (it is not a primitive type), so this
+    // is checked here instead of alongside the `label`/`icon` assert above.
+    assert(bleed.left == 0 && bleed.right == 0, 'bleed is vertical only');
     final t = CommanderTokens.of(context);
     final r = Radius.circular(t.elbowRadius);
     final centred = icon != null || labelAlignment == Alignment.center;

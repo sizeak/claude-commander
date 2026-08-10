@@ -45,8 +45,10 @@ class LcarsChrome extends Chrome {
     // [buildShell] does: whether a `Scaffold` republishes its body's padding
     // never has to be assumed.
     final insets = MediaQuery.paddingOf(context);
-    // The terminal keeps its `SafeArea` (PR #259: the PTY must never see a
-    // resize), so it publishes no bleed — a page cannot be inset *and* bled.
+    // Zero while panning: the terminal already wraps its whole row in a
+    // `SafeArea` (`chrome.dart:224`, PR #259 — the PTY must never see a
+    // resize), so a page cannot be inset *and* bled — a block that was both
+    // would be offset twice.
     final panning = spec.insets == ChromeInsets.pan;
     final bleed = panning
         ? EdgeInsets.zero
@@ -68,17 +70,14 @@ class LcarsChrome extends Chrome {
         ],
       ),
     );
-    return LcarsBleedScope(
-      bleed: bleed,
-      child: AnnotatedRegion<SystemUiOverlayStyle>(
-        value: _systemBars,
-        child: Scaffold(
-          backgroundColor: t.canvas,
-          resizeToAvoidBottomInset: !panning,
-          // Only `pan` still wraps: with a bleed the frame holds its own insets,
-          // and a `SafeArea` over it would hold them twice.
-          body: panning ? applyChromeInsets(ChromeInsets.pan, frame) : frame,
-        ),
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _systemBars,
+      child: Scaffold(
+        backgroundColor: t.canvas,
+        resizeToAvoidBottomInset: !panning,
+        // Only `pan` still wraps: with a bleed the frame holds its own insets,
+        // and a `SafeArea` over it would hold them twice.
+        body: panning ? applyChromeInsets(ChromeInsets.pan, frame) : frame,
       ),
     );
   }

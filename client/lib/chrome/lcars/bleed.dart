@@ -8,11 +8,6 @@ import 'package:flutter/widgets.dart';
 /// (`session_list_page.dart:219`, `activity_page.dart:64`) and it reaches the
 /// chrome via `Chrome.of(context)` (`chrome_forms.dart:552-558`), inside a body
 /// the shell treats as opaque. The top band could not be reached any other way.
-///
-/// It carries the *resolved* bleed rather than raw insets, which is what lets
-/// `ChromeInsets.pan` publish [EdgeInsets.zero]: the terminal already wraps its
-/// whole row in a `SafeArea` (`chrome.dart:224`), so a block that also bled
-/// would be offset twice.
 class LcarsBleedScope extends InheritedWidget {
   final EdgeInsets bleed;
 

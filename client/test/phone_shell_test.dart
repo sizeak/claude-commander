@@ -353,6 +353,21 @@ void main() {
       expect(tester.getRect(footerBlock('FLEET')).height, 38);
     });
 
+    // `view_rail_test.dart`'s top-band group pumps `LcarsBleedScope` by hand,
+    // which pins that `buildViewRail` *consumes* the scope but not that
+    // `buildShell` *publishes* it — nothing in this suite sets a top inset
+    // through the shell at all. This is the other half: through the real
+    // shell, with no scope wired in by the test.
+    testWidgets('the view rail meets the physical top edge', (tester) async {
+      seed();
+      useInsets(tester, top: 24);
+      await pumpLcars(tester);
+
+      final id = find.widgetWithText(ChromeElbow, '47-A');
+      expect(tester.getRect(id).top, 0);
+      expect(tester.getSize(id).height, 74 + 24);
+    });
+
     testWidgets('a horizontal inset is held, not bled', (tester) async {
       seed();
       useInsets(tester, left: 30);
@@ -361,6 +376,29 @@ void main() {
       // A cutout occludes; the rail must sit inboard of it rather than paint
       // under it.
       expect(tester.getRect(footerLabel('SETTINGS')).left, greaterThan(30));
+    });
+
+    // SETTINGS is the run's only fixed-width, bottom-aligned block (see the
+    // 1.3× test above) and its bleed is threaded through a different path
+    // than the other footer blocks' (`_navSettings` vs `_navBlock`), so
+    // nothing above pins it directly. Without its own bleed, SETTINGS would
+    // stay 38 tall while its run grows to 86 for the inset, leaving its label
+    // a full inset lower than FLEET/ACTIVITY — inside the gesture strip.
+    //
+    // An inequality against the safe region, not a label-centre equality
+    // against its neighbours: this suite does not load the Antonio font, so a
+    // wrap-sensitive centre-alignment assertion would be fragile.
+    testWidgets('the settings block holds its label off the gesture strip', (
+      tester,
+    ) async {
+      seed();
+      useInsets(tester, bottom: 48);
+      await pumpLcars(tester);
+
+      expect(
+        tester.getRect(footerLabel('SETTINGS')).bottom,
+        lessThan(surfaceHeight(tester) - 48),
+      );
     });
   });
 }
