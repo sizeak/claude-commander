@@ -208,6 +208,22 @@ pub enum GitError {
     /// subprocess stderr worth surfacing.
     #[error("clone timed out after {secs}s")]
     CloneTimedOut { secs: u64 },
+
+    /// A clone source or destination name was refused by the
+    /// [`claude_commander_protocol::github`] validators.
+    ///
+    /// Distinct from `OperationFailed` for the same reason as `GhUnavailable` and
+    /// `CloneTimedOut`, plus one more that only applies here: nothing failed. The
+    /// *request* is malformed, so a caller mapping errors onto a transport needs
+    /// to answer "you sent something unusable" rather than "the server broke" —
+    /// the server maps this to a 400 and every other `GitError` to a 500. A
+    /// rejection folded into `OperationFailed` is indistinguishable from a real
+    /// git failure, and the caller has no way to tell them apart.
+    ///
+    /// Built only by `clone_source_rejected`, which redacts the message, so a
+    /// credentialed source cannot be quoted back through this variant.
+    #[error("{0}")]
+    CloneSourceRejected(String),
 }
 
 /// Configuration errors

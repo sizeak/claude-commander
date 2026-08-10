@@ -124,9 +124,15 @@ pub async fn run_clone(source: &CloneSource, dest: &Path, timeout: Duration) -> 
 /// through that path, and the reasoning that missed it was "these variants only
 /// echo a scheme or a directory name", which was true of every variant but one.
 ///
+/// The variant is [`GitError::CloneSourceRejected`] rather than `OperationFailed`
+/// because nothing has *failed* here: the request is unusable, which a caller
+/// mapping onto a transport has to answer differently (the server turns this into
+/// a 400 and every other `GitError` into a 500). Folded into `OperationFailed` it
+/// would be indistinguishable from git itself falling over.
+///
 /// Pinned by `a_rejection_message_carries_no_credentials`.
 pub(crate) fn clone_source_rejected(rejection: impl std::fmt::Display) -> GitError {
-    GitError::OperationFailed(redact_credentials(&rejection.to_string()))
+    GitError::CloneSourceRejected(redact_credentials(&rejection.to_string()))
 }
 
 /// Build the clone invocation for `source`, with the non-interactive env applied.
