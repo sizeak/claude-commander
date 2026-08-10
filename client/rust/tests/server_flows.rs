@@ -27,11 +27,18 @@
 //! e2e.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
+use claude_commander_client::{RemoteClient, RemoteServerSpec, SecretString};
 use claude_commander_core::api::CreateSessionOpts;
 use claude_commander_core::session::SessionId;
 use claude_commander_protocol::api::{OperationKind, ProgramInfo};
-use claude_commander_test_support::{create_test_repo, spawn_server, test_state, tmux_available};
+use claude_commander_protocol::github::{
+    CloneJob, CloneJobId, CloneRequest, CloneSource, CloneStatus,
+};
+use claude_commander_test_support::{
+    create_test_repo, run_git, spawn_server, test_state, tmux_available,
+};
 use rust_lib_claude_commander_client::api::mirrors::OperationOutcomeKind;
 use rust_lib_claude_commander_client::api::{diff, registry, review, simple};
 use tempfile::TempDir;
@@ -115,6 +122,21 @@ impl Fixture {
     /// Best-effort tmux cleanup for a session left running by a test.
     fn kill(&self, id: &SessionId) {
         let _ = self.rt.block_on(self.service.kill_session(id));
+    }
+
+    /// A [`RemoteClient`] pointed at this fixture's server.
+    ///
+    /// The clone flow below drives the transport crate directly rather than a
+    /// cdylib `api::` fn, because Task 9 adds the `RemoteClient` methods and the
+    /// frb bridge that wraps them is Task 10's. It is still the same server, the
+    /// same routes and the same DTO decode this file exists to pin.
+    fn remote_client(&self) -> RemoteClient {
+        RemoteClient::new(RemoteServerSpec {
+            name: "fixture".to_string(),
+            base_url: self.base.clone(),
+            token: Some(SecretString::new(token())),
+        })
+        .expect("build RemoteClient")
     }
 }
 
@@ -422,6 +444,132 @@ fn projects_add_list_branches_and_scan() {
     );
 
     drop(second_repo);
+}
+
+/// Seed a bare repo with one commit on `main` inside `dir` and return its
+/// **plain local path** — the string a user pastes into the clone box, and what
+/// `validate_clone_url` admits absolute local paths for.
+///
+/// Network-free by construction: the "remote" is a directory in a `TempDir`, so
+/// this flow never reaches GitHub (and needs no `gh`, no credentials and no
+/// connectivity in CI). A third copy of a fixture core also has in `git::clone`
+/// and `api.rs` — both of those live in `#[cfg(test)]` modules, so neither is
+/// reachable from an integration test in another crate.
+async fn seed_bare_repo(dir: &TempDir) -> PathBuf {
+    let remote = dir.path().join("remote.git");
+    let seed = dir.path().join("seed");
+    tokio::fs::create_dir_all(&seed).await.unwrap();
+    run_git(dir.path(), &["init", "--bare", "-b", "main", "remote.git"]).await;
+    run_git(&seed, &["init", "-b", "main"]).await;
+    run_git(&seed, &["config", "user.email", "t@t.t"]).await;
+    run_git(&seed, &["config", "user.name", "t"]).await;
+    run_git(&seed, &["config", "commit.gpgsign", "false"]).await;
+    tokio::fs::write(seed.join("README"), "v1\n").await.unwrap();
+    run_git(&seed, &["add", "."]).await;
+    run_git(&seed, &["commit", "-m", "initial"]).await;
+    run_git(
+        &seed,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    run_git(&seed, &["push", "origin", "main"]).await;
+    remote
+}
+
+/// Poll a clone job through the client until it leaves `Running`, bounded so a
+/// wedged clone fails the test rather than hanging it (~20s of real time).
+///
+/// The polling lives here, not in the client: `clone_job` is a single request by
+/// design, and every frontend drives its own cadence.
+async fn await_clone(client: &RemoteClient, id: CloneJobId) -> CloneJob {
+    for _ in 0..1_000 {
+        let job = client
+            .clone_job(id)
+            .await
+            .expect("clone_job must not error")
+            .expect("an in-flight job must not read as absent");
+        if !matches!(job.status, CloneStatus::Running) {
+            return job;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("clone job {id} never reached a terminal status");
+}
+
+/// The clone route group end to end: start a clone from a local bare repo, poll
+/// it to `Succeeded`, and confirm the checkout was registered as a project the
+/// client can see.
+///
+/// Also pins the two answers a poller depends on: an unknown job id is
+/// `Ok(None)` (not an error — Task 6's registry prunes terminal jobs, so a client
+/// polling a pruned job must not see a hard failure), and `GET /github/repos`
+/// resolves as a *route* even where `gh` is absent.
+#[test]
+fn clone_from_a_local_bare_repo_registers_a_project() {
+    let Some(fx) = Fixture::start() else { return };
+    let client = fx.remote_client();
+
+    let remote_dir = TempDir::new().unwrap();
+    let remote = fx.rt.block_on(seed_bare_repo(&remote_dir));
+
+    // -- 202 Accepted carries the whole job, so the first status arrives with the
+    // id rather than needing a second round trip.
+    let started = fx
+        .rt
+        .block_on(client.start_clone(CloneRequest {
+            source: CloneSource::Url {
+                url: remote.to_string_lossy().into_owned(),
+            },
+            dest_name: Some("cloned-by-client".to_string()),
+        }))
+        .expect("start_clone");
+    assert!(
+        started.dest.ends_with("cloned-by-client"),
+        "the job must report the destination it is writing to, got {:?}",
+        started.dest
+    );
+
+    // -- poll to a terminal status --
+    let done = fx.rt.block_on(await_clone(&client, started.id));
+    let CloneStatus::Succeeded { project_id } = done.status else {
+        panic!("clone did not succeed: {:?}", done.status)
+    };
+    assert_eq!(
+        std::fs::read_to_string(done.dest.join("README")).unwrap(),
+        "v1\n",
+        "the checkout must contain the seeded commit's content"
+    );
+
+    // -- the clone is a registered project the client can see --
+    //
+    // Read through the workspace snapshot rather than a `GET /projects` call:
+    // `RemoteClient` has no method for that route (projects reach a client in the
+    // workspace snapshot), and adding one is outside this task's surface.
+    let snap = simple::workspace_snapshot(fx.handle.clone()).expect("workspace_snapshot");
+    // `ProjectInfoDto` is not `Debug` (it is an frb mirror), so report the paths.
+    let paths: Vec<&str> = snap.projects.iter().map(|p| p.repo_path.as_str()).collect();
+    assert!(
+        snap.projects.iter().any(|p| p.id == project_id),
+        "the cloned repo must be registered as a project, got {paths:?}"
+    );
+
+    // -- an unknown (or pruned) job id is a normal `None`, not an error --
+    let unknown = fx
+        .rt
+        .block_on(client.clone_job(CloneJobId::new()))
+        .expect("an unknown job id must not be an error");
+    assert!(unknown.is_none(), "an unknown job id must read as absent");
+
+    // -- `GET /github/repos` resolves. Its *contents* need an authenticated `gh`,
+    // which a CI box need not have, so assert only that the route exists: a
+    // `NotFound` would mean the client and the server disagree on the path,
+    // which is exactly the drift this file catches.
+    if let Err(err) = fx.rt.block_on(client.github_repos()) {
+        assert!(
+            !matches!(err, claude_commander_client::ClientError::NotFound),
+            "GET /github/repos must resolve to the repos route, got {err:?}"
+        );
+    }
 }
 
 /// The cascade / push-stack operation-status route group: push-stack records an

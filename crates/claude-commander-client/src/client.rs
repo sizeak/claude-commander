@@ -18,6 +18,7 @@ use claude_commander_protocol::api::{
     ToggleReviewed, WorkspaceSnapshot,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::session::{ProjectId, SessionId};
 use claude_commander_protocol::ws::AttachKind;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
@@ -136,6 +137,16 @@ impl RemoteClient {
         segments.push(&sid);
         segments.extend_from_slice(tail);
         self.endpoint(&segments)
+    }
+
+    /// `/api/projects/clone/{job}` — the poll URL for one clone job.
+    ///
+    /// Goes through `as_uuid()` rather than `CloneJobId`'s `Display` for the same
+    /// reason [`Self::session_url`] and [`Self::project_url`] do: the *full* UUID
+    /// is the path segment the server routes on, and the neighbouring id types'
+    /// `Display` truncates to an 8-char prefix.
+    fn clone_job_url(&self, id: CloneJobId) -> Url {
+        self.endpoint(&["projects", "clone", &id.as_uuid().to_string()])
     }
 
     fn project_url(&self, id: ProjectId, tail: &[&str]) -> Url {
@@ -559,6 +570,57 @@ impl RemoteClient {
         self.post_json(url, &ScanRequest { path: dir }).await
     }
 
+    // -- GitHub repos / repository clone --
+
+    /// `GET /github/repos` — every repo the server-side `gh` user can clone, for
+    /// the repo picker.
+    ///
+    /// The list is the server's to produce: `gh` runs where the repositories will
+    /// be checked out, so a phone with no `gh` and no GitHub credentials still gets
+    /// a picker. An absent `gh` surfaces as [`ClientError::Unavailable`] (the
+    /// server's 503 for a missing backing tool, as with tmux), which a frontend can
+    /// word as "install gh on the server" rather than as a generic failure.
+    pub async fn github_repos(&self) -> ClientResult<Vec<GithubRepo>> {
+        self.get_json(self.endpoint(&["github", "repos"])).await
+    }
+
+    /// `POST /projects/clone` — start a clone, returning the created job.
+    ///
+    /// The route answers **202 Accepted carrying the whole [`CloneJob`]**, not just
+    /// its id, so the caller gets the id, the destination and the initial status in
+    /// one round trip and can start polling [`Self::clone_job`] without a second
+    /// request to learn where it stands.
+    ///
+    /// **The status in the returned job is not a terminal status.** Every
+    /// outcome — success, failure, and an already-occupied destination — is
+    /// reported through the job, so this reads `Running` essentially always. A
+    /// caller that treats it as final will miss every result.
+    ///
+    /// `Err` means the *request* was refused (an unusable source or destination
+    /// name is a 400 → [`ClientError::InvalidRequest`], carrying the server's
+    /// already-redacted reason). Nothing here builds a message out of
+    /// `req.source`: a hand-pasted URL can carry `user:token@` userinfo, and the
+    /// rejection strings are redacted where they are constructed in
+    /// `claude-commander-protocol` precisely so no hop has to remember to.
+    pub async fn start_clone(&self, req: CloneRequest) -> ClientResult<CloneJob> {
+        self.post_json(self.endpoint(&["projects", "clone"]), &req)
+            .await
+    }
+
+    /// `GET /projects/clone/{job}` — one poll of a clone job.
+    ///
+    /// **A `404` is `Ok(None)`, not an error.** An unknown job is a normal answer
+    /// for a poller: the server's job registry prunes jobs a while after they
+    /// finish, so a client that keeps polling (or resumes polling an id it stored
+    /// across a restart) must see "gone" rather than a hard failure it would
+    /// surface as a broken connection.
+    ///
+    /// One request per call by design — the cadence, and when to stop, belong to
+    /// the caller.
+    pub async fn clone_job(&self, id: CloneJobId) -> ClientResult<Option<CloneJob>> {
+        self.get_json_opt(self.clone_job_url(id)).await
+    }
+
     // -- Cascade / push-stack --
 
     pub async fn cascade_merge(&self, id: SessionId) -> ClientResult<OperationStatus> {
@@ -795,6 +857,30 @@ mod tests {
         assert_eq!(
             client.endpoint(&["sessions", "a b", "detail"]).as_str(),
             "http://host:8080/api/sessions/a%20b/detail"
+        );
+    }
+
+    /// A clone-job poll URL must carry the **full** job UUID.
+    ///
+    /// `CloneJobId`'s `Display` is the full UUID today, but the neighbouring
+    /// `SessionId`/`ProjectId` truncate theirs to an 8-char prefix for the session
+    /// tree — so this pins that [`RemoteClient::clone_job`] goes through
+    /// `as_uuid()`, as [`RemoteClient::session_url`]/[`RemoteClient::project_url`]
+    /// do, rather than leaning on a `Display` whose contract differs from its
+    /// siblings'. A truncated segment would 404 every poll.
+    #[test]
+    fn clone_job_url_carries_the_full_uuid() {
+        let client = RemoteClient::new(RemoteServerSpec {
+            name: "box".to_string(),
+            base_url: "http://host:8080".to_string(),
+            token: None,
+        })
+        .unwrap();
+        let id =
+            CloneJobId::from_uuid(Uuid::parse_str("2f3ab1c0-0000-4000-8000-00000000abcd").unwrap());
+        assert_eq!(
+            client.clone_job_url(id).as_str(),
+            "http://host:8080/api/projects/clone/2f3ab1c0-0000-4000-8000-00000000abcd"
         );
     }
 
