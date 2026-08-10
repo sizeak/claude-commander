@@ -11,6 +11,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `cargo clippy` — lint
 - `cargo run -- --debug` — run TUI with debug logging to `/tmp/claude-commander.log`
 
+## Verification discipline
+
+- Never pipe command output through `| tail` / `| head` when checking pass/fail — it masks exit codes. Use `set -o pipefail` or run the command bare and report the real exit status.
+- Do not claim tests, CI, or builds are green unless you have the actual exit code / CI conclusion in front of you. If verification was blocked, say so explicitly instead of inferring success.
+- After any rebase or merge, re-run a full build before declaring done (stale `crate::` paths and missing deps have broken builds repeatedly).
+
+## Workflow: TDD then review then merge
+
+For every bug fix or behaviour change: (1) write a failing test that reproduces the issue, (2) implement the minimal fix, (3) run the full suite + lint + typecheck, (4) request a peer/Fable review and address findings, (5) open the PR with the required label, watch CI, merge only when all checks are green.
+
 ## Coding conventions
 
 - Minimise duplication: extract shared logic into helpers or existing utility functions rather than repeating code across modules
@@ -148,4 +158,5 @@ The `cargo fmt` hook auto-fixes formatting. If `cargo clippy` fails, fix the war
 - Before committing, always ensure `cargo clippy` and `cargo build` pass with no warnings or errors. Fix any issues before creating the commit.
 - Bug fixes need a regression test too, not just features: follow the red-green TDD rule under [Testing](#testing) — add a test that fails without the fix and passes with it. If the fix lives somewhere untestable (e.g. `main.rs`), push the logic down into testable library code rather than skipping the test.
 - Cutting a release: `cargo release {patch,minor,major} --execute` (see CONTRIBUTING.md). Never bump `Cargo.toml` manually.
+- The end-to-end sequence for a change — failing test, minimal fix, full suite, review, PR, green CI, merge — is [Workflow: TDD then review then merge](#workflow-tdd-then-review-then-merge). Follow it in order; the bullets above are its repo-specific details.
 
