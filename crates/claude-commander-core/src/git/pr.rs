@@ -239,7 +239,8 @@ pub async fn check_pr_for_branch(
     parse_pr_list_json(&json, session_created_at)
 }
 
-/// Parse the JSON array returned by `gh pr list --json number,url,state,isDraft,labels,baseRefName`.
+/// Parse the JSON array returned by the `gh pr list --json …` query in
+/// [`check_pr_for_branch`].
 ///
 /// Empty array → `NotFound` (gh told us there's no PR). Missing/malformed
 /// JSON → `FetchFailed`. Non-empty array → `Found`, preferring the first
@@ -289,9 +290,11 @@ fn parse_pr_list_json(json: &str, session_created_at: DateTime<Utc>) -> PrCheckR
 /// meaning it cannot be the session's own PR.
 ///
 /// `gh pr list --head <branch>` matches by branch *name*, not identity, so a
-/// name reused after an unrelated PR merged (GitHub deletes the head branch on
-/// merge, freeing the name) otherwise adopts that PR's number, URL and merged
-/// state onto a brand-new session that has never been pushed.
+/// name reused after an unrelated PR merged and its head branch was deleted
+/// (delete-branch-on-merge, as in the observed genio-learn/genio#28147 instance,
+/// whose `refs/heads/ts-7` is gone from origin while gh still returns the PR)
+/// otherwise adopts that PR's number, URL and merged state onto a brand-new
+/// session that has never been pushed.
 ///
 /// Only *settled* PRs are filtered, and only by their settle time:
 /// - An open PR is always kept: its head branch provably still exists on the
@@ -301,6 +304,12 @@ fn parse_pr_list_json(json: &str, session_created_at: DateTime<Utc>) -> PrCheckR
 /// - A PR that settled *after* the session started is kept even if it was
 ///   opened earlier, which is the same Checkout Branch flow carried through to
 ///   a merge.
+///
+/// One genuine case is filtered deliberately: checking out a branch whose PR
+/// had already merged or closed before the session existed reports no PR. A
+/// merged PR can't be reopened, and surfacing "merged" on a session created
+/// afterwards would enrol it in the delete-merged-PR-sessions sweep — the exact
+/// harm this filter exists to prevent.
 ///
 /// `closedAt` is set for merged PRs too (verified against
 /// `gh pr list --head ts-7 --state all --json state,closedAt,mergedAt` on
