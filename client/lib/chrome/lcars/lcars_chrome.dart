@@ -767,12 +767,14 @@ class LcarsChrome extends Chrome {
   @override
   Widget buildViewRail(BuildContext context, ChromeViewRailSpec spec) {
     final t = CommanderTokens.of(context);
+    // Top only: this rail's bottom is the shell's footer, which bleeds itself.
+    final bleed = EdgeInsets.only(top: LcarsBleedScope.of(context).top);
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _viewRail(spec, t),
+        _viewRail(spec, t, bleed),
         const SizedBox(width: _railPitch),
-        Expanded(child: _viewContent(context, spec, t)),
+        Expanded(child: _viewContent(context, spec, t, bleed)),
         const SizedBox(width: 10),
       ],
     );
@@ -784,11 +786,19 @@ class LcarsChrome extends Chrome {
   /// No closing elbow, unlike [_rail]: this rail is only ever drawn inside the
   /// phone shell, whose footer carries the frame's bottom-left corner — see
   /// [buildFooterNav]. Closing it here would bracket the screen twice.
-  Widget _viewRail(ChromeViewRailSpec spec, CommanderTokens t) {
+  ///
+  /// [bleed] goes to the identifier block alone — the rest of the column is
+  /// interior, below the status bar the identifier bleeds into.
+  Widget _viewRail(
+    ChromeViewRailSpec spec,
+    CommanderTokens t,
+    EdgeInsets bleed,
+  ) {
     final slices = spec.slices;
     final note = slices?.note;
     final blocks = <Widget>[
       ChromeElbow(
+        bleed: bleed,
         color: t.nav,
         corner: ElbowCorner.topLeft,
         height: 74,
@@ -824,17 +834,21 @@ class LcarsChrome extends Chrome {
 
   /// The content column: the elbow cap closing the rail's bracket, the title and
   /// its subtitle, the filter field, then the body.
+  ///
+  /// [bleed] goes to the cap alone, mirroring [_viewRail]'s identifier block:
+  /// the two are the run's top corners, and everything below is interior.
   Widget _viewContent(
     BuildContext context,
     ChromeViewRailSpec spec,
     CommanderTokens t,
+    EdgeInsets bleed,
   ) {
     final subtitle = spec.subtitle;
     final filter = spec.filter;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ChromeElbowCap(color: t.nav),
+        ChromeElbowCap(bleed: bleed, color: t.nav),
         const SizedBox(height: 7),
         MediaQuery.withClampedTextScaling(
           maxScaleFactor: 1.5,

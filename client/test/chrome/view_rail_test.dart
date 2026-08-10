@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:claude_commander_client/chrome/lcars/bleed.dart';
 import 'package:claude_commander_client/chrome/lcars/elbow.dart';
 import 'package:claude_commander_client/pages/activity_page.dart';
 import 'package:claude_commander_client/pages/session_list_page.dart';
@@ -14,6 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../support/fake_commander_api.dart';
 import '../support/fixtures.dart';
+import '../support/insets.dart';
 
 /// The two views that frame themselves with a `ChromeViewRail`, under both
 /// chromes. Mission Control must keep the branded header and the rounded controls
@@ -200,6 +202,49 @@ void main() {
 
       // Nothing is waiting in this fixture, so the filtered feed is empty.
       expect(find.text('Nothing needs you'), findsOneWidget);
+    });
+  });
+
+  group('LCARS top band', () {
+    testWidgets('the rail and the cap meet the physical top edge', (
+      tester,
+    ) async {
+      useInsets(tester, top: 24);
+      // Connected, like every other test here: an unconnected store leaves
+      // `workspace` null, which renders the list's `CircularProgressIndicator`
+      // and hangs `pumpAndSettle` forever on its animation.
+      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+      unawaited(store.connect());
+      await tester.pumpWidget(
+        LcarsBleedScope(
+          bleed: const EdgeInsets.only(top: 24),
+          child: fleet(tokens: lcarsTokens),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getRect(find.byType(ChromeElbowCap)).top, 0);
+      expect(tester.getRect(find.byType(ChromeElbow).first).top, 0);
+    });
+
+    // Same rule as the footer, mirrored: the identifier is bottom-aligned in its
+    // block, so a top bleed must leave it exactly where the safe region had it.
+    testWidgets('the identifier holds the safe region', (tester) async {
+      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+      unawaited(store.connect());
+      await tester.pumpWidget(fleet(tokens: lcarsTokens));
+      await tester.pumpAndSettle();
+      final flat = tester.getRect(find.text('47-A')).center.dy;
+
+      await tester.pumpWidget(
+        LcarsBleedScope(
+          bleed: const EdgeInsets.only(top: 24),
+          child: fleet(tokens: lcarsTokens),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getRect(find.text('47-A')).center.dy, flat + 24);
     });
   });
 }

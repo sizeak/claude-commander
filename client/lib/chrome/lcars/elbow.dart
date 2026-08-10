@@ -169,11 +169,8 @@ class ChromeElbowCap extends StatelessWidget {
   final Color color;
   final double height;
 
-  /// Bezel this block eats. Added to the block's fill **and** to its padding in
-  /// one expression, so a block can reach the screen edge without its label
-  /// leaving the safe region — the two numbers cannot drift because they are the
-  /// same number. Supplied by `LcarsBleedScope`; zero everywhere else, which is
-  /// why an unbled block is exactly the block it was.
+  /// Bezel this cap eats; added straight to its height. It carries no content,
+  /// so there is nothing to compensate.
   final EdgeInsets bleed;
 
   const ChromeElbowCap({
