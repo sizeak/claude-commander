@@ -20,27 +20,49 @@ import 'elbow.dart';
 class LcarsChrome extends Chrome {
   const LcarsChrome();
 
+  /// A pushed route's frame. LCARS draws to the edges, so instead of the
+  /// `SafeArea` this used to wrap itself in, the frame's own corner blocks grow
+  /// into the vertical insets and the labels stay exactly where that `SafeArea`
+  /// put them — see [buildShell]'s doc for why a black band under a bracket is
+  /// the wrong answer.
   @override
   Widget buildPage(BuildContext context, ChromePageSpec spec) {
     final t = CommanderTokens.of(context);
-    return Scaffold(
-      backgroundColor: t.canvas,
-      resizeToAvoidBottomInset: spec.insets != ChromeInsets.pan,
-      body: applyChromeInsets(
-        // LCARS draws to the edges, so it always needs the status-bar inset held
-        // off — even on a page Mission Control would have let its app bar cover.
-        spec.insets == ChromeInsets.standard
-            ? ChromeInsets.safeArea
-            : spec.insets,
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _rail(context, spec, t),
-            const SizedBox(width: _railPitch),
-            Expanded(child: _content(context, spec, t)),
-            const SizedBox(width: 10),
-          ],
-        ),
+    // Read here, above the `Scaffold` this returns, for the same reason
+    // [buildShell] does: whether a `Scaffold` republishes its body's padding
+    // never has to be assumed.
+    final insets = MediaQuery.paddingOf(context);
+    // The terminal keeps its `SafeArea` (PR #259: the PTY must never see a
+    // resize), so it publishes no bleed — a page cannot be inset *and* bled.
+    final panning = spec.insets == ChromeInsets.pan;
+    final bleed = panning
+        ? EdgeInsets.zero
+        : EdgeInsets.only(top: insets.top, bottom: insets.bottom);
+    final frame = Padding(
+      // Held, not bled — same reason as the shell's: a cutout is an occlusion,
+      // not a bezel to decorate. Skipped only when the `SafeArea` below is
+      // already holding them.
+      padding: panning
+          ? EdgeInsets.zero
+          : EdgeInsets.only(left: insets.left, right: insets.right),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _rail(context, spec, t, bleed),
+          const SizedBox(width: _railPitch),
+          Expanded(child: _content(context, spec, t, bleed)),
+          const SizedBox(width: 10),
+        ],
+      ),
+    );
+    return LcarsBleedScope(
+      bleed: bleed,
+      child: Scaffold(
+        backgroundColor: t.canvas,
+        resizeToAvoidBottomInset: !panning,
+        // Only `pan` still wraps: with a bleed the frame holds its own insets,
+        // and a `SafeArea` over it would hold them twice.
+        body: panning ? applyChromeInsets(ChromeInsets.pan, frame) : frame,
       ),
     );
   }
@@ -49,10 +71,19 @@ class LcarsChrome extends Chrome {
   /// filler that absorbs the slack, then the primary action, then a closing
   /// elbow. The two rounded corners are the first and last blocks only, so the
   /// column reads as one bracket.
-  Widget _rail(BuildContext context, ChromePageSpec spec, CommanderTokens t) {
+  ///
+  /// [bleed] is split across those two blocks alone — they are the bracket's
+  /// ends, and everything between them is interior.
+  Widget _rail(
+    BuildContext context,
+    ChromePageSpec spec,
+    CommanderTokens t,
+    EdgeInsets bleed,
+  ) {
     final back = shouldShowBack(context, spec);
     final blocks = <Widget>[
       ChromeElbow(
+        bleed: EdgeInsets.only(top: bleed.top),
         color: back ? t.primary : t.nav,
         corner: ElbowCorner.topLeft,
         height: back ? 62 : 74,
@@ -91,6 +122,7 @@ class LcarsChrome extends Chrome {
     }
     blocks.add(
       ChromeElbow(
+        bleed: EdgeInsets.only(bottom: bleed.bottom),
         color: t.nav,
         corner: ElbowCorner.bottomLeft,
         height: 44,
@@ -172,16 +204,22 @@ class LcarsChrome extends Chrome {
   }
 
   /// The content column: an elbow cap, then the title block, then the body.
+  ///
+  /// [bleed]'s top goes to the cap, mirroring the rail's opening block — the two
+  /// are the frame's top corners. Its bottom is *held* off the body rather than
+  /// bled into: the rail closes the frame down there, the body does not.
   Widget _content(
     BuildContext context,
     ChromePageSpec spec,
     CommanderTokens t,
+    EdgeInsets bleed,
   ) {
     final title = spec.title;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         ChromeElbowCap(
+          bleed: EdgeInsets.only(top: bleed.top),
           color: shouldShowBack(context, spec) ? t.primary : t.nav,
         ),
         if (title != null) ...[
@@ -211,7 +249,14 @@ class LcarsChrome extends Chrome {
           const SizedBox(height: 9),
         ] else
           const SizedBox(height: 12),
-        Expanded(child: spec.body),
+        // Held, not bled: a pushed page has no footer, so without this a
+        // scrollable would run under the gesture strip with nothing below it.
+        Expanded(
+          child: Padding(
+            padding: EdgeInsets.only(bottom: bleed.bottom),
+            child: spec.body,
+          ),
+        ),
       ],
     );
   }
