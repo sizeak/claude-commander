@@ -344,8 +344,10 @@ void main() {
       tester,
     ) async {
       seed();
-      useInsets(tester);
-      tester.view.viewInsets = const FakeViewPadding(bottom: 320);
+      // Genuinely keyboard-up: `padding.bottom` is 0 (what the platform
+      // collapses it to) while `viewPadding.bottom` still holds the inset —
+      // see `useInsets`'s doc for why the two must differ here.
+      useInsets(tester, viewBottom: 48);
       await pumpLcars(tester);
 
       expect(tester.getRect(footerBlock('FLEET')).height, 38);

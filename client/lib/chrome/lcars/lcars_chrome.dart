@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../theme/tokens.dart';
 import '../chrome.dart';
@@ -19,6 +20,18 @@ import 'elbow.dart';
 /// and dialogs work exactly as they do in Mission Control.
 class LcarsChrome extends Chrome {
   const LcarsChrome();
+
+  /// LCARS is `nav: #CC99CC` and `primary: #F7A01D` — both bright, so the system
+  /// icons over the band must be dark. Transparent bar colours as well as
+  /// brightness: on a pre-15 three-button device the navigation bar keeps an
+  /// opaque background otherwise, and the footer's bleed would sit behind it.
+  static const _systemBars = SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.dark,
+    statusBarBrightness: Brightness.light,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarIconBrightness: Brightness.dark,
+  );
 
   /// A pushed route's frame. LCARS draws to the edges, so instead of the
   /// `SafeArea` this used to wrap itself in, the frame's own corner blocks grow
@@ -57,12 +70,15 @@ class LcarsChrome extends Chrome {
     );
     return LcarsBleedScope(
       bleed: bleed,
-      child: Scaffold(
-        backgroundColor: t.canvas,
-        resizeToAvoidBottomInset: !panning,
-        // Only `pan` still wraps: with a bleed the frame holds its own insets,
-        // and a `SafeArea` over it would hold them twice.
-        body: panning ? applyChromeInsets(ChromeInsets.pan, frame) : frame,
+      child: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: _systemBars,
+        child: Scaffold(
+          backgroundColor: t.canvas,
+          resizeToAvoidBottomInset: !panning,
+          // Only `pan` still wraps: with a bleed the frame holds its own insets,
+          // and a `SafeArea` over it would hold them twice.
+          body: panning ? applyChromeInsets(ChromeInsets.pan, frame) : frame,
+        ),
       ),
     );
   }
@@ -659,36 +675,39 @@ class LcarsChrome extends Chrome {
     final insets = MediaQuery.paddingOf(context);
     return LcarsBleedScope(
       bleed: EdgeInsets.only(top: insets.top, bottom: insets.bottom),
-      child: Scaffold(
-        backgroundColor: t.canvas,
-        body: Padding(
-          // Held, not bled: a cutout is an occlusion, not a bezel to decorate.
-          // A sub-900dp phone stays on this shell in landscape
-          // (`adaptive_shell.dart:25`), where the notch lands on the rail's edge.
-          padding: EdgeInsets.only(left: insets.left, right: insets.right),
-          child: Column(
-            children: [
-              Expanded(child: spec.body),
-              Padding(
-                // Top gap at the rail's pitch, so the rail's filler meets the
-                // settings block on the same seam its own blocks are stacked on.
-                padding: const EdgeInsets.fromLTRB(0, _railPitch, 10, 0),
-                // A `Builder`, because `context` here is the one this method was
-                // called with — above the scope it is returning. The footer has
-                // to read the bleed from *below* it, exactly as the body's own
-                // blocks do.
-                child: Builder(
-                  builder: (context) => buildFooterNav(
-                    context,
-                    ChromeFooterNavSpec(
-                      items: spec.items,
-                      centreAction: spec.centreAction,
-                      settings: spec.settings,
+      child: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: _systemBars,
+        child: Scaffold(
+          backgroundColor: t.canvas,
+          body: Padding(
+            // Held, not bled: a cutout is an occlusion, not a bezel to decorate.
+            // A sub-900dp phone stays on this shell in landscape
+            // (`adaptive_shell.dart:25`), where the notch lands on the rail's edge.
+            padding: EdgeInsets.only(left: insets.left, right: insets.right),
+            child: Column(
+              children: [
+                Expanded(child: spec.body),
+                Padding(
+                  // Top gap at the rail's pitch, so the rail's filler meets the
+                  // settings block on the same seam its own blocks are stacked on.
+                  padding: const EdgeInsets.fromLTRB(0, _railPitch, 10, 0),
+                  // A `Builder`, because `context` here is the one this method was
+                  // called with — above the scope it is returning. The footer has
+                  // to read the bleed from *below* it, exactly as the body's own
+                  // blocks do.
+                  child: Builder(
+                    builder: (context) => buildFooterNav(
+                      context,
+                      ChromeFooterNavSpec(
+                        items: spec.items,
+                        centreAction: spec.centreAction,
+                        settings: spec.settings,
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

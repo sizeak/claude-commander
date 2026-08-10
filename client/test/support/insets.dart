@@ -21,17 +21,24 @@ void useInsets(
   double bottom = 0,
   double left = 0,
   double right = 0,
+  // Defaults to [bottom], which is what makes the common call model a
+  // keyboard-down device: `padding` and `viewPadding` equal, as they are on a
+  // real platform with nothing covering the edge. Pass this separately to
+  // model the keyboard up — on a real device that collapses `padding.bottom`
+  // to 0 while `viewPadding.bottom` keeps the inset, and a test that sets both
+  // equal cannot tell a shell reading `padding` (correct) from one reading
+  // `viewPadding` (wrong).
+  double? viewBottom,
 }) {
   final logical = tester.view.physicalSize / tester.view.devicePixelRatio;
   tester.view.devicePixelRatio = 1.0;
   tester.view.physicalSize = logical;
-  final fake = FakeViewPadding(
+  tester.view.padding = FakeViewPadding(
     top: top,
     bottom: bottom,
     left: left,
     right: right,
   );
-  tester.view.padding = fake;
   // `viewPadding` as well, and it is not redundant: with no keyboard up the two
   // are equal on a real platform, and `SafeArea(maintainBottomViewPadding: true)`
   // — the terminal's wrapper — reads `viewPadding.bottom` *unconditionally*
@@ -39,7 +46,12 @@ void useInsets(
   // keyboard is covering it. Setting `padding` alone left that SafeArea holding
   // nothing off the bottom, so the terminal's exemption looked correct in a test
   // that was measuring a page with no hold at all.
-  tester.view.viewPadding = fake;
+  tester.view.viewPadding = FakeViewPadding(
+    top: top,
+    bottom: viewBottom ?? bottom,
+    left: left,
+    right: right,
+  );
   addTearDown(tester.view.reset);
 }
 

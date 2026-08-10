@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'pages/adaptive_shell.dart';
 import 'pages/connection_page.dart';
@@ -17,6 +18,11 @@ import 'window/window_frame.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Edge-to-edge explicitly, not by platform default: OS enforcement only
+  // arrives at targetSdk 35 / Android 15, and below that the window may not be
+  // edge-to-edge at all — `MediaQuery.padding` would be ~0 and the LCARS bleed
+  // would silently no-op. A no-op on desktop.
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   // A missing token extension falls back to Mission Control so widget tests can
   // pump bare widgets; in the real app that silence would hide a mis-themed
   // subtree, so opt into the assert here.
