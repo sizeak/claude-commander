@@ -8,6 +8,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 
 - **Async-first architecture** - Non-blocking tmux and git operations
 - **Hierarchical session model** - Projects contain worktree sessions
+- **Add a project from GitHub** - Add a project by picking one of your GitHub repos, or by URL, and it's cloned in ready to go
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Kanban board UI** - Full-screen board with sections as columns and sessions as project-coloured cards
 - **Live preview pane** - In the list views, a right-hand pane with Preview / Info / Shell tabs: Preview and Shell tail the selected session's agent and shell output as it happens, Info shows its metadata and PR detail (`Tab` cycles, `<`/`>` resizes)

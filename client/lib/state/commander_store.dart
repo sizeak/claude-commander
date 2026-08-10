@@ -288,6 +288,39 @@ class CommanderStore extends ChangeNotifier {
   Future<ScanResultDto> scanDirectory(String path) =>
       _api.scanDirectory(handle: _requireHandle, path: path);
 
+  /// Register a project by its server-side repo path, or return the id of the
+  /// project already registered for it.
+  ///
+  /// The idempotent counterpart to [addProject]: `POST /projects/ensure` rather
+  /// than `POST /projects`. The dedupe stays on the server, which is the only
+  /// side that can resolve a path to a repository root — so this never compares
+  /// paths itself, and there is no second copy of the rule to drift.
+  Future<String> ensureProject(String path) =>
+      _api.ensureProject(handle: _requireHandle, path: path);
+
+  /// Every repo the server-side `gh` user can clone, for the repo picker.
+  /// Throws when the server has no `gh`, or when listing outruns the client's
+  /// request ceiling — the picker words both inline.
+  Future<List<GithubRepo>> githubRepos() =>
+      _api.githubRepos(handle: _requireHandle);
+
+  /// Start a clone. The returned job's status is not terminal; poll [cloneJob].
+  Future<CloneJobDto> startClone(CloneRequestDto request) =>
+      _api.startClone(handle: _requireHandle, request: request);
+
+  /// One poll of a clone job. Null means the server has pruned it, which is a
+  /// normal answer rather than a failure.
+  Future<CloneJobDto?> cloneJob(CloneJobId id) =>
+      _api.cloneJob(handle: _requireHandle, id: id);
+
+  /// A clone source's stable `host/owner/name` identity, or null when it has
+  /// none. No handle: it is pure string work in the shared protocol crate.
+  ///
+  /// **A null on either side of a comparison is never a match.** See
+  /// [CommanderApi.canonicalRepoSlug].
+  Future<String?> canonicalRepoSlug(String url) =>
+      _api.canonicalRepoSlug(url: url);
+
   /// List a project's branches (local, plus remotes when [fetch] is set).
   Future<List<BranchInfo>> listBranches(
     String projectId, {

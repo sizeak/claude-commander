@@ -88,6 +88,10 @@ pub fn test_state(data_dir: &TempDir, worktrees_dir: &TempDir) -> AppState {
         // temp dir. Without this, any suite exercising the paste-image route
         // would litter (and prune) `/tmp/paste-images` on the developer's box.
         paste_images_dir: Some(data_dir.path().join("paste")),
+        // And the same for cloned repositories, where the default is the user's
+        // REAL `~/Projects`: a suite exercising the clone routes would check
+        // repositories out into the developer's own projects directory.
+        projects_dir: Some(data_dir.path().join("projects")),
         ..Config::default()
     };
     // Telemetry is opt-out by default with a baked ingest token, so a plain
@@ -145,6 +149,24 @@ mod tests {
         assert!(
             !state.service.telemetry().is_active(),
             "test-support fixtures must not emit telemetry (would pollute production OpenObserve)"
+        );
+    }
+
+    /// Guard: the harness must pin the projects directory into `data_dir`.
+    /// `projects_dir` defaults to the user's REAL `~/Projects`, and the
+    /// repo-clone paths write there — so an unpinned harness would clone into
+    /// the developer's own projects directory from `cargo test` / CI. Mirrors
+    /// the guard on the server's in-crate `handlers/test_support.rs` fixture;
+    /// fails if someone drops the knob here.
+    #[tokio::test]
+    async fn test_state_pins_projects_dir_into_tempdir() {
+        let data_dir = TempDir::new().unwrap();
+        let worktrees_dir = TempDir::new().unwrap();
+        let state = test_state(&data_dir, &worktrees_dir);
+        let projects_dir = state.service.read_config().projects_dir().unwrap();
+        assert!(
+            projects_dir.starts_with(data_dir.path()),
+            "test-support fixtures must not clone into the real ~/Projects (got {projects_dir:?})"
         );
     }
 

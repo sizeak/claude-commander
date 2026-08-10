@@ -801,6 +801,95 @@ fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
 }
 
 #[test]
+fn test_projects_dir_row_shows_default_when_none() {
+    let mut app = make_test_app();
+    // The fixture pins `projects_dir` into its temp dir so no test can clone
+    // into the real `~/Projects`; clear it here, since the unset case is
+    // exactly what this test is about.
+    app.config.projects_dir = None;
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows.iter().find(|r| r.field_key == "projects_dir").unwrap();
+    assert_eq!(row.text_value(), "(default)");
+}
+
+#[test]
+fn test_projects_dir_row_shows_custom_path() {
+    let mut app = make_test_app();
+    app.config.projects_dir = Some(std::path::PathBuf::from("/custom/projects"));
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows.iter().find(|r| r.field_key == "projects_dir").unwrap();
+    assert_eq!(row.text_value(), "/custom/projects");
+}
+
+#[test]
+fn test_apply_projects_dir_round_trips_through_the_default_sentinel() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "projects_dir", "/my/projects");
+    assert_eq!(
+        app.config.projects_dir,
+        Some(std::path::PathBuf::from("/my/projects"))
+    );
+    app.apply_settings_edit(SettingsTab::General, "projects_dir", "(default)");
+    assert_eq!(app.config.projects_dir, None);
+    app.config.projects_dir = Some(std::path::PathBuf::from("/my/projects"));
+    app.apply_settings_edit(SettingsTab::General, "projects_dir", "");
+    assert_eq!(app.config.projects_dir, None);
+}
+
+#[test]
+fn test_clone_timeout_row_shows_current_value() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "clone_timeout_secs")
+        .unwrap();
+    assert_eq!(row.text_value(), "1800");
+}
+
+#[test]
+fn test_apply_clone_timeout_rejects_implausibly_short_values() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "clone_timeout_secs", "60");
+    assert_eq!(app.config.clone_timeout_secs, 60);
+    // Below the floor and unparseable input both leave the value untouched.
+    app.apply_settings_edit(SettingsTab::General, "clone_timeout_secs", "5");
+    assert_eq!(app.config.clone_timeout_secs, 60);
+    app.apply_settings_edit(SettingsTab::General, "clone_timeout_secs", "soon");
+    assert_eq!(app.config.clone_timeout_secs, 60);
+}
+
+#[test]
+fn test_repo_list_timeout_row_shows_current_value() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "repo_list_timeout_secs")
+        .unwrap();
+    assert_eq!(
+        row.text_value(),
+        claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS.to_string()
+    );
+}
+
+#[test]
+fn test_apply_repo_list_timeout_rejects_implausibly_short_values() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "repo_list_timeout_secs", "600");
+    assert_eq!(app.config.repo_list_timeout_secs, 600);
+    // Below the floor and unparseable input both leave the value untouched. There
+    // is deliberately no zero-disables case: `0` is just below the floor.
+    for rejected in ["5", "0", "soon"] {
+        app.apply_settings_edit(SettingsTab::General, "repo_list_timeout_secs", rejected);
+        assert_eq!(
+            app.config.repo_list_timeout_secs, 600,
+            "{rejected} should not have been accepted"
+        );
+    }
+}
+
+#[test]
 fn test_commander_rows_present_with_defaults() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
@@ -1595,7 +1684,14 @@ fn render_general_tab_draws_section_headers() {
         search: None,
     });
 
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    // Tall enough that every General section fits on one screen with room to
+    // spare. At 40 rows this test asserted three headers were visible while the
+    // third sat exactly on the bottom edge, so *adding a General row* broke it —
+    // a false failure, since the list scrolls (`list_scroll_offset`) and the
+    // header was still reachable. The height is deliberately generous so the next
+    // added row does not resurrect that coupling; what the test is for is that
+    // headers are drawn *at all*, interleaved with their settings.
+    let mut terminal = Terminal::new(TestBackend::new(100, 60)).unwrap();
     terminal.draw(|f| app.render(f)).unwrap();
 
     let text = buffer_text(&terminal);
@@ -1945,7 +2041,13 @@ fn make_test_app_with_path() -> (App, std::path::PathBuf) {
     let tmp = tempfile::TempDir::new().unwrap();
     let config_path = tmp.path().join("config.toml");
     let state_path = tmp.path().join("state.json");
-    let config = Config::default();
+    // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+    // repo-clone paths write into. Pin it under `tmp` so no App built here can
+    // clone outside the temp tree.
+    let config = Config {
+        projects_dir: Some(tmp.path().join("projects")),
+        ..Config::default()
+    };
     let config_store = Arc::new(ConfigStore::with_path(config, config_path.clone()));
     let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
     // Leak the TempDir so paths stay valid for the lifetime of the test.
@@ -3117,6 +3219,9 @@ fn build_app_with_mock_remotes(servers: Vec<(&str, WorkspaceSnapshot)>) -> App {
     let state_path = tmp.path().join("state.json");
     let mut config = Config::default();
     config.telemetry.enabled = false;
+    // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+    // repo-clone paths write into. Pin it under `tmp`.
+    config.projects_dir = Some(tmp.path().join("projects"));
     let mut snapshots: std::collections::HashMap<String, WorkspaceSnapshot> = Default::default();
     for (name, snap) in servers {
         config
@@ -3375,6 +3480,9 @@ async fn factory_failure_yields_degraded_placeholder() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mut config = Config::default();
     config.telemetry.enabled = false;
+    // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+    // repo-clone paths write into. Pin it under `tmp`.
+    config.projects_dir = Some(tmp.path().join("projects"));
     config
         .remote_servers
         .push(crate::config::RemoteServerConfig {
@@ -7717,4 +7825,662 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
     })
     .await;
     assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+// ---------------------------------------------------------------------------
+// Clone repository: palette command, repo picker, and clone-job progress
+// ---------------------------------------------------------------------------
+
+use claude_commander_protocol::github::{
+    CloneJob, CloneJobId, CloneSource, CloneStatus, GithubRepo,
+};
+
+/// A `GithubRepo` with just the fields the picker reads; the rest are plausible
+/// constants so a test can build a list without restating the whole DTO.
+fn github_repo(full_name: &str) -> GithubRepo {
+    let (owner, name) = full_name.split_once('/').expect("owner/name");
+    GithubRepo {
+        full_name: full_name.to_string(),
+        owner: owner.to_string(),
+        name: name.to_string(),
+        description: None,
+        private: false,
+        fork: false,
+        archived: false,
+        default_branch: "main".to_string(),
+        clone_url: format!("https://github.com/{full_name}.git"),
+        ssh_url: format!("git@github.com:{full_name}.git"),
+        pushed_at: None,
+    }
+}
+
+/// The labels of the repo-picker rows the palette would show for `query`.
+fn repo_picker_labels(app: &App, query: &str) -> Vec<String> {
+    app.gather_github_repo_picker_items(query)
+        .into_iter()
+        .map(|item| match item {
+            QuickSwitchItem::GithubRepo { label, .. } => label,
+            other => panic!("expected a GithubRepo row, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn clone_repository_is_offered_in_the_palette_without_a_keybinding() {
+    // The palette is the canonical command surface, so an unbound command must
+    // still be listed — with an empty key hint rather than being filtered out.
+    let app = make_test_app();
+    let entries = app
+        .ui_state
+        .gather_command_entries(&app.config.keybindings, "clone");
+    let clone = entries
+        .iter()
+        .find(|e| e.action == BindableAction::CloneRepository)
+        .expect("Clone repository must appear in the palette");
+    assert!(
+        clone.keys.is_empty(),
+        "the command is deliberately unbound; key hint was {:?}",
+        clone.keys
+    );
+    assert!(
+        app.ui_state
+            .is_command_available(BindableAction::CloneRepository),
+        "cloning needs no selection, so it is always available"
+    );
+}
+
+#[tokio::test]
+async fn repo_picker_filter_narrows_to_matching_repos() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    assert!(
+        matches!(
+            app.ui_state.modal,
+            Modal::QuickSwitch {
+                mode: PaletteMode::GithubRepoPicker,
+                ..
+            }
+        ),
+        "the command opens the palette in repo-picker mode"
+    );
+
+    app.ui_state.repo_picker.repos = vec![
+        github_repo("sizeak/claude-commander"),
+        github_repo("sizeak/diffgrid"),
+        github_repo("other/commander-docs"),
+    ];
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+
+    // Empty query lists everything.
+    assert_eq!(repo_picker_labels(&app, "").len(), 3);
+
+    // A query narrows to the fuzzy matches, and drops the rest.
+    let narrowed = repo_picker_labels(&app, "diffgr");
+    assert_eq!(narrowed.len(), 1, "got {narrowed:?}");
+    assert!(narrowed[0].contains("sizeak/diffgrid"));
+
+    // Matching spans the whole slug, not just the repo name.
+    let by_owner = repo_picker_labels(&app, "other/");
+    assert_eq!(by_owner.len(), 1, "got {by_owner:?}");
+    assert!(by_owner[0].contains("other/commander-docs"));
+
+    // A query matching nothing narrows to empty (the URL path takes over).
+    assert!(repo_picker_labels(&app, "zzzzz").is_empty());
+}
+
+#[tokio::test]
+async fn repo_picker_marks_repos_already_registered_as_projects() {
+    // `canonical_repo_slug` exists so this comparison isn't string equality:
+    // a project cloned by `gh` often has an `ssh://` origin while the API
+    // reports `https://`.
+    use crate::session::Project;
+    let mut app = make_test_app();
+    let mut project = Project::new(
+        "claude-commander",
+        std::path::PathBuf::from("/tmp/cc"),
+        "main",
+    );
+    project.origin_url = Some("git@github.com:sizeak/claude-commander.git".to_string());
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.add_project(project);
+        })
+        .await
+        .unwrap();
+    app.sync_local_view_from_store_for_test().await;
+
+    app.handle_command(UserCommand::CloneRepository).await;
+    app.ui_state.repo_picker.repos = vec![
+        github_repo("sizeak/claude-commander"),
+        github_repo("sizeak/diffgrid"),
+    ];
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+
+    let labels = repo_picker_labels(&app, "");
+    let existing = labels
+        .iter()
+        .find(|l| l.contains("claude-commander"))
+        .unwrap();
+    assert!(
+        existing.contains("already a project"),
+        "an ssh-origin project must be recognised from its https clone URL: {existing}"
+    );
+    let fresh = labels.iter().find(|l| l.contains("diffgrid")).unwrap();
+    assert!(!fresh.contains("already a project"), "{fresh}");
+}
+
+#[tokio::test]
+async fn a_failed_repo_list_is_shown_as_a_state_and_keeps_the_url_path_usable() {
+    // `gh` missing or unauthenticated is a distinguishable error, not an empty
+    // list. The picker must stay open (a URL can still be pasted) and say so.
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    let generation = app.ui_state.repo_picker.generation;
+
+    app.handle_state_update(StateUpdate::GithubReposLoaded {
+        backend_id: crate::backend::LOCAL_BACKEND_ID.0,
+        generation,
+        result: Err("gh: command not found".to_string()),
+    })
+    .await;
+
+    assert!(
+        matches!(
+            app.ui_state.modal,
+            Modal::QuickSwitch {
+                mode: PaletteMode::GithubRepoPicker,
+                ..
+            }
+        ),
+        "a failed listing must not close the picker — the URL path still works"
+    );
+    match &app.ui_state.repo_picker.fetch {
+        RepoFetch::Failed(msg) => assert!(msg.contains("gh"), "{msg}"),
+        other => panic!("expected a Failed fetch state, got {other:?}"),
+    }
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("the reason belongs in the status bar, not swallowed");
+    assert!(msg.contains("gh"), "{msg}");
+}
+
+#[tokio::test]
+async fn a_stale_repo_listing_is_dropped() {
+    // Ctrl-R can re-fetch while a listing is in flight; the earlier response
+    // must not overwrite the newer one's state.
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    let stale = app.ui_state.repo_picker.generation;
+    app.refetch_github_repos();
+    assert_ne!(app.ui_state.repo_picker.generation, stale);
+
+    app.handle_state_update(StateUpdate::GithubReposLoaded {
+        backend_id: crate::backend::LOCAL_BACKEND_ID.0,
+        generation: stale,
+        result: Ok(vec![github_repo("stale/repo")]),
+    })
+    .await;
+    assert!(
+        app.ui_state.repo_picker.repos.is_empty(),
+        "a superseded listing must be discarded"
+    );
+    assert!(matches!(app.ui_state.repo_picker.fetch, RepoFetch::Loading));
+}
+
+#[tokio::test]
+async fn enter_on_a_repo_opens_an_editable_destination_name_prefilled_with_the_repo_name() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    app.ui_state.repo_picker.repos = vec![github_repo("sizeak/claude-commander")];
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+    app.refilter_quick_switch();
+
+    app.activate_quick_switch_selection().await;
+
+    match &app.ui_state.modal {
+        Modal::Input {
+            value, on_submit, ..
+        } => {
+            assert_eq!(
+                value.value(),
+                "claude-commander",
+                "prefilled with the repo name, and editable"
+            );
+            match on_submit {
+                InputAction::CloneDestName { source, .. } => assert_eq!(
+                    source,
+                    &CloneSource::Github {
+                        full_name: "sizeak/claude-commander".to_string()
+                    }
+                ),
+                other => panic!("expected CloneDestName, got {other:?}"),
+            }
+        }
+        other => panic!("expected the destination-name input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_url_with_no_match_becomes_the_clone_source_without_leaking_credentials() {
+    // The URL path: nothing in the list matched, so the typed text is the
+    // source. A pasted `user:token@` must not reach any user-facing string.
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+    if let Modal::QuickSwitch { query, .. } = &mut app.ui_state.modal {
+        *query = "https://alice:ghp_secrettoken@github.com/sizeak/private-thing.git".into();
+    }
+    app.refilter_quick_switch();
+
+    app.activate_quick_switch_selection().await;
+
+    match &app.ui_state.modal {
+        Modal::Input {
+            value,
+            prompt,
+            title,
+            on_submit,
+            ..
+        } => {
+            assert_eq!(
+                value.value(),
+                "private-thing",
+                "destination defaults to the name derived from the URL"
+            );
+            for text in [prompt.as_str(), title.as_str()] {
+                assert!(
+                    !text.contains("ghp_secrettoken"),
+                    "credential leaked into a user-facing string: {text}"
+                );
+            }
+            assert!(
+                prompt.contains("github.com/sizeak/private-thing"),
+                "the redacted source should still identify the repo: {prompt}"
+            );
+            assert!(matches!(on_submit, InputAction::CloneDestName { .. }));
+        }
+        other => panic!("expected the destination-name input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_refused_url_is_reported_and_leaves_the_picker_open() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+    // A scheme outside `CLONE_SCHEMES`, and git's `ext::` transport (which runs
+    // an arbitrary command) — both must be refused, not attempted.
+    for source in ["ftp://example.com/repo.git", "ext::sh -c whoami"] {
+        if let Modal::QuickSwitch { query, .. } = &mut app.ui_state.modal {
+            *query = source.into();
+        }
+        app.refilter_quick_switch();
+
+        app.activate_quick_switch_selection().await;
+
+        assert!(
+            matches!(
+                app.ui_state.modal,
+                Modal::QuickSwitch {
+                    mode: PaletteMode::GithubRepoPicker,
+                    ..
+                }
+            ),
+            "a refused source keeps the picker open so the user can correct it ({source})"
+        );
+        let (msg, _) = app
+            .ui_state
+            .status_message
+            .clone()
+            .unwrap_or_else(|| panic!("a reason for refusing {source}"));
+        assert!(
+            msg.starts_with("Cannot clone that:"),
+            "the rejection must be reported: {msg}"
+        );
+    }
+    // The scheme case names the scheme it refused.
+    if let Modal::QuickSwitch { query, .. } = &mut app.ui_state.modal {
+        *query = "ftp://example.com/repo.git".into();
+    }
+    app.refilter_quick_switch();
+    app.activate_quick_switch_selection().await;
+    let (msg, _) = app.ui_state.status_message.clone().expect("a reason");
+    assert!(msg.to_lowercase().contains("scheme"), "{msg}");
+}
+
+/// Poll `f` until it yields a non-empty list, giving up after ~500ms. The clone
+/// paths hand work to `tokio::spawn`ed tasks (a slow backend must never block
+/// the event loop), so a test observes the call through the mock's recorder
+/// rather than by awaiting the dispatch.
+async fn eventually<T>(mut f: impl FnMut() -> Vec<T>) -> Vec<T> {
+    for _ in 0..50 {
+        let got = f();
+        if !got.is_empty() {
+            return got;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Vec::new()
+}
+
+/// An `App` whose repo picker targets a mock remote backend, plus that
+/// backend's id — so a clone can be driven end to end without touching `gh`,
+/// `git`, or the network.
+async fn app_with_remote_repo_picker() -> (App, BackendId) {
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", empty_snapshot())]);
+    app.bootstrap_backend_views().await;
+    let id = BackendId(1);
+    app.refresh_backend_view(id).await;
+    app.ui_state.repo_picker.backend = id;
+    (app, id)
+}
+
+#[tokio::test]
+async fn submitting_a_destination_name_starts_the_clone_on_the_pickers_backend() {
+    let (mut app, id) = app_with_remote_repo_picker().await;
+
+    app.handle_input_submit(
+        InputAction::CloneDestName {
+            backend: id,
+            source: CloneSource::Github {
+                full_name: "sizeak/diffgrid".to_string(),
+            },
+        },
+        "my-diffgrid".to_string(),
+        None,
+        None,
+    )
+    .await;
+
+    // The request went to the backend the picker was opened against, not the
+    // local one — a clone runs where the sessions run.
+    let requests = eventually(|| remote_mock(&app, id).clone_requests()).await;
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(
+        requests[0].source,
+        CloneSource::Github {
+            full_name: "sizeak/diffgrid".to_string()
+        }
+    );
+    assert_eq!(requests[0].dest_name.as_deref(), Some("my-diffgrid"));
+    let (msg, _) = app.ui_state.status_message.clone().expect("progress toast");
+    assert!(msg.contains("diffgrid"), "{msg}");
+}
+
+#[tokio::test]
+async fn an_empty_destination_name_means_derive_it_from_the_source() {
+    let (mut app, id) = app_with_remote_repo_picker().await;
+    app.handle_input_submit(
+        InputAction::CloneDestName {
+            backend: id,
+            source: CloneSource::Github {
+                full_name: "sizeak/diffgrid".to_string(),
+            },
+        },
+        "   ".to_string(),
+        None,
+        None,
+    )
+    .await;
+    let requests = eventually(|| remote_mock(&app, id).clone_requests()).await;
+    assert_eq!(requests[0].dest_name, None);
+}
+
+/// Drive a clone job to `status` through the poll handler, returning the app.
+async fn app_after_clone_status(status: CloneStatus) -> App {
+    let mut app = make_test_app();
+    app.handle_state_update(StateUpdate::CloneJobUpdated {
+        backend_id: crate::backend::LOCAL_BACKEND_ID.0,
+        source: CloneSource::Github {
+            full_name: "sizeak/diffgrid".to_string(),
+        },
+        result: Ok(Some(CloneJob {
+            id: CloneJobId::new(),
+            source_label: "sizeak/diffgrid".to_string(),
+            dest: std::path::PathBuf::from("/projects/diffgrid"),
+            status,
+        })),
+    })
+    .await;
+    app
+}
+
+#[tokio::test]
+async fn a_running_clone_reports_progress_in_the_status_bar() {
+    let app = app_after_clone_status(CloneStatus::Running).await;
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("a running clone must report progress");
+    assert!(msg.contains("sizeak/diffgrid"), "{msg}");
+    assert!(
+        matches!(app.ui_state.modal, Modal::None),
+        "progress belongs in the status bar, not a blocking modal"
+    );
+}
+
+#[tokio::test]
+async fn a_succeeded_clone_toasts_and_leaves_no_modal() {
+    let app = app_after_clone_status(CloneStatus::Succeeded {
+        project_id: ProjectId::new(),
+    })
+    .await;
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("a success toast");
+    assert!(msg.contains("sizeak/diffgrid"), "{msg}");
+    assert!(matches!(app.ui_state.modal, Modal::None));
+}
+
+#[tokio::test]
+async fn a_failed_clone_surfaces_the_backends_message_verbatim() {
+    // Task 11 made both transports produce byte-identical messages for the same
+    // refusal, and the layers below redact what they return — so the TUI shows
+    // the message it was given rather than composing its own.
+    let app = app_after_clone_status(CloneStatus::Failed {
+        message: "fatal: repository not found".to_string(),
+    })
+    .await;
+    match &app.ui_state.modal {
+        Modal::Error { message } => {
+            assert!(message.contains("fatal: repository not found"), "{message}")
+        }
+        other => panic!("expected an error modal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_occupied_destination_holding_a_git_repo_offers_to_register_it() {
+    // `DestinationExists` is not a failure: the checkout is already there, so
+    // the actionable offer is to add it as a project.
+    let app = app_after_clone_status(CloneStatus::DestinationExists {
+        dest: std::path::PathBuf::from("/projects/diffgrid"),
+        is_git_repo: true,
+    })
+    .await;
+    match &app.ui_state.modal {
+        Modal::Confirm {
+            message,
+            on_confirm,
+            ..
+        } => {
+            assert!(
+                !message.to_lowercase().contains("failed"),
+                "an occupied destination must not read as a failure: {message}"
+            );
+            assert!(message.contains("/projects/diffgrid"), "{message}");
+            match on_confirm {
+                ConfirmAction::RegisterExistingClone { dest, .. } => {
+                    assert_eq!(dest, &std::path::PathBuf::from("/projects/diffgrid"))
+                }
+                other => panic!("expected RegisterExistingClone, got {other:?}"),
+            }
+        }
+        other => panic!("expected a confirm offer, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_occupied_destination_without_a_repo_re_offers_the_name_prompt() {
+    // Nothing to register, so the useful move is another name — not a dead end.
+    let app = app_after_clone_status(CloneStatus::DestinationExists {
+        dest: std::path::PathBuf::from("/projects/diffgrid"),
+        is_git_repo: false,
+    })
+    .await;
+    match &app.ui_state.modal {
+        Modal::Input {
+            value, on_submit, ..
+        } => {
+            assert_eq!(value.value(), "diffgrid", "seeded with the occupied name");
+            assert!(matches!(on_submit, InputAction::CloneDestName { .. }));
+        }
+        other => panic!("expected the destination-name input again, got {other:?}"),
+    }
+    let (msg, _) = app.ui_state.status_message.clone().expect("a reason");
+    assert!(msg.to_lowercase().contains("exists"), "{msg}");
+}
+
+#[tokio::test]
+async fn registering_an_existing_clone_adds_it_as_a_project_on_that_backend() {
+    let (mut app, id) = app_with_remote_repo_picker().await;
+    app.handle_confirm(ConfirmAction::RegisterExistingClone {
+        backend: id,
+        dest: std::path::PathBuf::from("/srv/projects/diffgrid"),
+    })
+    .await;
+    assert_eq!(
+        eventually(|| remote_mock(&app, id).ensured_projects()).await,
+        vec![std::path::PathBuf::from("/srv/projects/diffgrid")]
+    );
+}
+
+/// Registering a checkout that is *already* a project must not add a second
+/// entry for it.
+///
+/// The offer is only ever made because the clone destination was occupied, so the
+/// path frequently is already registered — and `add_project` registers
+/// unconditionally, so accepting twice (or accepting once for an
+/// already-registered path) duplicated the project. The fix is which method the
+/// handler calls, so that is what this asserts: `ensure_project` for every
+/// attempt, `add_project` never, and one id across both attempts.
+#[tokio::test]
+async fn registering_an_already_registered_checkout_does_not_duplicate_it() {
+    let (mut app, id) = app_with_remote_repo_picker().await;
+    let dest = std::path::PathBuf::from("/srv/projects/diffgrid");
+    for _ in 0..2 {
+        app.handle_confirm(ConfirmAction::RegisterExistingClone {
+            backend: id,
+            dest: dest.clone(),
+        })
+        .await;
+    }
+    let mock = remote_mock(&app, id);
+    assert_eq!(
+        eventually(|| {
+            let ensured = mock.ensured_projects();
+            // `eventually` waits on a non-empty answer, so hold back until both
+            // spawned attempts have landed rather than settling for the first.
+            if ensured.len() == 2 {
+                ensured
+            } else {
+                Vec::new()
+            }
+        })
+        .await,
+        vec![dest.clone(), dest.clone()],
+        "both attempts must go through the idempotent route"
+    );
+    assert!(
+        mock.added_projects().is_empty(),
+        "the non-idempotent add_project must not be used: {:?}",
+        mock.added_projects()
+    );
+}
+
+#[tokio::test]
+async fn a_vanished_clone_job_stops_reporting_without_claiming_failure() {
+    let mut app = make_test_app();
+    app.handle_state_update(StateUpdate::CloneJobUpdated {
+        backend_id: crate::backend::LOCAL_BACKEND_ID.0,
+        source: CloneSource::Url {
+            url: "https://example.com/r.git".to_string(),
+        },
+        result: Ok(None),
+    })
+    .await;
+    // Absence is not an error — no error modal, just a neutral note.
+    assert!(matches!(app.ui_state.modal, Modal::None));
+    assert!(app.ui_state.status_message.is_some());
+}
+
+#[tokio::test]
+async fn a_failed_clone_poll_reports_the_transport_error() {
+    let mut app = make_test_app();
+    app.handle_state_update(StateUpdate::CloneJobUpdated {
+        backend_id: crate::backend::LOCAL_BACKEND_ID.0,
+        source: CloneSource::Url {
+            url: "https://example.com/r.git".to_string(),
+        },
+        result: Err("connection refused".to_string()),
+    })
+    .await;
+    match &app.ui_state.modal {
+        Modal::Error { message } => assert!(message.contains("connection refused"), "{message}"),
+        other => panic!("expected an error modal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ctrl_r_refetches_the_repo_list_but_plain_r_types_into_the_filter() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+    let before = app.ui_state.repo_picker.generation;
+
+    // A plain char belongs to the fuzzy query — the picker is filterable, so
+    // the re-fetch key has to be a modified one.
+    app.handle_modal_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+        .await;
+    match &app.ui_state.modal {
+        Modal::QuickSwitch { query, .. } => assert_eq!(query.value(), "r"),
+        other => panic!("expected the picker, got {other:?}"),
+    }
+    assert_eq!(app.ui_state.repo_picker.generation, before);
+
+    app.handle_modal_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+        .await;
+    assert_ne!(
+        app.ui_state.repo_picker.generation, before,
+        "Ctrl-R must start a fresh listing"
+    );
+    assert!(matches!(app.ui_state.repo_picker.fetch, RepoFetch::Loading));
+}
+
+#[test]
+fn the_help_modal_documents_the_clone_picker() {
+    let app = make_test_app();
+    let text: String = app
+        .build_help_lines()
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Listed as a (palette-only) bindable action…
+    assert!(
+        text.contains("Clone a GitHub repository"),
+        "help must list the command: {text}"
+    );
+    // …and the picker's own keys, which are not bindable actions.
+    assert!(
+        text.contains("Ctrl+R"),
+        "help must document the re-fetch key"
+    );
 }

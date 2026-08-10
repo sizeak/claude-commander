@@ -7,6 +7,7 @@ import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/src/rust/api/review.dart';
 import 'package:claude_commander_client/src/rust/api/simple.dart'
     show ScanResultDto;
+import 'package:uuid/uuid.dart';
 
 import 'fake_diff_layout.dart';
 
@@ -62,6 +63,32 @@ class FakeCommanderApi implements CommanderApi {
     added: 0,
     skipped: 0,
   );
+  List<GithubRepo> githubReposResponse = const [];
+
+  /// What `startClone` answers. Defaults to a `Running` job, which is what the
+  /// real route always returns (every outcome arrives via `cloneJob`).
+  CloneJobDto startCloneResponse = CloneJobDto(
+    id: CloneJobId(
+      field0: UuidValue.fromString('cccccccc-2222-3333-4444-555555555555'),
+    ),
+    sourceLabel: 'acme/widget',
+    dest: '/srv/projects/widget',
+    status: const CloneStatusDto(
+      kind: CloneStatusKind.running,
+      message: '',
+      isGitRepo: false,
+    ),
+  );
+
+  /// What each `cloneJob` poll answers. A test that starts a clone should set a
+  /// TERMINAL status here, otherwise the page's poll loop never stops and the
+  /// test ends with a pending timer.
+  CloneJobDto? cloneJobResponse;
+
+  /// When set, `startClone` awaits this before returning — lets a test hold the
+  /// page in the window between the confirm sheet closing and the job arriving,
+  /// which is where a second tap could otherwise start a parallel clone.
+  Completer<void>? startCloneGate;
   OperationStatusDto operationStatusResponse = OperationStatusDto(
     id: BigInt.zero,
     kind: OperationKind.cascade,
@@ -171,6 +198,8 @@ class FakeCommanderApi implements CommanderApi {
   Object? deleteCommentError;
   Object? applyCommentsError;
   Object? toggleFileReviewedError;
+  Object? githubReposError;
+  Object? startCloneError;
 
   // --- terminal ----------------------------------------------------------
   /// The controller behind the current [attachTerminal]. A test pushes events
@@ -480,6 +509,22 @@ class FakeCommanderApi implements CommanderApi {
   }
 
   @override
+  Future<String> ensureProject({
+    required String handle,
+    required String path,
+  }) async {
+    _record('ensureProject', {'path': path});
+    // Idempotent like the route it stands in for: a path already in the snapshot
+    // answers with that project's id. A fake that always returned a fresh id
+    // would let a caller that used the non-idempotent `addProject` pass a test
+    // about not duplicating.
+    for (final p in workspaceSnapshotResponse.projects) {
+      if (p.repoPath == path) return p.id.field0.uuid;
+    }
+    return addProjectResponse;
+  }
+
+  @override
   Future<void> removeProject({
     required String handle,
     required String id,
@@ -494,6 +539,102 @@ class FakeCommanderApi implements CommanderApi {
   }) async {
     _record('scanDirectory', {'path': path});
     return scanDirectoryResponse;
+  }
+
+  @override
+  Future<List<GithubRepo>> githubRepos({required String handle}) async {
+    _record('githubRepos');
+    if (githubReposError != null) throw githubReposError!;
+    return githubReposResponse;
+  }
+
+  @override
+  Future<CloneJobDto> startClone({
+    required String handle,
+    required CloneRequestDto request,
+  }) async {
+    _record('startClone', {'request': request});
+    if (startCloneGate != null) await startCloneGate!.future;
+    if (startCloneError != null) throw startCloneError!;
+    return startCloneResponse;
+  }
+
+  @override
+  Future<CloneJobDto?> cloneJob({
+    required String handle,
+    required CloneJobId id,
+  }) async {
+    _record('cloneJob', {'id': id});
+    return cloneJobResponse;
+  }
+
+  /// Stands in for the bridge's `canonical_repo_slug`, which is a Rust function
+  /// in `claude_commander_protocol::github` and unreachable from a widget test.
+  ///
+  /// **This is a test double, not a second implementation to depend on** — no
+  /// `lib/` code may canonicalise slugs itself; it must call the seam. What this
+  /// pins is the *contract* the page codes against, and the two halves that
+  /// matter for the picker's badge:
+  ///
+  /// - the same repo spelled `https://…/o/r.git`, `ssh://git@…/o/r` and
+  ///   `git@host:o/r.git` reduces to one identity, so a raw string comparison in
+  ///   the page fails the badge tests;
+  /// - a source with no GitHub identity answers **null**, and null is not an
+  ///   identity — a page that lets two nulls compare equal badges every row.
+  ///
+  /// Deliberately narrower than the real rule (no IPv6 authorities, no port
+  /// handling); the Rust side owns those and has its own tests.
+  @override
+  Future<String?> canonicalRepoSlug({required String url}) async {
+    final source = url.trim();
+    final String host;
+    final String path;
+    final scheme = RegExp(r'^([A-Za-z][A-Za-z0-9+.-]*)://').firstMatch(source);
+    if (scheme != null) {
+      // A `file://` URL is a local checkout wearing a URL's clothes.
+      if (scheme.group(1)!.toLowerCase() == 'file') return null;
+      final rest = source.substring(scheme.end);
+      final slash = rest.indexOf('/');
+      if (slash < 0) return null;
+      host = _hostOf(rest.substring(0, slash));
+      path = rest.substring(slash + 1);
+    } else if (source.contains(':') && !source.startsWith('/')) {
+      // scp form: `[user@]host:path`.
+      final colon = source.indexOf(':');
+      host = _hostOf(source.substring(0, colon));
+      path = source.substring(colon + 1);
+    } else {
+      return null; // a local path has no GitHub identity
+    }
+    if (host.isEmpty) return null;
+    // Lower-case BEFORE stripping, as the real rule does, so `repo.GIT` and
+    // `repo.git` cannot become two identities for one repo.
+    var p = path.toLowerCase();
+    p = _trim(p, '/');
+    if (p.endsWith('.git')) p = p.substring(0, p.length - 4);
+    while (p.endsWith('/')) {
+      p = p.substring(0, p.length - 1);
+    }
+    if (p.isEmpty) return null;
+    return '${host.toLowerCase()}/$p';
+  }
+
+  /// The authority's host, dropping any `user:token@` userinfo. Split on the
+  /// LAST `@` so an `@` inside a token can't be mistaken for the delimiter.
+  static String _hostOf(String authority) {
+    final at = authority.lastIndexOf('@');
+    return at < 0 ? authority : authority.substring(at + 1);
+  }
+
+  static String _trim(String s, String char) {
+    var out = s;
+    while (out.startsWith(char)) {
+      out = out.substring(1);
+    }
+    while (out.endsWith(char)) {
+      out = out.substring(0, out.length - 1);
+    }
+    return out;
   }
 
   @override

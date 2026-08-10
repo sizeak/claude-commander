@@ -1,3 +1,4 @@
+import 'package:claude_commander_client/pages/clone_repo_page.dart';
 import 'package:claude_commander_client/pages/projects_page.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/src/rust/api/simple.dart'
@@ -40,6 +41,14 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  /// Open the **+** sheet and pick one of its three ways to add a project.
+  Future<void> chooseAddSource(WidgetTester tester, String label) async {
+    await tester.tap(find.byType(FloatingActionButton));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(label));
+    await tester.pumpAndSettle();
+  }
+
   testWidgets('renders the current projects', (tester) async {
     api.projectsResponse = [
       projectInfo(name: 'my-repo', repoPath: '/srv/repos/my-repo'),
@@ -56,14 +65,26 @@ void main() {
     expect(find.textContaining('No projects'), findsOneWidget);
   });
 
+  testWidgets('the + sheet offers all three ways to add a project', (
+    tester,
+  ) async {
+    await pump(tester);
+
+    await tester.tap(find.byType(FloatingActionButton));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Clone from GitHub'), findsOneWidget);
+    expect(find.text('Add existing path'), findsOneWidget);
+    expect(find.text('Scan directory'), findsOneWidget);
+  });
+
   testWidgets('adding a project calls addProject then refreshes', (
     tester,
   ) async {
     await pump(tester);
     final refreshesBefore = api.countOf('workspaceSnapshot');
 
-    await tester.tap(find.byType(FloatingActionButton));
-    await tester.pumpAndSettle();
+    await chooseAddSource(tester, 'Add existing path');
     await enterPathAndConfirm(tester, '/srv/repos/new');
 
     expect(api.countOf('addProject'), 1);
@@ -78,13 +99,22 @@ void main() {
     api.scanDirectoryResponse = const ScanResultDto(added: 2, skipped: 1);
     await pump(tester);
 
-    await tester.tap(find.byTooltip('Scan directory'));
-    await tester.pumpAndSettle();
+    await chooseAddSource(tester, 'Scan directory');
     await enterPathAndConfirm(tester, '/srv/repos');
 
     expect(api.countOf('scanDirectory'), 1);
     expect(api.lastCall('scanDirectory')!.args['path'], '/srv/repos');
     expect(find.textContaining('Added 2, skipped 1'), findsOneWidget);
+  });
+
+  testWidgets('Clone from GitHub pushes the repo picker', (tester) async {
+    api.githubReposResponse = [githubRepo(owner: 'acme', name: 'widget')];
+    await pump(tester);
+
+    await chooseAddSource(tester, 'Clone from GitHub');
+
+    expect(find.byType(CloneRepoPage), findsOneWidget);
+    expect(api.countOf('githubRepos'), 1);
   });
 
   testWidgets('removing a project confirms then calls removeProject', (

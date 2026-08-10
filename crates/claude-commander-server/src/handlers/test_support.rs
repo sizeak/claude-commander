@@ -46,6 +46,11 @@ pub fn test_state(dir: &TempDir) -> AppState {
     // keeps the fixture safe if one ever reaches the store — whose prune
     // *deletes* files — instead of the real OS temp dir.
     config.paste_images_dir = Some(dir.path().join("paste"));
+    // And the same for cloned repositories, where the default is the user's
+    // REAL `~/Projects`: a clone route reached from a test would check a
+    // repository out into the developer's own projects directory. Pin it under
+    // `dir` so the fixture can only ever write inside the temp tree.
+    config.projects_dir = Some(dir.path().join("projects"));
     let config_store = Arc::new(ConfigStore::with_path(
         config,
         dir.path().join("config.toml"),
@@ -80,6 +85,21 @@ pub fn json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
             String::from_utf8_lossy(bytes)
         )
     })
+}
+
+/// Guard: the test fixture must pin the projects directory into the temp dir.
+/// `projects_dir` defaults to the user's REAL `~/Projects`, and the repo-clone
+/// paths write there — so an unpinned fixture would clone into the developer's
+/// own projects directory from `cargo test` / CI. Fails if the knob is dropped.
+#[tokio::test]
+async fn test_state_pins_projects_dir_into_tempdir() {
+    let dir = TempDir::new().unwrap();
+    let state = test_state(&dir);
+    let projects_dir = state.service.read_config().projects_dir().unwrap();
+    assert!(
+        projects_dir.starts_with(dir.path()),
+        "test fixtures must not clone into the real ~/Projects (got {projects_dir:?})"
+    );
 }
 
 /// Guard: the test fixture must NOT emit telemetry. Telemetry is opt-out by

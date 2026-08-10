@@ -47,6 +47,7 @@ use crate::api::{
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 
 pub use error::{BResult, BackendError};
 pub use local::LocalBackend;
@@ -590,8 +591,67 @@ pub trait CommanderBackend: Send + Sync {
     // -- Projects --
 
     async fn add_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+
+    /// Register `path` as a project, or answer with the id of the project already
+    /// registered for it.
+    ///
+    /// The idempotent counterpart to [`Self::add_project`], and the one a
+    /// "register this existing checkout" offer must use — the path it was handed
+    /// is frequently already a project (that is *why* the destination was
+    /// occupied), and `add_project` would register a second entry for the same
+    /// repository.
+    ///
+    /// No default: the dedupe belongs where the projects live, so a backend has to
+    /// route it to its own host rather than inherit an answer composed from a
+    /// snapshot a frontend happens to hold.
+    async fn ensure_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+
     async fn remove_project(&self, id: ProjectId) -> BResult<()>;
     async fn scan_directory(&self, dir: std::path::PathBuf) -> BResult<crate::session::ScanResult>;
+
+    // -- Repository clone --
+    //
+    // No capability flag gates these: both real backends genuinely support them.
+    // A clone runs where the *sessions* run (a project registered on the server
+    // host has to be checked out on the server host), so the local backend clones
+    // locally and a remote backend asks its server to clone — same feature, and
+    // nothing for a frontend to gate on. `list_github_repos` can still *fail* as
+    // `Unavailable` when the host has no `gh`; that is a runtime state a picker
+    // renders, not a static capability.
+
+    /// Every GitHub repo the backend's host can clone, for the repo picker.
+    /// Resolved by `gh` on that host, so its authenticated account decides the
+    /// list — a remote backend shows the *server's* repos, not the operator's.
+    ///
+    /// A host without `gh` fails with [`BackendError::Unavailable`] rather than
+    /// answering an empty list: "install the GitHub CLI" and "this account has no
+    /// repos" are different states and a picker renders them differently.
+    async fn list_github_repos(&self) -> BResult<Vec<GithubRepo>>;
+
+    /// Start cloning a repository into the host's projects directory, answering
+    /// with the created job.
+    ///
+    /// The whole [`CloneJob`] rather than just its id, matching the server's 202
+    /// body: a caller gets the id, the destination and the redacted source label
+    /// in one call and can start polling without a second round trip.
+    ///
+    /// **Its status is not a terminal status** — the clone has only been accepted.
+    /// Every outcome, including a destination that was already occupied, arrives
+    /// through [`Self::clone_job`]; a caller that reads this status as final will
+    /// miss every result.
+    ///
+    /// A refused source (empty, flag-shaped, unsupported scheme, escaping
+    /// destination name) is [`BackendError::InvalidRequest`] on every backend, and
+    /// its message is redacted where it is built, so a credentialed URL cannot
+    /// come back through it.
+    async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob>;
+
+    /// Poll a clone job. `Ok(None)` once it has been pruned (or was never issued)
+    /// — absence rather than an error, so a poll loop can tell "gone" from "the
+    /// backend is broken" and only stop retrying for one of them.
+    ///
+    /// No polling cadence is implied here: a frontend owns the interval.
+    async fn clone_job(&self, id: CloneJobId) -> BResult<Option<CloneJob>>;
 
     // -- Cascade / push-stack --
 
@@ -651,6 +711,7 @@ fn _assert_object_safe(b: Arc<dyn CommanderBackend>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use claude_commander_protocol::github::{CloneSource, CloneStatus};
 
     #[test]
     fn backend_id_local_is_zero() {
@@ -725,11 +786,106 @@ mod tests {
         );
     }
 
+    /// A [`GithubRepo`] with the fields a picker actually reads, for the
+    /// trait-surface round trip below.
+    fn repo(full_name: &str) -> GithubRepo {
+        let (owner, name) = full_name.split_once('/').unwrap();
+        GithubRepo {
+            full_name: full_name.to_string(),
+            owner: owner.to_string(),
+            name: name.to_string(),
+            description: None,
+            private: false,
+            fork: false,
+            archived: false,
+            default_branch: "main".to_string(),
+            clone_url: format!("https://github.com/{full_name}.git"),
+            ssh_url: format!("git@github.com:{full_name}.git"),
+            pushed_at: None,
+        }
+    }
+
+    /// The clone surface has to be reachable through the **trait object** the TUI
+    /// holds — a palette command drives `Arc<dyn CommanderBackend>`, never a
+    /// concrete backend — so this exercises all three methods there: the repo
+    /// list, the start (which answers with the whole job, matching the server's
+    /// 202 body), and the poll that resolves the id it handed back.
+    #[tokio::test]
+    async fn clone_surface_round_trips_through_a_trait_object() {
+        let mock = Arc::new(mock::MockBackend::new("buildbox", empty_snapshot()));
+        mock.set_github_repos(vec![repo("octo/widget")]);
+        let backend: Arc<dyn CommanderBackend> = mock.clone();
+
+        let repos = backend.list_github_repos().await.unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].full_name, "octo/widget");
+
+        let req = CloneRequest {
+            source: CloneSource::Github {
+                full_name: "octo/widget".to_string(),
+            },
+            dest_name: None,
+        };
+        let job = backend.start_clone(req.clone()).await.unwrap();
+        assert!(
+            matches!(job.status, CloneStatus::Running),
+            "a freshly started clone is running, got {:?}",
+            job.status
+        );
+        assert_eq!(mock.clone_requests(), vec![req]);
+
+        // The id the start handed back resolves through the poll method…
+        assert_eq!(backend.clone_job(job.id).await.unwrap(), Some(job.clone()));
+        // …and an id that was never issued is absence, not a failure: a pruned or
+        // bogus job must not read as a transport error.
+        assert_eq!(backend.clone_job(CloneJobId::new()).await.unwrap(), None);
+
+        // The outcome arrives through the *poll*, never through the start's
+        // response — which is why the trait documents that status as non-terminal.
+        let project_id = ProjectId::new();
+        mock.set_clone_status(job.id, CloneStatus::Succeeded { project_id });
+        assert_eq!(
+            backend.clone_job(job.id).await.unwrap().unwrap().status,
+            CloneStatus::Succeeded { project_id }
+        );
+    }
+
+    /// A downed backend has to surface as `Unavailable` on the clone surface too,
+    /// not as an empty repo list — a picker that renders "no repos" for an
+    /// unreachable server is indistinguishable from an empty account.
+    #[tokio::test]
+    async fn clone_surface_reports_a_failing_backend() {
+        let mock = mock::MockBackend::new("buildbox", empty_snapshot());
+        mock.set_failing(true);
+        assert!(matches!(
+            mock.list_github_repos().await.unwrap_err(),
+            BackendError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            mock.start_clone(CloneRequest {
+                source: CloneSource::Github {
+                    full_name: "octo/widget".to_string()
+                },
+                dest_name: None,
+            })
+            .await
+            .unwrap_err(),
+            BackendError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            mock.clone_job(CloneJobId::new()).await.unwrap_err(),
+            BackendError::Unavailable { .. }
+        ));
+    }
+
     #[test]
     fn backend_handle_new_seeds_connecting_view() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut config = crate::config::Config::default();
         config.telemetry.enabled = false;
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it under the temp dir.
+        config.projects_dir = Some(dir.path().join("projects"));
         let config_store = std::sync::Arc::new(crate::config::ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),

@@ -21,6 +21,7 @@ use crate::api::{
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, ScanResult, SessionId};
 use crate::tmux::HeadlessAttach;
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 
 use super::error::BResult;
 use super::run_local::run_local;
@@ -335,6 +336,11 @@ impl CommanderBackend for LocalBackend {
         Ok(run_local(move || async move { svc.add_project(path).await }).await?)
     }
 
+    async fn ensure_project(&self, path: PathBuf) -> BResult<ProjectId> {
+        let svc = self.service.clone();
+        Ok(run_local(move || async move { svc.ensure_project(path).await }).await?)
+    }
+
     async fn remove_project(&self, id: ProjectId) -> BResult<()> {
         let svc = self.service.clone();
         Ok(run_local(move || async move { svc.remove_project(&id).await }).await?)
@@ -343,6 +349,31 @@ impl CommanderBackend for LocalBackend {
     async fn scan_directory(&self, dir: PathBuf) -> BResult<ScanResult> {
         let svc = self.service.clone();
         Ok(run_local(move || async move { svc.scan_directory(&dir).await }).await?)
+    }
+
+    // -- Repository clone --
+    //
+    // No `run_local` here, unlike the project methods above: the `gix` work in
+    // this flow (registering the finished checkout as a project) lives inside the
+    // background job future, which `CloneJobs::spawn` already requires to be
+    // `Send + 'static` (`git/clone_jobs.rs:147-150`) and which routes itself
+    // through `run_local` (`clone_then_register` in `api.rs`). What these three
+    // methods await is a subprocess, a `create_dir_all` and an in-memory map read
+    // — all `Send`, which is what lets these be plain delegations.
+
+    async fn list_github_repos(&self) -> BResult<Vec<GithubRepo>> {
+        Ok(self.service.list_github_repos().await?)
+    }
+
+    async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
+        Ok(self.service.start_clone(req).await?)
+    }
+
+    async fn clone_job(&self, id: CloneJobId) -> BResult<Option<CloneJob>> {
+        // Infallible locally — the registry is in-process, so absence is the only
+        // "failure" and it is `None`. The `BResult` is for a remote backend, whose
+        // poll can fail on the transport before it can report absence.
+        Ok(self.service.clone_job(id).await)
     }
 
     // -- Cascade / push-stack (gix-backed → `run_local`) --
@@ -479,17 +510,21 @@ mod tests {
     use crate::config::{Config, ConfigStore, StateStore};
     use crate::session::{Project, WorktreeSession};
     use crate::telemetry::FrontendInfo;
+    use claude_commander_protocol::github::{CloneSource, CloneStatus};
     use std::sync::Arc;
 
     /// Build a hermetic backend over `TempDir`-backed stores: telemetry off,
-    /// tmux isolated onto a throwaway socket dir (per the project's
-    /// test-isolation rules).
+    /// tmux isolated onto a throwaway socket dir, projects dir pinned under
+    /// `dir` (per the project's test-isolation rules).
     fn backend(dir: &tempfile::TempDir) -> LocalBackend {
         let mut config = Config::default();
         config.telemetry.enabled = false;
         let tmux_tmpdir = dir.path().join("tmux");
         std::fs::create_dir_all(&tmux_tmpdir).unwrap();
         config.tmux_tmpdir = Some(tmux_tmpdir);
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it under `dir`.
+        config.projects_dir = Some(dir.path().join("projects"));
         let config_store = Arc::new(ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),
@@ -683,6 +718,95 @@ mod tests {
             Err(other) => panic!("expected NotFound, got {other:?}"),
             Ok(_) => panic!("expected an error attaching to an unknown session"),
         }
+    }
+
+    // -- Repository clone --
+    //
+    // `list_github_repos` is deliberately untested here: it shells out to `gh`,
+    // which on a developer's authenticated machine would hit the GitHub API. The
+    // parsing and the gh-availability probe are covered in `git::github`; what is
+    // left in the backend is a one-line delegation.
+
+    /// Start → poll → terminal status through the backend seam, network-free: an
+    /// occupied destination is the one outcome `start_clone` reaches *without*
+    /// running `git`, so it exercises the whole local clone surface offline.
+    #[tokio::test]
+    async fn clone_through_the_backend_reports_an_occupied_destination() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let be = backend(&dir);
+        let projects = be.service().read_config().projects_dir().unwrap();
+        // Occupy the destination the source's name derives to, so no clone runs.
+        std::fs::create_dir_all(projects.join("widget")).unwrap();
+
+        let job = be
+            .start_clone(CloneRequest {
+                source: CloneSource::Url {
+                    url: "https://example.invalid/octo/widget.git".to_string(),
+                },
+                dest_name: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(job.dest, projects.join("widget"));
+
+        // The id in that response is pollable through the same trait surface.
+        let mut status = job.status.clone();
+        for _ in 0..2_000 {
+            let polled = be
+                .clone_job(job.id)
+                .await
+                .unwrap()
+                .expect("a job started a moment ago must still be readable");
+            status = polled.status;
+            if !matches!(status, CloneStatus::Running) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            matches!(
+                status,
+                CloneStatus::DestinationExists {
+                    is_git_repo: false,
+                    ..
+                }
+            ),
+            "expected DestinationExists for an occupied dir, got {status:?}"
+        );
+    }
+
+    /// A refused source must classify as a **request** error, the same category a
+    /// remote backend builds from the server's 400 — otherwise the same mistake
+    /// reads as "the backend broke" locally and "you sent something unusable"
+    /// remotely, and a frontend cannot render one message for both.
+    #[tokio::test]
+    async fn a_refused_clone_source_is_an_invalid_request() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let be = backend(&dir);
+        let err = be
+            .start_clone(CloneRequest {
+                // Leading `-`: git would read this as a flag, so the validators
+                // refuse it before any subprocess starts.
+                source: CloneSource::Url {
+                    url: "--upload-pack=evil".to_string(),
+                },
+                dest_name: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidRequest(_)),
+            "expected InvalidRequest, got {err:?}"
+        );
+    }
+
+    /// An id that was never issued (or has been pruned) is absence, not an error:
+    /// a poll loop must be able to tell "gone" from "the backend is broken".
+    #[tokio::test]
+    async fn an_unknown_clone_job_is_absent_not_an_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let be = backend(&dir);
+        assert_eq!(be.clone_job(CloneJobId::new()).await.unwrap(), None);
     }
 
     /// The backend is usable as `Arc<dyn CommanderBackend>` and its futures are

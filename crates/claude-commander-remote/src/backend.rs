@@ -29,6 +29,7 @@ use claude_commander_core::backend::{
 };
 use claude_commander_core::comment::{ApplyOutcome, Comment};
 use claude_commander_core::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::ws::AttachKind as WsAttachKind;
 use uuid::Uuid;
 
@@ -289,6 +290,13 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
+    async fn ensure_project(&self, path: PathBuf) -> BResult<ProjectId> {
+        self.client
+            .ensure_project(path)
+            .await
+            .map_err(into_backend_error)
+    }
+
     async fn remove_project(&self, id: ProjectId) -> BResult<()> {
         self.client
             .remove_project(id)
@@ -308,6 +316,32 @@ impl CommanderBackend for RemoteBackend {
             added: body.added,
             skipped: body.skipped,
         })
+    }
+
+    // -- Repository clone --
+    //
+    // The clone runs on the *server* host: it is the machine whose projects dir
+    // the checkout lands in and whose `gh` account decides the repo list. So these
+    // are plain delegations, with no local fallback to blur which host acted.
+
+    async fn list_github_repos(&self) -> BResult<Vec<GithubRepo>> {
+        self.client.github_repos().await.map_err(into_backend_error)
+    }
+
+    async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
+        // The 202 body *is* a `CloneJob`, so there is nothing to rebuild here —
+        // the trait's return shape was chosen to match it. `req.source` is never
+        // logged: it routinely carries a credential.
+        self.client
+            .start_clone(req)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn clone_job(&self, id: CloneJobId) -> BResult<Option<CloneJob>> {
+        // The client turns the server's 404 into `Ok(None)`, keeping "pruned or
+        // never issued" distinct from a transport failure.
+        self.client.clone_job(id).await.map_err(into_backend_error)
     }
 
     // -- Cascade / push-stack --
@@ -444,6 +478,7 @@ mod tests {
     use claude_commander_core::session::{Project, WorktreeSession};
     use claude_commander_core::telemetry::FrontendInfo;
     use claude_commander_core::tmux::TmuxExecutor;
+    use claude_commander_protocol::github::{CloneSource, CloneStatus};
     use claude_commander_server::{AppState, AuthConfig};
     use claude_commander_test_support::{
         create_test_repo, spawn_server, test_state, tmux_available,
@@ -487,6 +522,9 @@ mod tests {
         let mut config = Config {
             worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
             tmux_tmpdir: Some(tmux_tmpdir),
+            // `projects_dir` defaults to the user's REAL `~/Projects`, which
+            // the repo-clone paths write into. Pin it under `data_dir`.
+            projects_dir: Some(data_dir.path().join("projects")),
             ..Config::default()
         };
         config.telemetry.enabled = false;
@@ -820,6 +858,130 @@ mod tests {
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
         let err = backend
             .paste_image(SessionId::new(), b"not an image".to_vec())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidRequest(_)),
+            "got {err:?}"
+        );
+    }
+
+    // -- Projects --
+
+    /// `ensure_project` is idempotent *across the wire*: registering a path the
+    /// server already knows must answer with the existing id rather than a second
+    /// project for the same checkout.
+    ///
+    /// This is what `add_project` cannot do — it registers unconditionally — and
+    /// the reason the trait carries both. Asserted on the id **and** on the
+    /// server's project list, because an equal id alone would also hold if the
+    /// route had somehow returned the right id while still adding a duplicate.
+    #[tokio::test]
+    async fn ensure_project_is_idempotent_over_http() {
+        let (addr, service, _d, _w) = serve_disabled().await;
+        let (_repo, repo_path) = create_test_repo().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+
+        let first = backend.ensure_project(repo_path.clone()).await.unwrap();
+        let second = backend.ensure_project(repo_path.clone()).await.unwrap();
+        assert_eq!(
+            first, second,
+            "the second ensure must return the id the first created"
+        );
+
+        let projects = service.list_projects().await;
+        let matching: Vec<_> = projects
+            .iter()
+            .filter(|p| p.repo_path == repo_path)
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            matching,
+            vec![first],
+            "exactly one project must exist for the path, got {projects:?}"
+        );
+    }
+
+    // -- Repository clone --
+    //
+    // `list_github_repos` is not exercised over HTTP: the server shells out to
+    // `gh`, so the result would depend on whether the machine running the tests
+    // has it installed and authenticated — and if it does, the call reaches the
+    // GitHub API. The delegation is one line; the parsing lives in core.
+
+    /// Start → poll → terminal status over real HTTP, network-free: an occupied
+    /// destination is the one clone outcome the server reaches without running
+    /// `git`, so it proves the whole remote surface (202 body, poll route,
+    /// terminal status) offline.
+    #[tokio::test]
+    async fn clone_round_trips_over_http() {
+        let (addr, service, _d, _w) = serve_disabled().await;
+        // `test_state` pins the server's projects dir into the temp data dir, so
+        // occupying a destination here cannot touch the real `~/Projects`.
+        let projects = service.read_config().projects_dir().unwrap();
+        std::fs::create_dir_all(projects.join("widget")).unwrap();
+
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let job = backend
+            .start_clone(CloneRequest {
+                source: CloneSource::Url {
+                    url: "https://example.invalid/octo/widget.git".to_string(),
+                },
+                dest_name: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(job.dest, projects.join("widget"));
+
+        let mut status = job.status.clone();
+        for _ in 0..2_000 {
+            let polled = backend
+                .clone_job(job.id)
+                .await
+                .unwrap()
+                .expect("a job started a moment ago must still be readable");
+            status = polled.status;
+            if !matches!(status, CloneStatus::Running) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            matches!(
+                status,
+                CloneStatus::DestinationExists {
+                    is_git_repo: false,
+                    ..
+                }
+            ),
+            "expected DestinationExists for an occupied dir, got {status:?}"
+        );
+    }
+
+    /// The server's 404 for an unknown job must arrive as `Ok(None)`, not an
+    /// error: a poll loop distinguishes "pruned/never existed" from "the link is
+    /// broken", and only one of those should stop it retrying.
+    #[tokio::test]
+    async fn an_unknown_clone_job_is_absent_not_an_error() {
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        assert_eq!(backend.clone_job(CloneJobId::new()).await.unwrap(), None);
+    }
+
+    /// The server's 400 for a refused source arrives as `InvalidRequest` — the
+    /// same category `LocalBackend` produces from core's `CloneSourceRejected`,
+    /// so a frontend renders one message regardless of transport.
+    #[tokio::test]
+    async fn a_refused_clone_source_is_an_invalid_request() {
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let err = backend
+            .start_clone(CloneRequest {
+                source: CloneSource::Url {
+                    url: "--upload-pack=evil".to_string(),
+                },
+                dest_name: None,
+            })
             .await
             .unwrap_err();
         assert!(

@@ -7,21 +7,28 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use claude_commander_protocol::github::{
+    CloneJob, CloneJobId, CloneRequest, CloneSource, GithubRepo, validate_clone_url,
+    validate_dest_name, validate_repo_slug,
+};
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::agent::AgentKind;
+use crate::backend::{RunLocalError, run_local};
 use crate::comment::{
     ApplyOutcome, Comment, CommentStatus, CommentStore, SendDecision, compose_markdown,
     decide_send, reanchor_comments,
 };
 use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
-use crate::error::{Result, SessionError};
+use crate::error::{GitError, Result, SessionError};
 use crate::git::{
-    ComposedDiff, FileDiff, GitBackend, PrCheckResult, compose_review_diff, compute_branch_diff,
-    diff_stat_summary, effective_pr_state, enrich_binary_sizes, is_gh_available, list_worktrees_at,
+    CloneJobs, CloneOutcome, ComposedDiff, FileDiff, GitBackend, PrCheckResult,
+    clone_source_rejected, compose_review_diff, compute_branch_diff, diff_stat_summary,
+    effective_pr_state, enrich_binary_sizes, is_gh_available, list_repos, list_worktrees_at,
     parse_unified_diff, prefer_remote_branch, read_base_blob, read_worktree_file, ref_exists_cli,
+    run_clone,
 };
 use crate::reviewed::ReviewedStore;
 use crate::session::{
@@ -86,6 +93,10 @@ pub struct CommanderService {
     /// [`Self::workspace_snapshot`] polling (~2s cadence) doesn't fork a
     /// subprocess on every poll. See [`Self::cached_tmux_ok`].
     tmux_ok_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
+    /// Running and recently-finished repository clones, started by
+    /// [`Self::start_clone`] and polled through [`Self::clone_job`]. In-memory
+    /// only — see [`CloneJobs`] for why a clone cannot outlive its process.
+    clone_jobs: CloneJobs,
 }
 
 /// Max entries kept in the operation ledger before the oldest are evicted.
@@ -155,6 +166,7 @@ impl CommanderService {
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
+            clone_jobs: CloneJobs::new(),
         }
     }
 
@@ -282,6 +294,126 @@ impl CommanderService {
     pub async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
         self.telemetry.feature("project.scan_directory");
         self.manager.scan_directory(dir).await
+    }
+
+    // -- Repository clone --
+
+    /// Every GitHub repo the authenticated user can clone, for the repo picker.
+    ///
+    /// Failures propagate rather than becoming an empty list — see
+    /// [`crate::git::list_repos`], which also owns the `gh` availability probe.
+    /// The [`Self::gh_available`] cache is deliberately *not* consulted here: it
+    /// is computed once per process, so a user who installs `gh` and reopens the
+    /// picker would keep being told it is missing. This call is user-initiated and
+    /// infrequent, so it can afford a fresh probe.
+    ///
+    /// Bounded by `Config::repo_list_timeout_secs`: `gh api --paginate` is
+    /// open-ended, and an unbounded run leaked a `gh` per abandoned request.
+    /// Overrunning it is [`GitError::RepoListTimedOut`](crate::error::GitError::RepoListTimedOut),
+    /// distinct from a missing `gh`.
+    pub async fn list_github_repos(&self) -> Result<Vec<GithubRepo>> {
+        self.telemetry.feature("github.list_repos");
+        let timeout = Duration::from_secs(self.config_store.read().repo_list_timeout_secs);
+        list_repos(timeout).await
+    }
+
+    /// Start cloning a repository into the projects directory, returning the
+    /// created job — poll it with [`Self::clone_job`] until its status leaves
+    /// [`CloneStatus::Running`](claude_commander_protocol::github::CloneStatus::Running).
+    ///
+    /// **The whole job rather than just its id** because that is what both callers
+    /// need: the server answers `POST /projects/clone` with a 202 carrying this
+    /// body, and the [`CommanderBackend`](crate::backend::CommanderBackend) seam
+    /// mirrors that shape so a TUI gets the id, the destination and the redacted
+    /// label in one call whichever transport it is on. Returning the id alone
+    /// would leave every caller doing the same follow-up read.
+    ///
+    /// **The status in the returned job is not a terminal status.** Every outcome
+    /// — including the occupied destination this method detects before it returns
+    /// — is reported through the job registry, and the spawned future has not been
+    /// scheduled yet, so this reads `Running` essentially always. Use it for the
+    /// id and the destination; take the *outcome* from [`Self::clone_job`].
+    ///
+    /// A repeat call for a destination already being cloned returns the *in-flight*
+    /// job: `CloneJobs::spawn` dedupes by destination, so a double-submit joins the
+    /// running clone rather than starting a second one.
+    ///
+    /// Returns `Err` for what is wrong with the *request* — an unusable source or
+    /// destination name, or a projects directory that cannot be created (plus one
+    /// unreachable internal case noted at the read below). Everything that can only
+    /// go wrong once the clone is running is reported through the job, because a
+    /// clone takes minutes and no caller can wait for it.
+    ///
+    /// Three things happen before a subprocess does:
+    ///
+    /// 1. **The source is validated** (`validate_repo_slug` for a
+    ///    [`CloneSource::Github`] slug, `validate_clone_url` otherwise) — it
+    ///    becomes an argv element, and a rejection message is redacted at
+    ///    construction by [`clone_source_rejected`].
+    /// 2. **The destination name is resolved and checked.** A caller-supplied
+    ///    `dest_name` clears the same bar as a derived one
+    ///    ([`validate_dest_name`]); otherwise a `..` override would escape the
+    ///    projects directory the derived-name rules exist to protect.
+    /// 3. **The destination is pre-flighted.** An occupied path short-circuits to
+    ///    a terminal [`CloneStatus::DestinationExists`] job rather than starting a
+    ///    doomed clone, carrying the `is_git_repo` flag that lets a frontend offer
+    ///    "register the existing checkout" instead of only "pick another name".
+    ///
+    /// [`CloneStatus::DestinationExists`]: claude_commander_protocol::github::CloneStatus::DestinationExists
+    pub async fn start_clone(&self, req: CloneRequest) -> Result<CloneJob> {
+        let dir_name = clone_dir_name(&req)?;
+        let config = self.read_config();
+        let projects_dir = config.projects_dir()?;
+        // `projects_dir()` only *resolves* a path (as `worktrees_dir()` does), so
+        // the first clone on a fresh machine has to create it.
+        std::fs::create_dir_all(&projects_dir).map_err(|e| {
+            GitError::OperationFailed(format!(
+                "could not create projects directory {}: {e}",
+                projects_dir.display()
+            ))
+        })?;
+        let dest = projects_dir.join(dir_name);
+        self.telemetry.feature("clone_project");
+
+        // The label is raw user input; `CloneJobs::spawn` redacts it. Never
+        // logged here — the destination is safe to log, the source is not.
+        let source_label = clone_source_label(&req.source).to_string();
+
+        let id = if let Some(is_git_repo) = occupied_destination(&dest) {
+            debug!("clone destination {} already exists", dest.display());
+            let occupied = dest.clone();
+            self.clone_jobs
+                .spawn(dest, source_label, async move {
+                    CloneOutcome::destination_exists(occupied, is_git_repo)
+                })
+                .await
+        } else {
+            let service = self.clone();
+            let timeout = Duration::from_secs(config.clone_timeout_secs);
+            let job_dest = dest.clone();
+            self.clone_jobs
+                .spawn(dest, source_label, async move {
+                    clone_then_register(service, req.source, job_dest, timeout).await
+                })
+                .await
+        };
+
+        // Unreachable in practice: the registry only misses an id that was never
+        // issued or has been pruned, and pruning is TTL-based on *finished* jobs,
+        // so a job spawned a moment ago is still there. An error rather than an
+        // `expect` because an internal failure is the honest answer if that ever
+        // stops holding — the server renders it as a 500, the backend seam as
+        // `BackendError::Local`.
+        self.clone_job(id).await.ok_or_else(|| {
+            GitError::OperationFailed(format!("clone job {id} vanished before it could be read"))
+                .into()
+        })
+    }
+
+    /// The clone job with this id, as a frontend polls it, or `None` once it has
+    /// been pruned (or never existed).
+    pub async fn clone_job(&self, id: CloneJobId) -> Option<CloneJob> {
+        self.clone_jobs.get(id).await
     }
 
     /// Clear the paused cascade state without merging.
@@ -1069,13 +1201,26 @@ impl CommanderService {
             .await
     }
 
+    /// Register `path` as a project, or answer with the id of the project already
+    /// registered for it.
+    ///
+    /// The idempotent counterpart to [`Self::add_project`], and what both
+    /// frontends' "register this existing checkout" offer calls: the destination
+    /// they hand over is frequently one that *is* already a project, and
+    /// `add_project` would register it a second time.
+    ///
+    /// The lookup is by
+    /// [`repo_identity`](crate::session::repo_identity), not by the
+    /// caller's string — see there for why comparing raw paths silently
+    /// duplicates.
     pub async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
+        let identity = crate::session::repo_identity(&path).await;
         let existing = {
             let state = self.store.read().await;
             state
                 .projects
                 .values()
-                .find(|p| p.repo_path == path)
+                .find(|p| p.repo_path == identity)
                 .map(|p| p.id)
         };
         match existing {
@@ -2773,6 +2918,7 @@ fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
             repo_path: p.repo_path.clone(),
             main_branch: p.main_branch.clone(),
             session_ids: p.worktrees.clone(),
+            origin_url: p.origin_url.clone(),
         })
         .collect()
 }
@@ -2857,9 +3003,134 @@ async fn capture_pane(
     Ok(Some(executor.execute(&args).await?))
 }
 
+// -- Repository clone helpers --
+
+/// The directory name a clone lands in: the caller's `dest_name` when given,
+/// otherwise the name derived from the source.
+///
+/// The **source is validated either way**, before the override is even looked at:
+/// it becomes an argv element regardless of where the directory name comes from,
+/// and that is the hazard that is invisible when it goes wrong.
+fn clone_dir_name(req: &CloneRequest) -> Result<String> {
+    let derived = match &req.source {
+        CloneSource::Github { full_name } => {
+            validate_repo_slug(full_name).map_err(clone_source_rejected)?;
+            // `validate_repo_slug` has just guaranteed exactly one `/`; the
+            // fallback is unreachable rather than a policy.
+            full_name
+                .split_once('/')
+                .map_or(full_name.as_str(), |(_, name)| name)
+                .to_string()
+        }
+        CloneSource::Url { url } => {
+            validate_clone_url(url)
+                .map_err(clone_source_rejected)?
+                .default_dir_name
+        }
+    };
+    match req.dest_name.as_deref() {
+        Some(name) => Ok(validate_dest_name(name)
+            .map_err(clone_source_rejected)?
+            .to_string()),
+        None => Ok(derived),
+    }
+}
+
+/// What to show the user as a clone's source: the slug or the URL, as typed.
+///
+/// Raw user input — every consumer redacts (`CloneJobs::spawn` for the job label,
+/// [`clone_source_rejected`] for an error message), so this must not be logged or
+/// formatted into a message on its own.
+fn clone_source_label(source: &CloneSource) -> &str {
+    match source {
+        CloneSource::Github { full_name } => full_name,
+        CloneSource::Url { url } => url,
+    }
+}
+
+/// `Some(is_git_repo)` when `dest` is already occupied, `None` when it is free.
+///
+/// An `Option` rather than a pair of booleans because `is_git_repo` only means
+/// anything once something is there — which is exactly the shape
+/// `CloneStatus::DestinationExists` needs.
+///
+/// `symlink_metadata`, not `exists()`: a dangling symlink is an occupied path (git
+/// refuses to clone onto one) while `exists()` follows the link and would call it
+/// free. A `.git` entry decides the flag and is tested with `exists()` because it
+/// is a directory in an ordinary checkout and a *file* in a linked worktree or
+/// submodule. A **bare** repo at the destination reads as "occupied, not a repo" —
+/// it has no `.git`, and it is not something a user would want registered as a
+/// project anyway.
+fn occupied_destination(dest: &Path) -> Option<bool> {
+    dest.symlink_metadata().ok()?;
+    Some(dest.join(".git").exists())
+}
+
+/// Clone into `dest`, register the checkout as a project, and report which of the
+/// three terminal outcomes happened.
+///
+/// The fallible steps sit in **one `?`-scoped block with a single cleanup**, so a
+/// step added later (an LFS fetch, a hook install) inherits the
+/// remove-the-partial-clone path instead of repeating it. CLAUDE.md calls this out
+/// as a review-time rule precisely because clippy cannot see it.
+///
+/// `ensure_project` builds a non-`Send` `gix::Repository` and holds it across an
+/// await, so it cannot be driven directly by this `tokio::spawn`ed task;
+/// [`run_local`] hands it to a current-thread runtime on its own thread. Same
+/// reason the server's project handlers do it (`handlers/projects.rs`).
+async fn clone_then_register(
+    service: CommanderService,
+    source: CloneSource,
+    dest: PathBuf,
+    timeout: Duration,
+) -> CloneOutcome {
+    let cloned = async {
+        run_clone(&source, &dest, timeout).await?;
+        let path = dest.clone();
+        run_local(move || async move { service.ensure_project(path).await })
+            .await
+            .map_err(|e| match e {
+                RunLocalError::Inner(err) => err,
+                RunLocalError::WorkerLost => GitError::OperationFailed(
+                    "the worker registering the cloned repository was lost".to_string(),
+                )
+                .into(),
+            })
+    }
+    .await;
+
+    match cloned {
+        Ok(project_id) => CloneOutcome::succeeded(project_id),
+        Err(e) => {
+            remove_partial_clone(&dest);
+            // `CloneOutcome::failed` redacts, so a message built from git's stderr
+            // cannot carry a credential into the registry.
+            CloneOutcome::failed(e.to_string())
+        }
+    }
+}
+
+/// Remove whatever a failed clone left at `dest`, so a retry into the same
+/// directory is not blocked by a half-written checkout.
+///
+/// Only ever called for a destination [`CommanderService::start_clone`] found free
+/// moments earlier, so this can only delete what this clone wrote — the same rule
+/// `run_clone`'s own cleanup follows. It overlaps with that cleanup for a failed
+/// clone (harmless: a missing directory is not an error) and is the *only* cleanup
+/// for a step that fails after the checkout exists.
+fn remove_partial_clone(dest: &Path) {
+    match std::fs::remove_dir_all(dest) {
+        Ok(()) => debug!("removed partial clone at {}", dest.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!("failed to remove partial clone at {}: {e}", dest.display()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use claude_commander_protocol::github::CloneStatus;
+
     use crate::comment::CommentSide;
     use crate::git::PrState;
     use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
@@ -2890,6 +3161,31 @@ mod tests {
             state.sessions.insert(s.id, s);
         }
         state
+    }
+
+    #[test]
+    fn build_project_info_list_projects_origin_url() {
+        // The repo picker badges a row by comparing a project's origin against
+        // the API's clone url, so the persisted value has to reach the wire DTO.
+        // It is projected, never derived here: this is a pure sync projection of
+        // `AppState` on the workspace-poll path, with no repo to open.
+        let mut with_origin = make_project("with-origin");
+        with_origin.origin_url = Some("git@github.com:sizeak/claude-commander.git".to_string());
+        let without_origin = make_project("no-origin");
+
+        let mut state = AppState::new();
+        state.projects.insert(with_origin.id, with_origin.clone());
+        state
+            .projects
+            .insert(without_origin.id, without_origin.clone());
+
+        let infos = build_project_info_list(&state);
+        let find = |id: ProjectId| infos.iter().find(|i| i.id == id).unwrap();
+        assert_eq!(
+            find(with_origin.id).origin_url.as_deref(),
+            Some("git@github.com:sizeak/claude-commander.git")
+        );
+        assert_eq!(find(without_origin.id).origin_url, None);
     }
 
     #[test]
@@ -3193,24 +3489,11 @@ mod tests {
     /// injected one (test-isolation regression).
     #[tokio::test]
     async fn comment_writes_stay_under_injected_data_dir() {
-        use crate::config::storage::AppState as CoreState;
-        use crate::config::{ConfigStore, StateStore};
-
         let dir = tempfile::TempDir::new().unwrap();
-        // Telemetry is opt-out by default with a baked ingest token; disable it
-        // so this test never posts events to the production OpenObserve instance.
-        let mut config = Config::default();
-        config.telemetry.enabled = false;
-        let config_store = Arc::new(ConfigStore::with_path(
-            config,
-            dir.path().join("config.toml"),
-        ));
-        let store = Arc::new(StateStore::with_path(
-            CoreState::default(),
-            dir.path().join("state.json"),
-        ));
-        let frontend = FrontendInfo::new("test", "0.0.0");
-        let service = CommanderService::new(config_store, store, frontend);
+        // Built through the shared helper rather than by hand, so this test
+        // inherits every isolation knob it sets (telemetry off, tmux and
+        // projects dir pinned) instead of having to repeat them.
+        let service = service_with_config(&dir, Config::default());
 
         // Write a comment through the public API.
         let session_id = SessionId::new();
@@ -3250,13 +3533,20 @@ mod tests {
     use crate::config::{ConfigStore, StateStore};
 
     /// Build a hermetic service over TempDir-backed stores with the given
-    /// config. Telemetry is disabled and tmux is isolated onto a throwaway
-    /// socket dir, per the project's test-isolation rules.
+    /// config. Telemetry is disabled, tmux is isolated onto a throwaway socket
+    /// dir, and the projects dir is pinned under `dir`, per the project's
+    /// test-isolation rules. The knobs are applied *after* the caller's config
+    /// arrives, so an explicitly-passed `Config` can't silently lose them.
+    /// Guarded by `service_with_config_pins_projects_dir`.
     fn service_with_config(dir: &tempfile::TempDir, mut config: Config) -> CommanderService {
         config.telemetry.enabled = false;
         let tmux_tmpdir = dir.path().join("tmux");
         std::fs::create_dir_all(&tmux_tmpdir).unwrap();
         config.tmux_tmpdir = Some(tmux_tmpdir);
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it so no service built here can
+        // clone outside the temp tree.
+        config.projects_dir = Some(dir.path().join("projects"));
         let config_store = Arc::new(ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),
@@ -3270,6 +3560,31 @@ mod tests {
 
     fn service(dir: &tempfile::TempDir) -> CommanderService {
         service_with_config(dir, Config::default())
+    }
+
+    /// Guard: the core service helper must pin the projects directory into the
+    /// temp dir. `projects_dir` defaults to the user's REAL `~/Projects` and the
+    /// repo-clone paths write there, so an unpinned helper would check
+    /// repositories out into the developer's own projects directory from
+    /// `cargo test` / CI. The caller-supplied config must not be able to defeat
+    /// the pin either, so this asserts it for an explicitly-passed `Config` too.
+    #[test]
+    fn service_with_config_pins_projects_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for config in [
+            Config::default(),
+            Config {
+                projects_dir: Some(PathBuf::from("/definitely/not/a/temp/dir")),
+                ..Config::default()
+            },
+        ] {
+            let svc = service_with_config(&dir, config);
+            let projects_dir = svc.read_config().projects_dir().unwrap();
+            assert!(
+                projects_dir.starts_with(dir.path()),
+                "core test services must not clone into the real ~/Projects (got {projects_dir:?})"
+            );
+        }
     }
 
     /// Seed one project with one session and return their ids.
@@ -4809,5 +5124,399 @@ mod tests {
             ),
             "shell-pair name should resolve to the session and hit its attach guard, got: {err}"
         );
+    }
+
+    // -- Repository clone (start_clone / clone_job) --
+
+    /// Seed a bare repo with one commit on `main` inside `dir`, network-free, and
+    /// return its **plain local path** — what a user pasting a path into the
+    /// clone box gives us, and what `validate_clone_url` admits absolute local
+    /// paths for.
+    ///
+    /// A second copy of `git::clone`'s fixture rather than a shared one: both live
+    /// in `#[cfg(test)]` modules, so neither is reachable from the other.
+    fn seed_bare_repo(dir: &tempfile::TempDir) -> PathBuf {
+        let remote = dir.path().join("remote.git");
+        let seed = dir.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        run_git(dir.path(), &["init", "--bare", "-b", "main", "remote.git"]);
+        run_git(&seed, &["init", "-b", "main"]);
+        run_git(&seed, &["config", "user.email", "t@t.t"]);
+        run_git(&seed, &["config", "user.name", "t"]);
+        std::fs::write(seed.join("README"), "v1\n").unwrap();
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        run_git(
+            &seed,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run_git(&seed, &["push", "origin", "main"]);
+        remote
+    }
+
+    /// Poll a clone job until it leaves `Running`, bounded so a job that never
+    /// finishes fails the test instead of hanging it.
+    ///
+    /// A short sleep rather than the bare `yield_now` spin `CloneJobs`' own tests
+    /// use: these jobs wait on a `git` **subprocess**, and a yield loop can burn
+    /// its whole iteration budget in milliseconds while the child is still
+    /// starting up. The budget below is ~10s of real time, reached only by a
+    /// genuinely stuck job.
+    async fn await_clone(svc: &CommanderService, id: CloneJobId) -> CloneJob {
+        for _ in 0..2_000 {
+            let job = svc.clone_job(id).await.expect("job disappeared");
+            if !matches!(job.status, CloneStatus::Running) {
+                return job;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("clone job {id} never reached a terminal status");
+    }
+
+    fn url_source(path: &Path) -> CloneSource {
+        CloneSource::Url {
+            url: path.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// The whole point of the flow: a finished clone is a *registered project*,
+    /// checked out under the configured projects dir, not just a directory on
+    /// disk.
+    #[tokio::test]
+    async fn clone_registers_the_result_as_a_project() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&remote),
+                dest_name: None,
+            })
+            .await
+            .unwrap()
+            .id;
+
+        let job = await_clone(&svc, id).await;
+        let CloneStatus::Succeeded { project_id } = job.status else {
+            panic!("{:?}", job.status)
+        };
+        // The destination is derived from the source (`remote.git` → `remote`)
+        // and sits under the pinned projects dir.
+        let expected = svc.read_config().projects_dir().unwrap().join("remote");
+        assert_eq!(job.dest, expected);
+        assert_eq!(
+            std::fs::read_to_string(expected.join("README")).unwrap(),
+            "v1\n"
+        );
+        let projects = svc.list_projects().await;
+        assert!(
+            projects.iter().any(|p| p.id == project_id),
+            "the clone was not registered as a project: {projects:?}"
+        );
+    }
+
+    /// `dest_name` renames the checkout directory; nothing else about the clone
+    /// changes.
+    #[tokio::test]
+    async fn a_destination_name_override_is_honoured() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&remote),
+                dest_name: Some("renamed".to_string()),
+            })
+            .await
+            .unwrap()
+            .id;
+
+        let job = await_clone(&svc, id).await;
+        assert!(matches!(job.status, CloneStatus::Succeeded { .. }));
+        assert_eq!(
+            job.dest,
+            svc.read_config().projects_dir().unwrap().join("renamed")
+        );
+    }
+
+    /// An occupied destination is a *terminal job*, not a started clone: the
+    /// frontend gets `DestinationExists` with the flag that decides whether the
+    /// sensible offer is "register the existing checkout" or "pick another name".
+    #[tokio::test]
+    async fn an_occupied_destination_short_circuits_without_cloning() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+        let projects_dir = svc.read_config().projects_dir().unwrap();
+
+        // A plain directory with a file in it: occupied, not a repo.
+        let plain = projects_dir.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("precious"), "mine\n").unwrap();
+
+        // An existing git checkout at the destination.
+        let checkout = projects_dir.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        run_git(&checkout, &["init", "-b", "main"]);
+
+        for (name, is_git_repo) in [("plain", false), ("checkout", true)] {
+            let id = svc
+                .start_clone(CloneRequest {
+                    source: url_source(&remote),
+                    dest_name: Some(name.to_string()),
+                })
+                .await
+                .unwrap()
+                .id;
+            let job = await_clone(&svc, id).await;
+            assert_eq!(
+                job.status,
+                CloneStatus::DestinationExists {
+                    dest: projects_dir.join(name),
+                    is_git_repo
+                },
+                "name: {name}"
+            );
+        }
+
+        // Nothing was cloned over either directory, and no project was created.
+        assert_eq!(
+            std::fs::read_to_string(plain.join("precious")).unwrap(),
+            "mine\n"
+        );
+        assert!(!plain.join(".git").exists());
+        assert!(svc.list_projects().await.is_empty());
+    }
+
+    /// A failed clone must leave nothing behind, so a retry into the same
+    /// directory is not blocked by a half-written checkout.
+    #[tokio::test]
+    async fn a_failed_clone_leaves_no_partial_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&dir.path().join("does-not-exist")),
+                dest_name: None,
+            })
+            .await
+            .unwrap()
+            .id;
+
+        let job = await_clone(&svc, id).await;
+        let CloneStatus::Failed { message } = &job.status else {
+            panic!("{:?}", job.status)
+        };
+        // git's own message, which is already phrased for a human.
+        assert!(message.contains("does not exist"), "unhelpful: {message}");
+        assert!(
+            !job.dest.exists(),
+            "a failed clone left {} behind",
+            job.dest.display()
+        );
+        assert!(svc.list_projects().await.is_empty());
+    }
+
+    /// The cleanup is *shared*, which is the whole reason clone-then-register is
+    /// one `?`-scoped block: a step that fails **after** the checkout exists has to
+    /// remove it too, or a retry hits `DestinationExists` on a directory nothing
+    /// knows about.
+    ///
+    /// Registration is made to fail by putting a *directory* where `state.json`
+    /// belongs, so every persist errors — the one failure that can be injected
+    /// after a clone has genuinely succeeded (`GitBackend::discover` and
+    /// `detect_main_branch` both cope with whatever a real clone produces,
+    /// including an empty repo).
+    #[tokio::test]
+    async fn a_failure_after_the_clone_removes_the_checkout_too() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("state.json")).unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&remote),
+                dest_name: None,
+            })
+            .await
+            .unwrap()
+            .id;
+
+        let job = await_clone(&svc, id).await;
+        assert!(
+            matches!(job.status, CloneStatus::Failed { .. }),
+            "{:?}",
+            job.status
+        );
+        assert!(
+            !job.dest.exists(),
+            "a checkout survived a failure after the clone: {}",
+            job.dest.display()
+        );
+    }
+
+    /// Validation happens before a job exists, so a doomed request is an error
+    /// the caller sees immediately rather than a job it has to poll.
+    #[tokio::test]
+    async fn an_invalid_source_is_rejected_before_a_job_is_created() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        for source in [
+            CloneSource::Url {
+                url: "ftp://example.com/o/r".to_string(),
+            },
+            // A leading `-` would be read by git as an option, not a source.
+            CloneSource::Url {
+                url: "--upload-pack=evil".to_string(),
+            },
+            CloneSource::Github {
+                full_name: "not-a-slug".to_string(),
+            },
+        ] {
+            assert!(
+                svc.start_clone(CloneRequest {
+                    source: source.clone(),
+                    dest_name: None,
+                })
+                .await
+                .is_err(),
+                "accepted {source:?}"
+            );
+        }
+        // Nothing landed in the projects dir, and no job is pollable.
+        let projects_dir = svc.read_config().projects_dir().unwrap();
+        assert!(!projects_dir.join("r").exists());
+    }
+
+    /// A caller-supplied `dest_name` gets the same directory-name rules as a
+    /// derived one — otherwise `..` would escape the projects dir entirely.
+    #[tokio::test]
+    async fn an_unsafe_destination_name_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+        let projects_dir = svc.read_config().projects_dir().unwrap();
+
+        for name in ["..", "../escaped", "sub/dir", "", "-flag"] {
+            assert!(
+                svc.start_clone(CloneRequest {
+                    source: url_source(&remote),
+                    dest_name: Some(name.to_string()),
+                })
+                .await
+                .is_err(),
+                "accepted dest_name {name:?}"
+            );
+        }
+        // The one that would have escaped: the parent of the projects dir is
+        // untouched.
+        assert!(!projects_dir.parent().unwrap().join("escaped").exists());
+    }
+
+    /// The security property carried through this whole feature: a pasted
+    /// `https://user:token@…` must not reach an error string, a log line or a job
+    /// label. `start_clone` builds one user-facing string from the source (the
+    /// rejection message), and it must be redacted.
+    #[tokio::test]
+    async fn a_credentialed_source_never_reaches_an_error_or_a_job() {
+        const SECRET: &str = "ghp_s3cr3tt0ken";
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        // A URL pasted into the slug field: always malformed, and the one path
+        // that echoes the caller's raw input back.
+        let err = svc
+            .start_clone(CloneRequest {
+                source: CloneSource::Github {
+                    full_name: format!("https://sizeak:{SECRET}@github.com/o/r"),
+                },
+                dest_name: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains(SECRET), "token leaked: {err}");
+        assert!(
+            !format!("{err:?}").contains(SECRET),
+            "token leaked: {err:?}"
+        );
+
+        // A credentialed URL that *validates*: the job it creates is polled,
+        // rendered and logged, so its label must be redacted too. Network-free —
+        // git resolves a `file://` source on disk, and this one is not there, so
+        // the clone fails locally and its message is checked as well.
+        let missing = dir.path().join("missing.git");
+        let id = svc
+            .start_clone(CloneRequest {
+                source: CloneSource::Url {
+                    url: format!("file://sizeak:{SECRET}@{}", missing.display()),
+                },
+                dest_name: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let job = svc.clone_job(id).await.unwrap();
+        assert_eq!(
+            job.source_label,
+            format!("file://***@{}", missing.display())
+        );
+        assert!(
+            !format!("{job:?}").contains(SECRET),
+            "token leaked: {job:?}"
+        );
+
+        // And the failure message git hands back, which quotes the source.
+        let job = await_clone(&svc, id).await;
+        assert!(
+            matches!(job.status, CloneStatus::Failed { .. }),
+            "{:?}",
+            job.status
+        );
+        assert!(
+            !format!("{job:?}").contains(SECRET),
+            "token leaked: {job:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_clone_job_id_is_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        assert!(svc.clone_job(CloneJobId::new()).await.is_none());
+    }
+
+    /// The projects directory is created on demand: `Config::projects_dir` only
+    /// *resolves* a path (matching `worktrees_dir`), so a first clone on a fresh
+    /// machine has nowhere to land unless `start_clone` creates it.
+    #[tokio::test]
+    async fn start_clone_creates_the_projects_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+        let projects_dir = svc.read_config().projects_dir().unwrap();
+        assert!(
+            !projects_dir.exists(),
+            "fixture pre-created the projects dir"
+        );
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&remote),
+                dest_name: None,
+            })
+            .await
+            .unwrap()
+            .id;
+
+        assert!(projects_dir.exists());
+        assert!(matches!(
+            await_clone(&svc, id).await.status,
+            CloneStatus::Succeeded { .. }
+        ));
     }
 }
