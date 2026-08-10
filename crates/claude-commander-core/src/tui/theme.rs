@@ -217,6 +217,18 @@ pub struct ReviewPalette {
     /// Selection highlight, matching the session list.
     pub selection_bg: Color,
     pub selection_fg: Option<Color>,
+    /// Selection highlight for the file list while focus sits in the diff body:
+    /// the focused selection, background *and* foreground, muted toward the
+    /// surface. The cursor row keeps a highlight at all times — without one
+    /// there is nothing on screen saying which file the body is showing — and
+    /// muting the whole selection keeps "which pane has the keys" readable.
+    ///
+    /// Both halves move together deliberately. A theme is free to carry its
+    /// selection mostly in the foreground (LCARS' band is `Rgb(36, 24, 9)`,
+    /// barely off black, under tan text), so muting only the background would
+    /// erase the row's only signal on exactly those themes.
+    pub selection_bg_unfocused: Color,
+    pub selection_fg_unfocused: Option<Color>,
     /// Subtle background band laid across file-tree rows marked reviewed, so a
     /// "read" file is obvious at a glance beyond the ` ✓` check alone.
     pub reviewed_bg: Color,
@@ -369,6 +381,21 @@ impl Theme {
             ColorMode::Indexed => Color::Indexed(22),
             ColorMode::Basic => Color::Reset,
         };
+        // The unfocused file list's highlight: the selection at 70% strength,
+        // both halves scaled together so the rule is simply "the same row,
+        // quieter". Only true-color can express that; below it the palette
+        // keeps the full selection (the pane border still marks focus) rather
+        // than emitting an RGB escape the terminal would render as something
+        // arbitrary.
+        const UNFOCUSED: f32 = 0.7;
+        let (selection_bg_unfocused, selection_fg_unfocused) = match self.mode {
+            ColorMode::TrueColor => (
+                toward_surface(self.selection_bg, UNFOCUSED, self.appearance),
+                self.selection_fg
+                    .map(|fg| toward_surface(fg, UNFOCUSED, self.appearance)),
+            ),
+            ColorMode::Indexed | ColorMode::Basic => (self.selection_bg, self.selection_fg),
+        };
         // Named theme bands for the review diff view.
         let context_bg = self.diff_expand_bg;
         let hunk_header_bg = self.diff_hunk_header_bg;
@@ -395,6 +422,8 @@ impl Theme {
             border_unfocused: self.border_unfocused,
             selection_bg: self.selection_bg,
             selection_fg: self.selection_fg,
+            selection_bg_unfocused,
+            selection_fg_unfocused,
             reviewed_bg,
             context_bg,
             hunk_header_bg,
@@ -1062,8 +1091,34 @@ pub fn fill_color(base: Color, strength: f32, appearance: Appearance) -> Color {
     let (r, g, b) = color_to_approx_rgb(base);
     let (r, g, b) = (r as f32, g as f32, b as f32);
     let mean = (r + g + b) / 3.0;
-    // The surface the fill is blended against: black behind light text, white
-    // behind dark text.
+    let saturate = |c: f32| (mean + (c - mean) * SAT).clamp(0.0, 255.0);
+    blend_to_surface(
+        [saturate(r), saturate(g), saturate(b)],
+        strength,
+        appearance,
+    )
+}
+
+/// Scale a colour *toward the surface* by `strength`, leaving its hue alone:
+/// `0.0` is the surface itself, `1.0` the colour unchanged.
+///
+/// The muting half of [`fill_color`], for colours that are already the shade
+/// they want to be — a selection band that must read as present but inactive,
+/// say — and would only be muddied by that function's saturation boost.
+pub fn toward_surface(color: Color, strength: f32, appearance: Appearance) -> Color {
+    let (r, g, b) = color_to_approx_rgb(color);
+    blend_to_surface([r as f32, g as f32, b as f32], strength, appearance)
+}
+
+/// Scale an RGB triple toward the terminal's surface by `strength`.
+///
+/// Which surface is the whole point. Scaling toward black is right on a dark
+/// terminal and wrong on a light one, where it produces a near-black band under
+/// dark text — legible only by accident. `appearance` picks the end to scale
+/// toward, so the same `strength` means "a fifth of the way from the background
+/// to this colour" on both.
+fn blend_to_surface(rgb: [f32; 3], strength: f32, appearance: Appearance) -> Color {
+    // Black behind light text, white behind dark text.
     let surface = match appearance {
         Appearance::Dark => 0.0,
         Appearance::Light => 255.0,
@@ -1071,11 +1126,8 @@ pub fn fill_color(base: Color, strength: f32, appearance: Appearance) -> Color {
         // behaviour rather than failing to build.
         _ => 0.0,
     };
-    let ch = |c: f32| {
-        let saturated = (mean + (c - mean) * SAT).clamp(0.0, 255.0);
-        (surface + (saturated - surface) * strength) as u8
-    };
-    Color::Rgb(ch(r), ch(g), ch(b))
+    let ch = |c: f32| (surface + (c - surface) * strength) as u8;
+    Color::Rgb(ch(rgb[0]), ch(rgb[1]), ch(rgb[2]))
 }
 
 /// Scale a color's brightness toward black by the given factor (0.0 = black, 1.0 = unchanged).
@@ -1582,6 +1634,80 @@ mod tests {
             fill_color(red, 1.0, Appearance::Light),
             "at full strength the surface no longer contributes"
         );
+    }
+
+    /// Muting keeps the hue and moves toward *the terminal's* surface — darker
+    /// on a dark theme, lighter on a light one. Scaling toward black on both
+    /// would put a near-black band under a light theme's dark text.
+    #[test]
+    fn muting_moves_toward_the_terminal_surface() {
+        let selection = Color::Rgb(69, 71, 90);
+        let Color::Rgb(dr, _, db) = toward_surface(selection, 0.7, Appearance::Dark) else {
+            panic!("toward_surface always returns Rgb");
+        };
+        assert!(dr < 69 && db < 90, "dark: muted band must darken");
+        let Color::Rgb(lr, _, lb) = toward_surface(selection, 0.7, Appearance::Light) else {
+            panic!("toward_surface always returns Rgb");
+        };
+        assert!(lr > 69 && lb > 90, "light: muted band must lighten");
+        assert_eq!(
+            toward_surface(selection, 1.0, Appearance::Dark),
+            selection,
+            "full strength is the colour itself"
+        );
+    }
+
+    /// The unfocused file-list highlight is the selection, muted — present (so
+    /// the row being read stays identifiable) but not the focused row.
+    #[test]
+    fn unfocused_selection_is_a_muted_selection() {
+        let theme = Theme::truecolor();
+        let pal = theme.review_palette();
+        assert_eq!(pal.selection_bg, theme.selection_bg);
+        assert_ne!(pal.selection_bg_unfocused, pal.selection_bg);
+        assert_ne!(
+            pal.selection_bg_unfocused,
+            Color::Reset,
+            "the unfocused cursor row must still be banded"
+        );
+        assert_ne!(
+            pal.selection_fg_unfocused, pal.selection_fg,
+            "the foreground is muted too, not dropped or left at full strength"
+        );
+        assert!(pal.selection_fg_unfocused.is_some());
+        // Below true-color the palette can't express a weaker shade, so it
+        // keeps the full selection rather than emitting an RGB escape.
+        let indexed = Theme::for_color_mode(ColorMode::Indexed).review_palette();
+        assert_eq!(indexed.selection_bg_unfocused, indexed.selection_bg);
+        assert_eq!(indexed.selection_fg_unfocused, indexed.selection_fg);
+    }
+
+    /// Every built-in preset must still show its unfocused cursor row: on a
+    /// theme whose band is already near-black (LCARS: `Rgb(36, 24, 9)`) the
+    /// muted background alone is not a signal, so the muted *foreground* has to
+    /// stay well clear of the surface. Guards the whole preset list, since the
+    /// failure is invisible on the themes that carry selection in the band.
+    #[test]
+    fn every_preset_keeps_a_visible_unfocused_selection() {
+        for preset in [
+            "truecolor",
+            "monokai-dimmed",
+            "zedokai",
+            "rose-pine",
+            "lcars",
+        ] {
+            let theme = Theme::from_preset(preset).expect("preset name from `from_preset`'s docs");
+            let pal = theme.review_palette();
+            let Some(Color::Rgb(r, g, b)) = pal.selection_fg_unfocused else {
+                panic!("{preset}: truecolor presets all set an RGB selection foreground");
+            };
+            let level = r.max(g).max(b);
+            assert!(
+                level > 96,
+                "{preset}: unfocused row text ({r}, {g}, {b}) is too close to the \
+                 surface to read as selected"
+            );
+        }
     }
 
     /// The role → colour mapping the review view renders every row through.
