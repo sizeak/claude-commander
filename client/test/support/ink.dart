@@ -68,9 +68,43 @@ Future<Color> pixelAt(WidgetTester tester, Offset point) async {
   );
 }
 
-/// Rasterises the [inkBoundary] repaint boundary once, so [inkCentre] and
-/// [pixelAt] share the same `toImage`/`toByteData` dance rather than each
-/// repeating it.
+/// The bounding box of everything inside [rect] that is not [fill] — in the
+/// same coordinates `tester.getRect` reports.
+///
+/// A box rather than [inkCentre]'s weighted centroid, and the two answer
+/// different questions. A centroid moves with the glyph mass of the particular
+/// word ('SHELL' and 'KILL' do not balance the same way), which is exactly what
+/// you want when asking "is this glyph centred in its block" and exactly what
+/// you do not want when asking "where does a typeface put its capitals inside a
+/// line box". Only the box isolates the second.
+///
+/// Rasterised at one image pixel per logical pixel, so the answer is quantised
+/// to half a logical pixel — do not assert on it more tightly than that.
+Future<Rect> inkBounds(WidgetTester tester, Rect rect, Color fill) async {
+  final raster = await _rasterise(tester);
+  final local = rect.shift(-raster.origin);
+  var top = -1.0, bottom = -1.0, left = -1.0, right = -1.0;
+  for (var y = local.top.ceil(); y < local.bottom.floor(); y++) {
+    for (var x = local.left.ceil(); x < local.right.floor(); x++) {
+      final i = (y * raster.image.width + x) * 4;
+      final differs =
+          (raster.data.getUint8(i) - (fill.r * 255)).abs() > 16 ||
+          (raster.data.getUint8(i + 1) - (fill.g * 255)).abs() > 16 ||
+          (raster.data.getUint8(i + 2) - (fill.b * 255)).abs() > 16;
+      if (!differs) continue;
+      if (top < 0) top = y.toDouble();
+      bottom = y.toDouble();
+      if (left < 0 || x < left) left = x.toDouble();
+      if (x > right) right = x.toDouble();
+    }
+  }
+  expect(top, isNonNegative, reason: 'nothing was painted over the fill');
+  return Rect.fromLTRB(left, top, right + 1, bottom + 1).shift(raster.origin);
+}
+
+/// Rasterises the [inkBoundary] repaint boundary once, so [inkCentre],
+/// [inkBounds] and [pixelAt] share the same `toImage`/`toByteData` dance rather
+/// than each repeating it.
 Future<({ui.Image image, ByteData data, Offset origin})> _rasterise(
   WidgetTester tester,
 ) async {

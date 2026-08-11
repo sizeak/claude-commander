@@ -171,16 +171,27 @@ class ChromeElbow extends StatelessWidget {
           // so accessibility scaling still applies — just bounded.
           : MediaQuery.withClampedTextScaling(
               maxScaleFactor: kElbowMaxTextScale,
-              child: Text(
-                label!,
-                textAlign: TextAlign.right,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: elbowLabelStyle(
-                  t,
-                  size: labelSize,
-                  weight: labelWeight,
-                  color: labelColor ?? t.canvas,
+              // Lifted by the typeface's own cap drop, and only where the label
+              // claims to be vertically centred — an edge-aligned one is not.
+              // A `Transform` rather than padding: this must move the glyphs
+              // without changing the block's height, which several tests and
+              // every golden pin.
+              child: Transform.translate(
+                offset: Offset(
+                  0,
+                  labelAlignment.y == 0 ? -labelSize * t.capInkDrop : 0,
+                ),
+                child: Text(
+                  label!,
+                  textAlign: TextAlign.right,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: elbowLabelStyle(
+                    t,
+                    size: labelSize,
+                    weight: labelWeight,
+                    color: labelColor ?? t.canvas,
+                  ),
                 ),
               ),
             ),
