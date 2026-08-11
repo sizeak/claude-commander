@@ -69,12 +69,17 @@ void main() {
 
     expect(tester.getRect(find.byType(ChromeElbow).first).top, 0);
     expect(tester.getRect(find.byType(ChromeElbowCap)).top, 0);
-    // 74 and 16 are their unbled heights — the rail's identifier block (this
-    // route cannot pop, so it carries the code rather than a back affordance)
-    // and the content column's cap. Growing by exactly the inset is only true
-    // once `_rail`/`_content` pass the bleed down to them.
+    // 74 is the rail's identifier block's unbled height (this route cannot
+    // pop, so it carries the code rather than a back affordance); growing by
+    // exactly the inset on top of it is only true once `_rail` passes the
+    // bleed down to it. The cap does not grow off its own unbled height (16)
+    // the same way — bled, it swaps to the fixed `kElbowCapBledHeight` instead
+    // — so its expected height is that plus the inset, not `16 + 24`.
     expect(tester.getSize(find.byType(ChromeElbow).first).height, 74 + 24);
-    expect(tester.getSize(find.byType(ChromeElbowCap)).height, 16 + 24);
+    expect(
+      tester.getSize(find.byType(ChromeElbowCap)).height,
+      kElbowCapBledHeight + 24,
+    );
   });
 
   // "Extend the fill, hold the label": the identifier is bottom-aligned in its

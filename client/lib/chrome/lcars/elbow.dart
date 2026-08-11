@@ -170,20 +170,45 @@ class ChromeElbow extends StatelessWidget {
   }
 }
 
-/// [ChromeElbowCap]'s default height. Public so a caller that needs to fill
-/// in behind the cap — the rail/content gutter's seam-filler, in particular —
-/// can match it without a second hardcoded `16`.
+/// [ChromeElbowCap]'s height when unbled — the desktop, tablet and
+/// zero-inset shape. Every existing golden depends on this exact value, so it
+/// stays fixed; only the *bled* cap's height moved away from it, to
+/// [kElbowCapBledHeight].
 const kElbowCapHeight = 16.0;
+
+/// The bled cap's own height, added to the inset it bleeds into — see
+/// [elbowCapHeight]. Deliberately independent of [kElbowCapHeight]: the bled
+/// cap used to add the *unbled* height to the inset (`inset + 16`), which on
+/// a Pixel 8a's 46dp status-bar inset (devicePixelRatio 2.625) produced a
+/// 62dp band — 35% taller than the status bar itself, and read on device as
+/// an oversized slab. The user asked for the band to stop essentially where
+/// the status bar does; measured on a Pixel 8a, 1dp here gives a 47.2dp band
+/// against the 46dp inset — a 1.1dp overhang.
+const kElbowCapBledHeight = 1.0;
+
+/// How tall a cap draws given its [bleed]: [unbledHeight] when there is none,
+/// [kElbowCapBledHeight] added to the inset once there is.
+///
+/// The rail/content gutter's seam fill (`lcars_chrome.dart`'s `_railGutter`)
+/// has to end exactly where the cap beside it does, so it calls this same
+/// function rather than repeating the arithmetic — there is only one
+/// expression that produces either height, so the two cannot independently
+/// drift apart.
+double elbowCapHeight(double unbledHeight, EdgeInsets bleed) =>
+    bleed.top > 0 ? bleed.vertical + kElbowCapBledHeight : unbledHeight;
 
 /// The short horizontal bar that caps the top of an LCARS content column,
 /// closing the bracket the rail opens. Rounded on its bottom-left so it flows
 /// out of the rail's top elbow.
 class ChromeElbowCap extends StatelessWidget {
   final Color color;
+
+  /// The cap's height when unbled. Ignored once [bleed] has a top inset —
+  /// see [elbowCapHeight].
   final double height;
 
-  /// Bezel this cap eats; added straight to its height. It carries no content,
-  /// so there is nothing to compensate.
+  /// Bezel this cap eats. It carries no content, so there is nothing to
+  /// compensate — see [elbowCapHeight] for how it changes the cap's height.
   final EdgeInsets bleed;
 
   const ChromeElbowCap({
@@ -197,7 +222,7 @@ class ChromeElbowCap extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
     return Container(
-      height: height + bleed.vertical,
+      height: elbowCapHeight(height, bleed),
       decoration: BoxDecoration(
         color: color,
         // A smaller radius than a rail elbow: the deck caps content columns at

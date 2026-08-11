@@ -231,11 +231,16 @@ void main() {
       // bleed reached anything.
       expect(tester.getRect(find.byType(ChromeElbowCap)).top, 0);
       expect(tester.getRect(find.byType(ChromeElbow).first).top, 0);
-      // These two are what actually pin the bleed: the cap and the identifier
-      // block grow by exactly the top inset (16 and 74 are their unbled
-      // heights), which is only true once `_viewContent`/`_viewRail` pass
-      // `bleed` through to them.
-      expect(tester.getSize(find.byType(ChromeElbowCap)).height, 16 + 24);
+      // These two are what actually pin the bleed. The identifier block grows
+      // by exactly the top inset on top of its unbled height (74), which is
+      // only true once `_viewRail` passes `bleed` through to it. The cap's
+      // bled height is not its unbled height (16) plus the inset — it swaps
+      // to the fixed 1dp bled height instead, so this is `kElbowCapBledHeight`
+      // plus the inset rather than `16 + 24`.
+      expect(
+        tester.getSize(find.byType(ChromeElbowCap)).height,
+        kElbowCapBledHeight + 24,
+      );
       expect(tester.getRect(find.byType(ChromeElbow).first).height, 74 + 24);
     });
 
