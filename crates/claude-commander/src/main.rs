@@ -174,11 +174,7 @@ fn raise_fd_limit() {
 fn raise_fd_limit() {}
 
 /// Execute async PTY-based attach to a tmux session
-async fn execute_attach(
-    session_name: &str,
-    editor_triggers: Vec<Vec<u8>>,
-    switcher_revive: Option<claude_commander_core::tmux::SwitcherRevive>,
-) {
+async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
     // CLI `attach` resolves a Claude session by title/ID, never a shell. The
     // review toggle has no standalone UI here, so it's disabled (empty triggers).
     // Voice input needs the TUI's conversation runtime, so it's disabled here too.
@@ -190,7 +186,6 @@ async fn execute_attach(
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         true,
-        switcher_revive,
     )
     .await
     {
@@ -198,7 +193,11 @@ async fn execute_attach(
             AttachResult::Detached
             | AttachResult::SwitchToShell
             | AttachResult::SwitchToReview
-            | AttachResult::OpenEditor => {
+            | AttachResult::OpenEditor
+            // The CLI attach sets `switcher_enabled: false`, so Ctrl+Space
+            // reaches the pane and this never fires; it is here so adding a
+            // frontend-serviced result can't silently fall through.
+            | AttachResult::OpenSwitcher => {
                 info!("Detached from session");
             }
             AttachResult::SessionEnded => {
@@ -229,7 +228,8 @@ async fn execute_remote_attach(
             AttachResult::Detached
             | AttachResult::SwitchToShell
             | AttachResult::SwitchToReview
-            | AttachResult::OpenEditor => info!("Detached from remote session"),
+            | AttachResult::OpenEditor
+            | AttachResult::OpenSwitcher => info!("Detached from remote session"),
             AttachResult::SessionEnded => info!("Remote session ended"),
             AttachResult::Error(e) => eprintln!("Attach error: {e}"),
         },
@@ -575,16 +575,7 @@ async fn main() -> Result<()> {
                     match claude_commander_core::cli::find_session(&app_state, &session) {
                         Some(s) => {
                             let tmux_name = s.tmux_session_name.clone();
-                            // Give the Ctrl+Space switcher revive-on-switch; a service
-                            // construction failure just degrades to switching without
-                            // reviving, as before.
-                            let revive = claude_commander_core::api::CommanderService::for_cli(
-                                config,
-                                frontend(),
-                            )
-                            .ok()
-                            .map(|svc| svc.switcher_revive_hook());
-                            execute_attach(&tmux_name, triggers, revive).await;
+                            execute_attach(&tmux_name, triggers).await;
                         }
                         None => {
                             eprintln!("Session not found: {}", session);
@@ -608,14 +599,7 @@ async fn main() -> Result<()> {
             {
                 Ok(name) => {
                     let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
-                    // Best-effort revive hook for the Ctrl+Space switcher: the
-                    // commander must stay usable even when state.json is
-                    // unreadable, so a `for_cli` failure means no hook.
-                    let revive =
-                        claude_commander_core::api::CommanderService::for_cli(config, frontend())
-                            .ok()
-                            .map(|svc| svc.switcher_revive_hook());
-                    execute_attach(&name, triggers, revive).await;
+                    execute_attach(&name, triggers).await;
                 }
                 Err(
                     e @ claude_commander_core::Error::Session(
@@ -650,11 +634,6 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
-        }
-
-        Some(Commands::PickSession { out, current }) => {
-            // No logging — the popup terminal is the picker's UI.
-            claude_commander_core::picker::run_session_picker(&out, current.as_deref())?;
         }
 
         Some(Commands::Config { init }) => {

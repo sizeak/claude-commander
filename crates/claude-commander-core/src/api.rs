@@ -595,7 +595,9 @@ impl CommanderService {
     /// session is revived (agent resumed, status bar reconfigured) and
     /// `last_attached_at` is stamped for MRU ordering. Returns the primary
     /// tmux name to attach or switch to. Used by the in-session Ctrl+Space
-    /// switcher, whose picker knows sessions only by tmux name.
+    /// switcher, which reaches a local session by `tmux switch-client` and so
+    /// never goes through the backend's `attach` (where that work usually
+    /// happens).
     pub async fn ensure_attachable_by_tmux_name(&self, tmux_name: &str) -> Result<String> {
         let session_id = {
             let state = self.store.read().await;
@@ -610,18 +612,6 @@ impl CommanderService {
         let name = self.manager.ensure_attachable(&id).await?;
         self.mark_attached(&id).await?;
         Ok(name)
-    }
-
-    /// Wrap this service as the [`crate::tmux::SwitcherRevive`] hook the
-    /// attach loop invokes before `tmux switch-client`, so the in-session
-    /// switcher revives a dead pick the same way the tree-view attach path
-    /// does (via [`Self::ensure_attachable_by_tmux_name`]).
-    pub fn switcher_revive_hook(&self) -> crate::tmux::SwitcherRevive {
-        let service = self.clone();
-        Arc::new(move |name: String| {
-            let service = service.clone();
-            Box::pin(async move { service.ensure_attachable_by_tmux_name(&name).await })
-        })
     }
 
     /// Store a pasted image for a remote session and inject its file path into

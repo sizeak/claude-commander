@@ -3785,14 +3785,9 @@ async fn attach_target_backend_routes_to_session_owner() {
         kind: crate::backend::AttachKind::Agent,
     };
     assert_eq!(app.attach_target_backend(&remote_target), BackendId(1));
-    assert!(
-        !app.backend(BackendId(1))
-            .unwrap()
-            .backend
-            .capabilities()
-            .switcher_popup,
-        "remote backend has no in-session switcher"
-    );
+    // No switcher capability is asserted here any more: the TUI draws the
+    // in-session switcher itself, over the pane, so unlike the `display-popup`
+    // picker it replaced it is available on every backend.
 
     // A name-only target (commander / project shell) is local.
     let local_target = AttachTarget::LocalName("cc-commander".to_string());

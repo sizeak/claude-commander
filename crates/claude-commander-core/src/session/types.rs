@@ -182,7 +182,7 @@ pub struct WorktreeSession {
     #[serde(default = "chrono::Utc::now")]
     pub entered_section_at: DateTime<Utc>,
     /// Most recent time the user attached to this session. Drives the
-    /// Alt+Tab-style MRU ordering in the in-tmux session picker.
+    /// Alt+Tab-style MRU ordering in the in-session switcher.
     /// `None` for sessions never attached since adopting the field.
     #[serde(default)]
     pub last_attached_at: Option<DateTime<Utc>>,

@@ -91,16 +91,17 @@ impl CommanderBackend for RemoteBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         // Every capability here is an operator-local affordance the server host
-        // can't satisfy: opening the operator's editor, a `tmux display-popup`
-        // switcher on the server, a dedicated commander tmux session, and
-        // *project* shells (a local tmux affordance keyed on a local project id).
+        // can't satisfy: opening the operator's editor, a dedicated commander
+        // tmux session, and *project* shells (a local tmux affordance keyed on a
+        // local project id). The in-session switcher used to be one of these,
+        // back when it was a `tmux display-popup` on the operator's own server;
+        // the TUI now draws it itself, so it works here too.
         // Note `shell_toggle` gates only the project-shell path — the in-session
         // Ctrl+\ toggle to a session's own shell pane works fine over WS
         // (e2e-tested) via a separate `AttachKind::Shell`, independent of this
         // flag. The name reads broader than it acts; left unchanged this round.
         BackendCapabilities {
             open_editor: false,
-            switcher_popup: false,
             commander_session: false,
             shell_toggle: false,
             // The agent runs on the server host: the operator's clipboard image
@@ -592,7 +593,6 @@ mod tests {
             let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
             let caps = backend.capabilities();
             assert!(!caps.open_editor);
-            assert!(!caps.switcher_popup);
             assert!(!caps.commander_session);
             assert!(!caps.shell_toggle);
             // Image paste is the exception: a remote agent can't read the
@@ -1317,8 +1317,16 @@ mod tests {
             mut reader,
             mut writer,
             resizer,
+            refresher: _,
             mut terminator,
+            local_client_tty,
         } = conn.split();
+
+        // A remote attach's tmux client lives on the server, so there is no
+        // local client here. The in-session switcher reads exactly this to decide
+        // whether it may `tmux switch-client` in place; a stray `Some` would send
+        // a local switch at a session this attach can't be moved to.
+        assert_eq!(local_client_tty, None);
 
         // Type a command; bash echoes the marker back through the PTY.
         writer.write_all(b"echo cc_remote_marker\n").await.unwrap();
@@ -1403,8 +1411,16 @@ mod tests {
             reader,
             writer,
             resizer,
+            refresher: _,
             mut terminator,
+            local_client_tty,
         } = conn.split();
+
+        // A remote attach's tmux client lives on the server, so there is no
+        // local client here. The in-session switcher reads exactly this to decide
+        // whether it may `tmux switch-client` in place; a stray `Some` would send
+        // a local switch at a session this attach can't be moved to.
+        assert_eq!(local_client_tty, None);
 
         // The shell pane's tmux session is the agent name + `-sh`.
         let shell_name = service

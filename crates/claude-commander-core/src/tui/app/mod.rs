@@ -74,6 +74,7 @@ mod review;
 mod selection;
 mod settings;
 mod state;
+mod switcher;
 
 #[cfg(test)]
 mod tests;
@@ -1556,6 +1557,11 @@ pub struct AppUiState {
     /// Session whose review diff should be opened on returning to the TUI —
     /// set when the user pressed Alt-r inside an attached session.
     pub pending_open_review: Option<SessionId>,
+    /// Where the in-session switcher wants to attach next, when its pick can't
+    /// be reached by `tmux switch-client` in place (it lives on another
+    /// backend, or the switch failed). The attach loop consumes this and hops
+    /// straight there rather than dropping the user back to the tree.
+    pub pending_switcher_target: Option<AttachTarget>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
     /// When attached via shell toggle (Ctrl+\), stores the session name to switch back to.
@@ -1694,6 +1700,7 @@ impl Default for AppUiState {
             commander_running: false,
             attach_request: None,
             pending_open_review: None,
+            pending_switcher_target: None,
             editor_command: None,
             shell_toggle_pair: None,
             force_clear: false,
@@ -2338,9 +2345,9 @@ impl App {
         }
     }
 
-    /// The tmux session name an [`AttachTarget`] resolves to, for the switcher
-    /// popup, MRU/viewed tracking, and post-attach focus. `None` when a session
-    /// ref isn't in the cached snapshot.
+    /// The tmux session name an [`AttachTarget`] resolves to, for the in-session
+    /// switcher, MRU/viewed tracking, and post-attach focus. `None` when a
+    /// session ref isn't in the cached snapshot.
     pub(super) fn attach_target_name(&self, target: &AttachTarget) -> Option<String> {
         match target {
             AttachTarget::LocalName(name) => Some(name.clone()),
@@ -2784,16 +2791,6 @@ impl App {
                                 viewed.insert(n.clone());
                             }
 
-                            // The in-session switcher is a local capability; a
-                            // remote backend forwards Ctrl+Space to the pane
-                            // instead. Gate on the *attached* session's backend,
-                            // re-evaluated each hop (the switcher/shell-toggle can
-                            // move `current` between backends).
-                            let switcher_enabled = self
-                                .backend(self.attach_target_backend(&current))
-                                .map(|h| h.backend.capabilities().switcher_popup)
-                                .unwrap_or(false);
-
                             // For a remote agent pane, hand the attach loop a sink
                             // that uploads a captured clipboard image via the
                             // owning backend (the remote agent can't read the
@@ -2874,21 +2871,17 @@ impl App {
                                 voice_listener,
                                 recording: self.conversation.recording.clone(),
                                 intercept_ctrl_z,
-                                switcher_enabled,
+                                // The TUI draws the switcher itself, over the
+                                // pane, so it works on every backend — unlike
+                                // the `tmux display-popup` picker this replaced,
+                                // which could only ever reach the operator's own
+                                // tmux server.
+                                switcher_enabled: true,
                                 session_name: name.clone(),
-                                // Revive a switcher pick whose tmux session
-                                // died (e.g. after a reboot) the way the
-                                // tree-view attach does. The switcher only
-                                // lists local sessions, so the local service
-                                // owns the revive regardless of which backend
-                                // the currently-attached session is on.
-                                switcher_revive: self
-                                    .local_backend()
-                                    .map(|b| b.service().switcher_revive_hook()),
                                 image_paste,
                             };
 
-                            let outcome = match crate::tmux::run_attach(streams, cfg).await {
+                            let outcome = match self.drive_attach(streams, cfg).await {
                                 Ok(o) => o,
                                 Err(e) => {
                                     warn!("Attach loop failed: {e}");
@@ -2930,6 +2923,24 @@ impl App {
                                     crate::tmux::flush_stdin();
                                     consecutive_ends = 0;
                                     continue;
+                                }
+                                crate::tmux::AttachResult::OpenSwitcher => {
+                                    // The overlay resolved to something it could
+                                    // not do in place. A staged target means the
+                                    // pick lives on another backend (or the
+                                    // `switch-client` failed), so hop straight
+                                    // there instead of dumping the user in the
+                                    // tree; no target means a command ran and
+                                    // wants the full TUI.
+                                    match self.ui_state.pending_switcher_target.take() {
+                                        Some(target) => {
+                                            current = target;
+                                            crate::tmux::flush_stdin();
+                                            consecutive_ends = 0;
+                                            continue;
+                                        }
+                                        None => break,
+                                    }
                                 }
                                 crate::tmux::AttachResult::SwitchToReview => {
                                     // Queue the review view; opened below once

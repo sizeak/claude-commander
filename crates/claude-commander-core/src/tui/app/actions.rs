@@ -83,7 +83,7 @@ pub(super) fn adjust_list_scroll(selected_idx: usize, scroll: usize, visible_row
 /// Order quick-switch session matches newest-attached first, then by title.
 /// Sessions never attached (`None`) sort to the bottom. Used for the
 /// empty-query palette so the most-recently-used session is at the top,
-/// mirroring the pinned "Recent" block and the in-tmux session picker.
+/// mirroring the pinned "Recent" block and the in-session switcher.
 pub(super) fn recency_then_title(a: &QuickSwitchMatch, b: &QuickSwitchMatch) -> std::cmp::Ordering {
     b.last_attached_at
         .cmp(&a.last_attached_at)
@@ -1420,7 +1420,7 @@ impl App {
             }
 
             // Empty query ranks by recency (newest attach first), matching the
-            // pinned "Recent" block and the in-tmux session picker; a real query
+            // pinned "Recent" block and the in-session switcher; a real query
             // ranks by fuzzy score.
             sort_palette_matches(&mut scored_sessions, eff_query.is_empty());
         }

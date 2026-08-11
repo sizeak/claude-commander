@@ -569,7 +569,7 @@ mod tests {
         assert_eq!(d.name, "local");
         assert_eq!(d.kind, BackendKind::Local);
         let c = be.capabilities();
-        assert!(c.open_editor && c.switcher_popup && c.commander_session && c.shell_toggle);
+        assert!(c.open_editor && c.commander_session && c.shell_toggle);
     }
 
     #[tokio::test]

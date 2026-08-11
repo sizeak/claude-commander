@@ -33,6 +33,8 @@ pub mod mock;
 pub mod placeholder;
 pub mod run_local;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -100,15 +102,16 @@ pub struct BackendDescriptor {
 }
 
 /// Which UI affordances a backend supports. A remote backend can't drive the
-/// operator's local editor or a `tmux display-popup` on the server host, so the
-/// TUI hides those actions when the capability is off. The local backend has
-/// them all.
+/// operator's local editor or create a tmux session on the server host from
+/// here, so the TUI hides those actions when the capability is off. The local
+/// backend has them all.
+///
+/// The in-session switcher is deliberately *not* one of these: the TUI draws it
+/// over the pane itself, so it works on every backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendCapabilities {
     /// Open the operator's `$EDITOR`/GUI editor on a session worktree.
     pub open_editor: bool,
-    /// The in-session `tmux display-popup` switcher (Ctrl+Space).
-    pub switcher_popup: bool,
     /// A dedicated commander tmux session.
     pub commander_session: bool,
     /// Ctrl+\ agent↔shell pane toggle.
@@ -126,7 +129,6 @@ impl BackendCapabilities {
     /// fresh selection assumes until it resolves the owning backend.
     pub const LOCAL: Self = Self {
         open_editor: true,
-        switcher_popup: true,
         commander_session: true,
         shell_toggle: true,
         // The local agent reads the operator's clipboard directly on Ctrl+V, so
@@ -380,6 +382,46 @@ impl AttachResizer {
     }
 }
 
+/// Forces the attached terminal to repaint its whole visible screen.
+///
+/// The in-session switcher draws the palette *over* the live pane, so when it
+/// closes something has to restore the region it covered. Rather than remember
+/// what was underneath, we ask the renderer that owns it — tmux — to paint it
+/// again. Verified against a real server: `refresh-client -t <client-tty>` emits
+/// the full visible screen, and in copy mode it repaints the scrolled content
+/// while leaving `scroll_position`/`copy_cursor_y` untouched. That last part is
+/// why this is its own operation and not a resize round-trip: a resize is
+/// exactly what loses a scrolled copy-mode anchor.
+///
+/// Transport-specific, like [`AttachResizer`]: locally a `tmux refresh-client`
+/// subprocess, remotely a `refresh` control frame the server turns into the same
+/// command. Async because both are I/O; cheaply cloneable so a paused attach can
+/// hold one.
+#[derive(Clone)]
+pub struct AttachRefresher(Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>);
+
+impl AttachRefresher {
+    pub fn new<F, Fut>(f: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        Self(Arc::new(move || Box::pin(f())))
+    }
+
+    /// Repaint the visible screen. Fire-and-forget: a failed refresh leaves a
+    /// stale rectangle, which the next pane output overwrites anyway.
+    pub async fn refresh(&self) {
+        (self.0)().await
+    }
+}
+
+impl std::fmt::Debug for AttachRefresher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AttachRefresher")
+    }
+}
+
 impl std::fmt::Debug for AttachResizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AttachResizer")
@@ -411,7 +453,22 @@ pub struct AttachStreams {
     pub reader: Box<dyn AsyncRead + Send + Unpin>,
     pub writer: Box<dyn AsyncWrite + Send + Unpin>,
     pub resizer: AttachResizer,
+    pub refresher: AttachRefresher,
     pub terminator: Box<dyn AttachTerminator>,
+    /// The tty of the **operator's own** tmux client backing this attach, when
+    /// there is one — i.e. only for a local PTY attach. `None` for a remote
+    /// attach, whose tmux client lives on the server.
+    ///
+    /// This is what tells the in-session switcher whether it may move the user
+    /// with `tmux switch-client` instead of re-attaching. Getting that wrong is
+    /// not a no-op: `switch-client` run without a live local client of our own
+    /// either fails, or — worse — succeeds against some *unrelated* client
+    /// (another terminal on the same server, or the outer client when commander
+    /// itself runs inside tmux) and yanks that one to a session the user never
+    /// asked for. Naming the client explicitly makes both mistakes
+    /// unrepresentable, so the capability travels with the transport rather than
+    /// being inferred at the call site.
+    pub local_client_tty: Option<String>,
 }
 
 /// A live attach to a session's pane. Transport-agnostic: [`LocalBackend`] backs

@@ -13,6 +13,16 @@ impl App {
         self.spawn_preview_update();
 
         loop {
+            // Honour a quit that was requested *before* this loop started. The
+            // in-session switcher runs the palette while an attach is suspended,
+            // so a command picked there (Quit, say) lands here already decided;
+            // without this the loop would draw a frame and sit waiting for an
+            // unrelated keystroke before acting on it. The check at the bottom
+            // covers quits raised by events we process ourselves.
+            if self.ui_state.should_quit {
+                break;
+            }
+
             // Full-screen-takeover clearing happens inside `render` via the
             // `Clear` widget (see the `force_clear`/`leaving_fullscreen`
             // handling there). We must not
