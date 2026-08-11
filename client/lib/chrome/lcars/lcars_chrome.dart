@@ -538,28 +538,68 @@ class LcarsChrome extends Chrome {
         // wraps them to `_barHeight` — which reshaped `button_bar_lcars`'s
         // reference the moment folding was introduced, with nothing about the
         // bar having actually changed.
-        if (lines.length == 1) return _barLine(t, lines.single);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (var i = 0; i < lines.length; i++) ...[
-              if (i > 0) const SizedBox(height: _seam),
-              _barLine(t, lines[i]),
+        if (lines.length == 1) return _barLine(t, lines.single, stretch: false);
+        // Every line drawn at the widest line's width and the stack centred, so
+        // the folded run reads as one block rather than a ragged left-aligned
+        // stair. Never wider than the column: the widest line is one that fit.
+        final width = lines.map(_lineWidth).reduce(math.max);
+        return SizedBox(
+          width: constraints.maxWidth,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < lines.length; i++) ...[
+                if (i > 0) const SizedBox(height: _seam),
+                SizedBox(
+                  width: width,
+                  child: _barLine(t, lines[i], stretch: true),
+                ),
+              ],
             ],
-          ],
+          ),
         );
       },
     );
   }
 
-  /// One line of a button bar: the [Row] the whole bar used to be, so a run that
-  /// fits comes out exactly as it did before folding existed.
-  Widget _barLine(CommanderTokens t, List<ChromeBarButton> line) => Row(
+  /// One line of a button bar: the [Row] the whole bar used to be, so an
+  /// unstretched line comes out exactly as it did before folding existed.
+  ///
+  /// [stretch] fills the width the line is given by growing each block **in
+  /// proportion to the width it already wanted**. Equal shares would be the
+  /// obvious alternative and is wrong: a line is only ever stretched to another
+  /// line's width, so equal shares could hand RESTART less than its own label
+  /// needs while SHELL sat in slack, and the label would ellipsise. Proportional
+  /// growth cannot shrink anything, because the target width is never below the
+  /// line's own natural width.
+  Widget _barLine(
+    CommanderTokens t,
+    _BarLine line, {
+    required bool stretch,
+  }) => Row(
     children: [
-      for (var i = 0; i < line.length; i++) ...[
+      for (var i = 0; i < line.buttons.length; i++) ...[
         if (i > 0) const SizedBox(width: _seam),
-        _barBlock(t, line[i], _runEnds(i, line.length, t.pillRadius)),
+        // `_barBlock` wraps an `expand` button in its own `Expanded`, which
+        // would be a second flex around the same child — safe only because
+        // [_foldRun] never folds a run containing one, so `stretch` is false
+        // wherever `expand` is true.
+        if (stretch)
+          Expanded(
+            flex: math.max(1, (line.widths[i] * 100).round()),
+            child: _barBlock(
+              t,
+              line.buttons[i],
+              _runEnds(i, line.buttons.length, t.pillRadius),
+            ),
+          )
+        else
+          _barBlock(
+            t,
+            line.buttons[i],
+            _runEnds(i, line.buttons.length, t.pillRadius),
+          ),
       ],
     ],
   );
@@ -572,7 +612,7 @@ class LcarsChrome extends Chrome {
   /// Falls back to one block per line when even that does not fit; a single
   /// block wider than its column is the caller's problem, and the block
   /// ellipsises rather than overflowing.
-  List<List<ChromeBarButton>> _foldRun(
+  List<_BarLine> _foldRun(
     BuildContext context,
     CommanderTokens t,
     List<ChromeBarButton> buttons,
@@ -582,30 +622,27 @@ class LcarsChrome extends Chrome {
     // slack the row has — so a run containing one can never overflow and never
     // needs folding.
     if (buttons.any((b) => b.expand) || !maxWidth.isFinite) {
-      return [buttons];
+      return [(buttons: buttons, widths: const <double>[])];
     }
     final widths = [
       for (final button in buttons) _barBlockWidth(context, t, button),
     ];
+    _BarLine cut(int from, int to) =>
+        (buttons: buttons.sublist(from, to), widths: widths.sublist(from, to));
     for (var lines = 1; lines < buttons.length; lines++) {
       final per = (buttons.length / lines).ceil();
-      final groups = <List<int>>[
+      final groups = [
         for (var i = 0; i < buttons.length; i += per)
-          [i, math.min(i + per, buttons.length)],
+          cut(i, math.min(i + per, buttons.length)),
       ];
-      final fits = groups.every((g) {
-        final blocks = widths.sublist(g[0], g[1]);
-        return blocks.reduce((a, b) => a + b) + _seam * (blocks.length - 1) <=
-            maxWidth;
-      });
-      if (fits) {
-        return [for (final g in groups) buttons.sublist(g[0], g[1])];
-      }
+      if (groups.every((line) => _lineWidth(line) <= maxWidth)) return groups;
     }
-    return [
-      for (final button in buttons) [button],
-    ];
+    return [for (var i = 0; i < buttons.length; i++) cut(i, i + 1)];
   }
+
+  /// A line's natural width: its blocks, plus the seams between them.
+  double _lineWidth(_BarLine line) =>
+      line.widths.reduce((a, b) => a + b) + _seam * (line.widths.length - 1);
 
   /// How wide [button]'s block will come out: its label laid out in the style
   /// [_barBlock] draws it, plus the padding [ChromeElbow] puts around centred
@@ -1256,6 +1293,13 @@ const _barHeight = 36.0;
 
 /// A bar label's size and weight. Named because `_foldRun` has to lay the same
 /// text out to predict a block's width — see [LcarsChrome.buildButtonBar].
+/// One line of a folded button bar: its blocks and the natural width each
+/// wants. The widths travel with the blocks because both the fold decision and
+/// the proportional stretch that follows need them, and measuring twice is how
+/// the two would come to disagree. Empty for an unfoldable run — see
+/// [LcarsChrome.buildButtonBar]'s `expand` guard.
+typedef _BarLine = ({List<ChromeBarButton> buttons, List<double> widths});
+
 const _barLabelSize = 13.0;
 const _barLabelWeight = FontWeight.w700;
 

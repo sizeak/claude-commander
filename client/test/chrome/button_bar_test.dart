@@ -79,6 +79,71 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  // Folded lines are a block, not a ragged left-aligned stack: every line is
+  // widened to the widest one's natural width and the stack is centred in its
+  // column. Widened by growing each block in proportion to the width it
+  // already wanted, so a stretched line's blocks keep their relative sizes and
+  // none is ever squeezed below the label it has to hold.
+  testWidgets('folded lines share one width, centred in the column', (
+    tester,
+  ) async {
+    await loadCommanderFonts();
+    await tester.pumpWidget(bar(300));
+    await tester.pumpAndSettle();
+
+    Rect line(String first, String last) => tester
+        .getRect(find.widgetWithText(ChromeElbow, first.toUpperCase()))
+        .expandToInclude(
+          tester.getRect(find.widgetWithText(ChromeElbow, last.toUpperCase())),
+        );
+
+    final top = line('Shell', 'Restart');
+    final bottom = line('Cascade', 'Delete');
+
+    expect(top.width, moreOrLessEquals(bottom.width, epsilon: 0.5));
+    expect(top.center.dx, moreOrLessEquals(bottom.center.dx, epsilon: 0.5));
+    expect(
+      top.center.dx,
+      moreOrLessEquals(150, epsilon: 0.5),
+      reason: 'the stack sits on the 300dp column\'s centre line',
+    );
+    // Neither line was stretched past the column.
+    expect(top.width, lessThanOrEqualTo(300));
+    expect(tester.takeException(), isNull);
+  });
+
+  // What makes the stretch *proportional* rather than an equal share, and the
+  // only assertion that can tell the two apart: equal shares would hand every
+  // block a third of the widest line, which is less than RESTART's own label
+  // needs while SHELL sits in slack — so RESTART would ellipsise. No folded
+  // block may come out narrower than the width it had unfolded.
+  testWidgets('stretching a line grows every block and shrinks none', (
+    tester,
+  ) async {
+    await loadCommanderFonts();
+    double widthOf(String label) => tester
+        .getSize(find.widgetWithText(ChromeElbow, label.toUpperCase()))
+        .width;
+
+    await tester.pumpWidget(bar(1200));
+    await tester.pumpAndSettle();
+    final natural = {for (final label in labels) label: widthOf(label)};
+
+    await tester.pumpWidget(bar(300));
+    await tester.pumpAndSettle();
+
+    for (final label in labels) {
+      expect(
+        widthOf(label),
+        // A hair of tolerance: the widest line is stretched to its own width,
+        // so its blocks grow by nothing and integer flex rounding can shave a
+        // fraction off one. An equal-share stretch misses by whole dp.
+        greaterThanOrEqualTo(natural[label]! - 1),
+        reason: '$label was squeezed below the label it has to hold',
+      );
+    }
+  });
+
   // The single-line case is the shape every existing golden pins, so folding
   // must not disturb it: with room, one line at natural widths.
   testWidgets('a run that fits stays on one line', (tester) async {
