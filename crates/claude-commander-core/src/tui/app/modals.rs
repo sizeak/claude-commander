@@ -811,6 +811,31 @@ impl App {
             width = key_col_width,
         )));
 
+        // Clone picker (in-modal keys, not bindable actions). The command
+        // itself is listed under Projects above; these are the picker's own.
+        lines.push(Line::from(""));
+        lines.push(Line::from("Clone Repository:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Re-list the host's GitHub repos (the listing can be slow)",
+            "Ctrl+R",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}With nothing matching, the typed text is used as a",
+            "type a URL",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}clone URL — for repos `gh` doesn't list.",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Enter then edits the destination directory name.",
+            "",
+            width = key_col_width,
+        )));
+
         // Remote image paste (an intercepted key in the attach loop, not a
         // bindable action — only active when attached to a remote session).
         lines.push(Line::from(""));
@@ -1172,6 +1197,15 @@ impl App {
             PaletteMode::SectionPicker { .. } => " Move to Section ",
             PaletteMode::RemoteServerPicker => " Remove Remote Server ",
             PaletteMode::ProgramPicker { .. } => " Change Program ",
+            // The fetch state lives in the title (as the Checkout modal
+            // does with "fetching origin…") so a slow or failed `gh`
+            // listing is visible rather than reading as an empty account.
+            // The failure's detail goes to the status bar.
+            PaletteMode::GithubRepoPicker => match self.ui_state.repo_picker.fetch {
+                RepoFetch::Loading => " Clone Repository — listing GitHub repos… ",
+                RepoFetch::Ready => " Clone Repository — Enter a repo, or type a URL ",
+                RepoFetch::Failed(_) => " Clone Repository — no repo list; type a URL ",
+            },
         };
         let block = Block::default()
             .title(title)
@@ -1310,6 +1344,7 @@ impl App {
                 }
                 QuickSwitchItem::SectionMove { label, .. }
                 | QuickSwitchItem::RemoteServerRemove { label, .. }
+                | QuickSwitchItem::GithubRepo { label, .. }
                 | QuickSwitchItem::ProgramChange { label, .. } => {
                     let style = if is_selected {
                         self.theme.selection()

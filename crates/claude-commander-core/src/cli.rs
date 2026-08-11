@@ -809,6 +809,7 @@ mod tests {
             repo_path: PathBuf::from(repo_path),
             main_branch: "main".to_string(),
             session_ids: Vec::new(),
+            origin_url: None,
         }
     }
 

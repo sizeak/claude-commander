@@ -16,24 +16,16 @@ use claude_commander_core::api::{BranchInfo, PreviewData, PreviewTarget, Project
 use claude_commander_core::session::ProjectId;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::handlers::run_local;
+use crate::handlers::{parse_id, run_local};
 use crate::state::AppState;
 
 /// Parse a `{id}` path param into a [`ProjectId`], mapping a malformed UUID to a
-/// 400 rather than a 404 (the client sent a syntactically bad id).
+/// 400 rather than a 404 (the client sent a syntactically bad id). See
+/// [`parse_id`].
 fn parse_project_id(raw: &str) -> Result<ProjectId, ApiError> {
-    Uuid::parse_str(raw).map(ProjectId::from_uuid).map_err(|e| {
-        ApiError(
-            claude_commander_core::error::SessionError::InvalidName {
-                name: raw.to_string(),
-                reason: format!("not a valid project id: {e}"),
-            }
-            .into(),
-        )
-    })
+    parse_id(raw, "project", ProjectId::from_uuid)
 }
 
 #[derive(Debug, Deserialize)]

@@ -538,6 +538,12 @@ pub enum PaletteMode {
     /// Remote-server picker for the remove-server flow: one entry per
     /// configured `[[remote_servers]]`; selecting one opens a confirm modal.
     RemoteServerPicker,
+    /// GitHub repo picker for the clone flow. Rows come from
+    /// [`AppUiState::repo_picker`] (fetched asynchronously); selecting one opens
+    /// the destination-name prompt. Unlike the other picker modes this one also
+    /// acts on an *unmatched* query, treating it as a clone URL — that is the
+    /// "clone something not in the list" path.
+    GithubRepoPicker,
     /// Program (agent) picker for a specific session. The palette lists the
     /// owning backend's configured programs; selecting one opens a confirm modal
     /// that changes the session's program and relaunches it.
@@ -567,6 +573,17 @@ pub enum QuickSwitchItem {
         /// Pre-formatted display label (`name (url)`).
         label: String,
     },
+    /// Selecting this row opens the destination-name prompt for cloning
+    /// `full_name` (GitHub repo-picker palette mode).
+    GithubRepo {
+        /// `owner/name`, the form `gh repo clone` takes.
+        full_name: String,
+        /// The repo's own directory name, the destination-name default.
+        dir_name: String,
+        /// Pre-formatted display label (slug, visibility, and an "already a
+        /// project" note when this repo is registered on the target backend).
+        label: String,
+    },
     /// Selecting this row opens a confirm modal to change `session_id`'s program
     /// to `program` and relaunch it (program-picker palette mode).
     ProgramChange {
@@ -590,6 +607,56 @@ pub struct CommandEntry {
     /// still lists these so it can function as the primary command surface
     /// as hotkeys are trimmed over time.
     pub keys: String,
+}
+
+/// Lifecycle of the clone picker's repo listing.
+///
+/// A distinct `Failed` state rather than an empty list because the two mean
+/// different things and the picker renders them differently: a host without
+/// `gh` (or an unauthenticated one) fails with
+/// [`BackendError::Unavailable`](crate::backend::BackendError), while an
+/// authenticated account with no repos genuinely answers an empty list. Either
+/// way the picker's URL path stays usable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RepoFetch {
+    /// A listing is in flight (`gh api --paginate` can take many seconds).
+    #[default]
+    Loading,
+    /// The listing arrived; `repos` is authoritative (possibly empty).
+    Ready,
+    /// The listing failed; the message is the backend's, shown as a state.
+    Failed(String),
+}
+
+/// State behind [`PaletteMode::GithubRepoPicker`].
+///
+/// Held on `AppUiState` (rather than inside the modal) for the same reason
+/// `program_picker_choices` is: the fetch resolves asynchronously and the
+/// refilter rebuilds the palette rows from it on every keystroke. Only read
+/// while that palette mode is open, so a stale value between opens is inert.
+#[derive(Debug, Clone)]
+pub struct RepoPicker {
+    /// Backend the listing came from and the clone will run on. Frozen when the
+    /// picker opens so a selection change mid-flow can't retarget it — a clone
+    /// runs where the sessions run, and the two hosts have different disks.
+    pub backend: BackendId,
+    /// Repos fetched from `backend`; the source the fuzzy filter narrows.
+    pub repos: Vec<claude_commander_protocol::github::GithubRepo>,
+    /// Where the listing is up to.
+    pub fetch: RepoFetch,
+    /// Bumped on each (re)fetch so a superseded response is dropped on arrival.
+    pub generation: u64,
+}
+
+impl Default for RepoPicker {
+    fn default() -> Self {
+        Self {
+            backend: LOCAL_BACKEND_ID,
+            repos: Vec::new(),
+            fetch: RepoFetch::default(),
+            generation: 0,
+        }
+    }
 }
 
 /// A single branch entry in the checkout modal list
@@ -1278,6 +1345,16 @@ pub enum InputAction {
         name: String,
         url: String,
     },
+    /// Step 2 of the clone flow: the destination directory name, prefilled with
+    /// the name derived from `source` and editable. An empty submission means
+    /// "derive it" (`CloneRequest::dest_name = None`), which is a valid choice
+    /// rather than an error.
+    CloneDestName {
+        /// Backend the clone runs on — the one the picker was opened against,
+        /// carried explicitly so it can't drift with the tree selection.
+        backend: BackendId,
+        source: claude_commander_protocol::github::CloneSource,
+    },
 }
 
 /// Action to perform when confirm modal is confirmed
@@ -1307,6 +1384,14 @@ pub enum ConfirmAction {
     /// Remove a configured remote server (picked via the palette).
     RemoveRemoteServer {
         name: String,
+    },
+    /// A clone found its destination already occupied by a git checkout, and the
+    /// user accepted the offer to register that checkout as a project instead.
+    RegisterExistingClone {
+        /// Backend that reported the occupied destination — the path is on *its*
+        /// disk, so the project must be added there.
+        backend: BackendId,
+        dest: PathBuf,
     },
 }
 
@@ -1557,6 +1642,10 @@ pub struct AppUiState {
     /// its row can be flagged. Re-set each time the palette opens; like
     /// `program_picker_choices`, only read while that palette is open.
     pub program_picker_current: String,
+    /// Repo listing + fetch state behind the clone picker
+    /// ([`PaletteMode::GithubRepoPicker`]). Reset each time the picker opens;
+    /// only read while it is open, so a stale value between opens is inert.
+    pub repo_picker: RepoPicker,
 }
 
 impl Default for AppUiState {
@@ -1635,6 +1724,7 @@ impl Default for AppUiState {
             lfs_pull_in_flight: std::collections::HashSet::new(),
             program_picker_choices: Vec::new(),
             program_picker_current: String::new(),
+            repo_picker: RepoPicker::default(),
         }
     }
 }
@@ -1706,7 +1796,11 @@ impl AppUiState {
             // stall, so gate on that backend being live. Nothing selected keeps
             // `connected` true (local default), so single-machine setups and the
             // no-selection case are unaffected.
-            BindableAction::NewSession | BindableAction::CheckoutBranch => connected,
+            // Same reasoning for the clone flow: the repo listing and the clone
+            // itself both run on the selected backend's host.
+            BindableAction::NewSession
+            | BindableAction::CheckoutBranch
+            | BindableAction::CloneRepository => connected,
             // The right pane only exists in the list views; the board is a
             // full-screen takeover, so these have nothing to act on there.
             BindableAction::TogglePane
