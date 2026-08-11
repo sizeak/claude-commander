@@ -295,6 +295,10 @@ mod tests {
 
         let mut config = Config::default();
         config.telemetry.enabled = false;
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it under `dir`, matching the shared
+        // `handlers/test_support.rs` fixture.
+        config.projects_dir = Some(dir.path().join("projects"));
         let mut core = CoreState::default();
         let mut project = Project::new("p", std::path::PathBuf::from("/tmp/p"), "main");
         let pid = project.id;

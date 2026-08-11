@@ -1,10 +1,14 @@
 //! Shared primitives for mouse interaction with row lists.
 //!
-//! Used by both the in-app list modals (`tui::app`) and the standalone
-//! in-session picker (`crate::picker`), which runs in a tmux popup outside
-//! the app event loop but must offer the same interactions: one click
-//! highlights a row, a second click on the same row within
-//! [`DOUBLE_CLICK_WINDOW`] activates it, and the wheel moves the highlight.
+//! Used by the in-app list modals (`tui::app`), so every row list offers the
+//! same interactions: one click highlights a row, a second click on the same row
+//! within [`DOUBLE_CLICK_WINDOW`] activates it, and the wheel moves the
+//! highlight.
+//!
+//! These were once shared with a standalone in-session picker that ran in a tmux
+//! popup, outside the app event loop, and had to reimplement the interactions to
+//! match. That picker is gone: the in-session switcher now draws the real
+//! palette over the pane (`tui::app::switcher`) and so inherits this for free.
 
 use std::time::Duration;
 

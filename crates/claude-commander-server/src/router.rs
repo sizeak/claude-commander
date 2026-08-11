@@ -16,7 +16,7 @@ use tracing::warn;
 
 use crate::auth::require_bearer;
 use crate::handlers::{
-    blobs, cascade, config, health, paste, projects, review, sessions, workspace,
+    blobs, cascade, config, github, health, paste, projects, review, sessions, workspace,
 };
 use crate::state::AppState;
 use crate::ws;
@@ -120,6 +120,19 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{id}", delete(projects::delete))
         .route("/projects/{id}/branches", get(projects::branches))
         .route("/projects/{id}/preview", get(projects::preview))
+        // -- repo picker + clone --
+        // `/projects/clone` sits alongside `/projects/{id}`, and it **does** rely
+        // on the router preferring a static segment over a capture: without that,
+        // "clone" binds to `{id}` and a POST here reaches a path that only
+        // registers DELETE, i.e. a 405 rather than this handler. The differing
+        // methods do not save it — they are what the failure would look like.
+        // `routes_reach_the_clone_handlers` is the receipt: it drives the real
+        // router and identifies the handler by a message only it produces, so a
+        // capture match shows up as a wrong status/body rather than passing
+        // quietly.
+        .route("/github/repos", get(github::repos))
+        .route("/projects/clone", post(github::clone))
+        .route("/projects/clone/{job}", get(github::clone_status))
         // -- config + health --
         .route("/config", get(config::read).patch(config::update))
         .route("/config/programs", put(config::put_programs))
@@ -150,6 +163,7 @@ pub fn build_router(state: AppState) -> Router {
 mod tests {
     use axum::body::Body;
     use axum::http::{Request, header};
+    use http_body_util::BodyExt;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -195,6 +209,51 @@ mod tests {
                 .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .is_none(),
             "unlisted origin must not receive a CORS allow header"
+        );
+    }
+
+    /// The clone routes resolve to *their own* handlers through the real router.
+    ///
+    /// `/projects/clone` sits next to `/projects/{id}`, so the literal "clone"
+    /// could be captured as a project id and `/projects/clone/{job}` could be read
+    /// as some `/projects/{id}/…` sub-route. Both assertions below identify the
+    /// handler by a message only it produces, so a mis-resolution shows up as a
+    /// wrong body rather than passing on a coincidentally equal status.
+    #[tokio::test]
+    async fn routes_reach_the_clone_handlers() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+
+        // A malformed job id → 400 from `parse_clone_job_id`. Routed to
+        // `/projects/{id}/…` instead this would be a 404 or a project-id message.
+        let req = Request::get("/api/projects/clone/not-a-uuid")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 400);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("not a valid clone job id"),
+            "not the clone-status handler: {body}"
+        );
+
+        // A rejected source → 400 from the clone handler. A routing miss would be
+        // a 404 (no such path) or 405 (wrong method on `/projects/{id}`).
+        let req = Request::post("/api/projects/clone")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "source": { "kind": "github", "full_name": "nope" } })
+                    .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 400);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("owner/name repository slug"),
+            "not the clone handler: {body}"
         );
     }
 

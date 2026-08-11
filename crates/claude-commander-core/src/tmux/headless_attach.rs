@@ -23,9 +23,31 @@ use async_trait::async_trait;
 use tokio::io::{ReadHalf, WriteHalf};
 use tracing::{info, warn};
 
-use crate::backend::{AttachEnd, AttachResizer, AttachStreams, AttachTerminator};
+use crate::backend::{AttachEnd, AttachRefresher, AttachResizer, AttachStreams, AttachTerminator};
 use crate::error::Result;
 use crate::tmux::isolation::TmuxTmpdir;
+
+/// The slave (`/dev/pts/N`) name of a PTY, from its master fd.
+///
+/// `ptsname_r` is the reentrant form; the classic `ptsname` returns a pointer
+/// into a shared static buffer, which is not safe to call from an async runtime
+/// with several PTYs in flight.
+fn pts_name(master_fd: RawFd) -> Option<String> {
+    let mut buf = [0 as nix::libc::c_char; 128];
+    // SAFETY: `master_fd` is a live PTY master (`Pty::as_raw_fd`), and `buf` is a
+    // valid writable buffer of the length passed alongside it.
+    let rc = unsafe { nix::libc::ptsname_r(master_fd, buf.as_mut_ptr(), buf.len()) };
+    if rc != 0 {
+        warn!(
+            "ptsname_r failed: {}; in-session switcher repaint disabled",
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+    // SAFETY: `ptsname_r` returned 0, so `buf` holds a NUL-terminated string.
+    let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    Some(name.to_string_lossy().into_owned())
+}
 
 /// A live `tmux attach-session` running inside a PTY.
 ///
@@ -34,6 +56,15 @@ use crate::tmux::isolation::TmuxTmpdir;
 pub struct HeadlessAttach {
     pty: pty_process::Pty,
     child: tokio::process::Child,
+    /// The PTY *slave* path (`/dev/pts/N`) — which is exactly the name tmux
+    /// knows this client by, so it can be used as `refresh-client -t`. Verified
+    /// against a live server: `ptsname_r` on the master and
+    /// `tmux list-clients -F '#{client_tty}'` return the same string. `None` if
+    /// the lookup failed, which only disables the repaint.
+    client_tty: Option<String>,
+    /// Kept so the refresher's `tmux` subprocess lands on the same socket dir as
+    /// the client it is refreshing (the server bridge runs isolated).
+    tmux_tmpdir: Option<std::path::PathBuf>,
 }
 
 impl HeadlessAttach {
@@ -67,11 +98,48 @@ impl HeadlessAttach {
         if let Some(term) = fallback_term(std::env::var("TERM").ok().as_deref()) {
             cmd = cmd.env("TERM", term);
         }
+        // Read the slave name off the master *before* spawning consumes `pts`.
+        let client_tty = pts_name(pty.as_raw_fd());
         let child = cmd.spawn(pts)?;
 
-        info!("Spawned tmux attach-session for {}", session_name);
+        info!(
+            "Spawned tmux attach-session for {} (client tty {:?})",
+            session_name, client_tty
+        );
 
-        Ok(Self { pty, child })
+        Ok(Self {
+            pty,
+            child,
+            client_tty,
+            tmux_tmpdir: tmux_tmpdir.map(Path::to_path_buf),
+        })
+    }
+
+    /// A handle that repaints this client's screen, for restoring the region an
+    /// overlay covered. See [`AttachRefresher`] for why this is `refresh-client`
+    /// and not a resize.
+    pub fn refresh_handle(&self) -> AttachRefresher {
+        let tty = self.client_tty.clone();
+        let tmpdir = self.tmux_tmpdir.clone();
+        AttachRefresher::new(move || {
+            let tty = tty.clone();
+            let tmpdir = tmpdir.clone();
+            async move {
+                let Some(tty) = tty else {
+                    return;
+                };
+                let mut cmd = tokio::process::Command::new("tmux");
+                cmd.args(["refresh-client", "-t", &tty]);
+                let status = cmd.with_tmux_tmpdir(tmpdir.as_deref()).status().await;
+                match status {
+                    Ok(s) if !s.success() => {
+                        warn!("tmux refresh-client -t {tty} exited with {:?}", s.code())
+                    }
+                    Err(e) => warn!("failed to spawn tmux refresh-client: {e}"),
+                    _ => {}
+                }
+            }
+        })
     }
 
     /// A handle that can resize the PTY without owning it. Cloneable; safe to
@@ -113,13 +181,21 @@ impl HeadlessAttach {
     /// CLI's [`attach_to_session`](super::attach_to_session) build their streams
     /// this way, so there is exactly one PTY→streams adapter.
     pub fn into_streams(self) -> AttachStreams {
+        let refresher = self.refresh_handle();
+        // This bridge *is* a local tmux client, so the switcher may move it with
+        // `switch-client` rather than re-attaching. Only the two local-attach
+        // paths reach `into_streams`; the server's WS bridge uses `split`, and
+        // its client is on the far side of a socket.
+        let local_client_tty = self.client_tty.clone();
         let (reader, writer, resize, child) = self.split();
         let resizer = AttachResizer::new(move |cols, rows| resize.resize(cols, rows));
         AttachStreams {
             reader: Box::new(reader),
             writer: Box::new(writer),
             resizer,
+            refresher,
             terminator: Box::new(PtyTerminator { child }),
+            local_client_tty,
         }
     }
 }

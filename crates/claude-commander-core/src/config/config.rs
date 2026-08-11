@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
@@ -121,6 +121,31 @@ pub struct Config {
 
     /// Path to worktrees directory
     pub worktrees_dir: Option<PathBuf>,
+
+    /// Directory that cloned repositories land in. `None` (the default) means
+    /// `~/Projects` under the user's *home* directory — deliberately not under
+    /// the app's data dir, since these are ordinary checkouts the user works in
+    /// directly. Resolved by [`Config::projects_dir`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projects_dir: Option<PathBuf>,
+
+    /// Timeout in seconds for a single repository clone before it is abandoned.
+    /// Default 1800 (30 min), generous enough for a large repo on a slow link
+    /// while still bounding a hung clone.
+    #[serde(default = "default_clone_timeout_secs")]
+    pub clone_timeout_secs: u64,
+
+    /// Timeout in seconds for listing GitHub repos in the clone picker
+    /// (`gh api --paginate`) before the process group is killed. Default 90 —
+    /// see [`DEFAULT_REPO_LIST_TIMEOUT_SECS`] for why it is generous rather than
+    /// snappy, and note that raising it past
+    /// [`REPO_LIST_HTTP_TIMEOUT_SECS`] hands the race back to a remote client's
+    /// own request timeout.
+    ///
+    /// [`DEFAULT_REPO_LIST_TIMEOUT_SECS`]: claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+    /// [`REPO_LIST_HTTP_TIMEOUT_SECS`]: claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS
+    #[serde(default = "default_repo_list_timeout_secs")]
+    pub repo_list_timeout_secs: u64,
 
     /// Socket directory to isolate every tmux command commander spawns onto.
     ///
@@ -523,6 +548,9 @@ impl Default for Config {
             diff_cache_ttl_ms: 500,
             ui_refresh_fps: 30,
             worktrees_dir: None,
+            projects_dir: None,
+            clone_timeout_secs: default_clone_timeout_secs(),
+            repo_list_timeout_secs: default_repo_list_timeout_secs(),
             tmux_tmpdir: None,
             paste_images_dir: None,
             per_repo_worktree_dirs: false,
@@ -581,6 +609,18 @@ fn default_dim_opacity() -> f32 {
 
 fn default_recent_sessions_limit() -> u32 {
     5
+}
+
+fn default_clone_timeout_secs() -> u64 {
+    1800
+}
+
+/// The default repo-list budget, taken from the protocol crate rather than
+/// spelled out here: its counterpart is the client's HTTP budget, and the two
+/// only mean anything relative to each other (see
+/// `claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS`).
+fn default_repo_list_timeout_secs() -> u64 {
+    claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
 }
 
 fn default_hibernate_idle_timeout_secs() -> u64 {
@@ -764,6 +804,27 @@ impl Config {
             Ok(dir.clone())
         } else {
             Ok(Self::data_dir()?.join("worktrees"))
+        }
+    }
+
+    /// Directory that cloned repositories land in (config override or the
+    /// default `~/Projects`).
+    ///
+    /// Deliberately resolved from the user's **home** directory via
+    /// [`directories::BaseDirs`], not from [`Self::project_dirs`] — the latter
+    /// yields the app's config/data dirs, so clones would end up buried in
+    /// `<data dir>/Projects` rather than somewhere the user works. Pinned by
+    /// `projects_dir_defaults_under_home_not_data_dir`.
+    pub fn projects_dir(&self) -> Result<PathBuf> {
+        if let Some(ref dir) = self.projects_dir {
+            Ok(dir.clone())
+        } else {
+            let home = BaseDirs::new().ok_or_else(|| {
+                Error::Config(ConfigError::LoadFailed(
+                    "Could not determine home directory".to_string(),
+                ))
+            })?;
+            Ok(home.home_dir().join("Projects"))
         }
     }
 
@@ -1511,6 +1572,69 @@ show_session_program = false
         };
         let result = config.resolve_worktrees_dir("genio").unwrap();
         assert_eq!(result, PathBuf::from("/tmp/worktrees/genio"));
+    }
+
+    /// The projects directory is where repositories are *cloned*, so it must
+    /// resolve under the user's home (`~/Projects`) — not under the app's data
+    /// dir. `Config::project_dirs()` returns the app's config/data dirs, so
+    /// resolving through it would silently bury clones in
+    /// `<data dir>/Projects`. This pins the distinction.
+    #[test]
+    fn projects_dir_defaults_under_home_not_data_dir() {
+        let config = Config::default();
+        let dir = config.projects_dir().unwrap();
+        assert!(dir.ends_with("Projects"), "unexpected default: {dir:?}");
+        assert!(
+            !dir.starts_with(Config::data_dir().unwrap()),
+            "projects_dir must not resolve under the app data dir: {dir:?}"
+        );
+    }
+
+    #[test]
+    fn projects_dir_honours_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            projects_dir: Some(tmp.path().join("repos")),
+            ..Config::default()
+        };
+        assert_eq!(config.projects_dir().unwrap(), tmp.path().join("repos"));
+    }
+
+    #[test]
+    fn clone_timeout_defaults_to_half_an_hour() {
+        assert_eq!(Config::default().clone_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn repo_list_timeout_defaults_to_the_protocol_budget() {
+        assert_eq!(
+            Config::default().repo_list_timeout_secs,
+            claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+        );
+    }
+
+    /// `clone_timeout_secs` and `repo_list_timeout_secs` are new fields, so every
+    /// existing `config.toml` — which is never rewritten — omits them.
+    /// Deserialising must fall back to the defaults rather than failing the whole
+    /// load.
+    #[test]
+    fn clone_fields_absent_from_toml_fall_back_to_defaults() {
+        let config: Config = toml::from_str("branch_prefix = \"cc/\"\n").unwrap();
+        assert_eq!(config.clone_timeout_secs, 1800);
+        assert_eq!(
+            config.repo_list_timeout_secs,
+            claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+        );
+        assert!(config.projects_dir.is_none());
+    }
+
+    /// A user who sets the knob gets their value, not the default — the whole
+    /// point of the knob being the escape hatch for an account the default
+    /// cannot list.
+    #[test]
+    fn repo_list_timeout_is_read_from_toml() {
+        let config: Config = toml::from_str("repo_list_timeout_secs = 600\n").unwrap();
+        assert_eq!(config.repo_list_timeout_secs, 600);
     }
 
     #[test]

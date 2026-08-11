@@ -5,6 +5,7 @@
 pub mod blobs;
 pub mod cascade;
 pub mod config;
+pub mod github;
 pub mod health;
 pub mod paste;
 pub mod projects;
@@ -31,19 +32,30 @@ use crate::error::ApiError;
 /// [`ApiError`] conversion and a lost worker thread to a 500.
 pub use claude_commander_core::backend::run_local;
 
-/// Parse a `{id}` path param into a [`SessionId`], mapping a malformed UUID to a
-/// 400 (`InvalidName`) rather than a 404 — the client sent a syntactically bad
-/// id, not a well-formed id that happens not to exist.
-pub fn parse_session_id(raw: &str) -> Result<SessionId, ApiError> {
-    Uuid::parse_str(raw).map(SessionId::from_uuid).map_err(|e| {
+/// Parse a `{id}` path param into a UUID-backed id newtype, mapping a malformed
+/// UUID to a 400 (`InvalidName`) rather than a 404 — the client sent a
+/// syntactically bad id, not a well-formed id that happens not to exist.
+///
+/// `noun` names the id in the message ("session", "project", "clone job"). The
+/// three id-bearing route families differ only in that word and in which newtype
+/// they wrap, so they share this rather than keeping three copies of one shape:
+/// a copy per family is how the 400-vs-404 distinction quietly stops holding on
+/// whichever one was added last.
+pub fn parse_id<T>(raw: &str, noun: &str, wrap: impl FnOnce(Uuid) -> T) -> Result<T, ApiError> {
+    Uuid::parse_str(raw).map(wrap).map_err(|e| {
         ApiError(
             SessionError::InvalidName {
                 name: raw.to_string(),
-                reason: format!("not a valid session id: {e}"),
+                reason: format!("not a valid {noun} id: {e}"),
             }
             .into(),
         )
     })
+}
+
+/// Parse a `{id}` path param into a [`SessionId`]. See [`parse_id`].
+pub fn parse_session_id(raw: &str) -> Result<SessionId, ApiError> {
+    parse_id(raw, "session", SessionId::from_uuid)
 }
 
 #[cfg(test)]

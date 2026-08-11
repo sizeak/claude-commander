@@ -2320,7 +2320,13 @@ impl App {
         let inner_width = area.width.saturating_sub(2) as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
-            let on_cursor = focused && i == state.tree_cursor;
+            // The cursor row is highlighted whether or not this pane has focus —
+            // unfocused it wears a muted one (see `selection_bg_unfocused`), so
+            // the row you navigated to stays identifiable while you read the
+            // body. (The cursor can rest on a directory, in which case it marks
+            // that row and not the file the body is showing — same as when the
+            // list is focused; moving onto a directory never changes the body.)
+            let on_cursor = i == state.tree_cursor;
             let line = match row {
                 TreeRow::Dir {
                     depth,
@@ -2336,7 +2342,7 @@ impl App {
                     )];
                     spans.extend(comment_badge_span(state.dir_comment_count(path), &pal));
                     if on_cursor {
-                        spans = select_spans(spans, &pal);
+                        spans = select_spans(spans, &pal, focused);
                     }
                     Line::from(spans)
                 }
@@ -2372,7 +2378,7 @@ impl App {
                     // selection still wins on the focused row.
                     spans = apply_reviewed_bg(spans, reviewed, inner_width, &pal);
                     if on_cursor {
-                        spans = select_spans(spans, &pal);
+                        spans = select_spans(spans, &pal, focused);
                     }
                     Line::from(spans)
                 }
@@ -3329,12 +3335,23 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 /// The file-list pane only: inside the diff body, selection is a flag on a
 /// [`SpanStyle`] that the palette resolves, so the two never disagree about
 /// precedence.
-fn select_spans(spans: Vec<Span<'static>>, pal: &ReviewPalette) -> Vec<Span<'static>> {
+fn select_spans(
+    spans: Vec<Span<'static>>,
+    pal: &ReviewPalette,
+    focused: bool,
+) -> Vec<Span<'static>> {
+    // Unfocused, the row wears the same selection at 70% — both halves, since a
+    // theme may carry its selection mostly in the foreground.
+    let (bg, sel_fg) = if focused {
+        (pal.selection_bg, pal.selection_fg)
+    } else {
+        (pal.selection_bg_unfocused, pal.selection_fg_unfocused)
+    };
     spans
         .into_iter()
         .map(|s| {
-            let mut style = s.style.bg(pal.selection_bg);
-            if let Some(fg) = pal.selection_fg {
+            let mut style = s.style.bg(bg);
+            if let Some(fg) = sel_fg {
                 style = style.fg(fg);
             }
             Span::styled(s.content, style)

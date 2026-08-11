@@ -27,7 +27,9 @@ mod error;
 mod poller;
 mod spec;
 
-pub use attach::{AttachConnection, AttachEnd, AttachResizer, AttachStreams, AttachTerminator};
+pub use attach::{
+    AttachConnection, AttachEnd, AttachRefresher, AttachResizer, AttachStreams, AttachTerminator,
+};
 pub use backoff::{BackoffConfig, backoff_delay};
 pub use client::{RemoteClient, ScanResponse};
 pub use error::{ClientError, ClientResult};

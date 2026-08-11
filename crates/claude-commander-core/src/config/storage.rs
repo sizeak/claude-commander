@@ -859,7 +859,8 @@ mod tests {
 
     #[test]
     fn test_load_from_corrupt_file_errors_and_names_the_path() {
-        // Regression: `for_cli` and the popup picker swallowed this error
+        // Regression: `for_cli` and the (since removed) popup picker swallowed
+        // this error
         // with `.unwrap_or_else(|_| AppState::new())`, so a corrupt
         // state.json silently reported "no sessions" — and creating a
         // session from that empty view persisted a duplicate project. The
