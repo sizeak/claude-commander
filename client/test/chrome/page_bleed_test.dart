@@ -5,22 +5,30 @@ import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../support/ink.dart';
 import '../support/insets.dart';
 
 /// A pushed LCARS route has no footer, so its bottom row is the rail's closing
 /// elbow beside the body. The elbow bleeds; the body must not — a scrollable
 /// running under the gesture strip is a regression, not a feature.
 void main() {
-  Widget page(ChromeInsets insets) => MaterialApp(
-    theme: themeDataFor(lcarsTokens),
-    home: ChromePage(
-      code: '47-B',
-      title: 'Detail',
-      insets: insets,
-      // Keyed, not found by type: `ColoredBox` and `SizedBox` both occur all
-      // over a built page, so a type finder here would silently measure
-      // something else.
-      body: const SizedBox.expand(key: Key('page-body')),
+  // Keyed with [inkBoundary] so `pixelAt` (used by the seam-colour test below)
+  // can rasterise the tree; a `RepaintBoundary` changes no geometry, so this
+  // is a no-op for every other test in the file.
+  Widget page(ChromeInsets insets, {bool showBack = false}) => RepaintBoundary(
+    key: inkBoundary,
+    child: MaterialApp(
+      theme: themeDataFor(lcarsTokens),
+      home: ChromePage(
+        code: '47-B',
+        title: 'Detail',
+        insets: insets,
+        showBack: showBack,
+        // Keyed, not found by type: `ColoredBox` and `SizedBox` both occur all
+        // over a built page, so a type finder here would silently measure
+        // something else.
+        body: const SizedBox.expand(key: Key('page-body')),
+      ),
     ),
   );
 
@@ -84,6 +92,27 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.getRect(find.text('47-B')).center.dy, flat + 24);
+  });
+
+  // Regression guard: the seam's fill colour tracks the back affordance, not
+  // a flat `t.nav`. A pushed page with a back button paints its rail's top
+  // block and cap `t.primary` (the same lilac-vs-amber distinction as the
+  // '‹ BACK' block itself), so the seam bridging them must match or a lilac
+  // block would sit against an amber seam and cap.
+  testWidgets('the seam fill matches the back affordance\'s colour', (
+    tester,
+  ) async {
+    useInsets(tester, top: 24);
+    await tester.pumpWidget(page(ChromeInsets.standard, showBack: true));
+    await tester.pumpAndSettle();
+
+    final rail = tester.getRect(find.widgetWithText(ChromeElbow, '‹ BACK'));
+    // Inside the top inset, well clear of the curved emergence the seam
+    // draws below its fill (see `phone_shell_test.dart`'s gutter-curve test)
+    // — this only needs to land somewhere the fill is flat.
+    final seamColour = await pixelAt(tester, Offset(rail.right + 2, 12));
+
+    expect(seamColour, lcarsTokens.primary);
   });
 
   testWidgets('a cutout is held, not bled', (tester) async {

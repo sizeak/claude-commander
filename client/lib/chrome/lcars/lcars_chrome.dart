@@ -186,10 +186,10 @@ class LcarsChrome extends Chrome {
   /// status-bar inset *and* down to the bottom of the elbow cap it continues
   /// into, open below that.
   ///
-  /// The band behind the status bar has to be *continuous*. The system clock
-  /// sits at a fixed horizontal offset and on a Pixel 8a it lands exactly on
-  /// this seam, so leaving it open painted a black column through the middle of
-  /// the time. Stopping the fill at `bleed.top` fixed that but left a second,
+  /// The band behind the status bar has to be *continuous*. On a Pixel 8a the
+  /// system clock sat at a fixed offset that landed exactly on this seam, so
+  /// leaving it open painted a black column through the middle of the time.
+  /// Stopping the fill at `bleed.top` fixed that but left a second,
   /// shorter black tab poking up into the band the moment the inset ends —
   /// also measured on device — because the rail's top block and the cap below
   /// the seam are two more colour patches the fill needs to bridge. Filling to

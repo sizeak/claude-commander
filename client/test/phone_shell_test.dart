@@ -381,6 +381,7 @@ void main() {
 
         final rail = tester.getRect(find.widgetWithText(ChromeElbow, '47-A'));
         final gutterX = rail.right + 2;
+        const insetTop = 24;
 
         expect(
           await pixelAt(tester, Offset(gutterX, 12)),
@@ -388,6 +389,21 @@ void main() {
           reason:
               'inside the inset the seam must be filled with the same colour '
               'as the blocks it joins, or a black column shows through',
+        );
+        // Midway between the end of the inset and the fill's own bottom edge
+        // (`insetTop + kElbowCapHeight`): still solidly within the flat fill,
+        // clear of both the inset's own top edge and the curved emergence
+        // below the fill, so nothing here is a mutation's unpinned extension
+        // shrinking the fill back down to `bleed.top` alone.
+        expect(
+          await pixelAt(
+            tester,
+            Offset(gutterX, insetTop + kElbowCapHeight / 2),
+          ),
+          lcarsTokens.nav,
+          reason:
+              'the fill must extend past the inset to the bottom of the '
+              'elbow cap, not stop at the inset alone',
         );
         expect(
           // 40 is exactly the fill's own bottom edge (24 + kElbowCapHeight);
@@ -491,6 +507,54 @@ void main() {
         tester.getRect(footerLabel('SETTINGS')).bottom,
         lessThan(surfaceHeight(tester) - 48),
       );
+    });
+  });
+
+  // `buildPage`'s right edge is pinned by the `settings_lcars` golden. An
+  // LCARS phone-shell golden is banned (`goldens/pages_golden_test.dart`, read
+  // the comment there for why), so the other two surfaces that used to carry a
+  // 10dp right margin — the footer run and the view rail's content column —
+  // get behavioural pins here instead.
+  group('LCARS runs flush to the right bezel', () {
+    Future<void> pump(WidgetTester tester) async {
+      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap(tokens: lcarsTokens));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the footer run\'s last block meets the right bezel', (
+      tester,
+    ) async {
+      await pump(tester);
+
+      // The run's slot order (`buildFooterNav`): SETTINGS leads, then FLEET,
+      // the centre create action, then ACTIVITY — so ACTIVITY is the last
+      // block, and its right edge is the run's own.
+      expect(
+        tester.getRect(find.widgetWithText(ChromeElbow, 'ACTIVITY')).right,
+        surfaceWidth(tester),
+      );
+    });
+
+    testWidgets('the view rail\'s content column meets the right bezel', (
+      tester,
+    ) async {
+      await pump(tester);
+
+      // The content column stretches (`crossAxisAlignment.stretch`) to fill
+      // the `Expanded` `buildViewRail` gives it beside the rail, so its
+      // nearest `Column` ancestor is the column itself. Anchored on the
+      // count line rather than the 'FLEET' title: that title string also
+      // occurs as the footer's own nav-block label, so `find.text('FLEET')`
+      // is not unique on this shell, but the count line is.
+      final content = find
+          .ancestor(
+            of: find.text('1 ACTIVE · 1 TOTAL · 1 SERVER'),
+            matching: find.byType(Column),
+          )
+          .first;
+      expect(tester.getRect(content).right, surfaceWidth(tester));
     });
   });
 }

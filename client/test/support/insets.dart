@@ -59,3 +59,9 @@ void useInsets(
 /// say "the physical bottom edge" without restating the ratio.
 double surfaceHeight(WidgetTester tester) =>
     tester.view.physicalSize.height / tester.view.devicePixelRatio;
+
+/// The surface's width in the logical pixels `getRect` reports, so a test can
+/// say "the physical right edge" without restating the ratio or hardcoding the
+/// harness's surface size.
+double surfaceWidth(WidgetTester tester) =>
+    tester.view.physicalSize.width / tester.view.devicePixelRatio;
