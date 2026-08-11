@@ -8,6 +8,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 
 - **Async-first architecture** - Non-blocking tmux and git operations
 - **Hierarchical session model** - Projects contain worktree sessions
+- **Add a project from GitHub** - Add a project by picking one of your GitHub repos, or by URL, and it's cloned in ready to go
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Kanban board UI** - Full-screen board with sections as columns and sessions as project-coloured cards
 - **Live preview pane** - In the list views, a right-hand pane with Preview / Info / Shell tabs: Preview and Shell tail the selected session's agent and shell output as it happens, Info shows its metadata and PR detail (`Tab` cycles, `<`/`>` resizes)
@@ -206,7 +207,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `1`–`99` | Jump to session by number |
 | palette only | Toggle section — collapse/expand the section under the cursor in the section list views (unbound by default) |
 | `Space` | Quick-switch palette (sessions and commands) |
-| `Ctrl-Space` | Quick-switch palette (same shortcut as the in-session switcher) |
+| `Ctrl-Space` | Quick-switch palette (the same shortcut, and the same palette, as the in-session switcher) |
 | `Shift+Space` | Command palette (commands only) |
 | `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |
@@ -247,7 +248,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 | `Ctrl-q` | Detach and return to the board |
 | `Ctrl-\` | Switch between the Claude and shell sessions |
 | `Alt-r` | Switch to this session's review diff (and `Alt-r` in the diff switches back) — Claude sessions only. Uses `Alt-r` rather than `Ctrl-r` so the shell's `Ctrl-r` reverse-history-search is never shadowed |
-| `Ctrl-Space` | Open the in-session switcher popup to jump to another claude-commander session without detaching |
+| `Ctrl-Space` | Open the quick-switch palette over the session, to jump to another claude-commander session without detaching. It is the same palette as `Ctrl-Space` in the board, so it lists remote sessions and commands too; `Esc` returns you to the pane. Switching between two local sessions never detaches |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
 | `Ctrl-v` | **Remote sessions only:** paste an image from your local clipboard into the Claude prompt. The image is uploaded to the server, saved to a temp file, and its path is typed into the prompt. On a local session `Ctrl-v` is forwarded to Claude, which reads your clipboard directly. If the clipboard holds no image, `Ctrl-v` is forwarded unchanged |
 

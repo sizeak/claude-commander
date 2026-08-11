@@ -282,6 +282,61 @@ impl App {
                     self.refilter_checkout_branches();
                 }
             }
+            StateUpdate::ProjectAdded {
+                backend_id,
+                project_id,
+            } => {
+                debug!("Project added: {}", project_id);
+                self.ui_state.status_message = Some((
+                    "Added project".to_string(),
+                    Instant::now() + Duration::from_secs(4),
+                ));
+                self.refresh_backend_view(BackendId(backend_id)).await;
+                self.refresh_list_items().await;
+            }
+            StateUpdate::GithubReposLoaded {
+                backend_id,
+                generation,
+                result,
+            } => {
+                // Drop a superseded listing: Ctrl-R can start a second fetch
+                // while the first is still running, and the earlier response
+                // must not clobber the newer one's state. Also ignored once the
+                // picker has closed (the generation is reset on each open).
+                if generation != self.ui_state.repo_picker.generation
+                    || self.ui_state.repo_picker.backend.0 != backend_id
+                {
+                    debug!("Discarding stale GitHub repo listing (gen {generation})");
+                    return;
+                }
+                match result {
+                    Ok(repos) => {
+                        self.ui_state.repo_picker.repos = repos;
+                        self.ui_state.repo_picker.fetch = super::RepoFetch::Ready;
+                    }
+                    Err(message) => {
+                        // Not a dead end: the picker stays open so a URL can
+                        // still be pasted. The reason goes to the status bar and
+                        // the picker's title reflects the state.
+                        self.ui_state.repo_picker.repos.clear();
+                        self.ui_state.status_message = Some((
+                            format!("Could not list GitHub repos: {message}"),
+                            Instant::now() + Duration::from_secs(8),
+                        ));
+                        self.ui_state.repo_picker.fetch = super::RepoFetch::Failed(message);
+                    }
+                }
+                // Rebuild the rows from the new listing if the picker is still up.
+                self.refilter_quick_switch();
+            }
+            StateUpdate::CloneJobUpdated {
+                backend_id,
+                source,
+                result,
+            } => {
+                self.apply_clone_job_update(BackendId(backend_id), source, result)
+                    .await;
+            }
             StateUpdate::RestartFinished { backend_id, result } => {
                 let backend_id = BackendId(backend_id);
                 match result {

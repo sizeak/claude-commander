@@ -719,6 +719,7 @@ mod tests {
                     .filter(|s| s.project_id == pid)
                     .map(|s| s.id)
                     .collect(),
+                origin_url: None,
             })
             .collect();
         projects.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1125,6 +1126,7 @@ mod tests {
             repo_path: PathBuf::from("/tmp"),
             main_branch: "main".to_string(),
             session_ids: Vec::new(),
+            origin_url: None,
         });
 
         let board = board_from(&state, &[], None, &BTreeMap::new());

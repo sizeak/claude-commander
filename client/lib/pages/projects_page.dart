@@ -4,15 +4,20 @@ import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../theme/tokens.dart';
+import 'clone_repo_page.dart';
 
 /// Manages the server's registered projects (git repos). Lists each project's
 /// name + repo path; adds one by its server-side path (`addProject`), removes one
 /// (`removeProject`), scans a server-side directory for repos (`scanDirectory`),
-/// and browses a project's branches on demand (`listBranches`).
+/// clones one from GitHub ([CloneRepoPage]), and browses a project's branches on
+/// demand (`listBranches`).
 ///
 /// Project paths are typed, not picked — the paths live on the server, not the
-/// device, mirroring the TUI. The list is rendered reactively from the
-/// [CommanderStore] (the change feed refreshes it after a mutation).
+/// device, mirroring the TUI. The one exception is cloning, which is how a
+/// project arrives on a server that doesn't have it yet: the repo list and the
+/// checkout are both the server's, so a phone can add a project it has no copy
+/// of. The list is rendered reactively from the [CommanderStore] (the change feed
+/// refreshes it after a mutation).
 class ProjectsPage extends StatefulWidget {
   final CommanderStore store;
 
@@ -21,6 +26,9 @@ class ProjectsPage extends StatefulWidget {
   @override
   State<ProjectsPage> createState() => _ProjectsPageState();
 }
+
+/// The three ways to add a project, as offered by the **+** sheet.
+enum _AddSource { clone, path, scan }
 
 class _ProjectsPageState extends State<ProjectsPage> {
   bool _busy = false;
@@ -33,6 +41,78 @@ class _ProjectsPageState extends State<ProjectsPage> {
         context: context,
         builder: (_) => _PathPromptDialog(title: title, label: label),
       );
+
+  /// The **+** sheet: the three ways a project can arrive. Cloning is listed
+  /// first because it is the only one that doesn't require the repo to already
+  /// be on the server's disk — the case a phone can't otherwise satisfy.
+  Future<void> _addSheet() async {
+    final t = CommanderTokens.of(context);
+    final choice = await showModalBottomSheet<_AddSource>(
+      context: context,
+      backgroundColor: t.canvasRaised,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _sheetTile(
+              sheetContext,
+              Icons.cloud_download_outlined,
+              'Clone from GitHub',
+              'Pick a repo, or paste a clone URL',
+              _AddSource.clone,
+            ),
+            _sheetTile(
+              sheetContext,
+              Icons.folder_open,
+              'Add existing path',
+              'A repo already on the server',
+              _AddSource.path,
+            ),
+            _sheetTile(
+              sheetContext,
+              Icons.travel_explore,
+              'Scan directory',
+              'Register every repo it finds',
+              _AddSource.scan,
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    switch (choice) {
+      case _AddSource.clone:
+        await _clone();
+      case _AddSource.path:
+        await _addProject();
+      case _AddSource.scan:
+        await _scan();
+    }
+  }
+
+  Widget _sheetTile(
+    BuildContext sheetContext,
+    IconData icon,
+    String label,
+    String subtitle,
+    _AddSource value,
+  ) {
+    final t = CommanderTokens.of(context);
+    return ListTile(
+      leading: Icon(icon, color: t.primary),
+      title: Text(label),
+      subtitle: Text(subtitle, style: t.meta(size: 11, color: t.textMuted)),
+      onTap: () => Navigator.of(sheetContext).pop(value),
+    );
+  }
+
+  /// Push the repo picker. It refreshes the store itself before popping, so the
+  /// list here already holds a newly cloned project when we come back.
+  Future<void> _clone() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<bool>(builder: (_) => CloneRepoPage(store: _store)),
+    );
+  }
 
   Future<void> _addProject() async {
     final path = await _promptPath(
@@ -123,17 +203,10 @@ class _ProjectsPageState extends State<ProjectsPage> {
         return ChromePage(
           title: 'Projects',
           code: '47-P',
-          actions: [
-            ChromeButtonAction(
-              icon: Icons.travel_explore,
-              label: 'Scan directory',
-              onPressed: _busy ? null : _scan,
-            ),
-          ],
           primaryAction: ChromeButtonAction(
             icon: Icons.add,
             label: 'Add project',
-            onPressed: _busy ? null : _addProject,
+            onPressed: _busy ? null : _addSheet,
           ),
           body: projects.isEmpty
               ? _emptyState()

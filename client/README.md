@@ -231,17 +231,18 @@ almost exactly as your machine does. Not *exactly*: the LCARS phone-shell golden
 disagreed with the runner on label antialiasing alone, with the geometry
 byte-identical, and was deleted in #280 rather than given a tolerance.
 
-So run them the way CI does — from the repo root, in the pinned dev shell:
+So run them the way CI does — from the repo root, with the pinned toolchain
+forced, because the images are rasteriser-sensitive:
 
 ```sh
-task goldens         # run them
-task goldens:update  # regenerate after an intended visual change
+CC_FORCE_NIX=1 scripts/verify.sh --goldens            # run them
+CC_FORCE_NIX=1 scripts/verify.sh --goldens --update   # regenerate them
 ```
 
 Then **look at the diff before committing** — an unexplained image change is the
-entire point. `task test-ci` before pushing a golden change is a repo rule; see
-the Golden tests section of the root `CLAUDE.md` for what it does and does not
-prove, and for what to do when a golden fails only on CI.
+entire point. Running that lane before pushing a golden change is a repo rule;
+see the Golden tests section of the root `CLAUDE.md` for what it does and does
+not prove, and for what to do when a golden fails only on CI.
 
 Three things the harness (`test/support/golden.dart`) has to do, each learned by
 getting it wrong first:
@@ -313,18 +314,30 @@ therefore no window bar and no key handler, without a platform check in the UI.
 
 ## Build and run
 
+`scripts/dev-run.sh` wraps both flows below, including the AVD boot-and-wait and
+the build → install → launch chain; it enters the right dev shell itself, so it
+works from a bare terminal. The raw commands are kept here because they are what
+the script runs and what you need when debugging a step of it.
+
 ### Linux desktop
 
 ```sh
-cd client
-flutter run -d linux
+scripts/dev-run.sh linux          # or, by hand:
+cd client && flutter run -d linux
 ```
 
 Requires a display (`DISPLAY` or `WAYLAND_DISPLAY`). The `release → debug` symlink in the shellHook means `flutter run` (debug mode) finds the cdylib without a separate `cargo build` step.
 
 ### Android emulator
 
-Boot the AVD the shellHook created (KVM-accelerated, Linux only):
+```sh
+scripts/dev-run.sh android              # boot if needed, build, install, launch
+scripts/dev-run.sh android --release    # the release APK instead
+scripts/dev-run.sh android --device 1A2B3C4D   # a physical handset
+scripts/dev-run.sh emulator start|stop|status  # AVD lifecycle on its own
+```
+
+By hand, boot the AVD the shellHook created (KVM-accelerated, Linux only):
 
 ```sh
 emulator -avd cctest -no-window -gpu swiftshader_indirect \
@@ -374,6 +387,10 @@ slim `.#clientCi` used by CI):
 | cdylib ↔ server integration | `client/rust/tests/server_flows.rs` | every blocking HTTP fn against a real in-process server (connect, create/list/detail/kill, restart/delete, join-by-prefix, review round-trip) |
 | Dart widget | `client/test/*_test.dart` | each page with a hand-rolled `FakeCommanderApi` (no live bridge), plus `CommanderStore` unit tests |
 | Full-stack e2e | `client/integration_test/app_flows_test.dart` | the real app on `-d linux` against a hermetic server |
+
+`scripts/verify.sh --client` runs the first three layers (plus `dart format` and
+`flutter analyze`) in one go; `scripts/verify.sh --e2e` adds the fourth. The
+per-layer commands:
 
 ```sh
 # Dart widget tests (fast; no Rust bridge, no server):

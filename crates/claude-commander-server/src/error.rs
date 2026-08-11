@@ -14,7 +14,7 @@ use axum::{
 };
 use claude_commander_core::Error as CoreError;
 use claude_commander_core::backend::RunLocalError;
-use claude_commander_core::error::{SessionError, TmuxError};
+use claude_commander_core::error::{GitError, SessionError, TmuxError};
 use serde_json::json;
 
 /// An error returned from an API handler. Wraps a [`CoreError`] and maps it to
@@ -79,11 +79,22 @@ impl ApiError {
             // Bad client input → 400.
             CoreError::Session(SessionError::InvalidName { .. })
             | CoreError::Session(SessionError::InvalidProgram(_))
-            | CoreError::Session(SessionError::InvalidImage(_)) => StatusCode::BAD_REQUEST,
+            | CoreError::Session(SessionError::InvalidImage(_))
+            // A refused clone source/destination name is the client's mistake, not
+            // a git failure — which is exactly why core gives it its own variant.
+            // Its message is redacted at construction (`clone_source_rejected`),
+            // so rendering it here cannot echo a credential back.
+            | CoreError::Git(GitError::CloneSourceRejected(_)) => StatusCode::BAD_REQUEST,
 
-            // tmux missing entirely → 503 (the backing service is unavailable).
+            // A missing backing tool → 503 (the service is unavailable, and the
+            // user can fix it by installing the thing). `gh` joins tmux here for
+            // the same reason core carved `GhUnavailable` out of `OperationFailed`:
+            // "install the GitHub CLI" is a distinct, actionable state, and
+            // flattening it into a 500 would deny every remote frontend the
+            // distinction core went to the trouble of making.
             CoreError::Tmux(TmuxError::NotInstalled)
-            | CoreError::Tmux(TmuxError::ServerNotRunning) => StatusCode::SERVICE_UNAVAILABLE,
+            | CoreError::Tmux(TmuxError::ServerNotRunning)
+            | CoreError::Git(GitError::GhUnavailable) => StatusCode::SERVICE_UNAVAILABLE,
 
             // Everything else (git failures, IO, persistence, cascade, other
             // tmux/TUI/TTS/config errors) is an internal server error.
@@ -128,7 +139,6 @@ pub fn error_response(status: StatusCode, kind: &str, message: impl Into<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use claude_commander_core::error::GitError;
     use claude_commander_core::session::SessionId;
 
     #[test]
@@ -179,5 +189,69 @@ mod tests {
         let err = ApiError(CoreError::Git(GitError::OperationFailed("boom".into())));
         assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(err.kind(), "git");
+    }
+
+    /// A refused clone source is the *client's* mistake, so it must not share the
+    /// 500 that every other git failure gets. Asserted alongside `OperationFailed`
+    /// because the pair is the whole point: the two are the same shape (a `GitError`
+    /// carrying a string) and only the variant separates a bad request from a
+    /// broken server.
+    #[test]
+    fn rejected_clone_source_maps_to_400_unlike_other_git_errors() {
+        let rejected = ApiError(CoreError::Git(GitError::CloneSourceRejected(
+            "'o' is not an owner/name repository slug".into(),
+        )));
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(rejected.kind(), "git");
+        // The message is rendered as-is — no prefix wrapping the user's reason.
+        assert_eq!(
+            rejected.to_string(),
+            "Git error: 'o' is not an owner/name repository slug"
+        );
+        assert_eq!(
+            ApiError(CoreError::Git(GitError::OperationFailed("boom".into()))).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// A missing `gh` is a 503, not a 500: core carved `GhUnavailable` out of
+    /// `OperationFailed` so a frontend could render "install the GitHub CLI" as its
+    /// own state, and flattening it here would throw that distinction away for
+    /// every remote client. Same treatment as a missing tmux.
+    #[test]
+    fn missing_gh_maps_to_503_like_missing_tmux() {
+        let err = ApiError(CoreError::Git(GitError::GhUnavailable));
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.kind(), "git");
+        // A clone that timed out is still a genuine failure → 500.
+        assert_eq!(
+            ApiError(CoreError::Git(GitError::CloneTimedOut { secs: 600 })).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// A repo listing that overran is a 500 carrying its own reason, **not** the
+    /// 503 a missing `gh` gets.
+    ///
+    /// The client maps 503 to `Unavailable`, which frontends word as "install gh
+    /// on the server" — actively wrong for a user whose working `gh` just had a
+    /// lot to paginate. What matters as much as the code is that a reason reaches
+    /// the client at all: this route is the reason the client gives the request a
+    /// budget longer than the server's `gh` budget, so the server wins the race
+    /// and answers with this instead of the client reporting a transport timeout.
+    #[test]
+    fn a_timed_out_repo_listing_is_a_500_not_the_503_for_a_missing_gh() {
+        let err = ApiError(CoreError::Git(GitError::RepoListTimedOut { secs: 90 }));
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_ne!(
+            err.status(),
+            ApiError(CoreError::Git(GitError::GhUnavailable)).status(),
+            "a slow listing must not be reported as a missing gh"
+        );
+        assert!(
+            err.0.to_string().contains("timed out"),
+            "the body must carry the real reason: {}",
+            err.0
+        );
     }
 }

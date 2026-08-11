@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
 // These functions are ignored because they are not marked as `pub`: `commander_sentinel_id`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 enum AgentState { working, idle, waitingForInput, unknown }
 
@@ -76,6 +76,165 @@ class BranchInfo {
           name == other.name &&
           isRemote == other.isRemote;
 }
+
+/// A clone in flight, as polled by a frontend. `dest` is flattened `PathBuf` →
+/// `String` (as `ProjectInfoDto::repo_path` is).
+///
+/// The status carried by the job [`crate::api::simple::start_clone`] returns is
+/// **not** terminal — every outcome is reported through
+/// [`crate::api::simple::clone_job`].
+class CloneJobDto {
+  final CloneJobId id;
+
+  /// What to show the user as the source — the `owner/name` slug or the URL.
+  final String sourceLabel;
+
+  /// Absolute destination path the clone is writing to.
+  final String dest;
+  final CloneStatusDto status;
+
+  const CloneJobDto({
+    required this.id,
+    required this.sourceLabel,
+    required this.dest,
+    required this.status,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ sourceLabel.hashCode ^ dest.hashCode ^ status.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CloneJobDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          sourceLabel == other.sourceLabel &&
+          dest == other.dest &&
+          status == other.status;
+}
+
+class CloneJobId {
+  final UuidValue field0;
+
+  const CloneJobId({required this.field0});
+
+  @override
+  int get hashCode => field0.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CloneJobId &&
+          runtimeType == other.runtimeType &&
+          field0 == other.field0;
+}
+
+/// Request body for [`crate::api::simple::start_clone`] — the Dart-constructible
+/// form of [`CloneRequest`]. `dest_name: None` means "derive the directory name
+/// from the source".
+class CloneRequestDto {
+  final CloneSourceDto source;
+  final String? destName;
+
+  const CloneRequestDto({required this.source, this.destName});
+
+  @override
+  int get hashCode => source.hashCode ^ destName.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CloneRequestDto &&
+          runtimeType == other.runtimeType &&
+          source == other.source &&
+          destName == other.destName;
+}
+
+/// Where a clone should come from — the Dart-constructible form of
+/// [`CloneSource`]. `value` is the `owner/name` slug for
+/// [`CloneSourceKind::Github`] and the clone URL for [`CloneSourceKind::Url`].
+///
+/// The two arms stay distinct because they are different *invocations* server
+/// side (`gh repo clone` vs `git clone`), not two spellings of one.
+class CloneSourceDto {
+  final CloneSourceKind kind;
+  final String value;
+
+  const CloneSourceDto({required this.kind, required this.value});
+
+  @override
+  int get hashCode => kind.hashCode ^ value.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CloneSourceDto &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          value == other.value;
+}
+
+/// Which kind of [`CloneSourceDto`] this is (flattens the data-carrying
+/// [`CloneSource`]).
+enum CloneSourceKind { github, url }
+
+/// How a clone is going. Only the fields belonging to `kind` are populated.
+class CloneStatusDto {
+  final CloneStatusKind kind;
+
+  /// The registered project (`Succeeded` only).
+  final ProjectId? projectId;
+
+  /// User-facing reason (`Failed` only); empty otherwise. Already redacted
+  /// where it was built, so it never carries `user:token@` userinfo.
+  final String message;
+
+  /// The occupied destination path reported by `DestinationExists`; `None`
+  /// otherwise.
+  final String? dest;
+
+  /// Whether that occupied path is itself a git repo (`DestinationExists`
+  /// only); `false` otherwise.
+  final bool isGitRepo;
+
+  const CloneStatusDto({
+    required this.kind,
+    this.projectId,
+    required this.message,
+    this.dest,
+    required this.isGitRepo,
+  });
+
+  @override
+  int get hashCode =>
+      kind.hashCode ^
+      projectId.hashCode ^
+      message.hashCode ^
+      dest.hashCode ^
+      isGitRepo.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CloneStatusDto &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          projectId == other.projectId &&
+          message == other.message &&
+          dest == other.dest &&
+          isGitRepo == other.isGitRepo;
+}
+
+/// Which kind of [`CloneStatusDto`] this is (flattens the data-carrying
+/// [`CloneStatus`]).
+///
+/// `DestinationExists` is its own arm rather than a `Failed` message because it
+/// is the one outcome a frontend can act on: whether the occupied directory is
+/// already a git repo decides whether the sensible offer is "add that checkout as
+/// a project" or "pick another name".
+enum CloneStatusKind { running, succeeded, failed, destinationExists }
 
 /// A backend's connection health, streamed over `connection_feed`.
 class ConnectionStateDto {
@@ -151,6 +310,69 @@ class DiffStatDto {
           filesChanged == other.filesChanged &&
           linesAdded == other.linesAdded &&
           linesRemoved == other.linesRemoved;
+}
+
+/// One repo offered by the picker. Compare `clone_url` against a project's
+/// `origin_url` via [`crate::api::simple::canonical_repo_slug`] to tell whether
+/// it is already registered — `gh repo clone` honours the user's `git_protocol`,
+/// so an added repo's origin is often `ssh://` where this reports `https://`.
+class GithubRepo {
+  final String fullName;
+  final String owner;
+  final String name;
+  final String? description;
+  final bool private;
+  final bool fork;
+  final bool archived;
+  final String defaultBranch;
+  final String cloneUrl;
+  final String sshUrl;
+  final DateTime? pushedAt;
+
+  const GithubRepo({
+    required this.fullName,
+    required this.owner,
+    required this.name,
+    this.description,
+    required this.private,
+    required this.fork,
+    required this.archived,
+    required this.defaultBranch,
+    required this.cloneUrl,
+    required this.sshUrl,
+    this.pushedAt,
+  });
+
+  @override
+  int get hashCode =>
+      fullName.hashCode ^
+      owner.hashCode ^
+      name.hashCode ^
+      description.hashCode ^
+      private.hashCode ^
+      fork.hashCode ^
+      archived.hashCode ^
+      defaultBranch.hashCode ^
+      cloneUrl.hashCode ^
+      sshUrl.hashCode ^
+      pushedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GithubRepo &&
+          runtimeType == other.runtimeType &&
+          fullName == other.fullName &&
+          owner == other.owner &&
+          name == other.name &&
+          description == other.description &&
+          private == other.private &&
+          fork == other.fork &&
+          archived == other.archived &&
+          defaultBranch == other.defaultBranch &&
+          cloneUrl == other.cloneUrl &&
+          sshUrl == other.sshUrl &&
+          pushedAt == other.pushedAt;
 }
 
 enum OperationKind { cascade, pushStack }
@@ -292,12 +514,20 @@ class ProjectInfoDto {
   final String mainBranch;
   final List<SessionId> sessionIds;
 
+  /// The repo's `origin` remote URL, or `None` when it has none (or when the
+  /// server predates the field). The repo picker's "already added" badge runs
+  /// this and a candidate's clone URL through
+  /// [`crate::api::simple::canonical_repo_slug`] and compares the results —
+  /// never the raw strings, since one repo has several spellings.
+  final String? originUrl;
+
   const ProjectInfoDto({
     required this.id,
     required this.name,
     required this.repoPath,
     required this.mainBranch,
     required this.sessionIds,
+    this.originUrl,
   });
 
   @override
@@ -306,7 +536,8 @@ class ProjectInfoDto {
       name.hashCode ^
       repoPath.hashCode ^
       mainBranch.hashCode ^
-      sessionIds.hashCode;
+      sessionIds.hashCode ^
+      originUrl.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -317,7 +548,8 @@ class ProjectInfoDto {
           name == other.name &&
           repoPath == other.repoPath &&
           mainBranch == other.mainBranch &&
-          sessionIds == other.sessionIds;
+          sessionIds == other.sessionIds &&
+          originUrl == other.originUrl;
 }
 
 /// One project's pull status — the flattened form of the snapshot's

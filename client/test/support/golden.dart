@@ -15,16 +15,16 @@ import 'package:flutter_test/flutter_test.dart';
 /// eyebrow's padding comment) renders identically here and passes. Anything a
 /// widget test can assert *behaviourally* still should be.
 ///
-/// Regenerate after an intended visual change, from the repo root so the pinned
-/// Flutter/Skia does the rasterising rather than whatever is on your PATH:
+/// Regenerate after an intended visual change, from the repo root and with the
+/// pinned Flutter/Skia forced rather than whatever is on your PATH:
 ///
 /// ```sh
-/// task goldens:update
+/// CC_FORCE_NIX=1 scripts/verify.sh --goldens --update
 /// ```
 ///
 /// and read the image diff before committing — an unexplained change is the
-/// point of these tests. `task test-ci` before pushing a golden change is a repo
-/// rule; see the Golden tests section of the root `CLAUDE.md`.
+/// point of these tests. Running that lane before pushing a golden change is a
+/// repo rule; see the Golden tests section of the root `CLAUDE.md`.
 
 /// The bundled faces, keyed by the family name `pubspec.yaml` declares.
 const _fonts = {

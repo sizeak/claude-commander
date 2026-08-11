@@ -42,6 +42,7 @@ pub enum BindableAction {
     CascadeAbandon,
     PushStack,
     NewProject,
+    CloneRepository,
     CheckoutBranch,
     DeleteSession,
     DeleteMergedPrSessions,
@@ -114,6 +115,7 @@ impl BindableAction {
         Self::CascadeAbandon,
         // Projects
         Self::NewProject,
+        Self::CloneRepository,
         Self::CheckoutBranch,
         Self::ScanDirectory,
         Self::RemoveProject,
@@ -173,6 +175,7 @@ impl BindableAction {
             Self::CascadeAbandon => "cascade_abandon",
             Self::PushStack => "push_stack",
             Self::NewProject => "new_project",
+            Self::CloneRepository => "clone_repository",
             Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
             Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
@@ -233,6 +236,7 @@ impl BindableAction {
             Self::CascadeAbandon => "Abandon paused cascade merge",
             Self::PushStack => "Push stack to remote (base → leaf)",
             Self::NewProject => "New project (add git repo)",
+            Self::CloneRepository => "Clone a GitHub repository…",
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
             Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
@@ -299,6 +303,7 @@ impl BindableAction {
             Self::CascadeAbandon => "abandon cascade",
             Self::PushStack => "push stack",
             Self::NewProject => "new project",
+            Self::CloneRepository => "clone repo",
             Self::CheckoutBranch => "checkout",
             Self::DeleteSession => "delete",
             Self::DeleteMergedPrSessions => "delete merged",
@@ -368,9 +373,11 @@ impl BindableAction {
             | Self::CascadeMergeMain
             | Self::CascadeResume
             | Self::CascadeAbandon => "Stacked & Cascade",
-            Self::NewProject | Self::CheckoutBranch | Self::ScanDirectory | Self::RemoveProject => {
-                "Projects"
-            }
+            Self::NewProject
+            | Self::CloneRepository
+            | Self::CheckoutBranch
+            | Self::ScanDirectory
+            | Self::RemoveProject => "Projects",
             Self::OpenPullRequest | Self::RefreshPrStatus | Self::DeleteMergedPrSessions => {
                 "Pull Requests"
             }
@@ -417,6 +424,7 @@ impl FromStr for BindableAction {
             "cascade_abandon" => Ok(Self::CascadeAbandon),
             "push_stack" => Ok(Self::PushStack),
             "new_project" => Ok(Self::NewProject),
+            "clone_repository" => Ok(Self::CloneRepository),
             "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
             "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
@@ -1420,6 +1428,28 @@ mod tests {
             assert_eq!(name.parse::<BindableAction>().unwrap(), action);
             assert_eq!(action.config_name(), name);
         }
+    }
+
+    #[test]
+    fn test_clone_repository_palette_only() {
+        // Palette-only, and deliberately so: the repo picker is a rare,
+        // deliberate action, and the palette is this project's canonical
+        // command surface. It must still round-trip through TOML so a user who
+        // binds it doesn't hit "unknown action".
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::CloneRepository).is_empty());
+        assert_eq!(
+            "clone_repository".parse::<BindableAction>().unwrap(),
+            BindableAction::CloneRepository
+        );
+        assert_eq!(
+            BindableAction::CloneRepository.config_name(),
+            "clone_repository"
+        );
+        // Grouped with the other project-level actions so the help screen and
+        // the settings Keybindings tab list it where a user would look.
+        assert_eq!(BindableAction::CloneRepository.section(), "Projects");
+        assert!(BindableAction::ALL.contains(&BindableAction::CloneRepository));
     }
 
     #[test]

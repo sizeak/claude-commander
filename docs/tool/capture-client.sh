@@ -11,6 +11,9 @@
 # desktop); force a real window with CC_NO_XVFB=1.
 set -euo pipefail
 
+# SCRIPTDIR, not the invocation dir: this script is run from anywhere.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=fixture.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fixture.sh"
 
 CLIENT_DIR="$CC_REPO_ROOT/client"

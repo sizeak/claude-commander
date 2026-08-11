@@ -226,6 +226,10 @@ async fn attach_session(
 /// Returns once any teardown condition fires; the bridge's `ChildGuard` reaps
 /// the attach child on the way out.
 async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
+    // Take the repaint handle before `split` consumes the bridge. It answers the
+    // client's `refresh` frame, which is how a client that drew over its own
+    // terminal (the TUI's in-session switcher) gets the covered region back.
+    let refresh = bridge.refresh_handle();
     let (mut pty_reader, mut pty_writer, resize, mut child) = bridge.split();
     let mut pty_buf = [0u8; 4096];
     let mut ping = tokio::time::interval(ATTACH_PING_INTERVAL);
@@ -275,6 +279,7 @@ async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
                     }
                     Some(Ok(Message::Text(text))) => match ClientControl::from_text(&text) {
                         Ok(ClientControl::Resize { cols, rows }) => resize.resize(cols, rows),
+                        Ok(ClientControl::Refresh) => refresh.refresh().await,
                         Ok(ClientControl::Detach) => break DetachReason::ClientRequest,
                         // `auth`/`attach` are handshake-only; ignore once attached.
                         Ok(_) => debug!("ignoring unexpected control frame in steady state"),

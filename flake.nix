@@ -243,17 +243,6 @@
             tmux
             git
             pkg-config
-            # `task` (go-task) runs the Taskfile.yml mirrors of the CI checks, so
-            # a contributor gets the runner from the flake rather than a separate
-            # install. Its own tasks re-enter `nix develop` per CI job, which
-            # nests harmlessly when invoked from inside this shell.
-            #
-            # Costs CI a little: the clippy, test and packaging jobs enter this
-            # shell without ever invoking `task`, and the nix-store cache keys
-            # hash only flake.lock/Cargo.lock — so the go-task closure is fetched
-            # on every run until the next flake.lock bump. A few MB per job, kept
-            # because the alternative is every contributor installing it by hand.
-            go-task
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             # Audio backends for the `audio` feature: ALSA + libpipewire. The
             # bindgenHook supplies LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS for
