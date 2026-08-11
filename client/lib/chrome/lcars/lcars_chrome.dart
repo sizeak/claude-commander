@@ -539,25 +539,19 @@ class LcarsChrome extends Chrome {
         // reference the moment folding was introduced, with nothing about the
         // bar having actually changed.
         if (lines.length == 1) return _barLine(t, lines.single, stretch: false);
-        // Every line drawn at the widest line's width and the stack centred, so
-        // the folded run reads as one block rather than a ragged left-aligned
-        // stair. Never wider than the column: the widest line is one that fit.
-        final width = lines.map(_lineWidth).reduce(math.max);
-        return SizedBox(
-          width: constraints.maxWidth,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (var i = 0; i < lines.length; i++) ...[
-                if (i > 0) const SizedBox(height: _seam),
-                SizedBox(
-                  width: width,
-                  child: _barLine(t, lines[i], stretch: true),
-                ),
-              ],
+        // Every line filling the column — `stretch`, so each Row is handed the
+        // Column's full width — which is what makes a folded run read as one
+        // shape rather than a ragged left-aligned stair. Lines then share both
+        // edges by construction, so nothing here has to centre anything.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < lines.length; i++) ...[
+              if (i > 0) const SizedBox(height: _seam),
+              _barLine(t, lines[i], stretch: true),
             ],
-          ),
+          ],
         );
       },
     );
@@ -568,11 +562,11 @@ class LcarsChrome extends Chrome {
   ///
   /// [stretch] fills the width the line is given by growing each block **in
   /// proportion to the width it already wanted**. Equal shares would be the
-  /// obvious alternative and is wrong: a line is only ever stretched to another
-  /// line's width, so equal shares could hand RESTART less than its own label
-  /// needs while SHELL sat in slack, and the label would ellipsise. Proportional
-  /// growth cannot shrink anything, because the target width is never below the
-  /// line's own natural width.
+  /// obvious alternative and is wrong: they would hand RESTART a third of the
+  /// column while SHELL sat in slack, and RESTART's label needs more than that,
+  /// so it would ellipsise. Proportional growth cannot shrink anything, because
+  /// [_foldRun] only cuts lines that already fit the column, so the width a
+  /// stretched line is filling is never below its own natural width.
   Widget _barLine(
     CommanderTokens t,
     _BarLine line, {

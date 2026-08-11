@@ -79,14 +79,12 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  // Folded lines are a block, not a ragged left-aligned stack: every line is
-  // widened to the widest one's natural width and the stack is centred in its
-  // column. Widened by growing each block in proportion to the width it
-  // already wanted, so a stretched line's blocks keep their relative sizes and
-  // none is ever squeezed below the label it has to hold.
-  testWidgets('folded lines share one width, centred in the column', (
-    tester,
-  ) async {
+  // Folded lines are a block, not a ragged left-aligned stack: every line fills
+  // the column, so the lines share both edges and the run reads as one shape.
+  // Filled by growing each block in proportion to the width it already wanted,
+  // so a stretched line's blocks keep their relative sizes and none is ever
+  // squeezed below the label it has to hold.
+  testWidgets('every folded line fills the column', (tester) async {
     await loadCommanderFonts();
     await tester.pumpWidget(bar(300));
     await tester.pumpAndSettle();
@@ -97,26 +95,23 @@ void main() {
           tester.getRect(find.widgetWithText(ChromeElbow, last.toUpperCase())),
         );
 
-    final top = line('Shell', 'Restart');
-    final bottom = line('Cascade', 'Delete');
-
-    expect(top.width, moreOrLessEquals(bottom.width, epsilon: 0.5));
-    expect(top.center.dx, moreOrLessEquals(bottom.center.dx, epsilon: 0.5));
-    expect(
-      top.center.dx,
-      moreOrLessEquals(150, epsilon: 0.5),
-      reason: 'the stack sits on the 300dp column\'s centre line',
-    );
-    // Neither line was stretched past the column.
-    expect(top.width, lessThanOrEqualTo(300));
+    for (final run in [line('Shell', 'Restart'), line('Cascade', 'Delete')]) {
+      expect(run.left, moreOrLessEquals(0, epsilon: 0.5));
+      expect(run.right, moreOrLessEquals(300, epsilon: 0.5));
+    }
     expect(tester.takeException(), isNull);
   });
 
+  /// The tightest column that still folds to two lines. The test below needs it
+  /// rather than the 300dp the others use: a wide column has slack enough that
+  /// even an equal-share stretch clears every label, so it cannot tell a correct
+  /// implementation from a wrong one.
+  const tight = 170.0;
+
   // What makes the stretch *proportional* rather than an equal share, and the
-  // only assertion that can tell the two apart: equal shares would hand every
-  // block a third of the widest line, which is less than RESTART's own label
-  // needs while SHELL sits in slack — so RESTART would ellipsise. No folded
-  // block may come out narrower than the width it had unfolded.
+  // only assertion that can tell the two apart. At [tight] an equal third is
+  // less than RESTART's own label needs while SHELL sits in slack, so RESTART
+  // ellipsises. No folded block may come out narrower than it was unfolded.
   testWidgets('stretching a line grows every block and shrinks none', (
     tester,
   ) async {
@@ -129,15 +124,15 @@ void main() {
     await tester.pumpAndSettle();
     final natural = {for (final label in labels) label: widthOf(label)};
 
-    await tester.pumpWidget(bar(300));
+    await tester.pumpWidget(bar(tight));
     await tester.pumpAndSettle();
 
     for (final label in labels) {
       expect(
         widthOf(label),
-        // A hair of tolerance: the widest line is stretched to its own width,
-        // so its blocks grow by nothing and integer flex rounding can shave a
-        // fraction off one. An equal-share stretch misses by whole dp.
+        // A hair of tolerance for integer flex rounding, which can shave a
+        // fraction off a block that had almost no room to grow. An equal-share
+        // stretch misses by whole dp, well outside this.
         greaterThanOrEqualTo(natural[label]! - 1),
         reason: '$label was squeezed below the label it has to hold',
       );
