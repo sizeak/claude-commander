@@ -532,24 +532,33 @@ class LcarsChrome extends Chrome {
     return LayoutBuilder(
       builder: (context, constraints) {
         final lines = _foldRun(context, t, spec.buttons, constraints.maxWidth);
-        // A run that fits is the bare [Row] it has always been, not a Column of
-        // one. The difference is vertical: a lone Row takes the height its
+        // A bar fills its column whether it folded or not — one rule, not two.
+        // In landscape the six lifecycle actions fit on one line, and the
+        // unfilled run hugged the left of a column whose every other card ran
+        // its full width.
+        //
+        // Two cases must not stretch. A caller that set `expand` is managing
+        // the fill itself, and `_barBlock` already wraps that button in its own
+        // `Expanded` — a second flex around the same child. And an unbounded
+        // column has no width to fill, where a flex child throws outright.
+        final stretch =
+            constraints.maxWidth.isFinite && !spec.buttons.any((b) => b.expand);
+        // A single line stays the bare [Row] it has always been, never a Column
+        // of one. The difference is vertical: a lone Row takes the height its
         // parent offers and its blocks stretch to it, while a Column shrink-
-        // wraps them to `_barHeight` — which reshaped `button_bar_lcars`'s
-        // reference the moment folding was introduced, with nothing about the
-        // bar having actually changed.
-        if (lines.length == 1) return _barLine(t, lines.single, stretch: false);
-        // Every line filling the column — `stretch`, so each Row is handed the
-        // Column's full width — which is what makes a folded run read as one
-        // shape rather than a ragged left-aligned stair. Lines then share both
-        // edges by construction, so nothing here has to centre anything.
+        // wraps them to `_barHeight`.
+        if (lines.length == 1) {
+          return _barLine(t, lines.single, stretch: stretch);
+        }
+        // Lines then share both edges by construction, so nothing here has to
+        // centre anything.
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
             for (var i = 0; i < lines.length; i++) ...[
               if (i > 0) const SizedBox(height: _seam),
-              _barLine(t, lines[i], stretch: true),
+              _barLine(t, lines[i], stretch: stretch),
             ],
           ],
         );
@@ -612,17 +621,22 @@ class LcarsChrome extends Chrome {
     List<ChromeBarButton> buttons,
     double maxWidth,
   ) {
-    // An expanding block has no natural width to measure — it takes whatever
-    // slack the row has — so a run containing one can never overflow and never
-    // needs folding.
-    if (buttons.any((b) => b.expand) || !maxWidth.isFinite) {
-      return [(buttons: buttons, widths: const <double>[])];
-    }
     final widths = [
       for (final button in buttons) _barBlockWidth(context, t, button),
     ];
     _BarLine cut(int from, int to) =>
         (buttons: buttons.sublist(from, to), widths: widths.sublist(from, to));
+    // Measured above this guard rather than below it, so a line's widths are
+    // populated unconditionally: `buildButtonBar` reads them whenever it
+    // stretches, and an empty list would be a crash reachable only through the
+    // exact combination of flags that had skipped the measurement.
+    //
+    // An expanding block has no natural width to honour — it takes whatever
+    // slack the row has — so a run containing one can never overflow and never
+    // needs folding. Neither can one in an unbounded column.
+    if (buttons.any((b) => b.expand) || !maxWidth.isFinite) {
+      return [cut(0, buttons.length)];
+    }
     for (var lines = 1; lines < buttons.length; lines++) {
       final per = (buttons.length / lines).ceil();
       final groups = [

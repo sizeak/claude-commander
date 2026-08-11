@@ -18,7 +18,10 @@ import '../support/ink.dart';
 void main() {
   const labels = ['Shell', 'Kill', 'Restart', 'Cascade', 'Push', 'Delete'];
 
-  Widget bar(double width, {List<String> of = labels}) => RepaintBoundary(
+  /// [width] null renders the bar unconstrained, which is how a test reads a
+  /// block's *natural* width: a bar given a bounded column always fills it, so
+  /// there is no bounded width at which the blocks are their own size.
+  Widget bar(double? width, {List<String> of = labels}) => RepaintBoundary(
     key: inkBoundary,
     child: MaterialApp(
       theme: themeDataFor(lcarsTokens),
@@ -26,8 +29,8 @@ void main() {
         backgroundColor: lcarsTokens.canvas,
         body: Align(
           alignment: Alignment.topLeft,
-          child: SizedBox(
-            width: width,
+          child: _sized(
+            width,
             child: ChromeButtonBar(
               ChromeButtonBarSpec(
                 buttons: [
@@ -120,7 +123,7 @@ void main() {
         .getSize(find.widgetWithText(ChromeElbow, label.toUpperCase()))
         .width;
 
-    await tester.pumpWidget(bar(1200));
+    await tester.pumpWidget(bar(null));
     await tester.pumpAndSettle();
     final natural = {for (final label in labels) label: widthOf(label)};
 
@@ -139,19 +142,28 @@ void main() {
     }
   });
 
-  // The single-line case is the shape every existing golden pins, so folding
-  // must not disturb it: with room, one line at natural widths.
-  testWidgets('a run that fits stays on one line', (tester) async {
+  // A run with room stays on one line — and fills the column exactly as a
+  // folded line does. One rule, not two: in landscape the six lifecycle actions
+  // fit, and the unfilled run hugged the left of a column whose every card ran
+  // its full width.
+  testWidgets('a run that fits stays on one line and fills the column', (
+    tester,
+  ) async {
     await loadCommanderFonts();
-    await tester.pumpWidget(bar(1200));
+    await tester.pumpWidget(bar(600));
     await tester.pumpAndSettle();
 
-    final tops = {
-      for (final label in labels)
-        tester
-            .getRect(find.widgetWithText(ChromeElbow, label.toUpperCase()))
-            .top,
-    };
-    expect(tops.length, 1);
+    Rect blockOf(String label) =>
+        tester.getRect(find.widgetWithText(ChromeElbow, label.toUpperCase()));
+
+    expect({for (final label in labels) blockOf(label).top}.length, 1);
+    final run = blockOf('Shell').expandToInclude(blockOf('Delete'));
+    expect(run.left, moreOrLessEquals(0, epsilon: 0.5));
+    expect(run.right, moreOrLessEquals(600, epsilon: 0.5));
   });
 }
+
+/// [SizedBox] for a width, or an [UnconstrainedBox] for none.
+Widget _sized(double? width, {required Widget child}) => width == null
+    ? UnconstrainedBox(child: child)
+    : SizedBox(width: width, child: child);
