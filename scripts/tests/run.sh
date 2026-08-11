@@ -85,6 +85,7 @@ assert_eq "22" "$(cc_exit_code_for_lane analyze)" "analyze -> 22"
 assert_eq "23" "$(cc_exit_code_for_lane flutter-test)" "flutter-test -> 23"
 assert_eq "24" "$(cc_exit_code_for_lane cdylib)" "cdylib -> 24"
 assert_eq "25" "$(cc_exit_code_for_lane e2e)" "e2e -> 25"
+assert_eq "26" "$(cc_exit_code_for_lane goldens)" "goldens -> 26"
 assert_eq "30" "$(cc_exit_code_for_lane nix-build)" "nix-build -> 30"
 assert_eq "31" "$(cc_exit_code_for_lane packaging)" "packaging -> 31"
 assert_eq "32" "$(cc_exit_code_for_lane shellcheck)" "shellcheck -> 32"
@@ -96,15 +97,36 @@ assert_fails "unknown lane is rejected" cc_exit_code_for_lane notalane
 echo "== exit codes are unique =="
 all_codes=""
 lane_count=0
-for lane in $(cc_lanes_for_tier all); do
+# Every lane in any tier, not just `all`: the goldens lane deliberately sits
+# outside `all` (flutter-test already covers it), and a lane that no tier sweep
+# reaches would otherwise be free to duplicate someone else's code.
+every_lane=$(cc_lane_run_order | tr ' ' '\n' | grep -v '^$')
+for lane in $every_lane; do
   all_codes+="$(cc_exit_code_for_lane "$lane")"$'\n'
   lane_count=$((lane_count + 1))
 done
 uniq_count=$(printf '%s' "$all_codes" | sort -u | grep -c .)
 # Derived from the tier list rather than a hand-kept lane list, so adding a lane
 # without giving it a distinct code fails here instead of passing quietly.
-assert_eq "$lane_count" "$uniq_count" "every lane in the all tier has a distinct exit code"
-assert_eq "14" "$lane_count" "the all tier covers 14 lanes"
+assert_eq "$lane_count" "$uniq_count" "every lane in every tier has a distinct exit code"
+# Counted from the `all` tier alone, not the widened union above: this pins what
+# CI's mirror covers, which is a different question from code uniqueness.
+all_tier_count=$(cc_lanes_for_tier all | tr ' ' '\n' | grep -c .)
+assert_eq "14" "$all_tier_count" "the all tier covers 14 lanes"
+assert_eq "15" "$lane_count" "the run order covers 15 lanes (all + goldens)"
+
+# The runner walks cc_lane_run_order, so a lane missing from it can never execute
+# however it is selected -- which is exactly how the goldens lane was first
+# silently skipped. Assert containment rather than trusting the two lists to agree.
+missing_from_run_order=""
+for lane in $(cc_lanes_for_tier all) $(cc_lanes_for_tier goldens); do
+  case " $(cc_lane_run_order) " in
+    *" $lane "*) : ;;
+    *) missing_from_run_order+="$lane " ;;
+  esac
+done
+assert_eq "" "$missing_from_run_order" \
+  "every lane a tier can select appears in cc_lane_run_order"
 
 # No lane may collide with the reserved argument/precondition codes, or with the
 # shell's own conventional statuses.
@@ -124,6 +146,9 @@ assert_eq "fmt clippy" "$(cc_lanes_for_tier fast)" "fast tier is fmt + clippy on
 assert_eq "fmt clippy build test" "$(cc_lanes_for_tier rust)" "rust tier is the four cargo lanes"
 assert_eq "pub-get dart-format analyze flutter-test cdylib" "$(cc_lanes_for_tier client)" \
   "client tier resolves packages before checking them"
+
+assert_eq "pub-get goldens" "$(cc_lanes_for_tier goldens)" \
+  "goldens tier resolves packages, then rasterises only test/goldens"
 assert_eq "fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest e2e nix-build packaging" \
   "$(cc_lanes_for_tier all)" "all tier is every lane, cheap-to-slow"
 

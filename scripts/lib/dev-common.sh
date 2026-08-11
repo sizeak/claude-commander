@@ -126,6 +126,7 @@ cc_exit_code_for_lane() {
     flutter-test) printf '23\n' ;;
     cdylib) printf '24\n' ;;
     e2e) printf '25\n' ;;
+    goldens) printf '26\n' ;;
     # Whole-repo lanes: 30-39
     nix-build) printf '30\n' ;;
     packaging) printf '31\n' ;;
@@ -151,6 +152,7 @@ cc_lane_description() {
     flutter-test) printf 'flutter test (client widget + golden tests)\n' ;;
     cdylib) printf 'cargo test in client/rust\n' ;;
     e2e) printf 'client/tool/e2e.sh (hermetic server + Linux app)\n' ;;
+    goldens) printf 'flutter test test/goldens (reference images only)\n' ;;
     nix-build) printf 'nix build\n' ;;
     packaging) printf 'cargo install --path crates/claude-commander (Homebrew path)\n' ;;
     shellcheck) printf 'shellcheck -x over scripts/, client/tool/, docs/tool/\n' ;;
@@ -166,16 +168,32 @@ cc_lane_description() {
 #
 # Ordered cheapest-first within and across families, so a one-second fmt or
 # clippy failure surfaces before a multi-minute `nix build` has been paid for.
+# cc_lane_run_order -- every lane that exists, cheapest first.
+#
+# Distinct from `cc_lanes_for_tier all` on purpose: that tier is the CI mirror,
+# and a lane can exist outside it (goldens, a focused subset of flutter-test).
+# The runner iterates THIS list so flag combinations cannot reorder lanes or run
+# one twice -- and so a lane outside every tier still gets a chance to run, which
+# is how the goldens lane was silently skipped when the runner walked the `all`
+# tier instead.
+cc_lane_run_order() {
+  printf 'fmt clippy build test pub-get dart-format analyze flutter-test goldens cdylib shellcheck selftest e2e nix-build packaging\n'
+}
+
 cc_lanes_for_tier() {
   case "${1:-}" in
     fast) printf 'fmt clippy\n' ;;
     rust) printf 'fmt clippy build test\n' ;;
     client) printf 'pub-get dart-format analyze flutter-test cdylib\n' ;;
+    # A focused subset of flutter-test, for the golden-image loop. Deliberately
+    # NOT in the client or all tiers: `flutter test` already runs the goldens, so
+    # including it there would rasterise every reference image twice.
+    goldens) printf 'pub-get goldens\n' ;;
     all)
       printf 'fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest e2e nix-build packaging\n'
       ;;
     *)
-      cc_error "unknown tier '${1:-}' (try: fast rust client all)"
+      cc_error "unknown tier '${1:-}' (try: fast rust client goldens all)"
       return 1
       ;;
   esac

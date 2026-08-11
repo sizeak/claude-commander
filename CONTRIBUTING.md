@@ -72,6 +72,20 @@ that differs from the flake's can disagree with CI in either direction. Set
 emulator + APK deploy); both are documented in
 [`CLAUDE.md`](CLAUDE.md#commands).
 
+**Golden images are the one case where the default toolchain rule is not good
+enough.** The client's reference images under `client/test/goldens/` are
+rasteriser-sensitive, so a `flutter test` from a differing local Flutter can pass
+against images CI will reject. Any change that adds, regenerates or deletes a
+golden must be verified with the pinned toolchain before pushing:
+
+```bash
+CC_FORCE_NIX=1 scripts/verify.sh --goldens          # check them
+CC_FORCE_NIX=1 scripts/verify.sh --goldens --update # regenerate, then read the diff
+```
+
+See the Golden tests section of [`CLAUDE.md`](CLAUDE.md) for what that does and
+does not prove — a green run is strong evidence, not proof.
+
 This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and
 `cargo clippy` on every commit, plus `dart format` when the commit touches Dart.
 After cloning, run `pre-commit install`.

@@ -226,15 +226,23 @@ not yet verified there.
 `test/goldens/` holds reference images for the chrome layer — each chrome form on
 its own, plus the session list, settings and wide shell — rendered in **both**
 themes. They run as part of `flutter test`; the Nix-pinned Flutter is what makes
-that safe, since identical Skia and font versions mean CI rasterises exactly as
-your machine does.
+that mostly safe, since identical Skia and font versions mean CI rasterises
+almost exactly as your machine does. Not *exactly*: the LCARS phone-shell golden
+disagreed with the runner on label antialiasing alone, with the geometry
+byte-identical, and was deleted in #280 rather than given a tolerance.
 
-Regenerate after an intended visual change, then **look at the diff before
-committing** — an unexplained image change is the entire point:
+So run them the way CI does — from the repo root, with the pinned toolchain
+forced, because the images are rasteriser-sensitive:
 
 ```sh
-cd client && flutter test test/goldens --update-goldens
+CC_FORCE_NIX=1 scripts/verify.sh --goldens            # run them
+CC_FORCE_NIX=1 scripts/verify.sh --goldens --update   # regenerate them
 ```
+
+Then **look at the diff before committing** — an unexplained image change is the
+entire point. Running that lane before pushing a golden change is a repo rule;
+see the Golden tests section of the root `CLAUDE.md` for what it does and does
+not prove, and for what to do when a golden fails only on CI.
 
 Three things the harness (`test/support/golden.dart`) has to do, each learned by
 getting it wrong first:

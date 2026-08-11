@@ -41,6 +41,7 @@ Shared logic lives in `scripts/lib/dev-common.sh`; its pure helpers are covered 
 - Never pipe command output through `| tail` / `| head` when checking pass/fail — it masks exit codes. Use `set -o pipefail` or run the command bare and report the real exit status.
 - Do not claim tests, CI, or builds are green unless you have the actual exit code / CI conclusion in front of you. If verification was blocked, say so explicitly instead of inferring success.
 - After any rebase or merge, re-run a full build before declaring done (stale `crate::` paths and missing deps have broken builds repeatedly).
+- Verify against the pinned toolchain, not your PATH. `scripts/verify.sh` uses whatever `cargo`/`flutter` is already on your `PATH` and only falls back to the dev shell when one is missing, so a local toolchain that differs from the flake's can disagree with CI in either direction. `CC_FORCE_NIX=1` routes every lane through `nix develop` the way CI does. This is **mandatory for golden changes** — see [Golden tests](#golden-tests).
 
 ## Workflow: TDD then review then merge
 
@@ -135,6 +136,26 @@ Unit tests are co-located in source files (`#[cfg(test)]`). Integration tests in
 Tests must not read or modify anything on the real filesystem. Any disk access must go through `tempfile::TempDir` (already in dev-deps) for OS-portable temp paths. Never hardcode `/tmp/...` as a real path. Dummy `PathBuf` values stored in struct fields (never accessed on disk) are acceptable.
 
 **tmux isolation:** tmux clients resolve their socket from the `$TMUX` env var (set inside any tmux session) **in preference to** `$TMUX_TMPDIR` — so a test script that only exports `TMUX_TMPDIR` is NOT isolated when run from inside tmux: its tmux commands (including a cleanup `tmux kill-server`) hit the developer's real server and can kill every open session. Any script that isolates tmux via `TMUX_TMPDIR` must also `unset TMUX TMUX_PANE` (see `client/tool/e2e.sh`), and never run a bare `tmux kill-server` without `$TMUX` provably unset. The Rust integration tests are now genuinely isolated via the `tmux_tmpdir` config knob (set by `crates/claude-commander-test-support`'s `test_state` and core's `create_isolated_config_store`): the `TmuxExecutor` and the `HeadlessAttach` bridge apply `TMUX_TMPDIR` + strip `$TMUX`/`$TMUX_PANE` per-command when it is set, so each test gets its own throwaway tmux server (which exits with its last session) rather than landing on the developer's default server.
+
+### Golden tests
+
+The Flutter client's reference images live in `client/test/goldens/images/` and run as part of `flutter test`. They guard the chrome layer — see the Golden tests section of `client/README.md` for what the harness (`client/test/support/golden.dart`) has to do and why.
+
+**Any change that adds, regenerates or deletes a golden must be verified with `CC_FORCE_NIX=1 scripts/verify.sh --goldens` before pushing** (`--update` regenerates them). A bare `flutter test` is not sufficient evidence: it can pick up a Flutter/Skia other than the pinned one, and the reference images are rasteriser-sensitive by nature. The lane warns when it is using an unpinned `flutter` rather than passing quietly. Then read the image diff before committing — an unexplained pixel change is the entire point of these tests.
+
+What that does and does not buy you, because a golden has already passed locally and failed on the runner:
+
+- **Reproduced by the pinned lane.** The Flutter SDK and its Skia (from the `clientCi` shell in `flake.nix`), the three bundled faces plus `MaterialIcons` resolved from the pinned `FLUTTER_ROOT`, and `devicePixelRatio` 1 (fixed by `useGoldenSurface`). No golden reads a system font, so there is nothing font-related to configure and the host's fontconfig is not consulted.
+- **Not reproduced, and not reproducible by any local configuration.** The runner's text antialiasing. The LCARS phone-shell golden failed only on CI for exactly this: 1179 px confined to one 13-row band, geometry byte-identical, i.e. label antialiasing alone (measured from the comparator's own images, run `31333637408`). It was deleted in #280 rather than given a tolerance — a tolerance sized to hide 0.39% also hides a genuinely wrapped label — and its layout is now asserted geometrically in `client/test/phone_shell_test.dart`. Prefer that resolution: when a golden pins the rasteriser rather than the layout, replace it with a geometric assertion instead of loosening the threshold.
+
+So a green `--goldens` lane is strong evidence, not proof. If a golden fails on CI and passes locally, do not re-run blindly — download the `golden-failures` artifact the Client Tests job uploads on failure (`isolated`/`masterImage`/`testImage` PNGs) and measure what moved before deciding whether it is layout or antialiasing.
+
+`TERM` and `COLORTERM` are irrelevant to the goldens themselves — a golden is rasterised by Skia into a PNG with no terminal in the picture. They are not equivalent elsewhere, though, and `scripts/verify.sh` treats them differently:
+
+- `COLORTERM` is read only by `ColorMode::detect()` (`tui/theme.rs`). Tests *do* reach that function — `Theme::default()` is `for_color_mode(detect())` and four board-widget tests construct one (`tui/widgets/board/render.rs`) — but no test **assertion** depends on the result: those four assert cell symbols and returned button/heading/hit regions, never styles, so the detected palette is built and discarded. It is left unset, because pinning it would imply an assertion depends on it.
+- `TERM` also reaches `HeadlessAttach::spawn` (`tmux/headless_attach.rs`), which the server's `/ws/attach` integration tests exercise. `fallback_term` normalises an unset/empty/`dumb`/`unknown` `TERM` to `xterm-256color` but passes a real one straight through to `tmux attach`, so a developer in kitty or tmux hands those tests a different `TERM` than a headless host does. `verify.sh` exports `TERM=xterm-256color` for its whole run — the value the fallback would pick anyway — so that path behaves the same in both places.
+
+`verify.sh` exports both `DO_NOT_TRACK` and `TERM` for the whole run rather than per lane, so a lane added later inherits them. That works because a bash `export` overrides whatever the caller had; do not assume a task runner's declarative `env:` block does the same — go-task's, for one, only fills a variable that is *absent* from the caller's environment, and `TERM` is always set in an interactive shell. If you change how either is pinned, verify it by echoing the variable from inside a lane under a deliberately wrong caller value, because a run that merely passes proves nothing here.
 
 ### Writing new tests
 

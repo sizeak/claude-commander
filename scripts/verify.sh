@@ -10,6 +10,8 @@
 #   verify.sh --all               every CI job, plus shellcheck, self-tests, e2e
 #   verify.sh --nix               rust lanes + nix build + the packaging install
 #   verify.sh --e2e               rust lanes + the Flutter e2e (forced)
+#   verify.sh --goldens           just the client's golden images
+#   verify.sh --goldens --update  regenerate them, then read the image diff
 #   verify.sh -p core <filter>    single crate: cargo test -p <crate> <filter>
 #   verify.sh --list              print the lane / exit-code table
 #
@@ -42,7 +44,25 @@ cd "$CC_REPO_ROOT"
 # it survives `nix develop -c`, which is what ci.yml relies on too.
 export DO_NOT_TRACK=1
 
+# A verification sweep should not inherit the developer's terminal either.
+# `HeadlessAttach::spawn` (crates/claude-commander-core/src/tmux/headless_attach.rs)
+# reads TERM and, via `fallback_term`, normalises an unset/empty/"dumb"/"unknown"
+# one to xterm-256color while passing a *real* one straight through to
+# `tmux attach`. The server's /ws/attach integration tests drive that path, so a
+# developer in kitty or tmux hands them different escape sequences than a
+# headless CI runner does. Pinning TERM to the value the fallback itself picks
+# makes the path behave the same in both places, without asserting anything about
+# a runner's environment. Exported, so it survives `nix develop -c`.
+#
+# COLORTERM is deliberately NOT pinned. It is read only by ColorMode::detect()
+# (tui/theme.rs), and while tests do reach that -- `Theme::default()` is
+# `for_color_mode(detect())` and four board-widget tests construct one -- no test
+# *assertion* depends on the result: those assert cell symbols and returned
+# regions, never styles. Pinning it would imply an assertion depends on it.
+export TERM=xterm-256color
+
 FORCE_E2E=0
+GOLDENS_UPDATE=0
 
 usage() {
   cc_usage_from_header "${BASH_SOURCE[0]}"
@@ -57,11 +77,13 @@ EOF
 }
 
 list_lanes() {
-  # Listed in run order (cheapest first), not by code: that is the order
-  # --all executes them in, and the EXIT column carries the code anyway.
+  # Listed in run order (cheapest first), not by code. This is every lane that
+  # exists; the Tiers block below says which flag selects which, since `--all` is
+  # the CI mirror and does not include every row (goldens is a subset of
+  # flutter-test).
   printf '%s%-13s %-5s %s%s\n' "$CC_C_BOLD" "LANE (run order)" "EXIT" "CHECK" "$CC_C_RESET"
   local lane
-  for lane in $(cc_lanes_for_tier all); do
+  for lane in $(cc_lane_run_order); do
     printf '%-13s %-5s %s\n' \
       "$lane" "$(cc_exit_code_for_lane "$lane")" "$(cc_lane_description "$lane")"
   done
@@ -71,6 +93,7 @@ Tiers:
   (default)     $(cc_lanes_for_tier rust)
   --fast        $(cc_lanes_for_tier fast)
   --client      $(cc_lanes_for_tier rust) + $(cc_lanes_for_tier client)
+  --goldens     $(cc_lanes_for_tier goldens)
   --all         every lane above
 EOF
 }
@@ -117,6 +140,20 @@ lane_analyze() {
 
 lane_flutter_test() {
   cc_run_in_shell "$CC_CLIENT_SHELL" flutter "cd client && flutter test"
+}
+
+lane_goldens() {
+  # The golden images are rasteriser-sensitive, so this lane is the one place the
+  # PATH-first toolchain rule is actively wrong: a local Flutter that differs from
+  # the flake's can pass against images CI will reject. Hence the CC_FORCE_NIX
+  # nudge rather than a silent pass -- see the Golden tests section of CLAUDE.md
+  # for what a green run does and does not prove.
+  if [ -z "${CC_FORCE_NIX:-}" ] && command -v flutter >/dev/null 2>&1; then
+    cc_warn "using the flutter on PATH; set CC_FORCE_NIX=1 to rasterise with the pinned SDK"
+  fi
+  local args=""
+  [ "$GOLDENS_UPDATE" -eq 1 ] && args=" --update-goldens"
+  cc_run_in_shell "$CC_CLIENT_SHELL" flutter "cd client && flutter test test/goldens$args"
 }
 
 lane_cdylib() {
@@ -238,6 +275,7 @@ run_lane() {
     analyze) cc_lane analyze lane_analyze ;;
     flutter-test) cc_lane flutter-test lane_flutter_test ;;
     cdylib) cc_lane cdylib lane_cdylib ;;
+    goldens) cc_lane goldens lane_goldens ;;
     e2e) cc_lane e2e lane_e2e ;;
     nix-build) cc_lane nix-build lane_nix_build ;;
     packaging) cc_lane packaging lane_packaging ;;
@@ -313,6 +351,17 @@ while [ "$#" -gt 0 ]; do
       TIER_SET=1
       shift
       ;;
+    --goldens)
+      # Not joined to the rust lanes: this is the focused image loop, and making
+      # it wait on a full cargo build would defeat that.
+      select_tier goldens
+      TIER_SET=1
+      shift
+      ;;
+    --update)
+      GOLDENS_UPDATE=1
+      shift
+      ;;
     --e2e)
       select_tier rust
       # The e2e drives the real Flutter app, so it needs resolved packages too.
@@ -338,10 +387,17 @@ done
 
 [ "$TIER_SET" -eq 1 ] || select_tier rust
 
-# Emit in the canonical `all` order so flag combinations cannot reorder lanes or
-# run one twice.
+# --update only means anything to the goldens lane, and silently ignoring it would
+# leave the caller believing they had regenerated the images.
+if [ "$GOLDENS_UPDATE" -eq 1 ] && [ -z "${SELECTED[goldens]:-}" ]; then
+  cc_die "$CC_EXIT_USAGE" "--update only applies to --goldens"
+fi
+
+# Emit in the canonical run order so flag combinations cannot reorder lanes or run
+# one twice. Note this is cc_lane_run_order, not the `all` tier: a lane that lives
+# outside every tier (goldens) must still be runnable when selected directly.
 lanes=()
-for lane in $(cc_lanes_for_tier all); do
+for lane in $(cc_lane_run_order); do
   [ -n "${SELECTED[$lane]:-}" ] && lanes+=("$lane")
 done
 
