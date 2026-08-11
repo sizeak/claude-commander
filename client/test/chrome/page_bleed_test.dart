@@ -112,12 +112,69 @@ void main() {
     await tester.pumpAndSettle();
 
     final rail = tester.getRect(find.widgetWithText(ChromeElbow, '‹ BACK'));
-    // Inside the top inset, well clear of the curved emergence the seam
-    // draws below its fill (see `phone_shell_test.dart`'s gutter-curve test)
-    // — this only needs to land somewhere the fill is flat.
+    // Inside the top inset, well clear of where the fill ends — this only
+    // needs to land somewhere the seam is painted at all.
     final seamColour = await pixelAt(tester, Offset(rail.right + 2, 12));
 
     expect(seamColour, lcarsTokens.primary);
+  });
+
+  // Both insets at once, which is what no other test in this file does and is
+  // exactly how the defect hid: `buildPage` hands `_railGutter` the frame's
+  // whole bleed, so a seam sized off `bleed.vertical` ran the bottom inset
+  // past the cap it is supposed to end level with. On a gesture-nav Pixel 8a
+  // that painted a 24dp amber tab hanging out of the band's underside.
+  testWidgets('the seam fill ends level with the cap', (tester) async {
+    useInsets(tester, top: 24, bottom: 48);
+    await tester.pumpWidget(page(ChromeInsets.standard));
+    await tester.pumpAndSettle();
+
+    // Two pixels inboard of the rail is inside the 5px gutter the seam fills.
+    final seamX = tester.getRect(find.byType(ChromeElbow).first).right + 2;
+    final capBottom = tester.getRect(find.byType(ChromeElbowCap)).bottom;
+
+    expect(
+      await pixelAt(tester, Offset(seamX, capBottom - 1)),
+      lcarsTokens.nav,
+    );
+    expect(
+      await pixelAt(tester, Offset(seamX, capBottom + 1)),
+      lcarsTokens.canvas,
+      reason: 'the seam must not outlive the cap it continues into',
+    );
+  });
+
+  // A rounded corner exists to curve the bracket into the canvas. Once a block
+  // grows to the bezel that corner faces the screen edge instead, and the
+  // radius bites a quarter-circle out of the screen's own corner — measured on
+  // a Pixel 8a, the band only reached x=0 at y=84, a 32dp black wedge above
+  // the rail and another below it.
+  testWidgets('the bracket squares the corners it bleeds into', (tester) async {
+    useInsets(tester, top: 24, bottom: 48);
+    await tester.pumpWidget(page(ChromeInsets.standard));
+    await tester.pumpAndSettle();
+
+    expect(await pixelAt(tester, const Offset(0.5, 0.5)), lcarsTokens.nav);
+    expect(
+      await pixelAt(tester, Offset(0.5, surfaceHeight(tester) - 0.5)),
+      lcarsTokens.nav,
+    );
+  });
+
+  // The other half of that rule, and the reason it is keyed to the bleed rather
+  // than applied outright: with nothing to bleed into, the elbow keeps the
+  // radius that makes the column read as a bracket — the shape every desktop
+  // and tablet golden pins.
+  testWidgets('an unbled bracket keeps its rounded corners', (tester) async {
+    useInsets(tester);
+    await tester.pumpWidget(page(ChromeInsets.standard));
+    await tester.pumpAndSettle();
+
+    expect(await pixelAt(tester, const Offset(0.5, 0.5)), lcarsTokens.canvas);
+    expect(
+      await pixelAt(tester, Offset(0.5, surfaceHeight(tester) - 0.5)),
+      lcarsTokens.canvas,
+    );
   });
 
   testWidgets('a cutout is held, not bled', (tester) async {

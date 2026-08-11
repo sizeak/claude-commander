@@ -98,15 +98,25 @@ class ChromeElbow extends StatelessWidget {
     assert(bleed.left == 0 && bleed.right == 0, 'bleed is vertical only');
     final t = CommanderTokens.of(context);
     final r = Radius.circular(t.elbowRadius);
+    // A corner is rounded only while it faces the canvas. `edge` is the bleed
+    // on the screen edge that corner sits against, and once the block grows
+    // into it the radius stops curving the bracket *into* the canvas and starts
+    // biting a quarter-circle *out of* the screen's own corner — measured on a
+    // Pixel 8a, the rail's amber band only reached x=0 at y=84, leaving a 32dp
+    // black wedge in the top-left of the display and its mirror at the bottom.
+    // The same rule [ChromeElbowCap] applies to its bottom-left, for the same
+    // reason: a bled edge has nothing left to curve across.
+    Radius radiusFor(ElbowCorner which, double edge) =>
+        corner == which && edge == 0 ? r : Radius.zero;
     final centred = icon != null || labelAlignment == Alignment.center;
     final decorated = Container(
       decoration: BoxDecoration(
         color: color,
         borderRadius: BorderRadius.only(
-          topLeft: corner == ElbowCorner.topLeft ? r : Radius.zero,
-          topRight: corner == ElbowCorner.topRight ? r : Radius.zero,
-          bottomLeft: corner == ElbowCorner.bottomLeft ? r : Radius.zero,
-          bottomRight: corner == ElbowCorner.bottomRight ? r : Radius.zero,
+          topLeft: radiusFor(ElbowCorner.topLeft, bleed.top),
+          topRight: radiusFor(ElbowCorner.topRight, bleed.top),
+          bottomLeft: radiusFor(ElbowCorner.bottomLeft, bleed.bottom),
+          bottomRight: radiusFor(ElbowCorner.bottomRight, bleed.bottom),
         ),
       ),
       // An edge-aligned label sits against the block's inboard edge, so the
@@ -187,15 +197,22 @@ const kElbowCapHeight = 16.0;
 const kElbowCapBledHeight = 1.0;
 
 /// How tall a cap draws given its [bleed]: [unbledHeight] when there is none,
-/// [kElbowCapBledHeight] added to the inset once there is.
+/// [kElbowCapBledHeight] added to the *top* inset once there is.
 ///
 /// The rail/content gutter's seam fill (`lcars_chrome.dart`'s `_railGutter`)
 /// has to end exactly where the cap beside it does, so it calls this same
 /// function rather than repeating the arithmetic — there is only one
 /// expression that produces either height, so the two cannot independently
 /// drift apart.
+///
+/// `bleed.top`, not `bleed.vertical`: a cap closes the *top* of a content
+/// column, so a bottom inset has no business in its height. Every cap is handed
+/// a top-only bleed, which is why summing both looked equivalent — but
+/// `buildPage` hands `_railGutter` the frame's whole bleed, so the seam ran the
+/// bottom inset further down than the cap and left a 24dp coloured tab hanging
+/// out of the band's underside on a gesture-nav Pixel 8a.
 double elbowCapHeight(double unbledHeight, EdgeInsets bleed) =>
-    bleed.top > 0 ? bleed.vertical + kElbowCapBledHeight : unbledHeight;
+    bleed.top > 0 ? bleed.top + kElbowCapBledHeight : unbledHeight;
 
 /// The short horizontal bar that caps the top of an LCARS content column,
 /// closing the bracket the rail opens. Rounded on its bottom-left so it flows
