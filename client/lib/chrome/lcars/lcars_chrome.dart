@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -517,18 +519,118 @@ class LcarsChrome extends Chrome {
   /// Deck P1's `ENGAGE / SCAN QR` pair: one contiguous run of blocks separated by
   /// a hairline seam, pill-ended on the outside only, so the bar reads as a single
   /// segmented control rather than a row of buttons.
+  ///
+  /// A run too wide for its column folds onto further lines rather than
+  /// overflowing. The session detail page's six lifecycle actions did overflow:
+  /// on a Pixel 8a (411dp) the run missed by 1.1dp and Flutter painted its
+  /// striped banner over a clipped DELETE, and a 360dp phone or raised text
+  /// scale misses by far more. Each line is a contiguous run in its own right,
+  /// pill-ended on its own outer blocks.
   @override
   Widget buildButtonBar(BuildContext context, ChromeButtonBarSpec spec) {
     final t = CommanderTokens.of(context);
-    final buttons = spec.buttons;
-    return Row(
-      children: [
-        for (var i = 0; i < buttons.length; i++) ...[
-          if (i > 0) const SizedBox(width: _seam),
-          _barBlock(t, buttons[i], _runEnds(i, buttons.length, t.pillRadius)),
-        ],
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final lines = _foldRun(context, t, spec.buttons, constraints.maxWidth);
+        // A run that fits is the bare [Row] it has always been, not a Column of
+        // one. The difference is vertical: a lone Row takes the height its
+        // parent offers and its blocks stretch to it, while a Column shrink-
+        // wraps them to `_barHeight` — which reshaped `button_bar_lcars`'s
+        // reference the moment folding was introduced, with nothing about the
+        // bar having actually changed.
+        if (lines.length == 1) return _barLine(t, lines.single);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < lines.length; i++) ...[
+              if (i > 0) const SizedBox(height: _seam),
+              _barLine(t, lines[i]),
+            ],
+          ],
+        );
+      },
     );
+  }
+
+  /// One line of a button bar: the [Row] the whole bar used to be, so a run that
+  /// fits comes out exactly as it did before folding existed.
+  Widget _barLine(CommanderTokens t, List<ChromeBarButton> line) => Row(
+    children: [
+      for (var i = 0; i < line.length; i++) ...[
+        if (i > 0) const SizedBox(width: _seam),
+        _barBlock(t, line[i], _runEnds(i, line.length, t.pillRadius)),
+      ],
+    ],
+  );
+
+  /// Splits [buttons] into the fewest **equal-sized** lines that each fit
+  /// [maxWidth] — six actions in too little room become 3 + 3, not a greedy
+  /// 4 + 2 that strands a short pair under a full line. Order is preserved, so
+  /// no action moves anywhere the reader would not look for it.
+  ///
+  /// Falls back to one block per line when even that does not fit; a single
+  /// block wider than its column is the caller's problem, and the block
+  /// ellipsises rather than overflowing.
+  List<List<ChromeBarButton>> _foldRun(
+    BuildContext context,
+    CommanderTokens t,
+    List<ChromeBarButton> buttons,
+    double maxWidth,
+  ) {
+    // An expanding block has no natural width to measure — it takes whatever
+    // slack the row has — so a run containing one can never overflow and never
+    // needs folding.
+    if (buttons.any((b) => b.expand) || !maxWidth.isFinite) {
+      return [buttons];
+    }
+    final widths = [
+      for (final button in buttons) _barBlockWidth(context, t, button),
+    ];
+    for (var lines = 1; lines < buttons.length; lines++) {
+      final per = (buttons.length / lines).ceil();
+      final groups = <List<int>>[
+        for (var i = 0; i < buttons.length; i += per)
+          [i, math.min(i + per, buttons.length)],
+      ];
+      final fits = groups.every((g) {
+        final blocks = widths.sublist(g[0], g[1]);
+        return blocks.reduce((a, b) => a + b) + _seam * (blocks.length - 1) <=
+            maxWidth;
+      });
+      if (fits) {
+        return [for (final g in groups) buttons.sublist(g[0], g[1])];
+      }
+    }
+    return [
+      for (final button in buttons) [button],
+    ];
+  }
+
+  /// How wide [button]'s block will come out: its label laid out in the style
+  /// [_barBlock] draws it, plus the padding [ChromeElbow] puts around centred
+  /// content. Both come from `elbow.dart` rather than being restated here, so a
+  /// change to either cannot leave the folder measuring a block that no longer
+  /// exists.
+  double _barBlockWidth(
+    BuildContext context,
+    CommanderTokens t,
+    ChromeBarButton button,
+  ) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: t.caseLabel(button.label),
+        style: elbowLabelStyle(t, size: _barLabelSize, weight: _barLabelWeight),
+      ),
+      maxLines: 1,
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(
+        context,
+      ).clamp(maxScaleFactor: kElbowMaxTextScale),
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width + kElbowCentredPadding.horizontal;
   }
 
   Widget _barBlock(
@@ -548,8 +650,8 @@ class LcarsChrome extends Chrome {
         height: _barHeight,
         label: t.caseLabel(button.label),
         labelAlignment: Alignment.center,
-        labelSize: 13,
-        labelWeight: FontWeight.w700,
+        labelSize: _barLabelSize,
+        labelWeight: _barLabelWeight,
         onTap: button.onPressed,
       ),
     );
@@ -1151,6 +1253,11 @@ const _segmentHeight = 30.0;
 /// Bar block height. The deck's `padding:11px 0` on 13px type comes to ~37px;
 /// rounded down, and comfortably clear of ChromeElbow's clamped 1.3× scaler.
 const _barHeight = 36.0;
+
+/// A bar label's size and weight. Named because `_foldRun` has to lay the same
+/// text out to predict a block's width — see [LcarsChrome.buildButtonBar].
+const _barLabelSize = 13.0;
+const _barLabelWeight = FontWeight.w700;
 
 /// Footer block height. The deck's is ~33px, but a 13px destination label at
 /// ChromeElbow's clamped 1.3× text scaler leaves that barely any room, so the

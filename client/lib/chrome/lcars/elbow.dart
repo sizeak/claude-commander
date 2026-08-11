@@ -2,6 +2,35 @@ import 'package:flutter/material.dart';
 
 import '../../theme/tokens.dart';
 
+/// A [ChromeElbow]'s padding around centred content, and the reason it is
+/// public: `lcars_chrome.dart`'s button bar has to know how wide a block will
+/// come out *before* building it, so it can fold a run that would not fit onto
+/// a second line. Measuring against a copy of this number would let the two
+/// drift silently — a block one pixel wider than the folder believed is a run
+/// that overflows again.
+const kElbowCentredPadding = EdgeInsets.symmetric(horizontal: 8, vertical: 6);
+
+/// The ceiling [ChromeElbow] clamps accessibility text scaling to. A rail only
+/// has so much vertical room to give, so scaling applies — just bounded.
+/// Public for the same reason as [kElbowCentredPadding].
+const kElbowMaxTextScale = 1.3;
+
+/// The style [ChromeElbow] draws a label in. Public so a caller that must
+/// predict a block's width lays the same text out the block will.
+TextStyle elbowLabelStyle(
+  CommanderTokens t, {
+  required double size,
+  required FontWeight weight,
+  Color? color,
+}) => TextStyle(
+  fontFamily: t.sans,
+  fontSize: size,
+  fontWeight: weight,
+  letterSpacing: size * 0.04,
+  height: 1.1,
+  color: color,
+);
+
 /// Which single corner of a block is rounded.
 ///
 /// LCARS' signature shape is a rectangle with exactly **one** large-radius
@@ -127,7 +156,7 @@ class ChromeElbow extends StatelessWidget {
       // which is only 46px wide.
       padding:
           (centred
-              ? const EdgeInsets.symmetric(horizontal: 8, vertical: 6)
+              ? kElbowCentredPadding
               : const EdgeInsets.fromLTRB(6, 6, 9, 6)) +
           bleed,
       alignment: icon != null
@@ -141,18 +170,16 @@ class ChromeElbow extends StatelessWidget {
           // a wrapped label, but a rail only has so much vertical room to give,
           // so accessibility scaling still applies — just bounded.
           : MediaQuery.withClampedTextScaling(
-              maxScaleFactor: 1.3,
+              maxScaleFactor: kElbowMaxTextScale,
               child: Text(
                 label!,
                 textAlign: TextAlign.right,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: t.sans,
-                  fontSize: labelSize,
-                  fontWeight: labelWeight,
-                  letterSpacing: labelSize * 0.04,
-                  height: 1.1,
+                style: elbowLabelStyle(
+                  t,
+                  size: labelSize,
+                  weight: labelWeight,
                   color: labelColor ?? t.canvas,
                 ),
               ),
