@@ -67,6 +67,7 @@ drop_probe() {
     CREATED=(${remaining[@]+"${remaining[@]}"})
 }
 
+# shellcheck disable=SC2329  # invoked indirectly, by `trap cleanup EXIT` below
 cleanup() {
     local probe
     for probe in ${CREATED[@]+"${CREATED[@]}"}; do

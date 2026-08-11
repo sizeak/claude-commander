@@ -112,8 +112,8 @@ assert_eq "$lane_count" "$uniq_count" "every lane in every tier has a distinct e
 # Counted from the `all` tier alone, not the widened union above: this pins what
 # CI's mirror covers, which is a different question from code uniqueness.
 all_tier_count=$(cc_lanes_for_tier all | tr ' ' '\n' | grep -c .)
-assert_eq "14" "$all_tier_count" "the all tier covers 14 lanes"
-assert_eq "15" "$lane_count" "the run order covers 15 lanes (all + goldens)"
+assert_eq "15" "$all_tier_count" "the all tier covers 15 lanes"
+assert_eq "16" "$lane_count" "the run order covers 16 lanes (all + goldens)"
 
 # The runner walks cc_lane_run_order, so a lane missing from it can never execute
 # however it is selected -- which is exactly how the goldens lane was first
@@ -149,7 +149,7 @@ assert_eq "pub-get dart-format analyze flutter-test cdylib" "$(cc_lanes_for_tier
 
 assert_eq "pub-get goldens" "$(cc_lanes_for_tier goldens)" \
   "goldens tier resolves packages, then rasterises only test/goldens"
-assert_eq "fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest e2e nix-build packaging" \
+assert_eq "fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter e2e nix-build packaging" \
   "$(cc_lanes_for_tier all)" "all tier is every lane, cheap-to-slow"
 
 # pub-get is not a check but a precondition: `dart format` reads each file's

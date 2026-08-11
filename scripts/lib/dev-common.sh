@@ -132,6 +132,7 @@ cc_exit_code_for_lane() {
     packaging) printf '31\n' ;;
     shellcheck) printf '32\n' ;;
     selftest) printf '33\n' ;;
+    nix-src-filter) printf '34\n' ;;
     *)
       cc_error "unknown lane '${1:-}'"
       return 1
@@ -154,6 +155,7 @@ cc_lane_description() {
     e2e) printf 'client/tool/e2e.sh (hermetic server + Linux app)\n' ;;
     goldens) printf 'flutter test test/goldens (reference images only)\n' ;;
     nix-build) printf 'nix build\n' ;;
+    nix-src-filter) printf 'scripts/check-nix-src-filter.sh (flake src filter guard)\n' ;;
     packaging) printf 'cargo install --path crates/claude-commander (Homebrew path)\n' ;;
     shellcheck) printf 'shellcheck -x over scripts/, client/tool/, docs/tool/\n' ;;
     selftest) printf 'scripts/tests/run.sh\n' ;;
@@ -177,7 +179,7 @@ cc_lane_description() {
 # is how the goldens lane was silently skipped when the runner walked the `all`
 # tier instead.
 cc_lane_run_order() {
-  printf 'fmt clippy build test pub-get dart-format analyze flutter-test goldens cdylib shellcheck selftest e2e nix-build packaging\n'
+  printf 'fmt clippy build test pub-get dart-format analyze flutter-test goldens cdylib shellcheck selftest nix-src-filter e2e nix-build packaging\n'
 }
 
 cc_lanes_for_tier() {
@@ -190,7 +192,7 @@ cc_lanes_for_tier() {
     # including it there would rasterise every reference image twice.
     goldens) printf 'pub-get goldens\n' ;;
     all)
-      printf 'fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest e2e nix-build packaging\n'
+      printf 'fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter e2e nix-build packaging\n'
       ;;
     *)
       cc_error "unknown tier '${1:-}' (try: fast rust client goldens all)"
