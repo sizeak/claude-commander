@@ -81,10 +81,10 @@ list_lanes() {
   # exists; the Tiers block below says which flag selects which, since `--all` is
   # the CI mirror and does not include every row (goldens is a subset of
   # flutter-test).
-  printf '%s%-13s %-5s %s%s\n' "$CC_C_BOLD" "LANE (run order)" "EXIT" "CHECK" "$CC_C_RESET"
+  printf '%s%-15s %-5s %s%s\n' "$CC_C_BOLD" "LANE (run order)" "EXIT" "CHECK" "$CC_C_RESET"
   local lane
   for lane in $(cc_lane_run_order); do
-    printf '%-13s %-5s %s\n' \
+    printf '%-15s %-5s %s\n' \
       "$lane" "$(cc_exit_code_for_lane "$lane")" "$(cc_lane_description "$lane")"
   done
   cat <<EOF

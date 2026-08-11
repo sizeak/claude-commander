@@ -90,6 +90,7 @@ assert_eq "30" "$(cc_exit_code_for_lane nix-build)" "nix-build -> 30"
 assert_eq "31" "$(cc_exit_code_for_lane packaging)" "packaging -> 31"
 assert_eq "32" "$(cc_exit_code_for_lane shellcheck)" "shellcheck -> 32"
 assert_eq "33" "$(cc_exit_code_for_lane selftest)" "selftest -> 33"
+assert_eq "34" "$(cc_exit_code_for_lane nix-src-filter)" "nix-src-filter -> 34"
 assert_fails "unknown lane is rejected" cc_exit_code_for_lane notalane
 
 # Every lane must own a distinct code: a duplicate would make the exit status
@@ -131,7 +132,7 @@ assert_eq "" "$missing_from_run_order" \
 # No lane may collide with the reserved argument/precondition codes, or with the
 # shell's own conventional statuses.
 echo "== reserved codes are not reused by lanes =="
-for reserved in 0 1 2 3; do
+for reserved in 0 1 2 3 77; do
   if printf '%s' "$all_codes" | grep -qx "$reserved"; then
     fail_count=$((fail_count + 1))
     printf '  FAIL a lane claims reserved exit code %s\n' "$reserved"
