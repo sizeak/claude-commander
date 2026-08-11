@@ -10,12 +10,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `cargo test <test_name>` — single test
 - `cargo clippy` — lint
 - `cargo run -- --debug` — run TUI with debug logging to `/tmp/claude-commander.log`
+- `task test-ci` — every CI check, run the way CI runs it (see `Taskfile.yml`; bare `task` lists the individual tasks). `task` comes from the dev shell; `nix develop` if it is not on your PATH.
+- `task goldens` / `task goldens:update` — the focused golden-test loop
 
 ## Verification discipline
 
 - Never pipe command output through `| tail` / `| head` when checking pass/fail — it masks exit codes. Use `set -o pipefail` or run the command bare and report the real exit status.
 - Do not claim tests, CI, or builds are green unless you have the actual exit code / CI conclusion in front of you. If verification was blocked, say so explicitly instead of inferring success.
 - After any rebase or merge, re-run a full build before declaring done (stale `crate::` paths and missing deps have broken builds repeatedly).
+- Verify against the pinned toolchain, not your PATH: `task test-ci` runs each CI command inside a Nix dev shell — the same one the corresponding CI job enters, except for `fmt-check` (CI's Format job uses dtolnay stable rustfmt, no Nix shell) and `nix-build` (which enters none anywhere); both departures are commented at the task. A bare `cargo test` or `flutter test` can pass on a host toolchain that CI does not have. This is mandatory for golden changes — see [Golden tests](#golden-tests).
 
 ## Workflow: TDD then review then merge
 
@@ -108,6 +111,26 @@ Unit tests are co-located in source files (`#[cfg(test)]`). Integration tests in
 Tests must not read or modify anything on the real filesystem. Any disk access must go through `tempfile::TempDir` (already in dev-deps) for OS-portable temp paths. Never hardcode `/tmp/...` as a real path. Dummy `PathBuf` values stored in struct fields (never accessed on disk) are acceptable.
 
 **tmux isolation:** tmux clients resolve their socket from the `$TMUX` env var (set inside any tmux session) **in preference to** `$TMUX_TMPDIR` — so a test script that only exports `TMUX_TMPDIR` is NOT isolated when run from inside tmux: its tmux commands (including a cleanup `tmux kill-server`) hit the developer's real server and can kill every open session. Any script that isolates tmux via `TMUX_TMPDIR` must also `unset TMUX TMUX_PANE` (see `client/tool/e2e.sh`), and never run a bare `tmux kill-server` without `$TMUX` provably unset. The Rust integration tests are now genuinely isolated via the `tmux_tmpdir` config knob (set by `crates/claude-commander-test-support`'s `test_state` and core's `create_isolated_config_store`): the `TmuxExecutor` and the `HeadlessAttach` bridge apply `TMUX_TMPDIR` + strip `$TMUX`/`$TMUX_PANE` per-command when it is set, so each test gets its own throwaway tmux server (which exits with its last session) rather than landing on the developer's default server.
+
+### Golden tests
+
+The Flutter client's reference images live in `client/test/goldens/images/` and run as part of `flutter test`. They guard the chrome layer — see the Golden tests section of `client/README.md` for what the harness (`client/test/support/golden.dart`) has to do and why.
+
+**Any change that adds, regenerates or deletes a golden must be verified with `task test-ci` (or at minimum `task goldens`) before pushing.** `flutter test` from a plain shell is not sufficient evidence: it can pick up a Flutter/Skia other than the pinned one, and the reference images are rasteriser-sensitive by nature. Then read the image diff before committing — an unexplained pixel change is the entire point of these tests.
+
+What that does and does not buy you, because a golden has already passed locally and failed on the runner:
+
+- **Reproduced by `task test-ci`.** The Flutter SDK and its Skia (from the `clientCi` shell in `flake.nix`), the three bundled faces plus `MaterialIcons` resolved from the pinned `FLUTTER_ROOT`, and `devicePixelRatio` 1 (fixed by `useGoldenSurface`). No golden reads a system font, so there is nothing font-related to configure and the host's fontconfig is not consulted.
+- **Not reproduced, and not reproducible by any local configuration.** The runner's text antialiasing. The LCARS phone-shell golden failed only on CI for exactly this: 1179 px confined to one 13-row band, geometry byte-identical, i.e. label antialiasing alone (measured from the comparator's own images, run `31333637408`). It was deleted in #280 rather than given a tolerance — a tolerance sized to hide 0.39% also hides a genuinely wrapped label — and its layout is now asserted geometrically in `client/test/phone_shell_test.dart`. Prefer that resolution: when a golden pins the rasteriser rather than the layout, replace it with a geometric assertion instead of loosening the threshold.
+
+So a green `task goldens` is strong evidence, not proof. If a golden fails on CI and passes locally, do not re-run blindly — download the `golden-failures` artifact the Client Tests job uploads on failure (`isolated`/`masterImage`/`testImage` PNGs) and measure what moved before deciding whether it is layout or antialiasing.
+
+`TERM` and `COLORTERM` are irrelevant to the goldens themselves — a golden is rasterised by Skia into a PNG with no terminal in the picture. They are not equivalent elsewhere, though, and `task test-ci` treats them differently:
+
+- `COLORTERM` is read only by `ColorMode::detect()` (`tui/theme.rs`). Tests *do* reach that function — `Theme::default()` is `for_color_mode(detect())` and four board-widget tests construct one (`tui/widgets/board/render.rs`) — but no test **assertion** depends on the result: those four assert cell symbols and returned button/heading/hit regions, never styles, so the detected palette is built and discarded. It is left unset, because pinning it would imply an assertion depends on it.
+- `TERM` also reaches `HeadlessAttach::spawn` (`tmux/headless_attach.rs`), which the server's `/ws/attach` integration tests exercise. `fallback_term` normalises an unset/empty/`dumb`/`unknown` `TERM` to `xterm-256color` but passes a real one straight through to `tmux attach`, so a developer in kitty or tmux hands those tests a different `TERM` than a headless host does. `task test-ci` pins it to `xterm-256color` — the value the fallback would pick anyway — so that path behaves the same in both places.
+
+Both of those are pinned as an **inline `VAR=… cmd` prefix**, not a top-level `env:` block, and the distinction is load-bearing: go-task's `env:` only fills a variable that is *absent* from the caller's environment and will not override one already set. `TERM` is always set in an interactive shell, so an `env:` block silently pins nothing. If you add a task that executes our **Rust** code — anything linking `claude-commander-core`, where both readers live — carry the `PINNED_ENV` prefix; the Dart tasks run our code too and correctly do not carry it; if you change how this is pinned, verify it by echoing the variable from inside the task under a deliberately wrong caller value, because a run that merely passes proves nothing here.
 
 ### Writing new tests
 

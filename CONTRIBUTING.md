@@ -44,6 +44,24 @@ claude-commander --debug
 cargo clippy
 ```
 
+Before pushing, run the CI checks locally with [go-task](https://taskfile.dev)
+(`task` comes from the dev shell, so `nix develop` if it isn't on your `PATH`):
+
+```bash
+task            # list the available tasks
+task test-ci    # all six CI jobs, mostly in the dev shell each CI job uses
+task goldens    # just the client's golden tests
+```
+
+`task test-ci` runs the same commands as `.github/workflows/ci.yml`, almost all of
+them inside the same Nix dev shells, so the Rust, Flutter and tmux versions doing
+the work are the pinned ones rather than whatever is on your `PATH`. (Two
+exceptions, commented in `Taskfile.yml`: formatting uses the flake's rustfmt where
+CI uses dtolnay stable, and `nix build` enters no dev shell in either place.)
+
+**Changes to the client's golden images must go through it** — see the Golden
+tests section of [`CLAUDE.md`](CLAUDE.md) for what it does and does not prove.
+
 This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and
 `cargo clippy` on every commit, plus `dart format` when the commit touches Dart.
 After cloning, run `pre-commit install`.
