@@ -390,11 +390,72 @@ void main() {
               'as the blocks it joins, or a black column shows through',
         );
         expect(
-          await pixelAt(tester, Offset(gutterX, 40)),
+          // 40 is exactly the fill's own bottom edge (24 + kElbowCapHeight);
+          // sampling there now lands inside the curved emergence the gutter
+          // draws below the band (see the test below), so this checks a few
+          // pixels further down, safely past the curve, where the seam is
+          // plain black across its whole width again.
+          await pixelAt(tester, Offset(gutterX, 46)),
           lcarsTokens.canvas,
           reason:
               'below the inset the gutter is the ordinary frame gap, not a '
               'stripe painted down the whole page',
+        );
+      },
+    );
+
+    // Regression/pin for the curved emergence the user chose on a Pixel 8a:
+    // instead of a hard corner where the seam's fill ends, the black resumes
+    // on a curve that reveals the band colour at the top corners. The fill
+    // ends at `bleed.top + kElbowCapHeight` (24 + 16 = 40 here); the two
+    // assertions sample either side of the radius the curve is drawn with.
+    //
+    // The corner sample lands inside the arc's own antialiasing — a pixel or
+    // two wide at this radius — so it is not pure `lcarsTokens.nav`, it is a
+    // blend of the band showing through and a sliver of the black beyond the
+    // arc. `_closerTo` asserts which side of that blend it falls on rather
+    // than demanding an exact colour, which is what an arc — as opposed to a
+    // hard corner — actually produces.
+    testWidgets(
+      'the gutter curve reveals the band at the top corners below the fill',
+      (tester) async {
+        seed();
+        useInsets(tester, top: 24);
+        await pumpLcars(tester);
+
+        final rail = tester.getRect(find.widgetWithText(ChromeElbow, '47-A'));
+        const fillHeight = 24 + kElbowCapHeight;
+
+        // The seam's top-left corner, right at the fill's bottom edge: with a
+        // square corner this would already be solid black, but the curve has
+        // not closed up to the seam's edge yet at this height, so the band
+        // still dominates the pixel.
+        expect(
+          _closerTo(
+            await pixelAt(tester, Offset(rail.right, fillHeight)),
+            lcarsTokens.nav,
+            than: lcarsTokens.canvas,
+          ),
+          isTrue,
+          reason:
+              'a square corner would be solid black here; the curve leaves '
+              'the band dominant until the arc reaches the edge',
+        );
+        // The seam's horizontal centre, a few pixels further down: by here the
+        // curve has closed back up to the seam's full width, so the black
+        // resumes.
+        expect(
+          await pixelAt(
+            // 2.5: half the 5px seam width the gutter is drawn at
+            // (`lcars_chrome.dart`'s private `_railPitch`), i.e. its
+            // horizontal centre.
+            tester,
+            Offset(rail.right + 2.5, fillHeight + 4.5),
+          ),
+          lcarsTokens.canvas,
+          reason:
+              'below the curve the seam is plain black again, same as '
+              'the flat fill it replaces',
         );
       },
     );
@@ -432,4 +493,14 @@ void main() {
       );
     });
   });
+}
+
+/// Whether [sample] sits closer to [a] than to [b], by summed per-channel
+/// distance in 0–255 space. Used where a sample lands inside a shape's own
+/// antialiasing and an exact colour match would be too strict to be
+/// meaningful — see the gutter-curve test above.
+bool _closerTo(Color sample, Color a, {required Color than}) {
+  double dist(Color x, Color y) =>
+      (x.r - y.r).abs() + (x.g - y.g).abs() + (x.b - y.b).abs();
+  return dist(sample, a) < dist(sample, than);
 }

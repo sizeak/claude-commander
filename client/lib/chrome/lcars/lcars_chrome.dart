@@ -76,7 +76,11 @@ class LcarsChrome extends Chrome {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _rail(context, spec, t, bleed),
-          _railGutter(bleed, shouldShowBack(context, spec) ? t.primary : t.nav),
+          _railGutter(
+            bleed,
+            shouldShowBack(context, spec) ? t.primary : t.nav,
+            t,
+          ),
           // No trailing margin: the frame runs flush to the right bezel at every
           // height. A 10dp gap there read as the frame stopping short of the
           // screen once the top and bottom bands met the edge — see [buildShell].
@@ -191,22 +195,58 @@ class LcarsChrome extends Chrome {
   /// the seam are two more colour patches the fill needs to bridge. Filling to
   /// [kElbowCapHeight] past the inset closes that gap too, so the rail's top
   /// block, the seam and the cap read as one solid mass with a clean bottom
-  /// edge. Below the cap the seam resumes as the frame's own gutter, which is
-  /// also why an unbled frame is pixel-identical to before — the fill is zero
-  /// height when there is no inset to bleed into, rather than a bare
-  /// [kElbowCapHeight] stripe with nothing above it.
-  Widget _railGutter(EdgeInsets bleed, Color color) => SizedBox(
-    width: _railPitch,
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        SizedBox(
-          height: bleed.top == 0 ? 0 : bleed.top + kElbowCapHeight,
-          child: ColoredBox(color: color),
+  /// edge.
+  ///
+  /// Below the fill, the black resumes on a curve rather than at a hard corner:
+  /// the user reviewed the square-cornered junction on a Pixel 8a and asked for
+  /// the black to look like it flows out from under the band instead of
+  /// starting at a right angle. With no inset there is no band and nothing to
+  /// flow out of, so that case returns the frame's original plain, full-height
+  /// seam untouched — every desktop/tablet golden and the zero-inset tests
+  /// depend on this being that exact widget, not a curve that happens to
+  /// degenerate to it.
+  Widget _railGutter(EdgeInsets bleed, Color color, CommanderTokens t) {
+    if (bleed.top == 0) {
+      return const SizedBox(width: _railPitch);
+    }
+    final fillHeight = bleed.top + kElbowCapHeight;
+    // A quarter-circle radius of half the seam's own width is a full
+    // semicircular emergence: the two top corners' arcs meet exactly at the
+    // seam's horizontal centre, `_seamCurveRadius` below the fill, rather than
+    // leaving a flat lead-in (a smaller radius) or overshooting past the
+    // column's width (a larger one). A wider seam should widen the curve with
+    // it, hence deriving rather than hardcoding.
+    const radius = Radius.circular(_seamCurveRadius);
+    return SizedBox(
+      width: _railPitch,
+      // The backdrop sits behind the *whole* column, not just the band's own
+      // fill: rounding the black seam's top corners cuts two quarter-circles
+      // out of it, and without a backdrop matching the band those cuts would
+      // reveal nothing but the Scaffold's own canvas — indistinguishable from
+      // a square corner. Painted here, the cuts reveal the band flowing out
+      // from underneath instead.
+      child: ColoredBox(
+        color: color,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Transparent, not painted: the backdrop above already shows
+            // through as the band colour here, exactly matching the old flat
+            // fill.
+            SizedBox(height: fillHeight),
+            Expanded(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: t.canvas,
+                  borderRadius: BorderRadius.vertical(top: radius),
+                ),
+              ),
+            ),
+          ],
         ),
-      ],
-    ),
-  );
+      ),
+    );
+  }
 
   /// A block's fill for a given emphasis. Shared by the rail, the button bar and
   /// the footer, so an action reads the same wherever the chrome puts it.
@@ -887,7 +927,7 @@ class LcarsChrome extends Chrome {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _viewRail(spec, t, bleed),
-        _railGutter(bleed, t.nav),
+        _railGutter(bleed, t.nav, t),
         // Flush right, like [buildPage] and the shell's footer — see
         // [buildShell] for why the 10dp margin all three used to carry went.
         Expanded(child: _viewContent(context, spec, t, bleed)),
@@ -1117,6 +1157,13 @@ const _seam = 4.0;
 /// between the rail and the content column beside it. The deck's rails are 5px
 /// apart throughout.
 const _railPitch = 5.0;
+
+/// The radius of the curve where the rail/content seam's black resumes below
+/// a safe-area band — see [LcarsChrome._railGutter]. Half the seam's own width
+/// ([_railPitch]), so the two top corners' quarter-circles meet exactly at the
+/// seam's centre: a full semicircular emergence rather than a flat lead-in or
+/// an overshoot.
+const _seamCurveRadius = _railPitch / 2;
 
 /// The list row's leading number block (deck P2's node headers: `width:38px`).
 const _rowNumberWidth = 38.0;
