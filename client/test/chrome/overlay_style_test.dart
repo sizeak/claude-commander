@@ -1,5 +1,6 @@
 import 'package:claude_commander_client/chrome/chrome.dart';
 import 'package:claude_commander_client/chrome/chrome_forms.dart';
+import 'package:claude_commander_client/chrome/chrome_wide.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:flutter/material.dart';
@@ -25,6 +26,21 @@ void main() {
     theme: themeDataFor(tokens),
     home: ChromeShell(
       ChromeShellSpec(body: const SizedBox.expand(), items: const []),
+    ),
+  );
+
+  Widget wide(CommanderTokens tokens) => MaterialApp(
+    theme: themeDataFor(tokens),
+    home: ChromeWide(
+      ChromeWideSpec(
+        fleetList: const SizedBox.expand(),
+        workspace: const SizedBox.expand(),
+        modes: const [],
+        needsInputCount: 0,
+        activeCount: 0,
+        totalCount: 0,
+        serverCount: 1,
+      ),
     ),
   );
 
@@ -71,6 +87,25 @@ void main() {
     );
     expect(region.value.statusBarIconBrightness, Brightness.dark);
     expect(region.value.systemNavigationBarColor, Colors.transparent);
+  });
+
+  // The wide frame is a third `Scaffold`, built by `chrome_wide.dart` rather
+  // than `lcars_chrome.dart`, and it bleeds into the same bars. Without its own
+  // region it inherited the framework default: light icons over a bright band.
+  testWidgets('the wide shell declares the same overlay', (tester) async {
+    await tester.pumpWidget(wide(lcarsTokens));
+    await tester.pumpAndSettle();
+
+    final region = tester.widget<AnnotatedRegion<SystemUiOverlayStyle>>(
+      find
+          .ancestor(
+            of: find.byType(Scaffold),
+            matching: find.byType(AnnotatedRegion<SystemUiOverlayStyle>),
+          )
+          .first,
+    );
+    expect(region.value.statusBarIconBrightness, Brightness.dark);
+    expect(region.value.systemNavigationBarContrastEnforced, isFalse);
   });
 
   testWidgets('Mission Control declares no LCARS overlay', (tester) async {

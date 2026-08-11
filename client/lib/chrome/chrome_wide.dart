@@ -12,11 +12,13 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../theme/tokens.dart';
 import '../widgets/brand_mark.dart';
 import 'chrome.dart';
 import 'chrome_forms.dart';
+import 'lcars/bleed.dart';
 import 'lcars/elbow.dart';
 
 /// Logical width at or above which LCARS gets its **third** column — the elbow
@@ -455,42 +457,81 @@ class LcarsWide extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
+    // Read above the Scaffold, as the phone frames do, so whether a Scaffold
+    // republishes its body's padding never has to be assumed.
+    final insets = MediaQuery.paddingOf(context);
+    final bleed = EdgeInsets.only(top: insets.top, bottom: insets.bottom);
     // Outside the Scaffold on purpose: this must measure the same box the
-    // wide/narrow breakpoint did, and a SafeArea inside the Scaffold would shave
-    // the display cutout off the width first.
+    // wide/narrow breakpoint did, and holding the display cutout inside the
+    // Scaffold would shave it off the width first.
     return LayoutBuilder(
       builder: (context, constraints) {
         final three = constraints.maxWidth >= kLcarsThreeColumnWidth;
-        return Scaffold(
-          backgroundColor: t.canvas,
-          body: SafeArea(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (three) ...[
+        return AnnotatedRegion<SystemUiOverlayStyle>(
+          value: lcarsSystemBars,
+          child: Scaffold(
+            backgroundColor: t.canvas,
+            // The vertical insets are bled into by the frame's own blocks
+            // rather than held off by a `SafeArea`; the horizontal ones are
+            // still held, because a cutout is an occlusion and not a bezel to
+            // decorate. Same split as the phone frames.
+            body: Padding(
+              padding: EdgeInsets.only(left: insets.left, right: insets.right),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (three) ...[
+                    SizedBox(
+                      key: const ValueKey('wide-nav'),
+                      width: _lcarsNavWidth,
+                      child: _nav(t, bleed),
+                    ),
+                    // Both columns beside this gap bleed into the band, so it
+                    // is filled across it — see [lcarsBandSeam]. Its fill ends
+                    // level with the fleet cap, the shorter of the two blocks
+                    // it bridges.
+                    lcarsBandSeam(
+                      width: _lcarsGap,
+                      height: elbowCapHeight(
+                        kElbowCapHeight,
+                        EdgeInsets.only(top: bleed.top),
+                      ),
+                      color: t.nav,
+                      bleed: bleed,
+                    ),
+                  ],
+                  // Keyed so crossing kLcarsThreeColumnWidth — which inserts two
+                  // children ahead of these — moves their elements rather than
+                  // re-inflating them. Unkeyed, the fold would reset the session
+                  // list's search text and filters on a window resize.
                   SizedBox(
-                    key: const ValueKey('wide-nav'),
-                    width: _lcarsNavWidth,
-                    child: _nav(t),
+                    key: const ValueKey('wide-fleet'),
+                    width: _lcarsFleetWidth,
+                    child: _fleet(t, bleed, folded: !three),
                   ),
+                  // Plain, not a seam: the workspace holds its insets, so the
+                  // band ends at the fleet column's right edge and there is
+                  // nothing on this side to bridge to.
                   const SizedBox(width: _lcarsGap),
+                  Expanded(
+                    key: const ValueKey('wide-workspace'),
+                    // Held, not bled. The workspace opens with a plain text
+                    // header and closes with page content — neither is an LCARS
+                    // block, so there is nothing up there to carry a band and
+                    // nothing down there that should sit under the gesture
+                    // strip.
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        top: bleed.top,
+                        bottom: bleed.bottom,
+                      ),
+                      child: spec.workspace,
+                    ),
+                  ),
+                  // No trailing margin: the frame runs flush to the right bezel,
+                  // the last LCARS surface that stopped short of it.
                 ],
-                // Keyed so crossing kLcarsThreeColumnWidth — which inserts two
-                // children ahead of these — moves their elements rather than
-                // re-inflating them. Unkeyed, the fold would reset the session
-                // list's search text and filters on a window resize.
-                SizedBox(
-                  key: const ValueKey('wide-fleet'),
-                  width: _lcarsFleetWidth,
-                  child: _fleet(t, folded: !three),
-                ),
-                const SizedBox(width: _lcarsGap),
-                Expanded(
-                  key: const ValueKey('wide-workspace'),
-                  child: spec.workspace,
-                ),
-                const SizedBox(width: 10),
-              ],
+              ),
             ),
           ),
         );
@@ -502,11 +543,12 @@ class LcarsWide extends StatelessWidget {
   /// the mode destinations, the live needs-input count, inert filler that
   /// absorbs the slack, the new-session block, and a closing settings elbow. Only
   /// the first and last blocks are rounded, so the column reads as one bracket.
-  Widget _nav(CommanderTokens t) {
+  Widget _nav(CommanderTokens t, EdgeInsets bleed) {
     final newSession = spec.newSession;
     final settings = spec.settings;
     final blocks = <Widget>[
       ChromeElbow(
+        bleed: EdgeInsets.only(top: bleed.top),
         color: t.nav,
         corner: ElbowCorner.topLeft,
         height: 74,
@@ -536,6 +578,7 @@ class LcarsWide extends StatelessWidget {
           onTap: newSession.onPressed,
         ),
       ChromeElbow(
+        bleed: EdgeInsets.only(bottom: bleed.bottom),
         color: t.nav,
         corner: ElbowCorner.bottomLeft,
         height: 44,
@@ -571,12 +614,15 @@ class LcarsWide extends StatelessWidget {
   /// The fleet column: an elbow cap, the FLEET title and its count line, the
   /// list, and — when the nav has folded in — a horizontal run of nav blocks
   /// beneath it.
-  Widget _fleet(CommanderTokens t, {required bool folded}) {
+  Widget _fleet(CommanderTokens t, EdgeInsets bleed, {required bool folded}) {
     final counts = t.caseLabel(_countsLine(spec));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ChromeElbowCap(color: t.nav),
+        ChromeElbowCap(
+          bleed: EdgeInsets.only(top: bleed.top),
+          color: t.nav,
+        ),
         const SizedBox(height: 7),
         Text('FLEET', style: t.display(size: 22)),
         Text(
@@ -591,7 +637,15 @@ class LcarsWide extends StatelessWidget {
         ),
         const SizedBox(height: 9),
         Expanded(child: spec.fleetList),
-        if (folded) ...[const SizedBox(height: 6), _foldedNav(t)],
+        // Folded, the nav run is the column's closing block and bleeds into the
+        // gesture strip; unfolded, the list itself is the bottom, and a
+        // scrollable running under that strip is a regression rather than a
+        // feature — so the column holds the inset instead.
+        if (folded) ...[
+          const SizedBox(height: 6),
+          _foldedNav(t, bleed),
+        ] else
+          SizedBox(height: bleed.bottom),
       ],
     );
   }
@@ -599,7 +653,7 @@ class LcarsWide extends StatelessWidget {
   /// The nav rail folded flat: the destinations and the two actions as one
   /// contiguous run of blocks, pill-ended on the outside only — the same shape
   /// the phone shell's footer uses, so the fold reads as the same control.
-  Widget _foldedNav(CommanderTokens t) {
+  Widget _foldedNav(CommanderTokens t, EdgeInsets bleed) {
     final actions = [?spec.newSession, ?spec.settings];
     final count = spec.modes.length + actions.length;
     final blocks = <Widget>[
@@ -612,6 +666,7 @@ class LcarsWide extends StatelessWidget {
             ink: spec.modes[i].selected ? t.canvas : t.nav,
             onTap: spec.modes[i].onTap,
             radius: _runEnds(i, count, t.pillRadius),
+            bleed: bleed,
           ),
         ),
       for (var i = 0; i < actions.length; i++)
@@ -625,6 +680,7 @@ class LcarsWide extends StatelessWidget {
             ink: actions[i].kind == ChromeActionKind.primary ? t.canvas : t.nav,
             onTap: actions[i].onPressed,
             radius: _runEnds(spec.modes.length + i, count, t.pillRadius),
+            bleed: bleed,
           ),
         ),
     ];
@@ -645,12 +701,14 @@ class LcarsWide extends StatelessWidget {
     required Color ink,
     required BorderRadius radius,
     VoidCallback? onTap,
+    EdgeInsets bleed = EdgeInsets.zero,
   }) => ClipRRect(
     // An elbow's single rounded corner is the wrong shape for the end of a
     // horizontal run, which is a pill, so the radius is clipped around the
     // primitive rather than coming from ElbowCorner.
     borderRadius: radius,
     child: ChromeElbow(
+      bleed: EdgeInsets.only(bottom: bleed.bottom),
       color: fill,
       labelColor: ink,
       height: 32,

@@ -23,30 +23,6 @@ import 'elbow.dart';
 class LcarsChrome extends Chrome {
   const LcarsChrome();
 
-  /// LCARS is `nav: #CC99CC` and `primary: #F7A01D` — both bright, so the system
-  /// icons over the band must be dark. `systemNavigationBarColor: transparent`
-  /// is kept for older devices, but on a three-button Pixel 8a (Android 17) it
-  /// painted an opaque light scrim across the nav bar regardless — that colour
-  /// property appears to be a no-op on a modern build, and clashed with the
-  /// black LCARS canvas besides. `systemNavigationBarContrastEnforced: false`
-  /// is what actually governs that scrim: per Flutter's own doc on the property
-  /// (`system_chrome.dart:265-274`, pinned 3.41.5), SDK 29+ may apply a
-  /// translucent body scrim behind a transparent nav bar to keep it readable,
-  /// and setting this to `false` overrides it — which is what let the footer's
-  /// bleed show through. `systemStatusBarContrastEnforced: false` is set for
-  /// the same reason on the status bar's matching property, even though only
-  /// the nav bar was seen scrimmed on device: the status bar's band is bled
-  /// into identically and the same SDK 29+ scrim policy applies to it.
-  static const _systemBars = SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.dark,
-    statusBarBrightness: Brightness.light,
-    systemStatusBarContrastEnforced: false,
-    systemNavigationBarColor: Colors.transparent,
-    systemNavigationBarIconBrightness: Brightness.dark,
-    systemNavigationBarContrastEnforced: false,
-  );
-
   /// A pushed route's frame. LCARS draws to the edges, so instead of the
   /// `SafeArea` this used to wrap itself in, the frame's own corner blocks grow
   /// into the vertical insets and the labels stay exactly where that `SafeArea`
@@ -87,7 +63,7 @@ class LcarsChrome extends Chrome {
       ),
     );
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: _systemBars,
+      value: lcarsSystemBars,
       child: Scaffold(
         backgroundColor: t.canvas,
         resizeToAvoidBottomInset: !panning,
@@ -207,23 +183,12 @@ class LcarsChrome extends Chrome {
   /// the frame's original plain, full-height seam untouched — every
   /// desktop/tablet golden and the zero-inset tests depend on this being that
   /// exact widget.
-  Widget _railGutter(EdgeInsets bleed, Color color) {
-    if (bleed.top == 0) {
-      return const SizedBox(width: _railPitch);
-    }
-    return SizedBox(
-      width: _railPitch,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-            height: elbowCapHeight(kElbowCapHeight, bleed),
-            child: ColoredBox(color: color),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget _railGutter(EdgeInsets bleed, Color color) => lcarsBandSeam(
+    width: _railPitch,
+    height: elbowCapHeight(kElbowCapHeight, bleed),
+    color: color,
+    bleed: bleed,
+  );
 
   /// A block's fill for a given emphasis. Shared by the rail, the button bar and
   /// the footer, so an action reads the same wherever the chrome puts it.
@@ -888,7 +853,7 @@ class LcarsChrome extends Chrome {
     return LcarsBleedScope(
       bleed: EdgeInsets.only(top: insets.top, bottom: insets.bottom),
       child: AnnotatedRegion<SystemUiOverlayStyle>(
-        value: _systemBars,
+        value: lcarsSystemBars,
         child: Scaffold(
           backgroundColor: t.canvas,
           body: Padding(
