@@ -34,9 +34,20 @@ class ChromeElbow extends StatelessWidget {
 
   final String? label;
 
+  /// A centred glyph, drawn instead of [label].
+  ///
+  /// An icon rather than the character it stands for, because a text glyph
+  /// centres its *line box*, not its ink: the footer's create block drew a
+  /// `Text('+')` whose box was dead centre while the cross painted ~2px low.
+  /// A Material `Icon` is a square with its glyph centred in the em box, so
+  /// centring the box centres what is seen — measured on painted pixels by
+  /// `test/chrome/footer_nav_test.dart`, which is the only thing here that can
+  /// hold the icon font to that.
+  final IconData? icon;
+
   /// Where the label sits inside the block. LCARS aligns rail labels to the
   /// inboard edge — bottom-right on a top elbow, top-right on a bottom elbow,
-  /// centre-right in between.
+  /// centre-right in between. An [icon] is always centred.
   final Alignment labelAlignment;
 
   final VoidCallback? onTap;
@@ -46,6 +57,9 @@ class ChromeElbow extends StatelessWidget {
 
   final FontWeight labelWeight;
 
+  /// [icon]'s size, ignored when there is none.
+  final double iconSize;
+
   const ChromeElbow({
     super.key,
     required this.color,
@@ -53,16 +67,22 @@ class ChromeElbow extends StatelessWidget {
     this.corner = ElbowCorner.none,
     this.height,
     this.label,
+    this.icon,
     this.labelAlignment = Alignment.centerRight,
     this.onTap,
     this.labelSize = 11,
     this.labelWeight = FontWeight.w600,
-  });
+    this.iconSize = 18,
+  }) : assert(
+         label == null || icon == null,
+         'a block carries one or the other',
+       );
 
   @override
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
     final r = Radius.circular(t.elbowRadius);
+    final centred = icon != null || labelAlignment == Alignment.center;
     final decorated = Container(
       decoration: BoxDecoration(
         color: color,
@@ -73,9 +93,21 @@ class ChromeElbow extends StatelessWidget {
           bottomRight: corner == ElbowCorner.bottomRight ? r : Radius.zero,
         ),
       ),
-      padding: const EdgeInsets.fromLTRB(6, 6, 9, 6),
-      alignment: label == null ? null : labelAlignment,
-      child: label == null
+      // An edge-aligned label sits against the block's inboard edge, so the
+      // padding is biased that way (the extra 3px on the right is the gutter a
+      // rail's right-aligned labels keep off the content column). Centred
+      // content has no edge to sit against, and the bias would push it 1.5px
+      // off the block's own centre line — visible on the footer's create block,
+      // which is only 46px wide.
+      padding: centred
+          ? const EdgeInsets.symmetric(horizontal: 8, vertical: 6)
+          : const EdgeInsets.fromLTRB(6, 6, 9, 6),
+      alignment: icon != null
+          ? Alignment.center
+          : (label == null ? null : labelAlignment),
+      child: icon != null
+          ? Icon(icon, size: iconSize, color: labelColor ?? t.canvas)
+          : label == null
           ? null
           // Two lines maximum, and the scaler is clamped: the block grows to fit
           // a wrapped label, but a rail only has so much vertical room to give,

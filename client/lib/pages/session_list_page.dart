@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../chrome/chrome.dart';
 import '../chrome/chrome_forms.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
@@ -224,13 +223,6 @@ class _SessionListBodyState extends State<SessionListBody> {
             subtitle:
                 '$active active · $total total · ${servers.length} '
                 'server${servers.length == 1 ? '' : 's'}',
-            actions: [
-              ChromeButtonAction(
-                icon: Icons.settings,
-                label: 'Settings',
-                onPressed: () => openSettings(context),
-              ),
-            ],
             filter: _fieldSpec(),
             slices: _sliceSpec(),
             body: Column(

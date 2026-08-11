@@ -50,6 +50,18 @@ pub(super) async fn delete_sessions_in_sequence(
 /// palette and the path-input completions list.
 pub(super) const LIST_MAX_VISIBLE: usize = 10;
 
+/// How often an in-flight clone job is polled.
+///
+/// A flat cadence, deliberately: no backoff (a clone that takes minutes is
+/// normal and the user wants live progress throughout) and no cancellation —
+/// jobs are bounded on the backend side by its `clone_timeout_secs`.
+pub(super) const CLONE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Lifetime of a clone progress toast. Comfortably longer than
+/// [`CLONE_POLL_INTERVAL`] so the next poll refreshes it before it expires,
+/// leaving the status bar continuously occupied for the clone's duration.
+const CLONE_TOAST_SECS: u64 = 4;
+
 /// Return the `scroll` offset that keeps `selected_idx` inside a visible
 /// window of `visible_rows` rows, starting from the caller's current
 /// scroll position. Handles all four cases (above window, below window,
@@ -71,7 +83,7 @@ pub(super) fn adjust_list_scroll(selected_idx: usize, scroll: usize, visible_row
 /// Order quick-switch session matches newest-attached first, then by title.
 /// Sessions never attached (`None`) sort to the bottom. Used for the
 /// empty-query palette so the most-recently-used session is at the top,
-/// mirroring the pinned "Recent" block and the in-tmux session picker.
+/// mirroring the pinned "Recent" block and the in-session switcher.
 pub(super) fn recency_then_title(a: &QuickSwitchMatch, b: &QuickSwitchMatch) -> std::cmp::Ordering {
     b.last_attached_at
         .cmp(&a.last_attached_at)
@@ -1282,6 +1294,9 @@ impl App {
         if eff_mode == PaletteMode::RemoteServerPicker {
             return self.gather_remote_server_picker_items(eff_query);
         }
+        if eff_mode == PaletteMode::GithubRepoPicker {
+            return self.gather_github_repo_picker_items(eff_query);
+        }
         if eff_mode == PaletteMode::Unified {
             for m in self.gather_quick_switch_matches(eff_query).await {
                 out.push(QuickSwitchItem::Session(m));
@@ -1345,64 +1360,24 @@ impl App {
         let eff_mode = Self::effective_palette_mode(mode, &query);
         let eff_query = Self::palette_filter_query(eff_mode, &query);
 
-        // Section picker: re-filter the section rows and stop — falling
-        // through would replace them with command entries.
-        if let PaletteMode::SectionPicker { session_id } = eff_mode {
-            let section_items = self.gather_section_picker_items(session_id, eff_query);
-            if let Modal::QuickSwitch {
-                matches,
-                selected_idx,
-                scroll,
-                ..
-            } = &mut self.ui_state.modal
-            {
-                *matches = section_items;
-                if *selected_idx >= matches.len() {
-                    *selected_idx = matches.len().saturating_sub(1);
-                }
-                *scroll = 0;
-                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+        // The dedicated picker modes each *replace* the whole row set with their
+        // own filtered list; falling through would append command entries to it.
+        // Only Unified/CommandOnly mix sessions and commands, below.
+        let picker_rows = match eff_mode {
+            PaletteMode::SectionPicker { session_id } => {
+                Some(self.gather_section_picker_items(session_id, eff_query))
             }
-            return;
-        }
-
-        // Program picker: same shape — re-filter the program rows and stop.
-        if let PaletteMode::ProgramPicker { session_id } = eff_mode {
-            let program_items = self.gather_program_picker_items(session_id, eff_query);
-            if let Modal::QuickSwitch {
-                matches,
-                selected_idx,
-                scroll,
-                ..
-            } = &mut self.ui_state.modal
-            {
-                *matches = program_items;
-                if *selected_idx >= matches.len() {
-                    *selected_idx = matches.len().saturating_sub(1);
-                }
-                *scroll = 0;
-                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+            PaletteMode::ProgramPicker { session_id } => {
+                Some(self.gather_program_picker_items(session_id, eff_query))
             }
-            return;
-        }
-
-        // Remote-server picker: same shape — re-filter the server rows and stop.
-        if eff_mode == PaletteMode::RemoteServerPicker {
-            let server_items = self.gather_remote_server_picker_items(eff_query);
-            if let Modal::QuickSwitch {
-                matches,
-                selected_idx,
-                scroll,
-                ..
-            } = &mut self.ui_state.modal
-            {
-                *matches = server_items;
-                if *selected_idx >= matches.len() {
-                    *selected_idx = matches.len().saturating_sub(1);
-                }
-                *scroll = 0;
-                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+            PaletteMode::RemoteServerPicker => {
+                Some(self.gather_remote_server_picker_items(eff_query))
             }
+            PaletteMode::GithubRepoPicker => Some(self.gather_github_repo_picker_items(eff_query)),
+            PaletteMode::Unified | PaletteMode::CommandOnly => None,
+        };
+        if let Some(rows) = picker_rows {
+            self.replace_palette_rows(rows);
             return;
         }
 
@@ -1445,7 +1420,7 @@ impl App {
             }
 
             // Empty query ranks by recency (newest attach first), matching the
-            // pinned "Recent" block and the in-tmux session picker; a real query
+            // pinned "Recent" block and the in-session switcher; a real query
             // ranks by fuzzy score.
             sort_palette_matches(&mut scored_sessions, eff_query.is_empty());
         }
@@ -1460,6 +1435,16 @@ impl App {
             .map(QuickSwitchItem::Command)
             .collect();
 
+        let mut rows = session_items;
+        rows.extend(command_items);
+        self.replace_palette_rows(rows);
+    }
+
+    /// Replace the open palette's rows with `rows`, clamping the selection into
+    /// the new list and collapsing the scroll window to a fresh one that still
+    /// shows the (clamped) highlight. Shared by every refilter path so the four
+    /// picker modes and the unified list can't drift apart.
+    fn replace_palette_rows(&mut self, rows: Vec<QuickSwitchItem>) {
         if let Modal::QuickSwitch {
             matches,
             selected_idx,
@@ -1467,16 +1452,11 @@ impl App {
             ..
         } = &mut self.ui_state.modal
         {
-            *matches = session_items;
-            matches.extend(command_items);
-
+            *matches = rows;
             if *selected_idx >= matches.len() {
                 *selected_idx = matches.len().saturating_sub(1);
             }
-            // Refilter collapses to a fresh window: reset to the top then
-            // adjust so the (now-clamped) selection is still visible.
-            *scroll = 0;
-            *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+            *scroll = adjust_list_scroll(*selected_idx, 0, LIST_MAX_VISIBLE);
         }
     }
 
@@ -1881,6 +1861,332 @@ impl App {
                 }
             })
             .collect()
+    }
+
+    /// Handle "Clone repository" — open the palette in GitHub repo-picker mode
+    /// and kick off the listing in the background.
+    ///
+    /// The picker opens *immediately*, showing its loading state, because
+    /// `list_github_repos` shells out to `gh api --paginate`: a large account takes
+    /// many seconds, and awaiting it here would freeze the event loop for the whole
+    /// listing. The listing is bounded server-side by `repo_list_timeout_secs`
+    /// (90s by default), so a wedged one reports a timeout rather than spinning
+    /// forever — but that bound is far too long to hold the event loop for.
+    pub(super) fn handle_clone_repository(&mut self) {
+        // Freeze the target backend now: the clone runs on that host's disk, so
+        // it must not drift if the tree selection moves while the picker is open.
+        self.ui_state.repo_picker = super::RepoPicker {
+            backend: self.selected_backend_id(),
+            ..Default::default()
+        };
+        self.ui_state.modal = Modal::QuickSwitch {
+            mode: PaletteMode::GithubRepoPicker,
+            query: super::Input::default(),
+            matches: Vec::new(),
+            selected_idx: 0,
+            scroll: 0,
+        };
+        self.refetch_github_repos();
+    }
+
+    /// (Re)start the repo listing for the open clone picker — the Ctrl-R action,
+    /// and the initial fetch. Bumps the generation so an in-flight listing's
+    /// response is discarded when it lands.
+    pub(super) fn refetch_github_repos(&mut self) {
+        self.ui_state.repo_picker.generation = self.ui_state.repo_picker.generation.wrapping_add(1);
+        self.ui_state.repo_picker.fetch = super::RepoFetch::Loading;
+        let generation = self.ui_state.repo_picker.generation;
+        let backend_id = self.ui_state.repo_picker.backend;
+        let backend = self.backend_arc(backend_id);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = backend.list_github_repos().await.map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::GithubReposLoaded {
+                    backend_id: backend_id.0,
+                    generation,
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    /// Build the clone picker's rows: one per fetched repo whose slug fuzzy-
+    /// matches `filter_query`, best match first.
+    ///
+    /// Repos already registered as projects on the target backend are labelled
+    /// rather than hidden — the user may legitimately want a second checkout, and
+    /// silently dropping rows from a picker reads as a bug. The comparison goes
+    /// through [`canonical_repo_slug`] rather than string equality because
+    /// `gh repo clone` honours the user's `git_protocol`, so a cloned project's
+    /// origin is often `ssh://` while the API reports `https://`.
+    pub(super) fn gather_github_repo_picker_items(
+        &self,
+        filter_query: &str,
+    ) -> Vec<QuickSwitchItem> {
+        use claude_commander_protocol::github::canonical_repo_slug;
+
+        let registered: std::collections::HashSet<String> = self
+            .backend(self.ui_state.repo_picker.backend)
+            .map(|h| h.view.snapshot.projects.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| p.origin_url.as_deref().and_then(canonical_repo_slug))
+            .collect();
+
+        let mut scored: Vec<(i64, QuickSwitchItem)> = Vec::new();
+        for repo in &self.ui_state.repo_picker.repos {
+            let Some(score) = crate::fuzzy::fuzzy_score(&repo.full_name, filter_query) else {
+                continue;
+            };
+            let already =
+                canonical_repo_slug(&repo.clone_url).is_some_and(|slug| registered.contains(&slug));
+            let mut label = repo.full_name.clone();
+            if repo.private {
+                label.push_str("  private");
+            }
+            if repo.archived {
+                label.push_str("  archived");
+            }
+            if already {
+                label.push_str("  · already a project");
+            }
+            scored.push((
+                score,
+                QuickSwitchItem::GithubRepo {
+                    full_name: repo.full_name.clone(),
+                    dir_name: repo.name.clone(),
+                    label,
+                },
+            ));
+        }
+        if !filter_query.is_empty() {
+            // Stable sort by score desc preserves the backend's ordering (most
+            // recently pushed first) among ties.
+            scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        }
+        scored.into_iter().map(|(_, item)| item).collect()
+    }
+
+    /// Open the destination-name prompt for a chosen clone `source`.
+    ///
+    /// `label` is what the prompt shows as the source. Callers pass a *redacted*
+    /// label for a URL source: git echoes the clone source in its own messages,
+    /// and a pasted `https://user:token@…` must not reach a rendered string.
+    pub(super) fn open_clone_dest_prompt(
+        &mut self,
+        backend: BackendId,
+        source: claude_commander_protocol::github::CloneSource,
+        label: &str,
+        dir_name: &str,
+    ) {
+        self.ui_state.modal = Modal::Input {
+            title: "Clone Repository".to_string(),
+            prompt: format!("Clone {label} into (directory name, blank to derive):"),
+            value: dir_name.to_string().into(),
+            on_submit: InputAction::CloneDestName { backend, source },
+            existing_branches: None,
+            project_picker: None,
+            program_picker: None,
+            server_picker: None,
+            section_picker: None,
+            focus: super::InputFocus::Name,
+            expanded: false,
+            mask: false,
+        };
+    }
+
+    /// Treat the picker's query as a clone URL — the "clone something not in the
+    /// list" path, taken when no repo row matched. A refused source reports why
+    /// and leaves the picker open so the user can correct it.
+    pub(super) fn open_clone_url_prompt(&mut self, typed: &str) {
+        use claude_commander_protocol::github::{
+            CloneSource, redact_credentials, validate_clone_url,
+        };
+        match validate_clone_url(typed) {
+            Ok(target) => {
+                // `target.source` is the caller's string; redact before it
+                // becomes a rendered label.
+                let label = redact_credentials(&target.source);
+                let dir_name = target.default_dir_name.clone();
+                self.open_clone_dest_prompt(
+                    self.ui_state.repo_picker.backend,
+                    CloneSource::Url { url: target.source },
+                    &label,
+                    &dir_name,
+                );
+            }
+            Err(rejection) => {
+                // `CloneRejection`'s Display is the same text the 400 response
+                // carries, and it never echoes the source — safe to show.
+                self.ui_state.status_message = Some((
+                    format!("Cannot clone that: {rejection}"),
+                    Instant::now() + Duration::from_secs(5),
+                ));
+            }
+        }
+    }
+
+    /// Ask `backend` to start cloning `source` into `dest_name`, then poll it.
+    ///
+    /// `dest_name` is the (already trimmed) user edit; empty means "derive it",
+    /// which is a valid choice rather than an error.
+    pub(super) fn spawn_clone(
+        &mut self,
+        backend_id: BackendId,
+        source: claude_commander_protocol::github::CloneSource,
+        dest_name: Option<String>,
+    ) {
+        use claude_commander_protocol::github::{CloneRequest, CloneSource, redact_credentials};
+
+        // Never build a progress string from the raw source: a `CloneSource::Url`
+        // may carry credentials. The backend's own `source_label` is redacted
+        // too, but the first toast is shown before any poll result arrives.
+        let label = redact_credentials(match &source {
+            CloneSource::Github { full_name } => full_name,
+            CloneSource::Url { url } => url,
+        });
+        self.ui_state.status_message = Some((
+            format!("Cloning {label}…"),
+            Instant::now() + Duration::from_secs(CLONE_TOAST_SECS),
+        ));
+
+        let backend = self.backend_arc(backend_id);
+        let tx = self.event_loop.sender();
+        let req = CloneRequest {
+            source: source.clone(),
+            dest_name,
+        };
+        tokio::spawn(async move {
+            // One task owns the whole job: accept it, then poll until it
+            // resolves. Every arm reports through `CloneJobUpdated`, so a
+            // refused request and a failed clone reach the UI the same way.
+            let job = match backend.start_clone(req).await {
+                Ok(job) => job,
+                Err(e) => {
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::CloneJobUpdated {
+                            backend_id: backend_id.0,
+                            source,
+                            result: Err(e.to_string()),
+                        }))
+                        .await;
+                    return;
+                }
+            };
+            let id = job.id;
+            loop {
+                // The accepted job's status is NOT terminal (it is always
+                // `Running`), so sleep first and let `clone_job` report every
+                // outcome — including an occupied destination.
+                tokio::time::sleep(CLONE_POLL_INTERVAL).await;
+                let result = backend.clone_job(id).await.map_err(|e| e.to_string());
+                let keep_polling = matches!(
+                    &result,
+                    Ok(Some(job))
+                        if matches!(
+                            job.status,
+                            claude_commander_protocol::github::CloneStatus::Running
+                        )
+                );
+                if tx
+                    .send(AppEvent::StateUpdate(StateUpdate::CloneJobUpdated {
+                        backend_id: backend_id.0,
+                        source: source.clone(),
+                        result,
+                    }))
+                    .await
+                    .is_err()
+                    || !keep_polling
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Apply one clone-job poll result.
+    ///
+    /// All four [`CloneStatus`](claude_commander_protocol::github::CloneStatus)
+    /// arms are distinct outcomes, and only one of them is a failure:
+    ///
+    /// * `Running` refreshes the status-bar progress line.
+    /// * `Succeeded` toasts and refreshes the tree, so the new project appears.
+    /// * `Failed` shows the backend's message. Task 11 made both transports
+    ///   produce byte-identical messages for the same refusal and the layers
+    ///   below redact what they return, so there is exactly one message path
+    ///   here — the TUI never composes its own from the source.
+    /// * `DestinationExists` is **not** a failure: the checkout is already
+    ///   there. With a git repo at the path the actionable offer is to register
+    ///   it; without one, the useful move is a different name, so the prompt is
+    ///   re-offered rather than leaving a dead end.
+    pub(super) async fn apply_clone_job_update(
+        &mut self,
+        backend_id: BackendId,
+        source: claude_commander_protocol::github::CloneSource,
+        result: std::result::Result<Option<claude_commander_protocol::github::CloneJob>, String>,
+    ) {
+        use claude_commander_protocol::github::CloneStatus;
+
+        let toast =
+            |text: String| Some((text, Instant::now() + Duration::from_secs(CLONE_TOAST_SECS)));
+        let job = match result {
+            Ok(Some(job)) => job,
+            // Absence, not failure — the job was pruned or never issued. Say so
+            // plainly instead of raising an error modal.
+            Ok(None) => {
+                self.ui_state.status_message =
+                    toast("Clone job is no longer being tracked".to_string());
+                return;
+            }
+            Err(message) => {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Clone failed: {message}"),
+                };
+                return;
+            }
+        };
+
+        match job.status {
+            CloneStatus::Running => {
+                self.ui_state.status_message = toast(format!("Cloning {}…", job.source_label));
+            }
+            CloneStatus::Succeeded { .. } => {
+                self.ui_state.status_message = toast(format!("Cloned {}", job.source_label));
+                self.refresh_backend_view(backend_id).await;
+                self.refresh_list_items().await;
+            }
+            CloneStatus::Failed { message } => {
+                self.ui_state.status_message = None;
+                self.ui_state.modal = Modal::Error { message };
+            }
+            CloneStatus::DestinationExists { dest, is_git_repo } => {
+                let shown = dest.display().to_string();
+                if is_git_repo {
+                    self.ui_state.status_message = None;
+                    self.ui_state.modal = Modal::Confirm {
+                        title: "Already Checked Out".to_string(),
+                        message: format!(
+                            "{shown} already contains a git repository, so nothing was cloned.\n\nAdd that checkout as a project instead?"
+                        ),
+                        on_confirm: ConfirmAction::RegisterExistingClone {
+                            backend: backend_id,
+                            dest,
+                        },
+                    };
+                } else {
+                    // Seed the prompt with the occupied name so the user edits
+                    // from it rather than retyping.
+                    let occupied = dest
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.ui_state.status_message =
+                        toast(format!("{shown} already exists — pick another name"));
+                    self.open_clone_dest_prompt(backend_id, source, &job.source_label, &occupied);
+                }
+            }
+        }
     }
 
     /// Handle "add remote server" — step 1 of the chained flow: prompt for a
@@ -2412,6 +2718,13 @@ impl App {
                 };
                 self.spawn_remote_server_probe(server);
             }
+            InputAction::CloneDestName { backend, source } => {
+                // Blank means "derive the name from the source" — a real choice,
+                // not an error, so it isn't bounced back to the prompt.
+                let dest_name = value.trim();
+                let dest_name = (!dest_name.is_empty()).then(|| dest_name.to_string());
+                self.spawn_clone(backend, source, dest_name);
+            }
         }
     }
 
@@ -2538,6 +2851,33 @@ impl App {
                         };
                     }
                 }
+            }
+            ConfirmAction::RegisterExistingClone { backend, dest } => {
+                // The occupied path is on `backend`'s disk, so the project has to
+                // be registered there — hence the trait rather than the local
+                // service. `ensure_project`, not `add_project`: the offer exists
+                // *because* the destination was occupied, so the checkout is often
+                // already a project and `add_project` would register a second
+                // entry for it.
+                let shown = dest.display().to_string();
+                self.ui_state.status_message = Some((
+                    format!("Adding existing checkout {shown}…"),
+                    Instant::now() + Duration::from_secs(CLONE_TOAST_SECS),
+                ));
+                let handle = self.backend_arc(backend);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let update = match handle.ensure_project(dest).await {
+                        Ok(project_id) => StateUpdate::ProjectAdded {
+                            backend_id: backend.0,
+                            project_id,
+                        },
+                        Err(e) => StateUpdate::Error {
+                            message: format!("Failed to add project: {e}"),
+                        },
+                    };
+                    let _ = tx.send(AppEvent::StateUpdate(update)).await;
+                });
             }
             ConfirmAction::RemoveRemoteServer { name } => {
                 match self.remove_remote_server_from_config(&name) {

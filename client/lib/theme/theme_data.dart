@@ -188,22 +188,40 @@ TextTheme _textTheme(TextTheme base, CommanderTokens t) {
   // LCARS' condensed face wants positive tracking where Space Grotesk is
   // tightened; flip the sign rather than carry two sets of literals.
   double track(double mc) => t.uppercaseLabels ? -mc * 2 : mc;
+  // Every style below repeats `fontFamily`, and it is not redundant with the
+  // `.apply()` above: `TextTheme.copyWith` *replaces* a style rather than merging
+  // into it, so a style listed here without a family silently drops the theme's
+  // face. `bodyMedium` is the one that bites — `Material` installs it as the
+  // `DefaultTextStyle`, so it is what every `Text` with no explicit family
+  // inherits, including Mission Control's session row titles. Those rendered in
+  // the platform sans for as long as this was wrong: near enough to Space
+  // Grotesk on Linux to pass unnoticed, and Roboto on Android.
   return base
       .apply(fontFamily: t.sans, bodyColor: t.text, displayColor: t.text)
       .copyWith(
         titleLarge: TextStyle(
+          fontFamily: t.sans,
           fontWeight: FontWeight.w700,
           letterSpacing: track(-0.3),
           color: t.text,
         ),
         titleMedium: TextStyle(
+          fontFamily: t.sans,
           fontWeight: FontWeight.w700,
           letterSpacing: track(-0.2),
           color: t.text,
         ),
-        titleSmall: TextStyle(fontWeight: FontWeight.w600, color: t.text),
-        bodyMedium: TextStyle(color: t.textBright, height: 1.45),
-        bodySmall: TextStyle(color: t.textMuted),
-        labelLarge: const TextStyle(fontWeight: FontWeight.w600),
+        titleSmall: TextStyle(
+          fontFamily: t.sans,
+          fontWeight: FontWeight.w600,
+          color: t.text,
+        ),
+        bodyMedium: TextStyle(
+          fontFamily: t.sans,
+          color: t.textBright,
+          height: 1.45,
+        ),
+        bodySmall: TextStyle(fontFamily: t.sans, color: t.textMuted),
+        labelLarge: TextStyle(fontFamily: t.sans, fontWeight: FontWeight.w600),
       );
 }

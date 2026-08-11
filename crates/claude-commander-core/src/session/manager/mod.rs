@@ -35,6 +35,7 @@ mod worktree_sync;
 
 pub use cascade::{CascadeOutcome, PushStackOutcome};
 pub use lifecycle::program_with_agent_flags;
+pub(crate) use projects::repo_identity;
 
 #[cfg(test)]
 mod tests;

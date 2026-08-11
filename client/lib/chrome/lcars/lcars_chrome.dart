@@ -436,23 +436,31 @@ class LcarsChrome extends Chrome {
     return button.expand ? Expanded(child: block) : block;
   }
 
-  /// Deck P2/P3's `FLEET / + / ACTIVITY`: three contiguous blocks meeting the
-  /// bottom of the screen, with the outer bottom corners rounded. The centre
+  /// Deck P2/P3's `SETTINGS / FLEET / + / ACTIVITY`: contiguous blocks meeting
+  /// the bottom of the screen, with the outer bottom corners rounded. The centre
   /// action is a block in the run, not a floating button — LCARS has no FAB.
+  ///
+  /// The settings block leads the run at the rail's width, which is what makes
+  /// the frame's bottom-left corner *this* row's rather than a second one above
+  /// it: the rail overhead runs down into it, and the bar is the corner it turns.
   @override
   Widget buildFooterNav(BuildContext context, ChromeFooterNavSpec spec) {
     final t = CommanderTokens.of(context);
+    final settings = spec.settings;
     final centre = spec.centreAction;
-    final count = spec.items.length + (centre == null ? 0 : 1);
-    // Where the centre action lands in the run. `count` — i.e. never — when there
-    // is no centre action, which also makes the item index below fall through
-    // unshifted.
+    // The nav blocks start one slot in when the settings block leads, so every
+    // run position below is offset by it.
+    final lead = settings == null ? 0 : 1;
+    final count = lead + spec.items.length + (centre == null ? 0 : 1);
+    // Where the centre action lands among the nav blocks. `count` — i.e. never —
+    // when there is no centre action, which also makes the item index below fall
+    // through unshifted.
     final centreSlot = centre == null ? count : spec.items.length ~/ 2;
 
     final blocks = <Widget>[];
-    for (var i = 0; i < count; i++) {
+    for (var i = 0; i < count - lead; i++) {
       // Bottom corners only: the footer sits against the edge of the screen.
-      final ends = _runEnds(i, count, t.pillRadius, bottom: true);
+      final ends = _runEnds(i + lead, count, t.pillRadius, bottom: true);
       blocks.add(
         i == centreSlot
             ? _navCentre(t, centre!, ends)
@@ -467,7 +475,23 @@ class LcarsChrome extends Chrome {
     }
 
     return Row(
+      // Bottom-aligned, not centred: the settings block is the run's only
+      // fixed-width one, so it is the only one that can outgrow `_footerHeight`
+      // when its label wraps at an accessibility text scale. Centred, that growth
+      // would lift every other block off the bottom of the screen — see the 1.3×
+      // test in `phone_shell_test.dart`.
+      crossAxisAlignment: CrossAxisAlignment.end,
       children: [
+        if (settings != null) ...[
+          _navSettings(
+            t,
+            settings,
+            _runEnds(0, count, t.pillRadius, bottom: true),
+          ),
+          // The rail's own pitch, not the run's tighter seam: this gap continues
+          // the gutter between the rail and the content column straight down.
+          const SizedBox(width: _railPitch),
+        ],
         for (var i = 0; i < blocks.length; i++) ...[
           if (i > 0) const SizedBox(width: _seam),
           blocks[i],
@@ -497,14 +521,47 @@ class LcarsChrome extends Chrome {
     ),
   );
 
+  /// The run's leading block: the deck's bottom-left elbow, now lying in the bar.
+  ///
+  /// [CommanderTokens.railWidth] wide so it sits squarely under the rail above,
+  /// and lettered at a rail label's 11px rather than a nav block's 13.
+  ///
+  /// Measured in Antonio at this exact `TextStyle`, against the 47px a 62px block
+  /// leaves after [ChromeElbow]'s padding: 'SETTINGS' takes 45.9px at 13 and
+  /// 38.8px at 11. So 13 fits by roughly a pixel and wraps at any text scale
+  /// above ~1.0, where 11 holds to ~1.2. Wrapping is not fatal — the block grows
+  /// to two lines (`elbow.dart`'s own doc) and [buildFooterNav] bottom-aligns the
+  /// run so its neighbours stay on the screen edge — but it costs the footer a
+  /// third of its height, so the smaller label is the one that earns its place.
+  Widget _navSettings(
+    CommanderTokens t,
+    ChromeButtonAction settings,
+    BorderRadius radius,
+  ) => SizedBox(
+    width: t.railWidth,
+    child: ClipRRect(
+      borderRadius: radius,
+      child: ChromeElbow(
+        color: t.nav,
+        height: _footerHeight,
+        label: t.caseLabel(settings.label),
+        labelAlignment: Alignment.center,
+        labelWeight: FontWeight.w700,
+        onTap: settings.onPressed,
+      ),
+    ),
+  );
+
   Widget _navCentre(
     CommanderTokens t,
     ChromeButtonAction centre,
     BorderRadius radius,
   ) => SizedBox(
     width: _footerCentreWidth,
-    // The block's own semantic label would be '+', which tells a screen-reader
-    // user nothing, so the action's real label wraps it.
+    // The action's own icon, not a `Text('+')`: a text glyph centres its line
+    // box rather than its ink, which left the cross painting ~2px low (see
+    // ChromeElbow.icon). The block carries no visible label, so the action's
+    // real one wraps it for a screen reader.
     child: Semantics(
       label: centre.label,
       child: ClipRRect(
@@ -512,10 +569,8 @@ class LcarsChrome extends Chrome {
         child: ChromeElbow(
           color: t.attention,
           height: _footerHeight,
-          label: '+',
-          labelAlignment: Alignment.center,
-          labelSize: 18,
-          labelWeight: FontWeight.w700,
+          icon: centre.icon,
+          iconSize: 20,
           onTap: centre.onPressed,
         ),
       ),
@@ -525,9 +580,14 @@ class LcarsChrome extends Chrome {
   /// The phone shell: body above a footer of contiguous blocks.
   ///
   /// No `FloatingActionButton` and no `BottomAppBar` — the deck's LCARS footer is
-  /// three butted blocks (FLEET / + / ACTIVITY) whose outer bottom corners round
-  /// into the rail, so the centre action is simply the middle block rather than
-  /// something overlapping the bar.
+  /// butted blocks (SETTINGS / FLEET / + / ACTIVITY) whose outer bottom corners
+  /// round against the edge of the screen, so the centre action is simply the
+  /// middle block rather than something overlapping the bar.
+  ///
+  /// The run is inset to the body's own margins rather than to margins of its
+  /// own: flush left, where the rail is, and 10 off the right, where the content
+  /// column ends. That is what lets the footer read as the rail turning its
+  /// corner — the two are one bracket, not a frame with a bar under it.
   @override
   Widget buildShell(BuildContext context, ChromeShellSpec spec) {
     final t = CommanderTokens.of(context);
@@ -538,12 +598,15 @@ class LcarsChrome extends Chrome {
           children: [
             Expanded(child: spec.body),
             Padding(
-              padding: const EdgeInsets.fromLTRB(8, 6, 10, 0),
+              // Top gap at the rail's pitch, so the rail's filler meets the
+              // settings block on the same seam its own blocks are stacked on.
+              padding: const EdgeInsets.fromLTRB(0, _railPitch, 10, 0),
               child: buildFooterNav(
                 context,
                 ChromeFooterNavSpec(
                   items: spec.items,
                   centreAction: spec.centreAction,
+                  settings: spec.settings,
                 ),
               ),
             ),
@@ -673,7 +736,7 @@ class LcarsChrome extends Chrome {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _viewRail(context, spec, t),
+        _viewRail(spec, t),
         const SizedBox(width: _railPitch),
         Expanded(child: _viewContent(context, spec, t)),
         const SizedBox(width: 10),
@@ -681,18 +744,13 @@ class LcarsChrome extends Chrome {
     );
   }
 
-  /// The view rail, top to bottom: the identifier, a block per slice, any actions
-  /// beyond the last, a band (labelled with the slice note when there is one),
-  /// inert filler, then a closing elbow carrying the last action.
-  Widget _viewRail(
-    BuildContext context,
-    ChromeViewRailSpec spec,
-    CommanderTokens t,
-  ) {
-    final actions = spec.actions;
-    // The deck's bottom-left block is where a rail's standing action lives, so
-    // the last one goes there and any earlier ones become blocks of their own.
-    final closing = actions.isEmpty ? null : actions.last;
+  /// The view rail, top to bottom: the identifier, a block per slice, a band
+  /// (labelled with the slice note when there is one), then inert filler.
+  ///
+  /// No closing elbow, unlike [_rail]: this rail is only ever drawn inside the
+  /// phone shell, whose footer carries the frame's bottom-left corner — see
+  /// [buildFooterNav]. Closing it here would bracket the screen twice.
+  Widget _viewRail(ChromeViewRailSpec spec, CommanderTokens t) {
     final slices = spec.slices;
     final note = slices?.note;
     final blocks = <Widget>[
@@ -713,14 +771,6 @@ class LcarsChrome extends Chrome {
           label: t.caseLabel(slice.label),
           onTap: slice.onTap,
         ),
-      for (final action in _railExtraActions(actions))
-        ChromeElbow(
-          color: _kindColor(action.kind, t),
-          labelColor: _kindLabelColor(action.kind, t),
-          height: 26,
-          label: t.caseLabel(action.label),
-          onTap: () => _invoke(context, action),
-        ),
       // The thin bright band the deck steps down through before the dark filler.
       // It carries the mode note when there is one — an inert label on an inert
       // block, which is where LCARS puts a readout.
@@ -734,22 +784,9 @@ class LcarsChrome extends Chrome {
           label: t.caseLabel(note),
         ),
       Expanded(child: ChromeElbow(color: t.divider)),
-      ChromeElbow(
-        color: t.nav,
-        corner: ElbowCorner.bottomLeft,
-        height: 44,
-        label: closing == null ? null : t.caseLabel(closing.label),
-        labelAlignment: Alignment.topRight,
-        onTap: closing == null ? null : () => _invoke(context, closing),
-      ),
     ];
     return _railColumn(t, blocks);
   }
-
-  /// The actions that get a block of their own — every one but the last, which
-  /// the closing elbow carries.
-  Iterable<ChromeAction> _railExtraActions(List<ChromeAction> actions) =>
-      actions.length > 1 ? actions.take(actions.length - 1) : const [];
 
   /// The content column: the elbow cap closing the rail's bracket, the title and
   /// its subtitle, the filter field, then the body.
@@ -799,6 +836,80 @@ class LcarsChrome extends Chrome {
   Widget buildWideDetail(BuildContext context, ChromeWideDetailSpec spec) =>
       LcarsDetail(spec);
 
+  /// The window bar as a run of blocks: a lilac cap carrying the app name, dark
+  /// filler that absorbs the slack (and is the drag surface), then three control
+  /// blocks closing the run.
+  ///
+  /// Not a flat bar of icon buttons — LCARS has no such element. The controls are
+  /// short-coded blocks (`MIN`, `MAX`, `CLOSE`) like every other LCARS control,
+  /// wrapped in [Tooltip]s so an abbreviation still announces its full name.
+  @override
+  Widget buildWindowBar(BuildContext context, ChromeWindowBarSpec spec) {
+    final t = CommanderTokens.of(context);
+    final controls = windowBarControls(spec);
+    // The name cap, the filler and each control are one run, so only the two
+    // outer ends round — the bar reads as a single bracket across the window.
+    final count = controls.length + 2;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: _seam),
+      child: Row(
+        children: [
+          // The name cap and the filler are the drag surface; the controls to
+          // their right are deliberately outside it.
+          Expanded(
+            child: applyWindowBarGestures(
+              spec,
+              Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: _runEnds(0, count, t.pillRadius),
+                    child: ChromeElbow(
+                      color: t.nav,
+                      labelColor: t.canvas,
+                      height: _windowBarHeight,
+                      label: t.caseLabel(spec.title),
+                      labelAlignment: Alignment.center,
+                      labelSize: 12,
+                      labelWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(width: _seam),
+                  // Inert filler: the block that makes the run span the window,
+                  // and the easiest part of the bar to grab for a drag.
+                  Expanded(
+                    child: ChromeElbow(
+                      color: t.divider,
+                      height: _windowBarHeight,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          for (var i = 0; i < controls.length; i++) ...[
+            const SizedBox(width: _seam),
+            Tooltip(
+              message: controls[i].label,
+              child: ClipRRect(
+                borderRadius: _runEnds(i + 2, count, t.pillRadius),
+                child: ChromeElbow(
+                  color: controls[i].destructive ? t.danger : t.borderSubtle,
+                  labelColor: controls[i].destructive ? t.canvas : t.nav,
+                  height: _windowBarHeight,
+                  label: controls[i].code,
+                  labelAlignment: Alignment.center,
+                  labelSize: 12,
+                  labelWeight: FontWeight.w700,
+                  onTap: controls[i].onTap,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget buildEyebrow(BuildContext context, String label) {
     final t = CommanderTokens.of(context);
@@ -808,7 +919,18 @@ class LcarsChrome extends Chrome {
       // header read as part of its first row rather than as a heading over the
       // run. Mission Control's eyebrow carried this padding from the start;
       // LCARS' was a bare Text.
-      padding: const EdgeInsets.only(top: 12, bottom: 6),
+      //
+      // 13 rather than 12, and the odd number is load-bearing. An 11px Antonio
+      // line box is 14.23 logical px, so headings accrue fractional offsets down
+      // the list; at dpr 1.5 the *first* one landed half a physical pixel out of
+      // phase with the rest, putting its cap tops flush on a pixel boundary. It
+      // rendered a hard top edge — read as clipped, though nothing clips it —
+      // while every later heading got a soft antialiased row above its caps. One
+      // extra logical pixel moves this heading 1.5 physical px (flipping its
+      // phase) and every heading below it 3.0 (leaving theirs alone), so the
+      // first agrees with the rest. Verified by dumping both headings' pixels:
+      // identical rasterisation, row for row.
+      padding: const EdgeInsets.only(top: 13, bottom: 6),
       child: Text(
         t.caseLabel(label),
         maxLines: 1,
@@ -836,6 +958,10 @@ const _railPitch = 5.0;
 /// The list row's leading number block (deck P2's node headers: `width:38px`).
 const _rowNumberWidth = 38.0;
 
+/// The app-drawn window bar's block height. Matches Mission Control's bar so
+/// switching theme while borderless does not reflow the page beneath it.
+const _windowBarHeight = 32.0;
+
 /// A slice block in a view rail. Taller than a rail action (26) because a slice is
 /// the rail's primary control, matching the wide nav's destination blocks.
 const _railSliceHeight = 30.0;
@@ -848,9 +974,10 @@ const _segmentHeight = 30.0;
 /// rounded down, and comfortably clear of ChromeElbow's clamped 1.3× scaler.
 const _barHeight = 36.0;
 
-/// Footer block height. The deck's is ~33px, but the 18px '+' overflows that at
-/// the clamped 1.3× text scaler, so the run is 5px taller than the frame — which
-/// also drags the nav closer to a usable touch target.
+/// Footer block height. The deck's is ~33px, but a 13px destination label at
+/// ChromeElbow's clamped 1.3× text scaler leaves that barely any room, so the
+/// run is 5px taller than the frame — which also drags the nav closer to a
+/// usable touch target.
 const _footerHeight = 38.0;
 
 /// The footer's centre action block (deck P2/P3: `width:46px`).

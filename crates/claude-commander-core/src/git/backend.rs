@@ -169,6 +169,20 @@ impl GitBackend {
         short.strip_prefix("origin/").map(|s| s.to_string())
     }
 
+    /// The URL of the `origin` remote, or `None` when the repo has no `origin`
+    /// (or its URL is unusable).
+    ///
+    /// This is the *effective* URL — gix applies `url.<base>.insteadOf`
+    /// rewrites, same as git does when it talks to the remote — so a repo
+    /// configured with a shorthand still yields the real host/owner/name that
+    /// [`canonical_repo_slug`](claude_commander_protocol::github::canonical_repo_slug)
+    /// can match a GitHub clone URL against.
+    pub fn origin_url(&self) -> Option<String> {
+        let remote = self.repo.try_find_remote("origin")?.ok()?;
+        let url = remote.url(gix::remote::Direction::Fetch)?;
+        Some(url.to_bstring().to_string())
+    }
+
     /// List all local and remote branches in the repository.
     ///
     /// Returns entries as `(short_name, is_remote)` where:

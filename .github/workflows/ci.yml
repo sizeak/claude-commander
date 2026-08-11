@@ -340,6 +340,21 @@ jobs:
       - name: Run Dart Unit Tests
         run: nix develop .#clientCi -c bash -c 'cd client && flutter test'
 
+      # A failing golden is otherwise undiagnosable from here: the log gives a
+      # percentage and a pixel count, never what moved, and the images the
+      # comparator writes die with the runner. `flutter test` drops isolated /
+      # masterImage / testImage PNGs into test/goldens/failures for exactly this.
+      # Failure-only, so a green run pays nothing; ignored when the run failed
+      # for some other reason and the directory does not exist.
+      - name: Upload Golden Failure Images
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures
+          path: client/test/goldens/failures/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run cdylib Integration Tests
         run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test'
 

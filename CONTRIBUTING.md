@@ -34,15 +34,57 @@ The AUR job depends on:
 ## Development
 
 ```bash
-# Run tests
-cargo test
+# Everything CI checks for Rust: fmt, clippy, build, test
+scripts/verify.sh
 
-# Run with debug logging
-claude-commander --debug
+# Just the fast pair, for a tight loop
+scripts/verify.sh --fast
 
-# Check for issues
-cargo clippy
+# One crate, one test
+scripts/verify.sh -p core worktree_add
+
+# Add the client lanes (dart format, flutter analyze, flutter test, cdylib)
+scripts/verify.sh --client
+
+# Everything CI runs, plus shellcheck, script self-tests and the Flutter e2e
+scripts/verify.sh --all
+
+# Run the TUI with debug logging to /tmp/claude-commander.log
+scripts/dev-run.sh tui --debug
 ```
+
+`verify.sh` runs every selected check even after one fails, keeps full output
+under `target/verify-logs/`, and exits with the failing lane's own code (10 fmt,
+11 clippy, 12 build, 13 test, …) — see `scripts/verify.sh --list`. Its lane list
+mirrors `.github/workflows/ci.yml`, so a green `--all` means a green PR (modulo
+toolchain drift — see below).
+
+One thing to expect from `--all`: it is a *superset* of CI, also running
+`shellcheck`, the script self-tests, and the Flutter `e2e` that CI cannot — so a
+red lane there needn't mean red CI. The `e2e` lane needs a display; it reports
+`SKIP` (not a failure) when there is neither one nor `xvfb-run`.
+
+By default the lanes use whatever `cargo`/`flutter` is already on your `PATH` and
+only re-enter the Nix dev shell when the tool is missing, so a local toolchain
+that differs from the flake's can disagree with CI in either direction. Set
+`CC_FORCE_NIX=1` to make every lane go through `nix develop` the way CI does.
+`scripts/dev-run.sh` covers the launch side (TUI, server, Linux app, Android
+emulator + APK deploy); both are documented in
+[`CLAUDE.md`](CLAUDE.md#commands).
+
+**Golden images are the one case where the default toolchain rule is not good
+enough.** The client's reference images under `client/test/goldens/` are
+rasteriser-sensitive, so a `flutter test` from a differing local Flutter can pass
+against images CI will reject. Any change that adds, regenerates or deletes a
+golden must be verified with the pinned toolchain before pushing:
+
+```bash
+CC_FORCE_NIX=1 scripts/verify.sh --goldens          # check them
+CC_FORCE_NIX=1 scripts/verify.sh --goldens --update # regenerate, then read the diff
+```
+
+See the Golden tests section of [`CLAUDE.md`](CLAUDE.md) for what that does and
+does not prove — a green run is strong evidence, not proof.
 
 This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and
 `cargo clippy` on every commit, plus `dart format` when the commit touches Dart.
@@ -52,6 +94,16 @@ The Dart hook shells out to `client/tool/dart-format.sh`, which re-enters the
 client dev shell if `dart` isn't already on your `PATH` — so it works whether or
 not you're inside `nix develop .#client`. The same script backs CI's Format Dart
 step (`--check`), so the two can't drift.
+
+### Screenshots
+
+The images in `docs/images/` are **generated**, not hand-captured: both capture
+scripts render one hermetic demo workspace (three projects, ten sessions, two PR
+stacks, a stand-in agent) so nothing of yours leaks into a screenshot and the
+terminal and client images stay consistent. Regenerate after a UI change with
+`docs/tool/capture-tui.sh` or
+`nix develop .#clientCi -c docs/tool/capture-client.sh`; see
+[`docs/tool/README.md`](docs/tool/README.md).
 
 ### Architecture
 

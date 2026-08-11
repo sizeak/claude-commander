@@ -278,20 +278,21 @@ enum ChromeViewRailStyle {
 }
 
 /// A whole *view's* frame: what slice of its data is showing, how it is filtered,
-/// what it is called, and what can be done to it.
+/// and what it is called.
 ///
 /// Distinct from [ChromeShellSpec], and the split matters: the shell's footer
-/// carries **app**-level navigation (Fleet / + / Activity) while this carries
-/// **view**-scoped controls. The deck's phone frames have both at once, which is
-/// why the rail belongs to the view rather than to the shell — a view embedded in
-/// the wide shell (whose own chrome already titles its panes) simply doesn't ask
-/// for one.
+/// carries **app**-level navigation and actions (Fleet / + / Activity, settings)
+/// while this carries **view**-scoped controls. The deck's phone frames have both
+/// at once, which is why the rail belongs to the view rather than to the shell —
+/// a view embedded in the wide shell (whose own chrome already titles its panes)
+/// simply doesn't ask for one.
 ///
 /// Mission Control renders it as the branded header the two pages built by hand,
 /// with the filter and slices in a padded controls column beneath. LCARS renders
-/// the deck's left elbow rail: [code], a block per slice, an inert band, filler,
-/// and a closing elbow for the last action — with the title, subtitle and filter
-/// in the content column beside it.
+/// the deck's left elbow rail: [code], a block per slice, an inert band and
+/// filler — with the title, subtitle and filter in the content column beside it.
+/// The rail has no closing elbow: the shell's footer carries the frame's
+/// bottom-left corner, so the rail runs down into it.
 @immutable
 class ChromeViewRailSpec {
   /// The LCARS rail identifier ("47-A"). Mission Control ignores it.
@@ -314,11 +315,6 @@ class ChromeViewRailSpec {
   /// rather than a pre-built [ChromeSegmented].
   final ChromeSegmentedSpec? slices;
 
-  /// Actions on the view itself (settings). LCARS gives the last one the rail's
-  /// closing elbow — the deck's bottom-left block — and any earlier ones a block
-  /// of their own; Mission Control renders each as a tile beside the title.
-  final List<ChromeAction> actions;
-
   final Widget body;
 
   const ChromeViewRailSpec({
@@ -328,7 +324,6 @@ class ChromeViewRailSpec {
     this.style = ChromeViewRailStyle.branded,
     this.filter,
     this.slices,
-    this.actions = const [],
     required this.body,
   });
 }
@@ -355,7 +350,7 @@ class ChromeNavItem {
 /// The phone shell's bottom navigation.
 ///
 /// Mission Control: a `BottomAppBar` with a docked centre `FloatingActionButton`.
-/// LCARS: three contiguous blocks (FLEET / + / ACTIVITY) with rounded outer
+/// LCARS: contiguous blocks (SETTINGS / FLEET / + / ACTIVITY) with rounded outer
 /// bottom corners and no FAB at all.
 @immutable
 class ChromeFooterNavSpec {
@@ -365,7 +360,16 @@ class ChromeFooterNavSpec {
   /// middle block.
   final ChromeButtonAction? centreAction;
 
-  const ChromeFooterNavSpec({required this.items, this.centreAction});
+  /// The shell's standing action. LCARS gives it the run's leading block, at the
+  /// rail's width — the deck's bottom-left elbow, turned the corner into the bar;
+  /// Mission Control a leading icon button.
+  final ChromeButtonAction? settings;
+
+  const ChromeFooterNavSpec({
+    required this.items,
+    this.centreAction,
+    this.settings,
+  });
 }
 
 /// The phone shell's whole frame: a body over a footer navigation bar.
@@ -386,10 +390,63 @@ class ChromeShellSpec {
   /// FAB between the tabs; LCARS makes it the middle footer block.
   final ChromeButtonAction? centreAction;
 
+  /// The standing action every destination shares (settings), carried by the
+  /// footer rather than by a view — as [ChromeWideSpec.settings] is carried by
+  /// the wide shell's nav. A view-scoped one would be reachable from whichever
+  /// tab happened to declare it, and no other.
+  final ChromeButtonAction? settings;
+
   const ChromeShellSpec({
     required this.body,
     required this.items,
     this.centreAction,
+    this.settings,
+  });
+}
+
+/// The desktop window's own title bar, drawn by the app.
+///
+/// Shown when the native title bar is hidden (`TitleBarMode.borderless`), which
+/// is the desktop default: GTK3 has no `xdg-decoration` support, so a GTK3 window
+/// on Wayland is always client-side decorated and KWin will never draw its own
+/// title bar for this app — the "native" frame is a GNOME-style header bar even
+/// in a KDE session, and this is the only frame that can match the desktop.
+///
+/// Declarative for the same reason [ChromeAction] is: the two themes disagree
+/// structurally, LCARS having no notion of a flat bar of icon buttons. Carrying
+/// the *callbacks* rather than a built widget also keeps `chrome/` free of any
+/// `window_manager` import, so both bars are testable with plain closures.
+@immutable
+class ChromeWindowBarSpec {
+  /// The app's name. Deliberately not the active page's title, which the page's
+  /// own chrome already shows and which would make the bar flicker on every
+  /// navigation.
+  final String title;
+
+  /// Drives the maximise control's glyph and label.
+  final bool isMaximized;
+
+  /// The user began dragging the bar's empty space — hand it to the compositor as
+  /// a window move.
+  final VoidCallback onDragStart;
+
+  /// A double-tap on the bar, which every desktop treats as maximise/restore.
+  final VoidCallback onDoubleTap;
+
+  final VoidCallback onMinimize;
+  final VoidCallback onToggleMaximize;
+
+  /// Quits the app, as the native close button does.
+  final VoidCallback onClose;
+
+  const ChromeWindowBarSpec({
+    required this.title,
+    this.isMaximized = false,
+    required this.onDragStart,
+    required this.onDoubleTap,
+    required this.onMinimize,
+    required this.onToggleMaximize,
+    required this.onClose,
   });
 }
 
@@ -415,6 +472,9 @@ abstract interface class ChromeForms {
 
   /// A section eyebrow ("SERVERS", "FILES CHANGED").
   Widget buildEyebrow(BuildContext context, String label);
+
+  /// The app-drawn window title bar, for borderless desktop windows.
+  Widget buildWindowBar(BuildContext context, ChromeWindowBarSpec spec);
 }
 
 // ── Widget front-ends ────────────────────────────────────────────────────────
@@ -505,4 +565,14 @@ class ChromeEyebrow extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       Chrome.of(context).buildEyebrow(context, label);
+}
+
+/// The app-drawn window title bar. See [ChromeWindowBarSpec].
+class ChromeWindowBar extends StatelessWidget {
+  final ChromeWindowBarSpec spec;
+  const ChromeWindowBar(this.spec, {super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      Chrome.of(context).buildWindowBar(context, spec);
 }

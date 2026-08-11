@@ -187,21 +187,6 @@ pub enum Commands {
         #[arg(long, conflicts_with = "start")]
         stop: bool,
     },
-
-    /// Show the in-session session picker (used by Ctrl+Space inside an attached
-    /// session via `tmux display-popup`). Writes the chosen tmux session name
-    /// to `--out` on selection; writes nothing on cancel.
-    #[command(hide = true)]
-    PickSession {
-        /// Path to write the chosen tmux session name to
-        #[arg(long)]
-        out: std::path::PathBuf,
-        /// tmux name of the currently-attached session — excluded from the
-        /// picker list (Alt+Tab style; switching to where you already are
-        /// is a no-op).
-        #[arg(long)]
-        current: Option<String>,
-    },
 }
 
 /// The clap command tree for the CLI. Single source of truth for this binary's
@@ -291,7 +276,7 @@ mod tests {
                     .about("Create a new session")
                     .arg(clap::Arg::new("name").help("Session name")),
             )
-            .subcommand(clap::Command::new("pick-session").hide(true))
+            .subcommand(clap::Command::new("hidden-helper").hide(true))
     }
 
     #[test]
@@ -307,7 +292,7 @@ mod tests {
     fn cli_reference_skips_hidden_subcommands() {
         let reference = generate_cli_reference(&sample_cli());
         assert!(
-            !reference.contains("pick-session"),
+            !reference.contains("hidden-helper"),
             "hidden subcommands must not leak into the CLI reference"
         );
     }
