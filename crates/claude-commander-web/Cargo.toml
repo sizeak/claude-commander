@@ -1,0 +1,66 @@
+[package]
+name = "claude-commander-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone web UI for Claude Commander — serves the browser SPA and reverse-proxies to claude-commander-server"
+publish = false
+
+# The `claude-commander` bin crate drives the release (single shared tag).
+[package.metadata.release]
+release = false
+
+[lib]
+name = "claude_commander_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "claude-commander-web"
+path = "src/main.rs"
+
+[dependencies]
+# This crate is a *client* of claude-commander-server; it never links core
+# (no tmux/gix), so it stays small and cross-platform.
+claude-commander-protocol = { path = "../claude-commander-protocol" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = "0.3"
+
+# Web framework (serving the SPA + the reverse proxy)
+axum = { version = "0.8", features = ["ws", "macros"] }
+
+# Embedded frontend assets (baked into the binary, no runtime file lookups)
+rust-embed = "8"
+mime_guess = "2"
+
+# Upstream HTTP + WebSocket clients for the reverse proxy
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "rustls-native-certs", "http2"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+
+# Shared http types (axum + reqwest both build on the `http` crate)
+http = "1"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Basic-auth decoding (BFF mode)
+base64 = "0.22"
+
+# Error handling
+thiserror = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI (derive macros)
+clap = { version = "4.6", features = ["derive", "env"] }
+
+[dev-dependencies]
+tempfile = "3.27"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
