@@ -24,6 +24,37 @@ static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid regex")
 });
 
+/// Claude Code's working status line can carry an elapsed-time and token-count
+/// parenthetical after its ellipsis — `✽ Boondoggling… (5m 35s · ↓ 18.6k tokens ·
+/// still thinking with high effort)`, `· Clauding… (4s · ↓ 4 tokens)`. Only a
+/// turn that is actually in flight renders a *live* counter, so this is a safe
+/// `Working` signal for the content fallback when the title check comes up empty
+/// (a user can disable the terminal title, and Claude has changed its spinner
+/// glyphs before now — see [`has_circle_spinner`]).
+///
+/// This fallback is deliberately **partial**, and the title check is the primary
+/// signal. Two things constrain it:
+///
+/// - The parenthetical is not always present. On a long-running turn it is:
+///   sampled 200× at 50ms against a live working pane, all 200 samples carried
+///   it. On a short turn the line can be a bare `✽ Bunning…` with no
+///   parenthetical at all (observed across 40 snapshots of one ~16s turn), which
+///   this regex does not match. That is the accepted gap — see
+///   `claude_content_bare_gerund_line_is_not_working`.
+/// - Matching the bare `<glyph> <Gerund>…` line instead would be unsafe. Claude
+///   renders tool lines in the same shape (`● Listing 1 directory… (ctrl+o to
+///   expand)`) and they *persist in the transcript after completing*, so an idle
+///   pane would read `Working` forever. Requiring a live duration *and* token
+///   count is what rules those out; a finished turn's line reads
+///   `✻ Cogitated for 15s`, with neither.
+///
+/// Receipt: every example line above captured verbatim from live panes
+/// (claude-code 2.1.228). This version renders no `esc to interrupt` hint, so
+/// unlike Codex there is no static string to match on instead.
+static CLAUDE_WORKING_STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"…\s*\(\d+(?:\.\d+)?(?:ms|s|m|h)\b[^)\n]*\btokens\b").expect("valid regex")
+});
+
 /// OpenCode renders completed assistant turns as an agent/model/duration line,
 /// e.g. `▣ Build · GPT-5.5 · 8.5s`. Active turns have the same agent/model
 /// prefix but no duration; the active signal is the separate `esc interrupt`
@@ -40,11 +71,29 @@ pub fn strip_ansi(s: &str) -> String {
     ANSI_RE.replace_all(s, "").into_owned()
 }
 
-/// Whether `title` contains a braille spinner glyph (U+2800..U+28FF). Both the
-/// Claude Code and Codex TUIs animate a braille spinner in the terminal title
-/// while the model is working, so this is shared across harnesses.
+/// Whether `title` contains a braille spinner glyph (U+2800..U+28FF). The Codex
+/// TUI animates a braille spinner in the terminal title while the model is
+/// working. Older Claude Code builds did too, so the Claude arm of
+/// [`AgentKind::title_state`] still accepts it alongside its current spinner.
 fn has_braille_spinner(title: &str) -> bool {
     title.contains(|c: char| ('\u{2800}'..='\u{28FF}').contains(&c))
+}
+
+/// Whether `title` contains a quadrant-circle spinner glyph (U+25D0..U+25D3).
+/// Current Claude Code animates `◐`/`◑` in the terminal title while a turn is in
+/// flight and shows a static `✳` (U+2733) when idle, so the spinner is a clean
+/// `Working` signal.
+///
+/// Receipt: claude-code 2.1.228 on Linux, sampled with `tmux display-message -p
+/// '#{pane_title}'` 200× at 50ms against a long-running working session and 100×
+/// at 200ms across a fresh session's first turn. Only U+25D0 and U+25D1 appeared
+/// while working, and only U+2733 while idle. U+25D2/U+25D3 complete the same
+/// four-frame set and are accepted for that reason, but were never observed.
+///
+/// This is why Claude sessions read `Idle` while working: the detector looked
+/// only for [`has_braille_spinner`], which Claude Code no longer renders.
+fn has_circle_spinner(title: &str) -> bool {
+    title.contains(|c: char| ('\u{25D0}'..='\u{25D3}').contains(&c))
 }
 
 /// Pane-content substrings Codex renders when it is blocked waiting for the user
@@ -182,13 +231,35 @@ impl AgentKind {
     /// Detect agent state from the tmux pane *title*. Returns `Some` when the
     /// title alone is conclusive (so the caller can skip capturing pane
     /// content), `None` when content must be inspected.
+    ///
+    /// Returning `Some(Working)` on a spinner is only sound because a spinner
+    /// title never coexists with a pending prompt: `AgentStateDetector::
+    /// detect_fresh` takes a `Some` as final and never captures content, so a
+    /// harness that kept spinning through an approval prompt would have its
+    /// `WaitingForInput` masked as `Working` — a worse failure than the `Idle`
+    /// bug this detector was fixed for.
+    ///
+    /// Receipt (claude-code 2.1.228): the title reverts from the `◐`/`◑` spinner
+    /// to the idle `✳ <topic>` the moment a prompt appears. Measured two ways —
+    /// 14/14 samples of a session driven to a mid-turn Bash approval prompt with
+    /// `Esc to cancel` visible, and 5/5 live sessions found sitting at a prompt,
+    /// none of which carried a spinner glyph.
     pub fn title_state(self, title: &str) -> Option<AgentState> {
         match self {
             // Codex prefixes the title with "Action Required" (no spinner) while
             // blocked on approval — check it before the shared spinner since the
             // two are mutually exclusive in Codex's title.
             Self::Codex if title.contains("Action Required") => Some(AgentState::WaitingForInput),
-            Self::Claude | Self::Codex if has_braille_spinner(title) => Some(AgentState::Working),
+            // Claude animates a quadrant-circle spinner, Codex a braille one.
+            // Both arms accept either glyph set: the two never collide with an
+            // idle title (Claude's is `✳ <name>`, Codex's a bare project name),
+            // so a harness changing its frames again degrades to the content
+            // fallback rather than silently reporting Idle.
+            Self::Claude | Self::Codex
+                if has_circle_spinner(title) || has_braille_spinner(title) =>
+            {
+                Some(AgentState::Working)
+            }
             // OpenCode's title is always "OpenCode" regardless of state, so
             // title alone is not conclusive — fall through to content.
             _ => None,
@@ -212,7 +283,10 @@ impl AgentKind {
 }
 
 /// Claude content patterns: the last visible lines carry permission/selection
-/// prompts when Claude is waiting for the user.
+/// prompts when Claude is waiting for the user, and an in-flight turn's status
+/// line when it is working. Waiting takes precedence over working, as it does
+/// for Codex — a permission prompt can be up while the status line is still
+/// rendered, and needs-attention is the more urgent read.
 fn claude_content_state(content: &str) -> AgentState {
     let lines: Vec<&str> = content
         .lines()
@@ -237,6 +311,15 @@ fn claude_content_state(content: &str) -> AgentState {
                 return AgentState::WaitingForInput;
             }
         }
+    }
+
+    // Working: the in-flight turn's status line, which sits directly above the
+    // composer and so falls inside the same last-10-lines window.
+    if lines
+        .iter()
+        .any(|line| CLAUDE_WORKING_STATUS_RE.is_match(line))
+    {
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -437,6 +520,63 @@ mod tests {
     }
 
     #[test]
+    fn title_state_working_claude_circle_spinner() {
+        // Claude Code animates a half-filled-circle spinner in the pane title
+        // while a turn is in flight, not a braille one. Captured verbatim from
+        // live panes (claude-code 2.1.228); without these frames every Claude
+        // session's title reads inconclusive and the session shows as Idle.
+        assert_eq!(
+            AgentKind::Claude.title_state("◐ audio-cleanup-video"),
+            Some(AgentState::Working)
+        );
+        assert_eq!(
+            AgentKind::Claude.title_state("◑ audio-cleanup-video"),
+            Some(AgentState::Working)
+        );
+    }
+
+    #[test]
+    fn title_state_accepts_either_spinner_set_for_both_harnesses() {
+        // Deliberate: each harness accepts the other's frames too, so a harness
+        // changing its spinner again degrades to the content fallback instead of
+        // silently reporting Idle (the failure this detector was fixed for).
+        // Neither glyph set can collide with an idle title — Claude's is
+        // `✳ <name>`, Codex's a bare project name — so the widening is free.
+        // Codex has never been observed rendering a circle frame; this pins the
+        // behaviour as intended rather than incidental.
+        assert_eq!(
+            AgentKind::Codex.title_state("◐ my-project"),
+            Some(AgentState::Working)
+        );
+        assert_eq!(
+            AgentKind::Claude.title_state("⠹ feature-branch"),
+            Some(AgentState::Working)
+        );
+        // Endpoints of the accepted quadrant-circle run. `◒`/`◓` complete the
+        // four-frame set but were never observed in 2.1.228 — pinned so the
+        // range boundary can't silently narrow.
+        assert_eq!(
+            AgentKind::Claude.title_state("◒ x"),
+            Some(AgentState::Working)
+        );
+        assert_eq!(
+            AgentKind::Claude.title_state("◓ x"),
+            Some(AgentState::Working)
+        );
+        // Just outside the range on both sides.
+        assert_eq!(AgentKind::Claude.title_state("● x"), None);
+        assert_eq!(AgentKind::Claude.title_state("◔ x"), None);
+    }
+
+    #[test]
+    fn title_state_claude_idle_asterisk_is_not_working() {
+        // The static `✳` is what an idle Claude title carries — it must stay
+        // inconclusive so the content fallback gets a say, and must never be
+        // mistaken for the spinner.
+        assert_eq!(AgentKind::Claude.title_state("✳ extract-tui-crate"), None);
+    }
+
+    #[test]
     fn title_state_codex_action_required_is_waiting() {
         assert_eq!(
             AgentKind::Codex.title_state("[ ! ] Action Required | my-project"),
@@ -492,10 +632,85 @@ mod tests {
     }
 
     #[test]
+    fn claude_content_working_from_status_line() {
+        // Both lines captured verbatim from live working panes (claude-code
+        // 2.1.228): a long-running turn and a fresh session's first turn. The
+        // elapsed/token parenthetical is the durable Working signal for the
+        // content fallback — this version renders no `esc to interrupt` hint.
+        let long_run = "  ⎿  Read src/main.rs\n\n✽ Boondoggling… (5m 35s · ↓ 18.6k tokens · still thinking with high effort)\n\n─── audio-cleanup-video ──\n❯ \n";
+        let first_turn = "· Clauding… (4s · ↓ 4 tokens)\n\n❯ \n";
+        assert_eq!(
+            AgentKind::Claude.content_state(long_run),
+            AgentState::Working
+        );
+        assert_eq!(
+            AgentKind::Claude.content_state(first_turn),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn claude_content_waiting_takes_precedence_over_working() {
+        // A permission prompt can be up while the status line is still
+        // rendered; needs-attention must win, as it does for Codex.
+        let content = "✽ Boondoggling… (12s · ↓ 900 tokens)\nAllow tool? Esc to cancel\n";
+        assert_eq!(
+            AgentKind::Claude.content_state(content),
+            AgentState::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn claude_content_bare_gerund_line_is_not_working() {
+        // Known, accepted gap in the content fallback: a short turn can render
+        // the status line with no elapsed/token parenthetical. Matching the bare
+        // `<glyph> <Gerund>…` shape instead would be unsafe, because completed
+        // tool lines keep that shape in the transcript forever — so this reads
+        // Idle and the title check is what covers the case. Captured verbatim
+        // from a live pane mid-turn (claude-code 2.1.228).
+        assert_eq!(
+            AgentKind::Claude.content_state("✽ Bunning…\n\n❯ \n"),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn claude_content_finished_turn_and_tool_lines_are_not_working() {
+        // The lines that persist in the transcript after a turn ends must never
+        // read Working — this is what the duration+tokens requirement buys.
+        // Both captured verbatim from live panes.
+        assert_eq!(
+            AgentKind::Claude.content_state("✻ Cogitated for 15s\n\n❯ \n"),
+            AgentState::Idle
+        );
+        assert_eq!(
+            AgentKind::Claude.content_state("● Listing 1 directory… (ctrl+o to expand)\n\n❯ \n"),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn claude_content_prose_ellipsis_is_not_working() {
+        // Requiring both an elapsed duration and the token count keeps ordinary
+        // transcript prose from being read as an in-flight turn.
+        assert_eq!(
+            AgentKind::Claude.content_state("Compiling… (2s)\nDone.\n❯ \n"),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
     fn claude_content_strips_ansi_before_matching() {
         assert_eq!(
             AgentKind::Claude.content_state("\x1B[1mAllow?\x1B[0m \x1B[33mEsc to cancel\x1B[0m\n"),
             AgentState::WaitingForInput
+        );
+        // The Working path needs the same guarantee: Claude colours the status
+        // line, so the regex would never match un-stripped input.
+        assert_eq!(
+            AgentKind::Claude
+                .content_state("\x1B[36m✽ Boondoggling…\x1B[0m \x1B[2m(4s · ↓ 4 tokens)\x1B[0m\n"),
+            AgentState::Working
         );
     }
 

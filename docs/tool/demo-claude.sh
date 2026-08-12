@@ -20,7 +20,8 @@
 # Manifest row: <worktree name>\t<mode>\t<task>\t<detail>, where mode picks the
 # state the detector will report:
 #
-#   working  — braille spinner in the pane title (`AgentKind::title_state`)
+#   working  — quadrant-circle spinner in the pane title
+#              (`AgentKind::title_state`), the frame real Claude Code animates
 #   waiting  — permission prompt containing "Esc to cancel"
 #              (`claude_content_state`)
 #   idle     — ordinary transcript, no prompt markers
@@ -55,8 +56,11 @@ r='\033[0m'   # reset
 # read as a conversion).
 say() { printf '%b\n' "$1"; }
 
-# Pane title. tmux reads OSC 2; a braille frame here is what makes the state
-# detector report Working without any content heuristics.
+# Pane title. tmux reads OSC 2; a spinner frame here is what makes the state
+# detector report Working without any content heuristics. Use the same
+# quadrant-circle frame real Claude Code renders (`◐`/`◑`) rather than the
+# braille one the detector also still accepts, so the fixture exercises the path
+# a real session takes.
 set_title() { printf '\033]2;%s\a' "$1"; }
 
 say "${d}╭────────────────────────────────────────────╮${r}"
@@ -79,7 +83,7 @@ working)
   say "   ${d}⎿  +18 −4${r}"
   say ""
   say " ${c}⠹${r} Running tests… ${d}(esc to interrupt · 42s)${r}"
-  set_title "⠹ claude"
+  set_title "◑ claude"
   ;;
 waiting)
   say ""
