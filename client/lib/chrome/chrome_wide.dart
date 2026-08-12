@@ -517,21 +517,26 @@ class LcarsWide extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        // The band continued across this column. It carries no
-                        // block of its own — the workspace opens with a plain
-                        // text header, so this is a fill in the status-bar
-                        // strip and nothing more — but it has to be here,
-                        // because the frame asks for dark system icons and a
-                        // band that stopped at the fleet column left the
-                        // bluetooth, signal and wifi glyphs drawing dark on
-                        // black. Measured on a Pixel 8a: every pixel sampled
-                        // from x=2050-2350 came back (0,0,0).
-                        if (bleed.top > 0)
-                          SizedBox(
-                            height: _bandHeight(bleed),
-                            child: ColoredBox(color: t.nav),
-                          ),
-                        // Held below it. The workspace closes with page content,
+                        // The workspace column's own cap, as the design deck's
+                        // landscape frames draw it — a short bar with a
+                        // bottom-left radius above the session title, present in
+                        // L1, L2 and L3 alike. The implementation had dropped
+                        // it, which is what left this column with nothing at the
+                        // top to bleed and the band with nothing to run across.
+                        //
+                        // Owned here rather than inside `LcarsDetail`, where the
+                        // deck draws it, because the pane is not always a detail
+                        // frame: the empty state fills it before a session is
+                        // picked, and a band that disappeared on that screen
+                        // would take the status-bar icons with it.
+                        ChromeElbowCap(
+                          bleed: EdgeInsets.only(top: bleed.top),
+                          color: t.nav,
+                        ),
+                        // The same gap the fleet column leaves under its cap, so
+                        // the two columns' titles start level.
+                        const SizedBox(height: 7),
+                        // Held below. The workspace closes with page content,
                         // which has no business under the gesture strip.
                         Expanded(child: spec.workspace),
                         SizedBox(height: bleed.bottom),
@@ -787,7 +792,10 @@ class LcarsDetail extends StatelessWidget {
     final badge = spec.badge;
     final refresh = spec.refresh;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(0, 4, 0, 9),
+      // No top pad: the workspace column now opens with an elbow cap and the
+      // gap under it, exactly as the fleet column does, so paying for it twice
+      // would drop this title below the FLEET title beside it.
+      padding: const EdgeInsets.fromLTRB(0, 0, 0, 9),
       child: Row(
         children: [
           spec.glyph,

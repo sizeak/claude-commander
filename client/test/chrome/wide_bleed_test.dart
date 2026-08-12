@@ -92,13 +92,13 @@ void main() {
       await pump(tester, width: 1400, top: 24);
 
       expect(tester.getRect(find.byType(ChromeElbow).first).top, 0);
-      expect(tester.getRect(find.byType(ChromeElbowCap)).top, 0);
+      expect(tester.getRect(find.byType(ChromeElbowCap).first).top, 0);
       // 74 is the CMDR block's unbled height; the cap swaps to the fixed bled
       // height rather than growing off its own 16, exactly as the phone frame's
       // do — see `page_bleed_test.dart`.
       expect(tester.getSize(find.byType(ChromeElbow).first).height, 74 + 24);
       expect(
-        tester.getSize(find.byType(ChromeElbowCap)).height,
+        tester.getSize(find.byType(ChromeElbowCap).first).height,
         kElbowCapBledHeight + 24,
       );
     });
@@ -136,11 +136,75 @@ void main() {
       await pump(tester, width: 1400, top: 24, bottom: 48);
 
       final workspace = tester.getRect(find.byKey(const Key('workspace')));
-      // Below the band, not below the raw inset: the band is one bar with a
-      // flat bottom edge, and it overhangs the status bar by the cap's own
-      // height so the workspace starts where the fleet column's content does.
-      expect(workspace.top, 24 + kElbowCapBledHeight);
+      // Below the band rather than below the raw inset: this column opens with
+      // a cap of its own, so its content starts under that, not under the
+      // status bar.
+      final band = tester.getRect(find.byType(ChromeElbowCap).last);
+      expect(workspace.top, greaterThanOrEqualTo(band.bottom));
       expect(workspace.bottom, surfaceHeight(tester) - 48);
+    });
+
+    // What the gap under each cap is for. Both columns open the same way — cap,
+    // gap, content — so the session title starts level with FLEET beside it.
+    // The workspace header used to pay a top pad of its own on top of that,
+    // which dropped it below.
+    testWidgets('both columns start their content at the same height', (
+      tester,
+    ) async {
+      await pump(tester, width: 1400, top: 24);
+
+      expect(
+        tester.getRect(find.byKey(const Key('workspace'))).top,
+        // Scoped to the fleet column: the nav rail carries a 'FLEET' block
+        // label too, and a bare text finder matches both.
+        tester
+            .getRect(
+              find.descendant(
+                of: find.byKey(const ValueKey('wide-fleet')),
+                matching: find.text('FLEET'),
+              ),
+            )
+            .top,
+      );
+    });
+
+    // The deck gives the workspace column its own elbow cap in every landscape
+    // frame (4b's L1/L2/L3, a ~16px bar with a bottom-left radius above the
+    // session title), and the implementation had dropped it. It is what makes
+    // the top of the frame read as three columns stepping down rather than one
+    // slab, and it is what carries the band across the status bar without a
+    // fill bolted on beside it.
+    testWidgets('the workspace column carries a cap of its own', (
+      tester,
+    ) async {
+      await pump(tester, width: 1400);
+
+      final caps = tester.widgetList<ChromeElbowCap>(
+        find.byType(ChromeElbowCap),
+      );
+      expect(caps.length, 2, reason: 'the fleet column and the workspace');
+      // Present with no inset to bleed into as well — the deck draws it on the
+      // desktop frames too, so it is the column's shape and not a safe-area
+      // fixture.
+      for (final rect in find.byType(ChromeElbowCap).evaluate()) {
+        expect(
+          tester.getSize(find.byWidget(rect.widget)).height,
+          kElbowCapHeight,
+        );
+      }
+    });
+
+    testWidgets('both caps bleed and end level', (tester) async {
+      await pump(tester, width: 1400, top: 24);
+
+      final caps = find.byType(ChromeElbowCap);
+      expect(tester.getRect(caps.first).top, 0);
+      expect(tester.getRect(caps.last).top, 0);
+      expect(
+        tester.getRect(caps.first).bottom,
+        tester.getRect(caps.last).bottom,
+        reason: 'the band must have one flat bottom edge',
+      );
     });
 
     // The band covers the *whole* status bar, not just the columns that have
@@ -193,9 +257,9 @@ void main() {
     testWidgets('the fleet cap meets the physical top edge', (tester) async {
       await pump(tester, width: 800, top: 24);
 
-      expect(tester.getRect(find.byType(ChromeElbowCap)).top, 0);
+      expect(tester.getRect(find.byType(ChromeElbowCap).first).top, 0);
       expect(
-        tester.getSize(find.byType(ChromeElbowCap)).height,
+        tester.getSize(find.byType(ChromeElbowCap).first).height,
         kElbowCapBledHeight + 24,
       );
     });
