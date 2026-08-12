@@ -90,6 +90,7 @@ assert_eq "30" "$(cc_exit_code_for_lane nix-build)" "nix-build -> 30"
 assert_eq "31" "$(cc_exit_code_for_lane packaging)" "packaging -> 31"
 assert_eq "32" "$(cc_exit_code_for_lane shellcheck)" "shellcheck -> 32"
 assert_eq "33" "$(cc_exit_code_for_lane selftest)" "selftest -> 33"
+assert_eq "34" "$(cc_exit_code_for_lane nix-src-filter)" "nix-src-filter -> 34"
 assert_fails "unknown lane is rejected" cc_exit_code_for_lane notalane
 
 # Every lane must own a distinct code: a duplicate would make the exit status
@@ -112,8 +113,8 @@ assert_eq "$lane_count" "$uniq_count" "every lane in every tier has a distinct e
 # Counted from the `all` tier alone, not the widened union above: this pins what
 # CI's mirror covers, which is a different question from code uniqueness.
 all_tier_count=$(cc_lanes_for_tier all | tr ' ' '\n' | grep -c .)
-assert_eq "14" "$all_tier_count" "the all tier covers 14 lanes"
-assert_eq "15" "$lane_count" "the run order covers 15 lanes (all + goldens)"
+assert_eq "15" "$all_tier_count" "the all tier covers 15 lanes"
+assert_eq "16" "$lane_count" "the run order covers 16 lanes (all + goldens)"
 
 # The runner walks cc_lane_run_order, so a lane missing from it can never execute
 # however it is selected -- which is exactly how the goldens lane was first
@@ -131,7 +132,7 @@ assert_eq "" "$missing_from_run_order" \
 # No lane may collide with the reserved argument/precondition codes, or with the
 # shell's own conventional statuses.
 echo "== reserved codes are not reused by lanes =="
-for reserved in 0 1 2 3; do
+for reserved in 0 1 2 3 77; do
   if printf '%s' "$all_codes" | grep -qx "$reserved"; then
     fail_count=$((fail_count + 1))
     printf '  FAIL a lane claims reserved exit code %s\n' "$reserved"
@@ -149,7 +150,7 @@ assert_eq "pub-get dart-format analyze flutter-test cdylib" "$(cc_lanes_for_tier
 
 assert_eq "pub-get goldens" "$(cc_lanes_for_tier goldens)" \
   "goldens tier resolves packages, then rasterises only test/goldens"
-assert_eq "fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest e2e nix-build packaging" \
+assert_eq "fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter e2e nix-build packaging" \
   "$(cc_lanes_for_tier all)" "all tier is every lane, cheap-to-slow"
 
 # pub-get is not a check but a precondition: `dart format` reads each file's

@@ -19,15 +19,46 @@
         pkgs = nixpkgs.legacyPackages.${system};
         craneLib = crane.mkLib pkgs;
 
-        # .md files must survive the source filter:
-        # crates/claude-commander-core/src/commander_prime.md is embedded into
-        # the binary via include_str!. The src root is the whole tree, so every
-        # workspace member under crates/ is in the build sandbox;
-        # filterCargoSources keeps each crate's Rust/Cargo sources.
+        # `src` is the package derivation's only source input: Nix hashes the
+        # filtered tree and that hash lands in the .drv, so every file admitted
+        # here forces a full (fat-LTO) rebuild when it changes — whether or not
+        # cargo ever opens it. Admit the workspace's Rust/Cargo sources and
+        # nothing else. `scripts/check-nix-src-filter.sh` guards both directions
+        # of this and runs in CI.
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
-            (pkgs.lib.hasSuffix ".md" path) || (craneLib.filterCargoSources path type);
+            let
+              rel = pkgs.lib.removePrefix "${toString ./.}/" (toString path);
+              # Top-level subtrees are default-deny: an allow-list means a new
+              # directory can't quietly start invalidating the build, and it
+              # prunes each subtree whole rather than leaving an empty directory
+              # behind (an empty dir is still part of the hash, so `docs/` alone
+              # surviving would make `docs/…` the next thing to force a
+              # rebuild). `crates/` is the workspace; `.cargo/` is admitted
+              # because cargo reads `.cargo/config.toml` from the workspace root
+              # — there is none today, and one added later must take effect
+              # rather than being silently dropped.
+              #
+              # This is what excludes `client/`, whose 13 Rust/Cargo files
+              # (incl. frb_generated.rs and its own Cargo.lock) were landing in
+              # the hash: root Cargo.toml `exclude`s it and no workspace crate
+              # path-depends on it, so a Flutter-client commit was rebuilding a
+              # binary it is not part of. That costs no client coverage —
+              # nothing in this flake builds the Flutter app (client/ appears
+              # only as the `client`/`clientCi` dev shells) and CI's `client`
+              # job tests it from the checked-out worktree, never from `src`.
+              prunedTopDir =
+                type == "directory"
+                && !(pkgs.lib.hasInfix "/" rel)
+                && !(builtins.elem rel [ "crates" ".cargo" ]);
+              # crates/claude-commander-core/src/commander_prime.md is embedded
+              # via include_str!, so .md must survive the filter — but scoped to
+              # crates/, or README/docs/CLAUDE.md invalidate the build too.
+              isCrateMarkdown =
+                pkgs.lib.hasPrefix "crates/" rel && pkgs.lib.hasSuffix ".md" rel;
+            in
+            !prunedTopDir && (isCrateMarkdown || craneLib.filterCargoSources path type);
           name = "source";
         };
 
@@ -88,28 +119,55 @@
           '';
         };
 
-        # Build only dependencies (cached separately for incremental rebuilds)
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        mkClaudeCommander = extraArgs:
+          let
+            args = commonArgs // extraArgs;
+          in
+          craneLib.buildPackage (args // {
+            # Build only dependencies (cached separately for incremental
+            # rebuilds). Derived from `args`, not `commonArgs`: a cargo profile
+            # override re-fingerprints every dependency, so a variant sharing the
+            # default artifacts would rebuild the whole graph anyway.
+            cargoArtifacts = craneLib.buildDepsOnly args;
 
-        claude-commander = craneLib.buildPackage (commonArgs // {
-          inherit cargoArtifacts;
+            # Some tests require a real git repo, which isn't available in the Nix sandbox
+            doCheck = false;
 
-          # Some tests require a real git repo, which isn't available in the Nix sandbox
-          doCheck = false;
+            # tmux and git are required at runtime
+            postFixup = ''
+              wrapProgram $out/bin/claude-commander \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux pkgs.git ]}
+            '';
 
-          # tmux and git are required at runtime
-          postFixup = ''
-            wrapProgram $out/bin/claude-commander \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.tmux pkgs.git ]}
-          '';
+            meta = with pkgs.lib; {
+              description = "A high-performance terminal UI for managing Claude coding sessions";
+              homepage = "https://github.com/sizeak/claude-commander";
+              license = licenses.mit;
+              mainProgram = "claude-commander";
+            };
+          });
 
-          meta = with pkgs.lib; {
-            description = "A high-performance terminal UI for managing Claude coding sessions";
-            homepage = "https://github.com/sizeak/claude-commander";
-            license = licenses.mit;
-            mainProgram = "claude-commander";
-          };
-        });
+        claude-commander = mkClaudeCommander { };
+
+        # CI-only variant — NOT for distribution, and deliberately absent from
+        # `checks` so `nix flake check` still means the real package.
+        #
+        # `[profile.release]`'s `lto = true` + `codegen-units = 1` re-optimise the
+        # whole dependency graph in one largely serial LLVM pass, which is ~11 of
+        # the Nix CI job's 12 minutes. Pull requests build this instead: it still
+        # exercises everything that actually breaks — the source filter above, the
+        # read-only-vendor `preBuild` workaround, bindgen inside the sandbox, and
+        # `wrapProgram` — and only skips fat LTO. Pushes to `main` build this *and*
+        # the real `packages.default`, so the profile users get from AUR /
+        # Homebrew / `nix build` is still compiled on every merge, and both
+        # variants' cached dependencies reach a scope pull requests can restore
+        # from. See .github/workflows/ci.yml for why that second part matters.
+        claude-commander-ci = mkClaudeCommander {
+          # Distinct pname so the two variants' store paths are tellable apart.
+          pname = "claude-commander-ci";
+          CARGO_PROFILE_RELEASE_LTO = "off";
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "16";
+        };
         # ---- Client (Flutter + Rust) dev-shell toolchain ----
         # Heavy Flutter + Android NDK toolchain for the in-repo `client/` app,
         # kept entirely out of the default shell so core TUI/CLI/server
@@ -228,6 +286,7 @@
 
         packages = {
           claude-commander = claude-commander;
+          claude-commander-ci = claude-commander-ci;
           default = claude-commander;
         };
 

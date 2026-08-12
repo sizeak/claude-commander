@@ -8,7 +8,7 @@
 #   verify.sh --fast              fmt + clippy only (seconds, pre-commit shape)
 #   verify.sh --client            rust lanes + dart format/analyze/test/cdylib
 #   verify.sh --all               every CI job, plus shellcheck, self-tests, e2e
-#   verify.sh --nix               rust lanes + nix build + the packaging install
+#   verify.sh --nix               rust lanes + src-filter guard, nix build, packaging
 #   verify.sh --e2e               rust lanes + the Flutter e2e (forced)
 #   verify.sh --goldens           just the client's golden images
 #   verify.sh --goldens --update  regenerate them, then read the image diff
@@ -81,10 +81,10 @@ list_lanes() {
   # exists; the Tiers block below says which flag selects which, since `--all` is
   # the CI mirror and does not include every row (goldens is a subset of
   # flutter-test).
-  printf '%s%-13s %-5s %s%s\n' "$CC_C_BOLD" "LANE (run order)" "EXIT" "CHECK" "$CC_C_RESET"
+  printf '%s%-15s %-5s %s%s\n' "$CC_C_BOLD" "LANE (run order)" "EXIT" "CHECK" "$CC_C_RESET"
   local lane
   for lane in $(cc_lane_run_order); do
-    printf '%-13s %-5s %s\n' \
+    printf '%-15s %-5s %s\n' \
       "$lane" "$(cc_exit_code_for_lane "$lane")" "$(cc_lane_description "$lane")"
   done
   cat <<EOF
@@ -199,6 +199,16 @@ lane_nix_build() {
   nix build
 }
 
+lane_nix_src_filter() {
+  if ! command -v nix >/dev/null 2>&1; then
+    CC_SKIP_REASON="nix is not installed"
+    return "$CC_LANE_SKIPPED"
+  fi
+  # Mirrors CI's Check Nix Source Filter step. Evaluation only -- no build -- so
+  # it costs a second or two and runs before the nix-build lane it protects.
+  ./scripts/check-nix-src-filter.sh
+}
+
 lane_packaging() {
   # Mirrors CI's Packaging Install job, which mirrors the Homebrew formula's
   # `cargo install --locked --root <prefix> --path <crate>`. A workspace build
@@ -277,6 +287,7 @@ run_lane() {
     cdylib) cc_lane cdylib lane_cdylib ;;
     goldens) cc_lane goldens lane_goldens ;;
     e2e) cc_lane e2e lane_e2e ;;
+    nix-src-filter) cc_lane nix-src-filter lane_nix_src_filter ;;
     nix-build) cc_lane nix-build lane_nix_build ;;
     packaging) cc_lane packaging lane_packaging ;;
     shellcheck) cc_lane shellcheck lane_shellcheck ;;
@@ -346,6 +357,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --nix)
       select_tier rust
+      SELECTED[nix-src-filter]=1
       SELECTED[nix-build]=1
       SELECTED[packaging]=1
       TIER_SET=1
