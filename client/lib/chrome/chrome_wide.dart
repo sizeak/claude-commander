@@ -492,10 +492,7 @@ class LcarsWide extends StatelessWidget {
                     // it bridges.
                     lcarsBandSeam(
                       width: _lcarsGap,
-                      height: elbowCapHeight(
-                        kElbowCapHeight,
-                        EdgeInsets.only(top: bleed.top),
-                      ),
+                      height: _bandHeight(bleed),
                       color: t.nav,
                       bleed: bleed,
                     ),
@@ -509,23 +506,36 @@ class LcarsWide extends StatelessWidget {
                     width: _lcarsFleetWidth,
                     child: _fleet(t, bleed, folded: !three),
                   ),
-                  // Plain, not a seam: the workspace holds its insets, so the
-                  // band ends at the fleet column's right edge and there is
-                  // nothing on this side to bridge to.
-                  const SizedBox(width: _lcarsGap),
+                  lcarsBandSeam(
+                    width: _lcarsGap,
+                    height: _bandHeight(bleed),
+                    color: t.nav,
+                    bleed: bleed,
+                  ),
                   Expanded(
                     key: const ValueKey('wide-workspace'),
-                    // Held, not bled. The workspace opens with a plain text
-                    // header and closes with page content — neither is an LCARS
-                    // block, so there is nothing up there to carry a band and
-                    // nothing down there that should sit under the gesture
-                    // strip.
-                    child: Padding(
-                      padding: EdgeInsets.only(
-                        top: bleed.top,
-                        bottom: bleed.bottom,
-                      ),
-                      child: spec.workspace,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // The band continued across this column. It carries no
+                        // block of its own — the workspace opens with a plain
+                        // text header, so this is a fill in the status-bar
+                        // strip and nothing more — but it has to be here,
+                        // because the frame asks for dark system icons and a
+                        // band that stopped at the fleet column left the
+                        // bluetooth, signal and wifi glyphs drawing dark on
+                        // black. Measured on a Pixel 8a: every pixel sampled
+                        // from x=2050-2350 came back (0,0,0).
+                        if (bleed.top > 0)
+                          SizedBox(
+                            height: _bandHeight(bleed),
+                            child: ColoredBox(color: t.nav),
+                          ),
+                        // Held below it. The workspace closes with page content,
+                        // which has no business under the gesture strip.
+                        Expanded(child: spec.workspace),
+                        SizedBox(height: bleed.bottom),
+                      ],
                     ),
                   ),
                   // No trailing margin: the frame runs flush to the right bezel,
@@ -538,6 +548,17 @@ class LcarsWide extends StatelessWidget {
       },
     );
   }
+
+  /// How far down the status-bar band runs: the fleet column's elbow cap sets
+  /// it, and every other part of the band — the gap fills either side of that
+  /// column, and the plain strip over the workspace — is drawn to the same
+  /// number so the bar has one flat bottom edge.
+  ///
+  /// Takes only the *top* of [bleed], because that is all a top band can be
+  /// made of; [elbowCapHeight] would otherwise be handed a bottom inset it has
+  /// no use for.
+  static double _bandHeight(EdgeInsets bleed) =>
+      elbowCapHeight(kElbowCapHeight, EdgeInsets.only(top: bleed.top));
 
   /// Deck frame L1's nav rail, read top to bottom: the `CMDR` identity block,
   /// the mode destinations, the live needs-input count, inert filler that

@@ -136,8 +136,35 @@ void main() {
       await pump(tester, width: 1400, top: 24, bottom: 48);
 
       final workspace = tester.getRect(find.byKey(const Key('workspace')));
-      expect(workspace.top, 24);
+      // Below the band, not below the raw inset: the band is one bar with a
+      // flat bottom edge, and it overhangs the status bar by the cap's own
+      // height so the workspace starts where the fleet column's content does.
+      expect(workspace.top, 24 + kElbowCapBledHeight);
       expect(workspace.bottom, surfaceHeight(tester) - 48);
+    });
+
+    // The band covers the *whole* status bar, not just the columns that have
+    // blocks in them. Measured on a Pixel 8a when it did not: the frame asks
+    // for dark system icons, correct over a bright band — and the bluetooth,
+    // signal and wifi glyphs, which sit at the far right over the workspace
+    // column, drew dark on black and vanished. Every pixel sampled from
+    // x=2050-2350 came back (0,0,0).
+    testWidgets('the band runs the full width of the status bar', (
+      tester,
+    ) async {
+      await pump(tester, width: 1400, top: 24);
+
+      for (final x in [
+        4.0,
+        surfaceWidth(tester) / 2,
+        surfaceWidth(tester) - 4,
+      ]) {
+        expect(
+          await pixelAt(tester, Offset(x, 12)),
+          lcarsTokens.nav,
+          reason: 'the status bar is not banded at x=$x',
+        );
+      }
     });
 
     testWidgets('the workspace runs flush to the right bezel', (tester) async {
