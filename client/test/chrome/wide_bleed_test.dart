@@ -127,7 +127,7 @@ void main() {
       final navRight = tester.getRect(find.byType(ChromeElbow).first).right;
       expect(
         await pixelAt(tester, Offset(navRight + 2, 12)),
-        lcarsTokens.nav,
+        lcarsTokens.primary,
         reason: 'the gap between the nav and fleet columns is open',
       );
     });
@@ -225,7 +225,7 @@ void main() {
       ]) {
         expect(
           await pixelAt(tester, Offset(x, 12)),
-          lcarsTokens.nav,
+          lcarsTokens.primary,
           reason: 'the status bar is not banded at x=$x',
         );
       }

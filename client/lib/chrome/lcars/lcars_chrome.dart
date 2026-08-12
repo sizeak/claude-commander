@@ -112,7 +112,7 @@ class LcarsChrome extends Chrome {
         ),
       // Two-tone inert filler, brightest first — the deck's rails always step
       // down through a thin bright band into a large dark one.
-      ChromeElbow(color: t.borderSubtle, height: 16),
+      ChromeElbow(color: t.border, height: 16),
       Expanded(child: ChromeElbow(color: t.divider)),
     ];
 
@@ -1010,14 +1010,20 @@ class LcarsChrome extends Chrome {
     final t = CommanderTokens.of(context);
     // Top only: this rail's bottom is the shell's footer, which bleeds itself.
     final bleed = EdgeInsets.only(top: LcarsBleedScope.of(context).top);
+    // The frame's top run is amber on Fleet and lilac on Activity, per view
+    // rather than per theme — the deck's 4a portrait pair and 4b's L1-L3
+    // against L4. `style` already draws that line, so the accent reads off it.
+    final accent = spec.style == ChromeViewRailStyle.branded
+        ? t.primary
+        : t.nav;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _viewRail(spec, t, bleed),
-        _railGutter(bleed, t.nav),
+        _viewRail(spec, t, accent, bleed),
+        _railGutter(bleed, accent),
         // Flush right, like [buildPage] and the shell's footer — see
         // [buildShell] for why the 10dp margin all three used to carry went.
-        Expanded(child: _viewContent(context, spec, t, bleed)),
+        Expanded(child: _viewContent(context, spec, t, accent, bleed)),
       ],
     );
   }
@@ -1034,6 +1040,7 @@ class LcarsChrome extends Chrome {
   Widget _viewRail(
     ChromeViewRailSpec spec,
     CommanderTokens t,
+    Color accent,
     EdgeInsets bleed,
   ) {
     final slices = spec.slices;
@@ -1041,7 +1048,7 @@ class LcarsChrome extends Chrome {
     final blocks = <Widget>[
       ChromeElbow(
         bleed: bleed,
-        color: t.nav,
+        color: accent,
         corner: ElbowCorner.topLeft,
         height: 74,
         label: spec.code,
@@ -1051,7 +1058,10 @@ class LcarsChrome extends Chrome {
       ),
       for (final slice in slices?.segments ?? const <ChromeSegment>[])
         ChromeElbow(
-          color: slice.selected ? t.primary : t.borderSubtle,
+          // A rail's selected block is lilac — see the note in
+          // `chrome_wide.dart`'s `_nav`. The deck's portrait fleet rail shows
+          // ALL selected as `#cc99cc` over RECENT's `#3a2f45`.
+          color: slice.selected ? t.nav : t.borderSubtle,
           labelColor: slice.selected ? t.canvas : t.nav,
           height: _railSliceHeight,
           label: t.caseLabel(slice.label),
@@ -1061,7 +1071,7 @@ class LcarsChrome extends Chrome {
       // It carries the mode note when there is one — an inert label on an inert
       // block, which is where LCARS puts a readout.
       if (note == null)
-        ChromeElbow(color: t.borderSubtle, height: 16)
+        ChromeElbow(color: t.border, height: 16)
       else
         ChromeElbow(
           color: t.borderSubtle,
@@ -1083,6 +1093,7 @@ class LcarsChrome extends Chrome {
     BuildContext context,
     ChromeViewRailSpec spec,
     CommanderTokens t,
+    Color accent,
     EdgeInsets bleed,
   ) {
     final subtitle = spec.subtitle;
@@ -1090,7 +1101,7 @@ class LcarsChrome extends Chrome {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ChromeElbowCap(bleed: bleed, color: t.nav),
+        ChromeElbowCap(bleed: bleed, color: accent),
         const SizedBox(height: 7),
         MediaQuery.withClampedTextScaling(
           maxScaleFactor: 1.5,

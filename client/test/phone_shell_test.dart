@@ -385,7 +385,7 @@ void main() {
 
         expect(
           await pixelAt(tester, Offset(gutterX, 12)),
-          lcarsTokens.nav,
+          lcarsTokens.primary,
           reason:
               'inside the inset the seam must be filled with the same colour '
               'as the blocks it joins, or a black column shows through',
@@ -396,7 +396,7 @@ void main() {
         // unpinned shrink of the fill back down to `bleed.top` alone.
         expect(
           await pixelAt(tester, Offset(gutterX, insetTop)),
-          lcarsTokens.nav,
+          lcarsTokens.primary,
           reason:
               'the fill must extend past the inset to the bottom of the '
               'elbow cap, not stop at the inset alone',

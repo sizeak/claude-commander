@@ -64,6 +64,12 @@ class ChromeWideSpec {
   final ChromeButtonAction? newSession;
   final ChromeButtonAction? settings;
 
+  /// Which view the shell is showing, which is what the LCARS frame's accent
+  /// follows — see `LcarsWide._accent`. The same distinction
+  /// [ChromeViewRailSpec.style] draws for the phone frames, reused rather than
+  /// restated so the two shells cannot disagree about which view is which.
+  final ChromeViewRailStyle style;
+
   const ChromeWideSpec({
     required this.fleetList,
     required this.workspace,
@@ -74,6 +80,7 @@ class ChromeWideSpec {
     required this.serverCount,
     this.newSession,
     this.settings,
+    this.style = ChromeViewRailStyle.branded,
   });
 }
 
@@ -457,6 +464,7 @@ class LcarsWide extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
+    final accent = _accent(spec.style, t);
     // Read above the Scaffold, as the phone frames do, so whether a Scaffold
     // republishes its body's padding never has to be assumed.
     final insets = MediaQuery.paddingOf(context);
@@ -484,7 +492,7 @@ class LcarsWide extends StatelessWidget {
                     SizedBox(
                       key: const ValueKey('wide-nav'),
                       width: _lcarsNavWidth,
-                      child: _nav(t, bleed),
+                      child: _nav(t, accent, bleed),
                     ),
                     // Both columns beside this gap bleed into the band, so it
                     // is filled across it — see [lcarsBandSeam]. Its fill ends
@@ -493,7 +501,7 @@ class LcarsWide extends StatelessWidget {
                     lcarsBandSeam(
                       width: _lcarsGap,
                       height: _bandHeight(bleed),
-                      color: t.nav,
+                      color: accent,
                       bleed: bleed,
                     ),
                   ],
@@ -504,12 +512,12 @@ class LcarsWide extends StatelessWidget {
                   SizedBox(
                     key: const ValueKey('wide-fleet'),
                     width: _lcarsFleetWidth,
-                    child: _fleet(t, bleed, folded: !three),
+                    child: _fleet(t, accent, bleed, folded: !three),
                   ),
                   lcarsBandSeam(
                     width: _lcarsGap,
                     height: _bandHeight(bleed),
-                    color: t.nav,
+                    color: accent,
                     bleed: bleed,
                   ),
                   Expanded(
@@ -531,7 +539,7 @@ class LcarsWide extends StatelessWidget {
                         // would take the status-bar icons with it.
                         ChromeElbowCap(
                           bleed: EdgeInsets.only(top: bleed.top),
-                          color: t.nav,
+                          color: accent,
                         ),
                         // The same gap the fleet column leaves under its cap, so
                         // the two columns' titles start level.
@@ -554,6 +562,18 @@ class LcarsWide extends StatelessWidget {
     );
   }
 
+  /// The colour the frame's top run takes: the nav column's identifier block,
+  /// both column caps, and the fills that bridge them.
+  ///
+  /// Per view rather than per theme, which is how the deck paints it — amber on
+  /// Fleet (4b's L1, L2 and L3 all open with an `#f7a01d` elbow and an
+  /// `#f7a01d` fleet cap) and lilac on Activity (L4, `#cc99cc` throughout).
+  /// [ChromeViewRailStyle] already divides the views that way for the phone
+  /// frames, so the accent reads off it rather than adding a second switch that
+  /// could come to disagree.
+  static Color _accent(ChromeViewRailStyle style, CommanderTokens t) =>
+      style == ChromeViewRailStyle.branded ? t.primary : t.nav;
+
   /// How far down the status-bar band runs: the fleet column's elbow cap sets
   /// it, and every other part of the band — the gap fills either side of that
   /// column, and the plain strip over the workspace — is drawn to the same
@@ -569,13 +589,13 @@ class LcarsWide extends StatelessWidget {
   /// the mode destinations, the live needs-input count, inert filler that
   /// absorbs the slack, the new-session block, and a closing settings elbow. Only
   /// the first and last blocks are rounded, so the column reads as one bracket.
-  Widget _nav(CommanderTokens t, EdgeInsets bleed) {
+  Widget _nav(CommanderTokens t, Color accent, EdgeInsets bleed) {
     final newSession = spec.newSession;
     final settings = spec.settings;
     final blocks = <Widget>[
       ChromeElbow(
         bleed: EdgeInsets.only(top: bleed.top),
-        color: t.nav,
+        color: accent,
         corner: ElbowCorner.topLeft,
         height: 74,
         label: 'CMDR',
@@ -585,7 +605,13 @@ class LcarsWide extends StatelessWidget {
       ),
       for (final mode in spec.modes)
         ChromeElbow(
-          color: mode.selected ? t.primary : t.borderSubtle,
+          // Lilac, not amber: in a *rail* the deck marks the selected block
+          // `#cc99cc` (4b L1's FLEET against LOG's `#3a2f45`, and the portrait
+          // rail's h30/h22 pair), keeping amber for the identifier block that
+          // opens the bracket. A run is the opposite — the phone footer's
+          // selected block is `#f7a01d` — which is why `buildFooterNav` and
+          // `_foldedNav` still use [CommanderTokens.primary].
+          color: mode.selected ? t.nav : t.borderSubtle,
           labelColor: mode.selected ? t.canvas : t.nav,
           height: _lcarsNavBlock,
           label: t.caseLabel(mode.label),
@@ -594,7 +620,7 @@ class LcarsWide extends StatelessWidget {
       _inputBlock(t),
       // Two-tone inert filler, brightest first — the deck's rails always step
       // down through a thin bright band into a large dark one.
-      ChromeElbow(color: t.borderSubtle, height: 16),
+      ChromeElbow(color: t.border, height: 16),
       Expanded(child: ChromeElbow(color: t.divider)),
       if (newSession != null)
         ChromeElbow(
@@ -640,14 +666,19 @@ class LcarsWide extends StatelessWidget {
   /// The fleet column: an elbow cap, the FLEET title and its count line, the
   /// list, and — when the nav has folded in — a horizontal run of nav blocks
   /// beneath it.
-  Widget _fleet(CommanderTokens t, EdgeInsets bleed, {required bool folded}) {
+  Widget _fleet(
+    CommanderTokens t,
+    Color accent,
+    EdgeInsets bleed, {
+    required bool folded,
+  }) {
     final counts = t.caseLabel(_countsLine(spec));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         ChromeElbowCap(
           bleed: EdgeInsets.only(top: bleed.top),
-          color: t.nav,
+          color: accent,
         ),
         const SizedBox(height: 7),
         Text('FLEET', style: t.display(size: 22)),
@@ -867,7 +898,7 @@ class LcarsDetail extends StatelessWidget {
           labelWeight: FontWeight.w700,
           onTap: () => spec.onSelect(i),
         ),
-      ChromeElbow(color: t.borderSubtle, height: 16),
+      ChromeElbow(color: t.border, height: 16),
       Expanded(
         child: ChromeElbow(color: t.divider, corner: ElbowCorner.bottomRight),
       ),
