@@ -1183,9 +1183,17 @@ class LcarsChrome extends Chrome {
                         topLeft: Radius.circular(t.elbowRadius),
                       ),
                       child: ChromeElbow(
-                        // The identity colour the deck gives its CMDR block
-                        // (4b's L1-L3).
-                        color: t.primary,
+                        // Deliberately not the frame's own accent. The block
+                        // directly below this one is the rail's amber opening
+                        // block at the same width, and painting the corner
+                        // amber too made the two read as a single tall column
+                        // split by a hairline rather than as window chrome
+                        // above an app frame. Rendered against the frame in
+                        // amber, lilac, periwinkle and both inert fills before
+                        // choosing: the dark ones lose the corner into the
+                        // bar's own filler, and lilac is the frame's other
+                        // accent, so it says "frame" too.
+                        color: t.info,
                         height: _windowBarHeight,
                       ),
                     ),

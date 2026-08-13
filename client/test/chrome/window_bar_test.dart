@@ -207,12 +207,19 @@ void main() {
     /// than by a label, because it deliberately has none.
     Finder corner() => find.byType(ChromeElbow).first;
 
-    testWidgets('the corner block is the frame identity, in amber', (
-      tester,
-    ) async {
+    // Not the frame's accent, and that is the whole point: the rail's opening
+    // block sits directly below this one at the same width, so an accent-
+    // coloured corner reads as one tall column split by a hairline rather than
+    // as window chrome above an app frame.
+    testWidgets('the corner block is not the frame accent', (tester) async {
       await pumpLcars(tester);
 
-      expect(tester.widget<ChromeElbow>(corner()).color, lcarsTokens.primary);
+      expect(tester.widget<ChromeElbow>(corner()).color, lcarsTokens.info);
+      expect(
+        tester.widget<ChromeElbow>(corner()).color,
+        isNot(lcarsTokens.primary),
+        reason: 'amber is the rail block directly beneath it',
+      );
       expect(tester.widget<ChromeElbow>(corner()).label, isNull);
     });
 
