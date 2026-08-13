@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../chrome/lcars/bleed.dart';
 import 'package:flutter/services.dart';
 
 import '../chrome/chrome_forms.dart';
@@ -108,7 +110,11 @@ class _WindowFrameState extends State<WindowFrame> {
                   ),
                 ),
               ),
-              Expanded(child: widget.child),
+              // The bar's name cap has just turned the frame's corner, so the
+              // rail below must not turn it again — see [LcarsCornerScope].
+              Expanded(
+                child: LcarsCornerScope(takenAbove: true, child: widget.child),
+              ),
             ],
           ),
         );
