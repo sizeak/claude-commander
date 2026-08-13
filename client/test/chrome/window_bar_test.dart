@@ -1,4 +1,6 @@
+import 'package:claude_commander_client/chrome/chrome.dart';
 import 'package:claude_commander_client/chrome/chrome_forms.dart';
+import 'package:claude_commander_client/chrome/chrome_wide.dart';
 import 'package:claude_commander_client/chrome/lcars/bleed.dart';
 import 'package:claude_commander_client/chrome/lcars/elbow.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
@@ -44,9 +46,13 @@ void main() {
           ),
         );
 
-        // Uppercased under LCARS, so match on the cased form the theme asks for
-        // rather than pinning one spelling.
-        expect(find.text(tokens.caseLabel('Claude Commander')), findsOneWidget);
+        // Mission Control captions its bar; LCARS does not. Its leading block
+        // is the bracket's corner — a shape, not a caption — and the window's
+        // name is already its title in the task switcher.
+        expect(
+          find.text(tokens.caseLabel('Claude Commander')),
+          tokens.chrome == ChromeKind.lcars ? findsNothing : findsOneWidget,
+        );
       });
 
       testWidgets('minimize, maximize and close each fire', (tester) async {
@@ -108,9 +114,11 @@ void main() {
           ),
         );
 
-        // Drag the title area, not a control: the buttons must stay clickable.
+        // The drag surface, not a control: the buttons must stay clickable.
+        // Keyed rather than found by what is drawn on it — LCARS draws nothing
+        // on its corner block, and the surface is the thing under test anyway.
         await tester.timedDrag(
-          find.text(tokens.caseLabel('Claude Commander')),
+          find.byKey(windowBarDragSurface),
           const Offset(60, 0),
           const Duration(milliseconds: 200),
         );
@@ -133,7 +141,7 @@ void main() {
           ),
         );
 
-        final bar = find.text(tokens.caseLabel('Claude Commander'));
+        final bar = find.byKey(windowBarDragSurface);
         await tester.tap(bar);
         await tester.pump(const Duration(milliseconds: 50));
         await tester.tap(bar);
@@ -182,55 +190,74 @@ void main() {
   // mid-window. The design deck cannot settle this on its own: its laptop frame
   // is drawn as a bare screen with no title bar at all.
   group('LCARS bracket', () {
-    testWidgets('the name cap is the frame identity, in amber', (tester) async {
-      await pumpBar(
-        tester,
-        lcarsTokens,
-        ChromeWindowBarSpec(
-          title: 'Claude Commander',
-          onDragStart: () {},
-          onDoubleTap: () {},
-          onMinimize: () {},
-          onToggleMaximize: () {},
-          onClose: () {},
-        ),
-      );
+    Future<void> pumpLcars(WidgetTester tester) => pumpBar(
+      tester,
+      lcarsTokens,
+      ChromeWindowBarSpec(
+        title: 'Claude Commander',
+        onDragStart: () {},
+        onDoubleTap: () {},
+        onMinimize: () {},
+        onToggleMaximize: () {},
+        onClose: () {},
+      ),
+    );
 
-      final cap = tester.widget<ChromeElbow>(
-        find.widgetWithText(ChromeElbow, 'CLAUDE COMMANDER'),
-      );
-      expect(cap.color, lcarsTokens.primary);
-    });
+    /// The bar's leading block — the corner itself. Found by position rather
+    /// than by a label, because it deliberately has none.
+    Finder corner() => find.byType(ChromeElbow).first;
 
-    testWidgets('the name cap carries the bracket corner, not a pill', (
+    testWidgets('the corner block is the frame identity, in amber', (
       tester,
     ) async {
-      await pumpBar(
-        tester,
-        lcarsTokens,
-        ChromeWindowBarSpec(
-          title: 'Claude Commander',
-          onDragStart: () {},
-          onDoubleTap: () {},
-          onMinimize: () {},
-          onToggleMaximize: () {},
-          onClose: () {},
-        ),
-      );
+      await pumpLcars(tester);
+
+      expect(tester.widget<ChromeElbow>(corner()).color, lcarsTokens.primary);
+      expect(tester.widget<ChromeElbow>(corner()).label, isNull);
+    });
+
+    // Drawn to the nav column's width, so the amber runs straight down into the
+    // block below rather than stepping sideways a row in.
+    testWidgets('the corner block is the width of the column below it', (
+      tester,
+    ) async {
+      await pumpLcars(tester);
+
+      expect(tester.getSize(corner()).width, kLcarsNavWidth);
+    });
+
+    testWidgets('the corner turns the elbow, and only at the top', (
+      tester,
+    ) async {
+      await pumpLcars(tester);
 
       final clip = tester.widget<ClipRRect>(
-        find
-            .ancestor(
-              of: find.widgetWithText(ChromeElbow, 'CLAUDE COMMANDER'),
-              matching: find.byType(ClipRRect),
-            )
-            .first,
+        find.ancestor(of: corner(), matching: find.byType(ClipRRect)).first,
       );
       final radius = clip.borderRadius as BorderRadius;
       expect(radius.topLeft, Radius.circular(lcarsTokens.elbowRadius));
       // Square below, so the bracket flows down into the rail rather than
       // closing itself off as a free-standing pill.
       expect(radius.bottomLeft, Radius.zero);
+    });
+
+    // The trailing edge is the window's, and the frame runs flush to it
+    // everywhere else too — a pill there left the run stopping short of its own
+    // corner.
+    testWidgets('the closing control is square against the window edge', (
+      tester,
+    ) async {
+      await pumpLcars(tester);
+
+      final clip = tester.widget<ClipRRect>(
+        find
+            .ancestor(
+              of: find.widgetWithText(ChromeElbow, 'CLOSE'),
+              matching: find.byType(ClipRRect),
+            )
+            .first,
+      );
+      expect(clip.borderRadius, BorderRadius.zero);
     });
 
     // The other half of the deal, and the only thing that holds it: the bar

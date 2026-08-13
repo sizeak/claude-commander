@@ -1157,9 +1157,6 @@ class LcarsChrome extends Chrome {
   Widget buildWindowBar(BuildContext context, ChromeWindowBarSpec spec) {
     final t = CommanderTokens.of(context);
     final controls = windowBarControls(spec);
-    // The name cap, the filler and each control are one run, so only the two
-    // outer ends round — the bar reads as a single bracket across the window.
-    final count = controls.length + 2;
     return Padding(
       padding: const EdgeInsets.only(bottom: _seam),
       child: Row(
@@ -1171,25 +1168,26 @@ class LcarsChrome extends Chrome {
               spec,
               Row(
                 children: [
-                  ClipRRect(
-                    // The bracket's corner, not a pill end: this bar is the top
-                    // of the frame, so the elbow radius belongs here and the
-                    // rail beneath must not draw a second one — see
-                    // [LcarsCornerScope]. Square below, so the bracket flows
-                    // down into that rail instead of closing itself off.
-                    borderRadius: BorderRadius.only(
-                      topLeft: Radius.circular(t.elbowRadius),
-                    ),
-                    child: ChromeElbow(
-                      // The window's identity block, which the deck paints
-                      // amber wherever it draws one (4b's CMDR in L1-L3).
-                      color: t.primary,
-                      labelColor: t.canvas,
-                      height: _windowBarHeight,
-                      label: t.caseLabel(spec.title),
-                      labelAlignment: Alignment.center,
-                      labelSize: 12,
-                      labelWeight: FontWeight.w700,
+                  // The bracket's corner, and nothing else. Drawn to the nav
+                  // column's width so the amber runs straight down into the
+                  // block below it rather than stepping sideways a row in, and
+                  // unlabelled: the corner is a shape, not a caption, and the
+                  // window's name is already its title in the task switcher.
+                  SizedBox(
+                    width: kLcarsNavWidth,
+                    child: ClipRRect(
+                      // Square below, so the bracket flows down into the rail
+                      // instead of closing itself off — and the rail must not
+                      // turn a second corner, see [LcarsCornerScope].
+                      borderRadius: BorderRadius.only(
+                        topLeft: Radius.circular(t.elbowRadius),
+                      ),
+                      child: ChromeElbow(
+                        // The identity colour the deck gives its CMDR block
+                        // (4b's L1-L3).
+                        color: t.primary,
+                        height: _windowBarHeight,
+                      ),
                     ),
                   ),
                   const SizedBox(width: _seam),
@@ -1210,7 +1208,10 @@ class LcarsChrome extends Chrome {
             Tooltip(
               message: controls[i].label,
               child: ClipRRect(
-                borderRadius: _runEnds(i + 2, count, t.pillRadius),
+                // Square at the trailing end: that edge is the window's, and
+                // the frame runs flush to it everywhere else too. A pill there
+                // left the run stopping short of its own corner.
+                borderRadius: BorderRadius.zero,
                 child: ChromeElbow(
                   color: controls[i].destructive ? t.danger : t.borderSubtle,
                   labelColor: controls[i].destructive ? t.canvas : t.nav,

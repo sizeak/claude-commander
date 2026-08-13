@@ -25,7 +25,7 @@ import 'lcars/elbow.dart';
 /// nav rail as a column of its own, separate from the fleet list.
 ///
 /// Higher than the wide/narrow breakpoint on purpose. The two LCARS side columns
-/// are fixed at [_lcarsNavWidth] + [_lcarsFleetWidth] = 394px, so at 900px the
+/// are fixed at [kLcarsNavWidth] + [_lcarsFleetWidth] = 394px, so at 900px the
 /// workspace would be left ~500px, where the deck's workspace frames assume
 /// 1120px+. Between the wide breakpoint and this one, LCARS folds the nav into
 /// the fleet column instead (see [LcarsWide]).
@@ -491,7 +491,7 @@ class LcarsWide extends StatelessWidget {
                   if (three) ...[
                     SizedBox(
                       key: const ValueKey('wide-nav'),
-                      width: _lcarsNavWidth,
+                      width: kLcarsNavWidth,
                       child: _nav(context, t, accent, bleed),
                     ),
                     // Both columns beside this gap bleed into the band, so it
@@ -931,7 +931,11 @@ const _mcRailWidth = 312.0;
 
 /// LCARS' nav column (deck frame L1's rail on a landscape deck — wider than the
 /// portrait [CommanderTokens.railWidth], which has no room for lettering).
-const _lcarsNavWidth = 104.0;
+/// LCARS' nav column width. Public because the desktop window bar's corner
+/// block is drawn to it: the bar turns the frame's corner, so its leading block
+/// has to be the same width as the column that continues down from it, or the
+/// bracket steps sideways one row in.
+const kLcarsNavWidth = 104.0;
 
 /// LCARS' fleet column.
 const _lcarsFleetWidth = 290.0;
