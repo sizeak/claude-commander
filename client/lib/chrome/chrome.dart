@@ -237,8 +237,15 @@ bool shouldShowBack(BuildContext context, ChromePageSpec spec) =>
 /// translucently instead looks equivalent and is not: two quick clicks on
 /// adjacent controls fall inside the double-tap slop, so the bar claims the
 /// second one and minimise-then-close silently becomes minimise-then-maximise.
+/// The drag surface [applyWindowBarGestures] produces, so a test can grab the
+/// bar without depending on what is drawn on it. It used to grab the title
+/// text, which stopped being a locator the moment LCARS dropped its title —
+/// and was never the right one anyway, since the surface is the point.
+const windowBarDragSurface = ValueKey('window-bar-drag');
+
 Widget applyWindowBarGestures(ChromeWindowBarSpec spec, Widget dragRegion) =>
     GestureDetector(
+      key: windowBarDragSurface,
       behavior: HitTestBehavior.opaque,
       onPanStart: (_) => spec.onDragStart(),
       onDoubleTap: spec.onDoubleTap,

@@ -1,9 +1,13 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../theme/tokens.dart';
 import '../chrome.dart';
 import '../chrome_forms.dart';
 import '../chrome_wide.dart';
+import 'bleed.dart';
 import 'elbow.dart';
 
 /// The LCARS chrome: a black canvas, an elbow rail down the left holding
@@ -19,27 +23,53 @@ import 'elbow.dart';
 class LcarsChrome extends Chrome {
   const LcarsChrome();
 
+  /// A pushed route's frame. LCARS draws to the edges, so instead of the
+  /// `SafeArea` this used to wrap itself in, the frame's own corner blocks grow
+  /// into the vertical insets and the labels stay exactly where that `SafeArea`
+  /// put them — see [buildShell]'s doc for why a black band under a bracket is
+  /// the wrong answer.
   @override
   Widget buildPage(BuildContext context, ChromePageSpec spec) {
     final t = CommanderTokens.of(context);
-    return Scaffold(
-      backgroundColor: t.canvas,
-      resizeToAvoidBottomInset: spec.insets != ChromeInsets.pan,
-      body: applyChromeInsets(
-        // LCARS draws to the edges, so it always needs the status-bar inset held
-        // off — even on a page Mission Control would have let its app bar cover.
-        spec.insets == ChromeInsets.standard
-            ? ChromeInsets.safeArea
-            : spec.insets,
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _rail(context, spec, t),
-            const SizedBox(width: _railPitch),
-            Expanded(child: _content(context, spec, t)),
-            const SizedBox(width: 10),
-          ],
-        ),
+    // Read here, above the `Scaffold` this returns, for the same reason
+    // [buildShell] does: whether a `Scaffold` republishes its body's padding
+    // never has to be assumed.
+    final insets = MediaQuery.paddingOf(context);
+    // Zero while panning: the terminal already wraps its whole row in a
+    // `SafeArea` (`chrome.dart:224`, PR #259 — the PTY must never see a
+    // resize), so a page cannot be inset *and* bled — a block that was both
+    // would be offset twice.
+    final panning = spec.insets == ChromeInsets.pan;
+    final bleed = panning
+        ? EdgeInsets.zero
+        : EdgeInsets.only(top: insets.top, bottom: insets.bottom);
+    final frame = Padding(
+      // Held, not bled — same reason as the shell's: a cutout is an occlusion,
+      // not a bezel to decorate. Skipped only when the `SafeArea` below is
+      // already holding them.
+      padding: panning
+          ? EdgeInsets.zero
+          : EdgeInsets.only(left: insets.left, right: insets.right),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _rail(context, spec, t, bleed),
+          _railGutter(bleed, shouldShowBack(context, spec) ? t.primary : t.nav),
+          // No trailing margin: the frame runs flush to the right bezel at every
+          // height. A 10dp gap there read as the frame stopping short of the
+          // screen once the top and bottom bands met the edge — see [buildShell].
+          Expanded(child: _content(context, spec, t, bleed)),
+        ],
+      ),
+    );
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: lcarsSystemBars,
+      child: Scaffold(
+        backgroundColor: t.canvas,
+        resizeToAvoidBottomInset: !panning,
+        // Only `pan` still wraps: with a bleed the frame holds its own insets,
+        // and a `SafeArea` over it would hold them twice.
+        body: panning ? applyChromeInsets(ChromeInsets.pan, frame) : frame,
       ),
     );
   }
@@ -48,12 +78,22 @@ class LcarsChrome extends Chrome {
   /// filler that absorbs the slack, then the primary action, then a closing
   /// elbow. The two rounded corners are the first and last blocks only, so the
   /// column reads as one bracket.
-  Widget _rail(BuildContext context, ChromePageSpec spec, CommanderTokens t) {
+  ///
+  /// [bleed] is split across those two blocks alone — they are the bracket's
+  /// ends, and everything between them is interior.
+  Widget _rail(
+    BuildContext context,
+    ChromePageSpec spec,
+    CommanderTokens t,
+    EdgeInsets bleed,
+  ) {
     final back = shouldShowBack(context, spec);
+    final corner = _openingCorner(context);
     final blocks = <Widget>[
       ChromeElbow(
+        bleed: EdgeInsets.only(top: bleed.top),
         color: back ? t.primary : t.nav,
-        corner: ElbowCorner.topLeft,
+        corner: corner,
         height: back ? 62 : 74,
         // With no back affordance the top block carries the screen's LCARS
         // identifier instead ("47-A"), as the deck's root screens do.
@@ -73,7 +113,7 @@ class LcarsChrome extends Chrome {
         ),
       // Two-tone inert filler, brightest first — the deck's rails always step
       // down through a thin bright band into a large dark one.
-      ChromeElbow(color: t.borderSubtle, height: 16),
+      ChromeElbow(color: t.border, height: 16),
       Expanded(child: ChromeElbow(color: t.divider)),
     ];
 
@@ -90,6 +130,7 @@ class LcarsChrome extends Chrome {
     }
     blocks.add(
       ChromeElbow(
+        bleed: EdgeInsets.only(bottom: bleed.bottom),
         color: t.nav,
         corner: ElbowCorner.bottomLeft,
         height: 44,
@@ -99,6 +140,13 @@ class LcarsChrome extends Chrome {
 
     return _railColumn(t, blocks);
   }
+
+  /// The corner a rail's opening block turns — none when something above the
+  /// frame has already turned it. Only the desktop window bar does, and only
+  /// there does a second rounded corner appear mid-window under a bar that has
+  /// already curved away from it. See [LcarsCornerScope].
+  static ElbowCorner _openingCorner(BuildContext context) =>
+      LcarsCornerScope.of(context) ? ElbowCorner.none : ElbowCorner.topLeft;
 
   /// A rail: [blocks] stacked at the deck's 5px pitch, in a column
   /// [CommanderTokens.railWidth] wide. Shared by the page rail and the view rail
@@ -114,6 +162,40 @@ class LcarsChrome extends Chrome {
         ],
       ],
     ),
+  );
+
+  /// The seam between the rail and the content column: filled across the
+  /// status-bar inset *and* down to the bottom of the elbow cap it continues
+  /// into, open below that.
+  ///
+  /// The band behind the status bar has to be *continuous*. On a Pixel 8a the
+  /// system clock sat at a fixed offset that landed exactly on this seam, so
+  /// leaving it open painted a black column through the middle of the time.
+  /// Stopping the fill at `bleed.top` fixed that but left a second,
+  /// shorter black tab poking up into the band the moment the inset ends —
+  /// also measured on device — because the rail's top block and the cap below
+  /// the seam are two more colour patches the fill needs to bridge. Filling
+  /// down to the cap's own bled height closes that gap too, so the rail's top
+  /// block, the seam and the cap read as one solid mass with a clean bottom
+  /// edge — [elbowCapHeight] is the one function that produces that height,
+  /// called here and by [ChromeElbowCap] itself, so the fill and the cap it
+  /// continues into cannot independently drift apart.
+  ///
+  /// Below the fill, the black resumes at a plain square junction. A curved
+  /// emergence was tried and reviewed on a Pixel 8a alongside the bled cap's
+  /// 1dp height; at that height the fill overhangs the inset by only ~3px,
+  /// too little for an arc to read as anything but noise, so the curve was
+  /// removed rather than kept disabled.
+  ///
+  /// With no inset there is no band and nothing to fill, so that case returns
+  /// the frame's original plain, full-height seam untouched — every
+  /// desktop/tablet golden and the zero-inset tests depend on this being that
+  /// exact widget.
+  Widget _railGutter(EdgeInsets bleed, Color color) => lcarsBandSeam(
+    width: _railPitch,
+    height: elbowCapHeight(kElbowCapHeight, bleed),
+    color: color,
+    bleed: bleed,
   );
 
   /// A block's fill for a given emphasis. Shared by the rail, the button bar and
@@ -171,16 +253,22 @@ class LcarsChrome extends Chrome {
   }
 
   /// The content column: an elbow cap, then the title block, then the body.
+  ///
+  /// [bleed]'s top goes to the cap, mirroring the rail's opening block — the two
+  /// are the frame's top corners. Its bottom is *held* off the body rather than
+  /// bled into: the rail closes the frame down there, the body does not.
   Widget _content(
     BuildContext context,
     ChromePageSpec spec,
     CommanderTokens t,
+    EdgeInsets bleed,
   ) {
     final title = spec.title;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         ChromeElbowCap(
+          bleed: EdgeInsets.only(top: bleed.top),
           color: shouldShowBack(context, spec) ? t.primary : t.nav,
         ),
         if (title != null) ...[
@@ -210,7 +298,14 @@ class LcarsChrome extends Chrome {
           const SizedBox(height: 9),
         ] else
           const SizedBox(height: 12),
-        Expanded(child: spec.body),
+        // Held, not bled: a pushed page has no footer, so without this a
+        // scrollable would run under the gesture strip with nothing below it.
+        Expanded(
+          child: Padding(
+            padding: EdgeInsets.only(bottom: bleed.bottom),
+            child: spec.body,
+          ),
+        ),
       ],
     );
   }
@@ -397,18 +492,163 @@ class LcarsChrome extends Chrome {
   /// Deck P1's `ENGAGE / SCAN QR` pair: one contiguous run of blocks separated by
   /// a hairline seam, pill-ended on the outside only, so the bar reads as a single
   /// segmented control rather than a row of buttons.
+  ///
+  /// A run too wide for its column folds onto further lines rather than
+  /// overflowing. The session detail page's six lifecycle actions did overflow:
+  /// on a Pixel 8a (411dp) the run missed by 1.1dp and Flutter painted its
+  /// striped banner over a clipped DELETE, and a 360dp phone or raised text
+  /// scale misses by far more. Each line is a contiguous run in its own right,
+  /// pill-ended on its own outer blocks.
   @override
   Widget buildButtonBar(BuildContext context, ChromeButtonBarSpec spec) {
     final t = CommanderTokens.of(context);
-    final buttons = spec.buttons;
-    return Row(
-      children: [
-        for (var i = 0; i < buttons.length; i++) ...[
-          if (i > 0) const SizedBox(width: _seam),
-          _barBlock(t, buttons[i], _runEnds(i, buttons.length, t.pillRadius)),
-        ],
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final lines = _foldRun(context, t, spec.buttons, constraints.maxWidth);
+        // A bar fills its column whether it folded or not — one rule, not two.
+        // In landscape the six lifecycle actions fit on one line, and the
+        // unfilled run hugged the left of a column whose every other card ran
+        // its full width.
+        //
+        // Two cases must not stretch. A caller that set `expand` is managing
+        // the fill itself, and `_barBlock` already wraps that button in its own
+        // `Expanded` — a second flex around the same child. And an unbounded
+        // column has no width to fill, where a flex child throws outright.
+        final stretch =
+            constraints.maxWidth.isFinite && !spec.buttons.any((b) => b.expand);
+        // A single line stays the bare [Row] it has always been, never a Column
+        // of one. The difference is vertical: a lone Row takes the height its
+        // parent offers and its blocks stretch to it, while a Column shrink-
+        // wraps them to `_barHeight`.
+        if (lines.length == 1) {
+          return _barLine(t, lines.single, stretch: stretch);
+        }
+        // Lines then share both edges by construction, so nothing here has to
+        // centre anything.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < lines.length; i++) ...[
+              if (i > 0) const SizedBox(height: _seam),
+              _barLine(t, lines[i], stretch: stretch),
+            ],
+          ],
+        );
+      },
     );
+  }
+
+  /// One line of a button bar: the [Row] the whole bar used to be, so an
+  /// unstretched line comes out exactly as it did before folding existed.
+  ///
+  /// [stretch] fills the width the line is given by growing each block **in
+  /// proportion to the width it already wanted**. Equal shares would be the
+  /// obvious alternative and is wrong: they would hand RESTART a third of the
+  /// column while SHELL sat in slack, and RESTART's label needs more than that,
+  /// so it would ellipsise. Proportional growth cannot shrink anything, because
+  /// [_foldRun] only cuts lines that already fit the column, so the width a
+  /// stretched line is filling is never below its own natural width.
+  Widget _barLine(
+    CommanderTokens t,
+    _BarLine line, {
+    required bool stretch,
+  }) => Row(
+    children: [
+      for (var i = 0; i < line.buttons.length; i++) ...[
+        if (i > 0) const SizedBox(width: _seam),
+        // `_barBlock` wraps an `expand` button in its own `Expanded`, which
+        // would be a second flex around the same child — safe only because
+        // [_foldRun] never folds a run containing one, so `stretch` is false
+        // wherever `expand` is true.
+        if (stretch)
+          Expanded(
+            flex: math.max(1, (line.widths[i] * 100).round()),
+            child: _barBlock(
+              t,
+              line.buttons[i],
+              _runEnds(i, line.buttons.length, t.pillRadius),
+            ),
+          )
+        else
+          _barBlock(
+            t,
+            line.buttons[i],
+            _runEnds(i, line.buttons.length, t.pillRadius),
+          ),
+      ],
+    ],
+  );
+
+  /// Splits [buttons] into the fewest **equal-sized** lines that each fit
+  /// [maxWidth] — six actions in too little room become 3 + 3, not a greedy
+  /// 4 + 2 that strands a short pair under a full line. Order is preserved, so
+  /// no action moves anywhere the reader would not look for it.
+  ///
+  /// Falls back to one block per line when even that does not fit; a single
+  /// block wider than its column is the caller's problem, and the block
+  /// ellipsises rather than overflowing.
+  List<_BarLine> _foldRun(
+    BuildContext context,
+    CommanderTokens t,
+    List<ChromeBarButton> buttons,
+    double maxWidth,
+  ) {
+    final widths = [
+      for (final button in buttons) _barBlockWidth(context, t, button),
+    ];
+    _BarLine cut(int from, int to) =>
+        (buttons: buttons.sublist(from, to), widths: widths.sublist(from, to));
+    // Measured above this guard rather than below it, so a line's widths are
+    // populated unconditionally: `buildButtonBar` reads them whenever it
+    // stretches, and an empty list would be a crash reachable only through the
+    // exact combination of flags that had skipped the measurement.
+    //
+    // An expanding block has no natural width to honour — it takes whatever
+    // slack the row has — so a run containing one can never overflow and never
+    // needs folding. Neither can one in an unbounded column.
+    if (buttons.any((b) => b.expand) || !maxWidth.isFinite) {
+      return [cut(0, buttons.length)];
+    }
+    for (var lines = 1; lines < buttons.length; lines++) {
+      final per = (buttons.length / lines).ceil();
+      final groups = [
+        for (var i = 0; i < buttons.length; i += per)
+          cut(i, math.min(i + per, buttons.length)),
+      ];
+      if (groups.every((line) => _lineWidth(line) <= maxWidth)) return groups;
+    }
+    return [for (var i = 0; i < buttons.length; i++) cut(i, i + 1)];
+  }
+
+  /// A line's natural width: its blocks, plus the seams between them.
+  double _lineWidth(_BarLine line) =>
+      line.widths.reduce((a, b) => a + b) + _seam * (line.widths.length - 1);
+
+  /// How wide [button]'s block will come out: its label laid out in the style
+  /// [_barBlock] draws it, plus the padding [ChromeElbow] puts around centred
+  /// content. Both come from `elbow.dart` rather than being restated here, so a
+  /// change to either cannot leave the folder measuring a block that no longer
+  /// exists.
+  double _barBlockWidth(
+    BuildContext context,
+    CommanderTokens t,
+    ChromeBarButton button,
+  ) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: t.caseLabel(button.label),
+        style: elbowLabelStyle(t, size: _barLabelSize, weight: _barLabelWeight),
+      ),
+      maxLines: 1,
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(
+        context,
+      ).clamp(maxScaleFactor: kElbowMaxTextScale),
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width + kElbowCentredPadding.horizontal;
   }
 
   Widget _barBlock(
@@ -428,8 +668,8 @@ class LcarsChrome extends Chrome {
         height: _barHeight,
         label: t.caseLabel(button.label),
         labelAlignment: Alignment.center,
-        labelSize: 13,
-        labelWeight: FontWeight.w700,
+        labelSize: _barLabelSize,
+        labelWeight: _barLabelWeight,
         onTap: button.onPressed,
       ),
     );
@@ -448,6 +688,8 @@ class LcarsChrome extends Chrome {
     final t = CommanderTokens.of(context);
     final settings = spec.settings;
     final centre = spec.centreAction;
+    // Bottom only: the run meets the screen's edge, not its sides.
+    final bleed = EdgeInsets.only(bottom: LcarsBleedScope.of(context).bottom);
     // The nav blocks start one slot in when the settings block leads, so every
     // run position below is offset by it.
     final lead = settings == null ? 0 : 1;
@@ -463,12 +705,13 @@ class LcarsChrome extends Chrome {
       final ends = _runEnds(i + lead, count, t.pillRadius, bottom: true);
       blocks.add(
         i == centreSlot
-            ? _navCentre(t, centre!, ends)
+            ? _navCentre(t, centre!, ends, bleed)
             : Expanded(
                 child: _navBlock(
                   t,
                   spec.items[i < centreSlot ? i : i - 1],
                   ends,
+                  bleed,
                 ),
               ),
       );
@@ -487,6 +730,7 @@ class LcarsChrome extends Chrome {
             t,
             settings,
             _runEnds(0, count, t.pillRadius, bottom: true),
+            bleed,
           ),
           // The rail's own pitch, not the run's tighter seam: this gap continues
           // the gutter between the rail and the content column straight down.
@@ -507,9 +751,11 @@ class LcarsChrome extends Chrome {
     CommanderTokens t,
     ChromeNavItem item,
     BorderRadius radius,
+    EdgeInsets bleed,
   ) => ClipRRect(
     borderRadius: radius,
     child: ChromeElbow(
+      bleed: bleed,
       color: item.selected ? t.primary : t.borderSubtle,
       labelColor: item.selected ? t.canvas : t.nav,
       height: _footerHeight,
@@ -537,11 +783,13 @@ class LcarsChrome extends Chrome {
     CommanderTokens t,
     ChromeButtonAction settings,
     BorderRadius radius,
+    EdgeInsets bleed,
   ) => SizedBox(
     width: t.railWidth,
     child: ClipRRect(
       borderRadius: radius,
       child: ChromeElbow(
+        bleed: bleed,
         color: t.nav,
         height: _footerHeight,
         label: t.caseLabel(settings.label),
@@ -556,6 +804,7 @@ class LcarsChrome extends Chrome {
     CommanderTokens t,
     ChromeButtonAction centre,
     BorderRadius radius,
+    EdgeInsets bleed,
   ) => SizedBox(
     width: _footerCentreWidth,
     // The action's own icon, not a `Text('+')`: a text glyph centres its line
@@ -567,6 +816,7 @@ class LcarsChrome extends Chrome {
       child: ClipRRect(
         borderRadius: radius,
         child: ChromeElbow(
+          bleed: bleed,
           color: t.attention,
           height: _footerHeight,
           icon: centre.icon,
@@ -585,32 +835,65 @@ class LcarsChrome extends Chrome {
   /// middle block rather than something overlapping the bar.
   ///
   /// The run is inset to the body's own margins rather than to margins of its
-  /// own: flush left, where the rail is, and 10 off the right, where the content
-  /// column ends. That is what lets the footer read as the rail turning its
-  /// corner — the two are one bracket, not a frame with a bar under it.
+  /// own: flush left, where the rail is, and flush right too. That is what lets
+  /// the footer read as the rail turning its corner — the two are one bracket,
+  /// not a frame with a bar under it.
+  ///
+  /// The right margin used to be 10, matching the gap [buildPage] and
+  /// [buildViewRail] left beside their content columns. All three are zero now.
+  /// Compared side by side on a Pixel 8a against a variant that filled only the
+  /// bled bands, running flush at every height was the one that read as a
+  /// frame: a 10dp strip of canvas down the right made the bracket look like it
+  /// had stopped short of a screen its other three edges were already meeting.
+  ///
+  /// **No `SafeArea`, deliberately.** One would hold the whole column off the
+  /// bezel, which on a gesture-navigation phone leaves a black band under a run
+  /// whose entire premise is meeting the edge of the screen. The vertical insets
+  /// are published as an [LcarsBleedScope] instead, so each block grows its fill
+  /// *and* its padding by them and the labels end up exactly where a `SafeArea`
+  /// put them. The horizontal ones stay ordinary padding.
   @override
   Widget buildShell(BuildContext context, ChromeShellSpec spec) {
     final t = CommanderTokens.of(context);
-    return Scaffold(
-      backgroundColor: t.canvas,
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(child: spec.body),
-            Padding(
-              // Top gap at the rail's pitch, so the rail's filler meets the
-              // settings block on the same seam its own blocks are stacked on.
-              padding: const EdgeInsets.fromLTRB(0, _railPitch, 10, 0),
-              child: buildFooterNav(
-                context,
-                ChromeFooterNavSpec(
-                  items: spec.items,
-                  centreAction: spec.centreAction,
-                  settings: spec.settings,
+    // Read *here*, above the `Scaffold` this returns, so whether a `Scaffold`
+    // republishes its body's padding never has to be assumed.
+    final insets = MediaQuery.paddingOf(context);
+    return LcarsBleedScope(
+      bleed: EdgeInsets.only(top: insets.top, bottom: insets.bottom),
+      child: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: lcarsSystemBars,
+        child: Scaffold(
+          backgroundColor: t.canvas,
+          body: Padding(
+            // Held, not bled: a cutout is an occlusion, not a bezel to decorate.
+            // A sub-900dp phone stays on this shell in landscape
+            // (`adaptive_shell.dart:25`), where the notch lands on the rail's edge.
+            padding: EdgeInsets.only(left: insets.left, right: insets.right),
+            child: Column(
+              children: [
+                Expanded(child: spec.body),
+                Padding(
+                  // Top gap at the rail's pitch, so the rail's filler meets the
+                  // settings block on the same seam its own blocks are stacked on.
+                  padding: const EdgeInsets.only(top: _railPitch),
+                  // A `Builder`, because `context` here is the one this method was
+                  // called with — above the scope it is returning. The footer has
+                  // to read the bleed from *below* it, exactly as the body's own
+                  // blocks do.
+                  child: Builder(
+                    builder: (context) => buildFooterNav(
+                      context,
+                      ChromeFooterNavSpec(
+                        items: spec.items,
+                        centreAction: spec.centreAction,
+                        settings: spec.settings,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -733,13 +1016,22 @@ class LcarsChrome extends Chrome {
   @override
   Widget buildViewRail(BuildContext context, ChromeViewRailSpec spec) {
     final t = CommanderTokens.of(context);
+    // Top only: this rail's bottom is the shell's footer, which bleeds itself.
+    final bleed = EdgeInsets.only(top: LcarsBleedScope.of(context).top);
+    // The frame's top run is amber on Fleet and lilac on Activity, per view
+    // rather than per theme — the deck's 4a portrait pair and 4b's L1-L3
+    // against L4. `style` already draws that line, so the accent reads off it.
+    final accent = spec.style == ChromeViewRailStyle.branded
+        ? t.primary
+        : t.nav;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _viewRail(spec, t),
-        const SizedBox(width: _railPitch),
-        Expanded(child: _viewContent(context, spec, t)),
-        const SizedBox(width: 10),
+        _viewRail(context, spec, t, accent, bleed),
+        _railGutter(bleed, accent),
+        // Flush right, like [buildPage] and the shell's footer — see
+        // [buildShell] for why the 10dp margin all three used to carry went.
+        Expanded(child: _viewContent(context, spec, t, accent, bleed)),
       ],
     );
   }
@@ -750,13 +1042,23 @@ class LcarsChrome extends Chrome {
   /// No closing elbow, unlike [_rail]: this rail is only ever drawn inside the
   /// phone shell, whose footer carries the frame's bottom-left corner — see
   /// [buildFooterNav]. Closing it here would bracket the screen twice.
-  Widget _viewRail(ChromeViewRailSpec spec, CommanderTokens t) {
+  ///
+  /// [bleed] goes to the identifier block alone — the rest of the column is
+  /// interior, below the status bar the identifier bleeds into.
+  Widget _viewRail(
+    BuildContext context,
+    ChromeViewRailSpec spec,
+    CommanderTokens t,
+    Color accent,
+    EdgeInsets bleed,
+  ) {
     final slices = spec.slices;
     final note = slices?.note;
     final blocks = <Widget>[
       ChromeElbow(
-        color: t.nav,
-        corner: ElbowCorner.topLeft,
+        bleed: bleed,
+        color: accent,
+        corner: _openingCorner(context),
         height: 74,
         label: spec.code,
         labelAlignment: Alignment.bottomRight,
@@ -765,7 +1067,10 @@ class LcarsChrome extends Chrome {
       ),
       for (final slice in slices?.segments ?? const <ChromeSegment>[])
         ChromeElbow(
-          color: slice.selected ? t.primary : t.borderSubtle,
+          // A rail's selected block is lilac — see the note in
+          // `chrome_wide.dart`'s `_nav`. The deck's portrait fleet rail shows
+          // ALL selected as `#cc99cc` over RECENT's `#3a2f45`.
+          color: slice.selected ? t.nav : t.borderSubtle,
           labelColor: slice.selected ? t.canvas : t.nav,
           height: _railSliceHeight,
           label: t.caseLabel(slice.label),
@@ -775,7 +1080,7 @@ class LcarsChrome extends Chrome {
       // It carries the mode note when there is one — an inert label on an inert
       // block, which is where LCARS puts a readout.
       if (note == null)
-        ChromeElbow(color: t.borderSubtle, height: 16)
+        ChromeElbow(color: t.border, height: 16)
       else
         ChromeElbow(
           color: t.borderSubtle,
@@ -790,17 +1095,22 @@ class LcarsChrome extends Chrome {
 
   /// The content column: the elbow cap closing the rail's bracket, the title and
   /// its subtitle, the filter field, then the body.
+  ///
+  /// [bleed] goes to the cap alone, mirroring [_viewRail]'s identifier block:
+  /// the two are the run's top corners, and everything below is interior.
   Widget _viewContent(
     BuildContext context,
     ChromeViewRailSpec spec,
     CommanderTokens t,
+    Color accent,
+    EdgeInsets bleed,
   ) {
     final subtitle = spec.subtitle;
     final filter = spec.filter;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ChromeElbowCap(color: t.nav),
+        ChromeElbowCap(bleed: bleed, color: accent),
         const SizedBox(height: 7),
         MediaQuery.withClampedTextScaling(
           maxScaleFactor: 1.5,
@@ -847,9 +1157,6 @@ class LcarsChrome extends Chrome {
   Widget buildWindowBar(BuildContext context, ChromeWindowBarSpec spec) {
     final t = CommanderTokens.of(context);
     final controls = windowBarControls(spec);
-    // The name cap, the filler and each control are one run, so only the two
-    // outer ends round — the bar reads as a single bracket across the window.
-    final count = controls.length + 2;
     return Padding(
       padding: const EdgeInsets.only(bottom: _seam),
       child: Row(
@@ -861,16 +1168,34 @@ class LcarsChrome extends Chrome {
               spec,
               Row(
                 children: [
-                  ClipRRect(
-                    borderRadius: _runEnds(0, count, t.pillRadius),
-                    child: ChromeElbow(
-                      color: t.nav,
-                      labelColor: t.canvas,
-                      height: _windowBarHeight,
-                      label: t.caseLabel(spec.title),
-                      labelAlignment: Alignment.center,
-                      labelSize: 12,
-                      labelWeight: FontWeight.w700,
+                  // The bracket's corner, and nothing else. Drawn to the nav
+                  // column's width so the amber runs straight down into the
+                  // block below it rather than stepping sideways a row in, and
+                  // unlabelled: the corner is a shape, not a caption, and the
+                  // window's name is already its title in the task switcher.
+                  SizedBox(
+                    width: kLcarsNavWidth,
+                    child: ClipRRect(
+                      // Square below, so the bracket flows down into the rail
+                      // instead of closing itself off — and the rail must not
+                      // turn a second corner, see [LcarsCornerScope].
+                      borderRadius: BorderRadius.only(
+                        topLeft: Radius.circular(t.elbowRadius),
+                      ),
+                      child: ChromeElbow(
+                        // Deliberately not the frame's own accent. The block
+                        // directly below this one is the rail's amber opening
+                        // block at the same width, and painting the corner
+                        // amber too made the two read as a single tall column
+                        // split by a hairline rather than as window chrome
+                        // above an app frame. Rendered against the frame in
+                        // amber, lilac, periwinkle and both inert fills before
+                        // choosing: the dark ones lose the corner into the
+                        // bar's own filler, and lilac is the frame's other
+                        // accent, so it says "frame" too.
+                        color: t.info,
+                        height: _windowBarHeight,
+                      ),
                     ),
                   ),
                   const SizedBox(width: _seam),
@@ -891,7 +1216,10 @@ class LcarsChrome extends Chrome {
             Tooltip(
               message: controls[i].label,
               child: ClipRRect(
-                borderRadius: _runEnds(i + 2, count, t.pillRadius),
+                // Square at the trailing end: that edge is the window's, and
+                // the frame runs flush to it everywhere else too. A pill there
+                // left the run stopping short of its own corner.
+                borderRadius: BorderRadius.zero,
                 child: ChromeElbow(
                   color: controls[i].destructive ? t.danger : t.borderSubtle,
                   labelColor: controls[i].destructive ? t.canvas : t.nav,
@@ -973,6 +1301,18 @@ const _segmentHeight = 30.0;
 /// Bar block height. The deck's `padding:11px 0` on 13px type comes to ~37px;
 /// rounded down, and comfortably clear of ChromeElbow's clamped 1.3× scaler.
 const _barHeight = 36.0;
+
+/// A bar label's size and weight. Named because `_foldRun` has to lay the same
+/// text out to predict a block's width — see [LcarsChrome.buildButtonBar].
+/// One line of a folded button bar: its blocks and the natural width each
+/// wants. The widths travel with the blocks because both the fold decision and
+/// the proportional stretch that follows need them, and measuring twice is how
+/// the two would come to disagree. Empty for an unfoldable run — see
+/// [LcarsChrome.buildButtonBar]'s `expand` guard.
+typedef _BarLine = ({List<ChromeBarButton> buttons, List<double> widths});
+
+const _barLabelSize = 13.0;
+const _barLabelWeight = FontWeight.w700;
 
 /// Footer block height. The deck's is ~33px, but a 13px destination label at
 /// ChromeElbow's clamped 1.3× text scaler leaves that barely any room, so the

@@ -1,71 +1,28 @@
-import 'dart:ui' as ui;
-
 import 'package:claude_commander_client/chrome/chrome.dart';
 import 'package:claude_commander_client/chrome/chrome_forms.dart';
 import 'package:claude_commander_client/chrome/lcars/elbow.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/golden.dart';
+import '../support/ink.dart';
 
-/// The LCARS footer's centre (create) block, measured in **painted pixels**.
-///
-/// Pixels rather than widget boxes, because the defect this pins was invisible
-/// to box geometry. The block used to draw a `Text('+')`, and a text glyph
-/// centres its *line box*, not its ink: '+' sits above the baseline, so the box
-/// could be dead centre while the cross painted ~2px low. The horizontal half of
-/// the same bug came from [ChromeElbow]'s inboard padding bias (6 left, 9
-/// right), which is right for a rail's right-aligned labels and wrong for a
-/// centred one.
+/// The LCARS footer's centre (create) block, measured in **painted pixels** —
+/// see [inkCentre] for what that buys and which defect it pins. The bled twin
+/// of this measurement lives in `phone_shell_test.dart`, against the same
+/// helper.
 ///
 /// This test is also the receipt for the claim that a Material `Icon` centres
 /// its glyph in its box — nothing in this repo can assert that about the icon
 /// font except a measurement of what it actually paints.
 void main() {
-  const boundary = ValueKey('footer-boundary');
-
-  /// The ink centroid of [rect] (in the surface's logical pixels), weighted by
-  /// how far each pixel is from [fill].
-  ///
-  /// A centroid rather than a bounding box: both are exact for a symmetric
-  /// glyph, but antialiased edge pixels perturb a bbox asymmetrically and cancel
-  /// out in a weighted mean.
-  Future<Offset> inkCentre(WidgetTester tester, Rect rect, Color fill) async {
-    final image = await tester.runAsync(
-      () => (tester.renderObject(find.byKey(boundary)) as RenderRepaintBoundary)
-          .toImage(),
-    );
-    final data = await tester.runAsync(
-      () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
-    );
-    addTearDown(image!.dispose);
-
-    var weight = 0.0, sx = 0.0, sy = 0.0;
-    for (var y = rect.top.ceil(); y < rect.bottom.floor(); y++) {
-      for (var x = rect.left.ceil(); x < rect.right.floor(); x++) {
-        final i = (y * image.width + x) * 4;
-        final w =
-            ((data!.getUint8(i) - (fill.r * 255)).abs() +
-                (data.getUint8(i + 1) - (fill.g * 255)).abs() +
-                (data.getUint8(i + 2) - (fill.b * 255)).abs()) /
-            765;
-        weight += w;
-        sx += w * (x + 0.5);
-        sy += w * (y + 0.5);
-      }
-    }
-    expect(weight, greaterThan(1), reason: 'the block painted no glyph at all');
-    return Offset(sx / weight, sy / weight);
-  }
-
   Future<void> pumpFooter(WidgetTester tester) => pumpGolden(
     tester,
     tokens: lcarsTokens,
     size: const Size(300, 60),
     child: RepaintBoundary(
-      key: boundary,
+      key: inkBoundary,
       child: ChromeFooterNav(
         ChromeFooterNavSpec(
           items: [
@@ -110,17 +67,16 @@ void main() {
     final blocks = find.byType(ChromeElbow);
     expect(blocks, findsNWidgets(3));
     final rect = tester.getRect(blocks.at(1));
-    final origin = tester.getTopLeft(find.byKey(boundary));
 
     final centre = await inkCentre(
       tester,
       // Inset by a pixel: the block's own edges may land on a fraction and
       // antialias against the seam either side of it.
-      rect.shift(-origin).deflate(1),
+      rect.deflate(1),
       lcarsTokens.attention,
     );
 
-    final expected = rect.shift(-origin).center;
+    final expected = rect.center;
     expect(
       (centre.dx - expected.dx).abs(),
       lessThan(1),
