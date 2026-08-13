@@ -2762,20 +2762,20 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         .into());
     }
     // An initial prompt is passed as a positional argument, which only
-    // harnesses that accept one (claude, codex) understand.
+    // harnesses that accept one (claude, codex, omp) understand.
     if opts.initial_prompt.is_some() && !kind.accepts_positional_prompt() {
         return Err(SessionError::InvalidProgram(format!(
             "--initial-prompt is only supported for programs that accept a \
-             positional prompt, e.g. claude or codex (got {:?})",
+             positional prompt, e.g. claude, codex, or omp (got {:?})",
             resolved_program
         ))
         .into());
     }
-    // `--model` is understood by Claude, Codex, and OpenCode.
+    // `--model` is understood by Claude, Codex, OpenCode, and omp.
     if opts.model.is_some() && !kind.supports_model_flag() {
         return Err(SessionError::InvalidProgram(format!(
             "--model is only supported for programs that accept it, e.g. \
-             claude, codex, or opencode (got {:?})",
+             claude, codex, opencode, or omp (got {:?})",
             resolved_program
         ))
         .into());

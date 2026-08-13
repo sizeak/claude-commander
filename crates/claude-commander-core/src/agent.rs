@@ -1,9 +1,9 @@
 //! Agent harness abstraction.
 //!
 //! Claude Commander launches different agent CLIs (Claude Code, OpenAI Codex,
-//! OpenCode) inside tmux sessions. Each harness differs in how it is resumed,
-//! whether it accepts a positional prompt, and what it renders in the tmux pane
-//! while working or waiting for the user.
+//! OpenCode, Oh My Pi) inside tmux sessions. Each harness differs in how it is
+//! resumed, whether it accepts a positional prompt, and what it renders in the
+//! tmux pane while working or waiting for the user.
 //!
 //! [`AgentKind`] is *derived* from the persisted `program` command string (never
 //! stored separately) and owns this per-harness behaviour, so the divergences
@@ -65,6 +65,47 @@ static OPENCODE_COMPLETED_TURN_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
+
+/// Oh My Pi renders one status row while a turn is in flight —
+/// `⠴ Working… ⟦esc⟧`, or the running tool's progress message in place of
+/// `Working…` (`⠇ Read existing glTF exporter patterns ⟨esc⟩`). Neither the
+/// spinner nor the message is matchable (the message is arbitrary tool text),
+/// but the trailing interrupt hint is: it is rendered only on that row, and the
+/// row is dropped the moment the turn ends.
+///
+/// The bracket pair is glyph-mode dependent, so all three of omp's modes are
+/// accepted — Unicode `⟦⟧` (U+27E6/U+27E7), Nerd Font `⟨⟩` (U+27E8/U+27E9) and
+/// ASCII `[]`. The hint always ends its row, which is what keeps the ASCII form
+/// from matching `[esc]` occurring mid-line in transcript prose or tool output.
+///
+/// Receipts (omp 17.2.15): the Unicode form captured from a local pane driven to
+/// a live turn against a stalling mock endpoint; the Nerd Font form from the
+/// user's working session on another host. The bracket set is omp's own
+/// `format.bracketLeft`/`format.bracketRight` theme keys, whose three values are
+/// exactly those pairs.
+static OMP_WORKING_HINT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(?:\u{27E6}esc\u{27E7}|\u{27E8}esc\u{27E9}|\[esc\])\s*$").expect("valid regex")
+});
+
+/// Pane-content substrings Oh My Pi renders in an overlay that is blocking on a
+/// user decision. The tool-approval options cover a session whose title state
+/// indicator has been turned off; the plan-review options cover the case the
+/// title cannot report at all, because the turn ends *underneath* an open plan
+/// review and drives the title to `idle` — see [`omp_title_state`] for the
+/// sequencing and its receipt.
+///
+/// Receipt (omp 17.2.15): both option sets are verbatim from omp's own bundle —
+/// the approval options are its `allow_once`/`allow_always` option table, and
+/// the plan-review options are the literal argument list passed to
+/// `showPlanReview`. Neither survives the overlay being dismissed.
+const OMP_ATTENTION_MARKERS: [&str; 4] = [
+    // Tool-approval overlay options.
+    "Allow once",
+    "Always allow",
+    // Plan-review overlay options.
+    "Approve and execute",
+    "Refine plan",
+];
 
 /// Strip ANSI escape sequences from a string.
 pub fn strip_ansi(s: &str) -> String {
@@ -165,6 +206,8 @@ pub enum AgentKind {
     Codex,
     /// OpenCode TUI (`opencode`).
     OpenCode,
+    /// Oh My Pi (`omp`).
+    Omp,
     /// Any other program (a bare shell, an unrecognised agent, …). We launch it
     /// but make no assumptions about its flags or TUI output.
     Unknown,
@@ -186,6 +229,8 @@ impl AgentKind {
             Self::Codex
         } else if name.eq_ignore_ascii_case("opencode") {
             Self::OpenCode
+        } else if name.eq_ignore_ascii_case("omp") {
+            Self::Omp
         } else {
             Self::Unknown
         }
@@ -198,18 +243,24 @@ impl AgentKind {
     }
 
     /// Whether the harness accepts a single positional prompt argument at
-    /// launch. Both Claude and Codex do (`claude '<prompt>'`,
-    /// `codex '<prompt>'`); an unknown program (e.g. a bare shell) does not, so
-    /// we must not append a prompt it would mis-parse.
+    /// launch. Claude, Codex and Oh My Pi do (`claude '<prompt>'`,
+    /// `codex '<prompt>'`, `omp '<prompt>'`); an unknown program (e.g. a bare
+    /// shell) does not, so we must not append a prompt it would mis-parse.
+    ///
+    /// Receipt for omp (17.2.15): its `--help` documents a positional
+    /// `MESSAGES` argument and the example `omp "List all .ts files in src/"`.
     pub fn accepts_positional_prompt(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
+        matches!(self, Self::Claude | Self::Codex | Self::Omp)
     }
 
     /// Whether this harness accepts a `--model <name>` launch flag. Claude,
-    /// Codex, and OpenCode support it; an unknown program's flags are
+    /// Codex, OpenCode and Oh My Pi support it; an unknown program's flags are
     /// unconstrained.
     pub fn supports_model_flag(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex | Self::OpenCode)
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::OpenCode | Self::Omp
+        )
     }
 
     /// Delay to wait between injecting prompt *text* into the pane and sending
@@ -224,6 +275,11 @@ impl AgentKind {
     /// carriage-return regardless of timing, so it needs no delay. (Verified
     /// against codex-cli 0.144.3: a coalesced text+Enter write never submitted
     /// across 5/5 trials; a ~200ms gap submitted 15/15.)
+    ///
+    /// Oh My Pi needs no delay either, verified rather than assumed: a single
+    /// `send-keys '<text>' Enter` — one write carrying both — submitted 3/3
+    /// against omp 17.2.15, each time leaving an empty composer and dispatching
+    /// the turn.
     pub fn submit_key_delay(self) -> Option<Duration> {
         match self {
             Self::Codex => Some(Duration::from_millis(250)),
@@ -236,8 +292,13 @@ impl AgentKind {
     /// has no resume mechanism we can drive (so the caller launches fresh).
     ///
     /// Claude appends a `--resume` flag; Codex uses a `resume --last` subcommand
-    /// that must follow the binary, before its other flags; OpenCode appends
-    /// `--continue`.
+    /// that must follow the binary, before its other flags; OpenCode and Oh My
+    /// Pi append `--continue`.
+    ///
+    /// Receipt for omp (17.2.15): `--help` documents `-c, --continue  Continue
+    /// previous session` and the example `omp --continue "What did we
+    /// discuss?"`. Its `-r, --resume` takes an optional session id and opens a
+    /// picker when given none, so it is not the flag to drive unattended.
     pub fn resume_command(self, program: &str) -> Option<String> {
         let mut parts = program.splitn(2, char::is_whitespace);
         let binary = parts.next().unwrap_or("");
@@ -251,7 +312,7 @@ impl AgentKind {
                 Some(r) => format!("{binary} resume --last {r}"),
                 None => format!("{binary} resume --last"),
             }),
-            Self::OpenCode => Some(match rest {
+            Self::OpenCode | Self::Omp => Some(match rest {
                 Some(r) => format!("{binary} {r} --continue"),
                 None => format!("{binary} --continue"),
             }),
@@ -291,8 +352,24 @@ impl AgentKind {
             {
                 Some(AgentState::Working)
             }
-            // OpenCode's title is always "OpenCode" regardless of state, so
-            // title alone is not conclusive — fall through to content.
+            Self::Omp => omp_title_state(title),
+            // OpenCode's title reports which *view* it is showing, never the
+            // agent state: `OC | <session title>` on a session that has been
+            // titled (truncated to 40 chars), `OC | <plugin id>` on a plugin
+            // view, and a bare `OpenCode` on the home view or before the
+            // session has a title. It can also be neither: setting
+            // `OPENCODE_DISABLE_TERMINAL_TITLE` returns from the effect before
+            // any title is set, leaving whatever the pane already had, and the
+            // in-app toggle clears it to the empty string. None of those
+            // distinguish Working from Idle, so fall through to content.
+            //
+            // Receipt (opencode 1.17.15): those branches are the entire body of
+            // the one reactive effect that composes a title, and it reads only
+            // the current route and the session's own title — every other
+            // `setTerminalTitle` in the bundle is opentui plumbing, the
+            // destroy-time clear, or that toggle. Live confirmation: a fresh
+            // untitled session reports `OpenCode`, while a titled session on
+            // 1.18.11 reports `OC | PLAN.md review`.
             _ => None,
         }
     }
@@ -308,6 +385,7 @@ impl AgentKind {
             Self::Claude => claude_content_state(&content),
             Self::Codex => codex_content_state(&content),
             Self::OpenCode => opencode_content_state(&content),
+            Self::Omp => omp_content_state(&content),
             Self::Unknown => AgentState::Idle,
         }
     }
@@ -393,6 +471,109 @@ fn opencode_content_state(content: &str) -> AgentState {
     AgentState::Unknown
 }
 
+/// Oh My Pi's title is `π <state glyph> <label>`, where the label is the
+/// auto-generated session title (falling back to the working directory's
+/// basename) and the state glyph is one of exactly four values: a braille
+/// spinner frame while a turn is in flight, `!` while blocked on the user, `>`
+/// when idle, or `:` in place of the spinner on Windows. With the state
+/// indicator turned off the title is `π: <label>` instead, carrying no state.
+///
+/// Receipt (omp 17.2.15): the glyph set and the `π <glyph> <label>` assembly are
+/// from omp's own title builder, whose state is driven by three transitions —
+/// `working` when a turn starts, `attention` when a tool call needs approval or
+/// the `ask` tool runs, `idle` when a terminal turn ends. Live confirmations:
+/// `π ⠼ omp-support-5e59cfe0` cycling the documented ten frames against a
+/// stalling mock endpoint, and `π > omp-support-5e59cfe0` at an idle composer.
+///
+/// The title is *not* subject to omp's glyph-mode setting, unlike its pane
+/// content: driven to ASCII glyph mode — where the same pane's status row
+/// degrades to `| Working… [esc]` and its statusline brand to a literal `pi` —
+/// the title still read `π > …` idle and `π ⠼ …` working.
+///
+/// The idle `>` is deliberately *not* treated as conclusive: it returns `None`
+/// rather than `Some(Idle)`, because omp ends the turn *before* raising its
+/// full-screen plan review — so an idle title can sit above an overlay that is
+/// waiting on the user. Falling through lets [`omp_content_state`] see the
+/// overlay. Receipt (omp 17.2.15): `handlePlanApproval` awaits an internal
+/// `session.abort()` — bracketed by `markPlanInternalAbortPending` /
+/// `clearPlanInternalAbortPending`, and called out in omp's own changelog as
+/// the "internal approval abort" — which forcibly ends the turn, and only then
+/// calls `showPlanReview`. The idle title follows from the terminal turn-end
+/// event. The cost of falling through is one extra `capture-pane` per fresh
+/// detection, the same price OpenCode already pays; note the hibernation loop
+/// and several `CommanderService` paths construct their detector with a
+/// `Duration::ZERO` cache deliberately, so they pay it on every tick.
+///
+/// The flattened `_` in the glyph position is read as the spinner. tmux replaces
+/// every non-ASCII character of a pane title with `_` when its server's locale
+/// is not UTF-8, so a working omp session reports `_ _ <label>` — brand and
+/// spinner both flattened — which is what the author's own sessions look like.
+/// The inference is exact rather than a guess about tmux: the glyph position
+/// holds one of exactly four values and three of them (`!`, `>`, `:`) are ASCII
+/// that passes through untouched, so a replaced glyph can only have been a
+/// spinner frame. It cannot mask a pending prompt either, since `attention`
+/// renders the ASCII `!` and plan review leaves the ASCII `>`. Should tmux ever
+/// substitute something else, this arm simply stops matching and the content
+/// fallback covers it.
+///
+/// Receipts: flattening reproduced on tmux 3.6a — an identical `printf` of
+/// `π ⠦ Probe` round-tripped byte-for-byte under `LANG=en_GB.UTF-8` but came
+/// back `_ _ Probe` under `LANG=C` and under an unset locale. Only the *title*
+/// is affected; pane cells keep their UTF-8 either way, confirmed on a
+/// POSIX-locale server whose `capture-pane` returned `⠇`/`⟨esc⟩` intact while
+/// that same pane's title read `_ _ <label>`.
+fn omp_title_state(title: &str) -> Option<AgentState> {
+    let mut tokens = title.split_whitespace();
+    // The brand prefix is a single character (`π`, or `_` once tmux has
+    // flattened it). `π:` — the state-indicator-off form — is two, and so
+    // declines here, as does any title an extension has overridden wholesale.
+    let brand = tokens.next()?;
+    if brand.chars().count() != 1 {
+        return None;
+    }
+    match tokens.next()? {
+        "!" => Some(AgentState::WaitingForInput),
+        ":" => Some(AgentState::Working),
+        glyph if has_braille_spinner(glyph) => Some(AgentState::Working),
+        // The spinner is the glyph position's only non-ASCII inhabitant, so a
+        // glyph tmux has flattened to `_` was one.
+        "_" => Some(AgentState::Working),
+        _ => None,
+    }
+}
+
+/// Oh My Pi content patterns. A blocking overlay's options are rendered in the
+/// visible pane, and the in-flight turn's status row carries the interrupt hint;
+/// waiting takes precedence over working, as it does for the other harnesses.
+///
+/// Unlike OpenCode this falls back to `Idle` rather than `Unknown`, because omp
+/// *does* have a durable idle signal: the status row exists only while a turn is
+/// in flight and is dropped when it ends (verified — an idle pane carries no
+/// interrupt hint at all). So "no working hint and no overlay" is a positive
+/// idle reading rather than an absence of information.
+///
+/// The attention markers are ordinary English phrases, so a session whose pane
+/// happens to *display* one — an agent reading this very file, say — reads
+/// `WaitingForInput` while it is merely working. That is the safe direction (a
+/// spurious needs-attention flag holds hibernation off; it can never kill a live
+/// session), and Codex's `"needs your approval."` shares the weakness. Where the
+/// state indicator is on, a real approval also flips the title to `!` and this
+/// fallback is never reached for it — but with the indicator off (`π: <label>`)
+/// these markers are the *only* approval signal, which is what they are here
+/// for, so they cannot be tightened away.
+fn omp_content_state(content: &str) -> AgentState {
+    if OMP_ATTENTION_MARKERS
+        .iter()
+        .any(|marker| content.contains(marker))
+    {
+        return AgentState::WaitingForInput;
+    }
+    if OMP_WORKING_HINT_RE.is_match(content) {
+        return AgentState::Working;
+    }
+    AgentState::Idle
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +621,14 @@ mod tests {
     }
 
     #[test]
+    fn from_program_detects_omp() {
+        assert_eq!(AgentKind::from_program("omp"), AgentKind::Omp);
+        assert_eq!(AgentKind::from_program("omp --model opus"), AgentKind::Omp);
+        assert_eq!(AgentKind::from_program("OMP"), AgentKind::Omp);
+        assert_eq!(AgentKind::from_program("/usr/bin/omp"), AgentKind::Omp);
+    }
+
+    #[test]
     fn from_program_unknown_for_others() {
         assert_eq!(AgentKind::from_program("bash"), AgentKind::Unknown);
         assert_eq!(AgentKind::from_program(""), AgentKind::Unknown);
@@ -447,6 +636,8 @@ mod tests {
         assert_eq!(AgentKind::from_program("claude-code"), AgentKind::Unknown);
         assert_eq!(AgentKind::from_program("codex-cli"), AgentKind::Unknown);
         assert_eq!(AgentKind::from_program("opencode-ai"), AgentKind::Unknown);
+        assert_eq!(AgentKind::from_program("ompx"), AgentKind::Unknown);
+        assert_eq!(AgentKind::from_program("omp-wrapper"), AgentKind::Unknown);
     }
 
     // --- capability flags ---
@@ -458,6 +649,8 @@ mod tests {
         // OpenCode's plain `opencode` does not accept a positional prompt;
         // prompts are passed via `opencode run [message..]` instead.
         assert!(!AgentKind::OpenCode.accepts_positional_prompt());
+        // omp takes a positional `MESSAGES` argument, like Claude and Codex.
+        assert!(AgentKind::Omp.accepts_positional_prompt());
         assert!(!AgentKind::Unknown.accepts_positional_prompt());
     }
 
@@ -466,6 +659,7 @@ mod tests {
         assert!(AgentKind::Claude.is_claude());
         assert!(!AgentKind::Codex.is_claude());
         assert!(!AgentKind::OpenCode.is_claude());
+        assert!(!AgentKind::Omp.is_claude());
         assert!(!AgentKind::Unknown.is_claude());
     }
 
@@ -474,6 +668,7 @@ mod tests {
         assert!(AgentKind::Claude.supports_model_flag());
         assert!(AgentKind::Codex.supports_model_flag());
         assert!(AgentKind::OpenCode.supports_model_flag());
+        assert!(AgentKind::Omp.supports_model_flag());
         assert!(!AgentKind::Unknown.supports_model_flag());
     }
 
@@ -489,6 +684,7 @@ mod tests {
         );
         assert_eq!(AgentKind::Claude.submit_key_delay(), None);
         assert_eq!(AgentKind::OpenCode.submit_key_delay(), None);
+        assert_eq!(AgentKind::Omp.submit_key_delay(), None);
         assert_eq!(AgentKind::Unknown.submit_key_delay(), None);
     }
 
@@ -534,6 +730,18 @@ mod tests {
         assert_eq!(
             AgentKind::OpenCode.resume_command("opencode --auto"),
             Some("opencode --auto --continue".to_string())
+        );
+    }
+
+    #[test]
+    fn resume_command_omp_appends_continue() {
+        assert_eq!(
+            AgentKind::Omp.resume_command("omp"),
+            Some("omp --continue".to_string())
+        );
+        assert_eq!(
+            AgentKind::Omp.resume_command("omp --model opus"),
+            Some("omp --model opus --continue".to_string())
         );
     }
 
@@ -622,6 +830,135 @@ mod tests {
         );
     }
 
+    // --- title_state: omp ---
+
+    #[test]
+    fn title_state_omp_working_across_every_spinner_frame() {
+        // omp's ten braille frames, verbatim from its title builder and
+        // observed cycling in a live pane. Every one must read Working, or the
+        // state flickers between Working and Idle at 80ms.
+        for frame in [
+            '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}',
+            '\u{2827}', '\u{2807}', '\u{280F}',
+        ] {
+            let title = format!("\u{3C0} {frame} omp-support-5e59cfe0");
+            assert_eq!(
+                AgentKind::Omp.title_state(&title),
+                Some(AgentState::Working),
+                "frame {frame:?} should signal Working"
+            );
+        }
+    }
+
+    #[test]
+    fn title_state_omp_attention_is_waiting() {
+        // `!` replaces the spinner while omp is blocked on a tool approval or
+        // the `ask` tool. Captured shape: `π ! <session title>`.
+        assert_eq!(
+            AgentKind::Omp.title_state("\u{3C0} ! Promote model loaders to api"),
+            Some(AgentState::WaitingForInput)
+        );
+    }
+
+    #[test]
+    fn title_state_omp_windows_colon_glyph_is_working() {
+        // On Windows omp substitutes a static `:` for the animated spinner.
+        assert_eq!(
+            AgentKind::Omp.title_state("\u{3C0} : omp-support"),
+            Some(AgentState::Working)
+        );
+    }
+
+    #[test]
+    fn title_state_omp_idle_glyph_falls_through_to_content() {
+        // `>` is omp's idle glyph, but it is deliberately inconclusive: omp ends
+        // the turn before raising its full-screen plan review, so an idle title
+        // can sit above an overlay that is waiting on the user. Returning
+        // `Some(Idle)` here would skip the content capture that spots it.
+        assert_eq!(
+            AgentKind::Omp.title_state("\u{3C0} > omp-support-5e59cfe0"),
+            None
+        );
+    }
+
+    #[test]
+    fn title_state_omp_ignores_punctuation_in_the_label() {
+        // Only the glyph *position* may be read. A session title ending in `!`
+        // under the idle glyph must not be mistaken for the attention glyph —
+        // matching `!` anywhere in the title would report WaitingForInput for an
+        // idle session forever.
+        assert_eq!(
+            AgentKind::Omp.title_state("\u{3C0} > Fix the parser!"),
+            None
+        );
+        // And a label that merely starts with `!` sits in the label position, so
+        // it cannot reach the glyph match either.
+        assert_eq!(
+            AgentKind::Omp.title_state("\u{3C0} > !important cleanup"),
+            None
+        );
+    }
+
+    #[test]
+    fn title_state_omp_state_indicator_disabled_is_inconclusive() {
+        // With the state indicator off omp renders `π: <label>` — the brand and
+        // a colon as one token, carrying no state. It must not be read as the
+        // Windows `:` working glyph.
+        assert_eq!(
+            AgentKind::Omp.title_state("\u{3C0}: omp-support-5e59cfe0"),
+            None
+        );
+    }
+
+    #[test]
+    fn title_state_omp_survives_tmux_flattening_the_brand() {
+        // tmux replaces non-ASCII in a pane title with `_` when its server's
+        // locale is not UTF-8 (reproduced on tmux 3.6a under `LANG=C`), so the
+        // `π` brand can arrive as `_`. The ASCII glyphs still land, and this is
+        // the shape the user's own working session reports.
+        assert_eq!(
+            AgentKind::Omp.title_state("_ ! Promote model loaders to api"),
+            Some(AgentState::WaitingForInput)
+        );
+        // The spinner flattens to `_` too, and is still read as Working: the
+        // glyph position holds one of exactly four values, and the other three
+        // are ASCII that tmux passes through, so a replaced glyph can only have
+        // been a spinner frame. Without this, every session on a non-UTF-8 tmux
+        // server — which is what the author's own are — loses the title signal
+        // for Working entirely and rests on the content fallback alone.
+        assert_eq!(
+            AgentKind::Omp.title_state("_ _ Promote model loaders to api"),
+            Some(AgentState::Working)
+        );
+        // The flattened brand alone is not enough: an idle or attention glyph
+        // still wins, so the inference cannot mask a pending prompt.
+        assert_eq!(
+            AgentKind::Omp.title_state("_ > Promote model loaders"),
+            None
+        );
+    }
+
+    #[test]
+    fn title_state_omp_needs_both_a_brand_and_a_glyph() {
+        assert_eq!(AgentKind::Omp.title_state(""), None);
+        assert_eq!(AgentKind::Omp.title_state("\u{3C0}"), None);
+        // A shell prompt left behind after omp exits must not parse as a state.
+        assert_eq!(AgentKind::Omp.title_state("si@togusa:~/Projects"), None);
+        // Another harness's title must not either.
+        assert_eq!(
+            AgentKind::Omp.title_state("\u{2733} extract-tui-crate"),
+            None
+        );
+    }
+
+    #[test]
+    fn title_state_omp_glyphs_are_inert_for_other_harnesses() {
+        // The omp parser is reached only via the Omp arm — `!` and `>` carry no
+        // meaning in Claude's or Codex's titles.
+        assert_eq!(AgentKind::Claude.title_state("\u{3C0} ! working"), None);
+        assert_eq!(AgentKind::Codex.title_state("\u{3C0} > my-project"), None);
+    }
+
     #[test]
     fn title_state_inconclusive_returns_none() {
         assert_eq!(AgentKind::Claude.title_state("✳ Claude Code"), None);
@@ -631,9 +968,18 @@ mod tests {
         // trip its detector via the title path.
         assert_eq!(AgentKind::Claude.title_state("Action Required"), None);
         assert_eq!(AgentKind::Unknown.title_state("⠋ working"), None);
-        // OpenCode's title is always "OpenCode" regardless of state, so title
-        // alone is not conclusive.
+        // OpenCode's title names the view it is showing, not the agent state,
+        // so none of its forms is conclusive. The bare `OpenCode` is only what
+        // the home view and a not-yet-titled session render — a session that
+        // has been titled reports `OC | <session title>`, which is what a real
+        // pane is showing almost all of the time. Asserting the bare form alone
+        // is what let this arm be documented as "always `OpenCode`".
         assert_eq!(AgentKind::OpenCode.title_state("OpenCode"), None);
+        assert_eq!(AgentKind::OpenCode.title_state("OC | PLAN.md review"), None);
+        assert_eq!(AgentKind::OpenCode.title_state("OC | my-plugin"), None);
+        // Switched off (`OPENCODE_DISABLE_TERMINAL_TITLE` or the in-app
+        // toggle), the title is cleared to the empty string.
+        assert_eq!(AgentKind::OpenCode.title_state(""), None);
     }
 
     // --- content_state: Claude ---
@@ -974,6 +1320,162 @@ mod tests {
         assert_eq!(
             AgentKind::OpenCode.content_state("\x1B[1mesc interrupt\x1B[0m  ctrl+p commands\n"),
             AgentState::Working
+        );
+    }
+
+    // --- content_state: omp ---
+
+    #[test]
+    fn omp_content_working_from_interrupt_hint_in_every_glyph_mode() {
+        // All three captured verbatim from live working panes (omp 17.2.15).
+        // Unicode is the default glyph mode; ASCII was reached by driving the
+        // setup wizard; the Nerd Font row is from the user's own session, and
+        // shows the status row carrying a running tool's progress message in
+        // place of `Working…`.
+        let unicode = " \u{2834} Working\u{2026} \u{27E6}esc\u{27E7}\n";
+        let ascii = " | Working\u{2026} [esc]\n";
+        let nerd = " \u{2826} Read existing glTF exporter patterns \u{27E8}esc\u{27E9}\n";
+        for content in [unicode, ascii, nerd] {
+            assert_eq!(
+                AgentKind::Omp.content_state(content),
+                AgentState::Working,
+                "content {content:?} should signal Working"
+            );
+        }
+    }
+
+    #[test]
+    fn omp_content_working_hint_is_found_above_the_statusline() {
+        // The status row is not the last row of the pane — omp's statusline is
+        // drawn below it. This is the real capture, and it is what the
+        // end-of-*line* anchor buys over an end-of-input one.
+        let content = concat!(
+            " count to ten\n",
+            " \u{2834} Working\u{2026} \u{27E6}esc\u{27E7}\n",
+            "\u{256D}\u{2500}\u{2500} \u{3C0}  > \u{2B22} Sonnet 5 \u{B7} \u{25D2} high > ",
+            "\u{1F333} claude-commander/omp-support \u{2500}\u{2500}\u{256E}\n",
+            "\u{2570}\u{2500} \u{2500}\u{256F}\n",
+        );
+        assert_eq!(AgentKind::Omp.content_state(content), AgentState::Working);
+    }
+
+    #[test]
+    fn omp_content_idle_when_the_status_row_is_gone() {
+        // omp drops the status row the moment the turn ends, so an idle pane
+        // carries no interrupt hint. Verified against a live idle composer: zero
+        // occurrences of the hint anywhere in the visible pane.
+        let content = concat!(
+            " Tip: Ctrl+D can be used to exit, but with your draft saved!\n",
+            " \u{2718} 401 {\"type\":\"error\"}\n",
+            " Dismissed when you send your next message.\n",
+            "\u{256D}\u{2500}\u{2500} \u{3C0}  > \u{2B22} Sonnet 5 \u{B7} \u{25D2} high ",
+            "\u{2500}\u{2500}\u{256E}\n",
+        );
+        assert_eq!(AgentKind::Omp.content_state(content), AgentState::Idle);
+        assert_eq!(AgentKind::Omp.content_state(""), AgentState::Idle);
+    }
+
+    #[test]
+    fn omp_content_mid_line_ascii_hint_is_not_working() {
+        // In ASCII glyph mode the hint is a bare `[esc]`, which can plausibly
+        // occur in transcript prose or tool output. Requiring it to end its row
+        // is what keeps that from reading as an in-flight turn.
+        assert_eq!(
+            AgentKind::Omp.content_state("Press [esc] twice to clear the composer.\n"),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn omp_content_overlay_options_are_waiting() {
+        for marker in OMP_ATTENTION_MARKERS {
+            let content = format!("omp output\n\n  \u{276F} {marker}\n");
+            assert_eq!(
+                AgentKind::Omp.content_state(&content),
+                AgentState::WaitingForInput,
+                "marker {marker:?} should signal WaitingForInput"
+            );
+        }
+    }
+
+    #[test]
+    fn each_omp_attention_marker_is_pinned_by_an_independent_literal() {
+        // The loop above builds its input *from* the marker constant, so it
+        // cannot catch a typo in one. These are the same option rows spelt out
+        // independently — verbatim from omp 17.2.15, where the approval options
+        // come from its `allow_once`/`allow_always` table and the plan-review
+        // options from the literal list passed to `showPlanReview`
+        // (`["Approve and execute", "Approve and compact context", <keep>,
+        // "Refine plan"]`, under the heading `Plan mode - next step`).
+        //
+        // Each input carries exactly ONE option, which is the point: with two in
+        // the same string, either one matching would mask a typo in the other.
+        for content in [
+            "   \u{276F} Allow once\n",
+            "     Always allow\n",
+            "   \u{276F} Approve and execute\n",
+            "     Refine plan\n",
+        ] {
+            assert_eq!(
+                AgentKind::Omp.content_state(content),
+                AgentState::WaitingForInput,
+                "option row {content:?} should signal WaitingForInput"
+            );
+        }
+    }
+
+    #[test]
+    fn omp_content_plan_review_overlay_is_waiting() {
+        // The whole overlay as a session actually shows it, so the realistic
+        // shape is pinned alongside the isolated options above.
+        let content = concat!(
+            " Plan mode - next step\n",
+            " \u{276F} Approve and execute\n",
+            "   Approve and compact context\n",
+            "   Approve and keep context\n",
+            "   Refine plan\n",
+            " esc cancel\n",
+        );
+        assert_eq!(
+            AgentKind::Omp.content_state(content),
+            AgentState::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn omp_content_waiting_takes_precedence_over_working() {
+        // The approval overlay is drawn over a pane whose status row is still
+        // up; needs-attention must win, as it does for the other harnesses.
+        let content =
+            " \u{2834} Working\u{2026} \u{27E6}esc\u{27E7}\n  Allow once   Always allow   Reject\n";
+        assert_eq!(
+            AgentKind::Omp.content_state(content),
+            AgentState::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn omp_content_strips_ansi_before_matching() {
+        // omp colours both the status row and the overlay, so the regex would
+        // never see a clean end-of-line without the strip.
+        assert_eq!(
+            AgentKind::Omp.content_state(
+                "\x1B[36m \u{2834} Working\u{2026}\x1B[0m \x1B[2m\u{27E6}esc\u{27E7}\x1B[0m\n"
+            ),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn omp_content_patterns_are_inert_for_other_harnesses() {
+        // omp's hint must not leak into the other harnesses' detectors.
+        assert_eq!(
+            AgentKind::Codex.content_state(" \u{2834} Working\u{2026} \u{27E6}esc\u{27E7}\n"),
+            AgentState::Idle
+        );
+        assert_eq!(
+            AgentKind::OpenCode.content_state(" \u{2834} Working\u{2026} \u{27E6}esc\u{27E7}\n"),
+            AgentState::Unknown
         );
     }
 

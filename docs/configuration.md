@@ -13,8 +13,10 @@ Configuration file location depends on your platform:
 # Selectable agent harnesses for the New Session dialog's program picker. Each
 # entry pairs a display `label` with the `command` launched (program plus any
 # flags); the command's first token determines the harness, so Claude Code
-# (`claude`) and OpenAI Codex (`codex`) are both recognised and get the right
-# launch, resume, and working/waiting detection. The first entry is the default
+# (`claude`), OpenAI Codex (`codex`), OpenCode (`opencode`) and Oh My Pi (`omp`)
+# are all recognised and get the right launch, resume, and working/waiting
+# detection. Anything else is launched as-is, with no such handling — a bare
+# shell is a valid entry. The first entry is the default
 # for new sessions. When `programs` is omitted, the picker offers a single
 # built-in `claude` entry.
 #
