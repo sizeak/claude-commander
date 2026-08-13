@@ -71,6 +71,20 @@ pub fn strip_ansi(s: &str) -> String {
     ANSI_RE.replace_all(s, "").into_owned()
 }
 
+/// The last `n` non-empty lines of `content`, bottom-first.
+///
+/// Both content detectors anchor their status-line matches to the bottom of the
+/// pane, because everything above it is transcript — text the model and its
+/// tools wrote, which can contain anything a status line contains.
+fn trailing_nonempty_lines(content: &str, n: usize) -> Vec<&str> {
+    content
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(n)
+        .collect()
+}
+
 /// Whether `title` contains a braille spinner glyph (U+2800..U+28FF). The Codex
 /// TUI animates a braille spinner in the terminal title while the model is
 /// working. Older Claude Code builds did too, so the Claude arm of
@@ -120,6 +134,23 @@ const CODEX_WORKING_MARKER: &str = "esc to interrupt";
 /// while a task is actively running. Completed turns keep the prompt footer but
 /// drop this interrupt hint, so it is a durable active-task signal.
 const OPENCODE_WORKING_MARKER: &str = "esc interrupt";
+
+/// How many trailing non-empty lines of the pane count as OpenCode's *footer*
+/// for [`OPENCODE_WORKING_MARKER`] purposes.
+///
+/// The marker must be matched against the footer only, never the whole pane: the
+/// transcript above it is model- and tool-authored text, and a session that
+/// merely *renders* the words `esc interrupt` — reading this file, quoting
+/// OpenCode's own keybindings, echoing a grep hit — pinned itself to `Working`
+/// forever, because `Working` is checked before the completed-turn line that sat
+/// right below it. Re-attaching and scrolling pushed the text out of the visible
+/// pane, which is exactly the reported "shows working until I re-enter it".
+///
+/// Receipt: the hint is the *last* non-empty line in 14/14 working captures
+/// (OpenCode 1.17.15) — full TUI at 200x50 with the sidebar, mini TUI at 80x24
+/// and 55x13, and a pane resized by an attach/detach cycle. The window is 3
+/// rather than 1 purely as slack for a future build adding a line beneath it.
+const OPENCODE_FOOTER_LINES: usize = 3;
 
 /// Pane-content substring OpenCode renders in its permission prompt overlay
 /// when the agent is blocked on a user approval decision.
@@ -288,12 +319,7 @@ impl AgentKind {
 /// for Codex — a permission prompt can be up while the status line is still
 /// rendered, and needs-attention is the more urgent read.
 fn claude_content_state(content: &str) -> AgentState {
-    let lines: Vec<&str> = content
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(10)
-        .collect();
+    let lines = trailing_nonempty_lines(content, 10);
 
     for line in &lines {
         // Permission prompt footer.
@@ -343,15 +369,22 @@ fn codex_content_state(content: &str) -> AgentState {
     AgentState::Idle
 }
 
-/// OpenCode content patterns. The interrupt hint is rendered while a task runs.
+/// OpenCode content patterns. The interrupt hint is rendered in the footer while
+/// a task runs — matched against the footer alone, see [`OPENCODE_FOOTER_LINES`].
 /// Completed turns render an agent/model/duration line, which is the durable idle
 /// signal. Brand-new sessions still return `Unknown`: "Ask anything" only
 /// appears before the first turn and is not a general idle marker.
+///
+/// The permission overlay *is* matched against the whole pane: it is a centred
+/// modal box whose distance from the bottom varies with its own height.
 fn opencode_content_state(content: &str) -> AgentState {
     if content.contains(OPENCODE_PERMISSION_MARKER) {
         return AgentState::WaitingForInput;
     }
-    if content.contains(OPENCODE_WORKING_MARKER) {
+    if trailing_nonempty_lines(content, OPENCODE_FOOTER_LINES)
+        .iter()
+        .any(|line| line.contains(OPENCODE_WORKING_MARKER))
+    {
         return AgentState::Working;
     }
     if OPENCODE_COMPLETED_TURN_RE.is_match(content) {
@@ -870,6 +903,69 @@ mod tests {
         assert_eq!(
             AgentKind::OpenCode.content_state(content),
             AgentState::Unknown
+        );
+    }
+
+    #[test]
+    fn opencode_content_interrupt_hint_in_transcript_is_not_working() {
+        // Regression: an *idle* session whose visible transcript happens to
+        // contain the footer's wording stayed `Working` for as long as the text
+        // stayed on screen, because the marker was matched against the whole
+        // pane and `Working` is checked before the completed-turn line sitting
+        // right below it. Captured verbatim from OpenCode 1.17.15 after asking
+        // it to echo the phrase; the session was at its prompt throughout.
+        let content = concat!(
+            "  ┃  running\n",
+            "  ┃\n",
+            "\n",
+            "     the footer said esc interrupt while running\n",
+            "\n",
+            "     ▣  Build · GPT-5.5 · 1.9s\n",
+            "\n",
+            "  ┃\n",
+            "  ┃  Build · GPT-5.5 GitHub Copilot\n",
+            "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n",
+            "                8.4K (1%) · $0.08  ctrl+p commands\n",
+        );
+        assert_eq!(AgentKind::OpenCode.content_state(content), AgentState::Idle);
+    }
+
+    #[test]
+    fn opencode_content_working_footer_is_last_line() {
+        // The live hint is the last non-empty line, so footer-anchoring keeps
+        // reading it as `Working` — with the same transcript contamination
+        // above that the previous test pins as harmless.
+        let content = concat!(
+            "     the footer said esc interrupt while running\n",
+            "\n",
+            "     ▣  Build · GPT-5.5 · 1.9s\n",
+            "\n",
+            "  ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt          tab agents  ctrl+p commands\n",
+        );
+        assert_eq!(
+            AgentKind::OpenCode.content_state(content),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn opencode_content_permission_overlay_matches_above_the_footer() {
+        // The permission modal is centred, not docked to the bottom, so it must
+        // keep matching against the whole pane rather than the footer window.
+        let content = concat!(
+            "⚠ Permission required\n",
+            "← Access external directory ~\n",
+            "\n",
+            "Allow once   Allow always   Reject\n",
+            "\n",
+            "  ┃\n",
+            "  ┃  Build · GPT-5.5 GitHub Copilot\n",
+            "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n",
+            "                8.4K (1%) · $0.08  ctrl+p commands\n",
+        );
+        assert_eq!(
+            AgentKind::OpenCode.content_state(content),
+            AgentState::WaitingForInput
         );
     }
 
