@@ -321,8 +321,23 @@ impl AgentKind {
                 Some(AgentState::Working)
             }
             Self::Omp => omp_title_state(title),
-            // OpenCode's title is always "OpenCode" regardless of state, so
-            // title alone is not conclusive — fall through to content.
+            // OpenCode's title reports which *view* it is showing, never the
+            // agent state: `OC | <session title>` on a session that has been
+            // titled (truncated to 40 chars), `OC | <plugin id>` on a plugin
+            // view, and a bare `OpenCode` on the home view or before the
+            // session has a title. It can also be absent entirely — the feature
+            // is switchable, by `OPENCODE_DISABLE_TERMINAL_TITLE` or its
+            // in-app toggle, which clears the title to the empty string. None
+            // of those distinguish Working from Idle, so fall through to
+            // content.
+            //
+            // Receipt (opencode 1.17.15): those branches are the entire body of
+            // the one reactive effect that composes a title, and it reads only
+            // the current route and the session's own title — every other
+            // `setTerminalTitle` in the bundle is opentui plumbing, the
+            // destroy-time clear, or that toggle. Live confirmation: a fresh
+            // untitled session reports `OpenCode`, while a titled session on
+            // 1.18.11 reports `OC | PLAN.md review`.
             _ => None,
         }
     }
@@ -880,9 +895,18 @@ mod tests {
         // trip its detector via the title path.
         assert_eq!(AgentKind::Claude.title_state("Action Required"), None);
         assert_eq!(AgentKind::Unknown.title_state("⠋ working"), None);
-        // OpenCode's title is always "OpenCode" regardless of state, so title
-        // alone is not conclusive.
+        // OpenCode's title names the view it is showing, not the agent state,
+        // so none of its forms is conclusive. The bare `OpenCode` is only what
+        // the home view and a not-yet-titled session render — a session that
+        // has been titled reports `OC | <session title>`, which is what a real
+        // pane is showing almost all of the time. Asserting the bare form alone
+        // is what let this arm be documented as "always `OpenCode`".
         assert_eq!(AgentKind::OpenCode.title_state("OpenCode"), None);
+        assert_eq!(AgentKind::OpenCode.title_state("OC | PLAN.md review"), None);
+        assert_eq!(AgentKind::OpenCode.title_state("OC | my-plugin"), None);
+        // Switched off (`OPENCODE_DISABLE_TERMINAL_TITLE` or the in-app
+        // toggle), the title is cleared to the empty string.
+        assert_eq!(AgentKind::OpenCode.title_state(""), None);
     }
 
     // --- content_state: Claude ---
