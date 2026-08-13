@@ -1157,55 +1157,67 @@ class LcarsChrome extends Chrome {
   Widget buildWindowBar(BuildContext context, ChromeWindowBarSpec spec) {
     final t = CommanderTokens.of(context);
     final controls = windowBarControls(spec);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: _seam),
-      child: Row(
-        children: [
-          // The name cap and the filler are the drag surface; the controls to
-          // their right are deliberately outside it.
-          Expanded(
-            child: applyWindowBarGestures(
-              spec,
-              Row(
-                children: [
-                  // The bracket's corner, and nothing else. Drawn to the nav
-                  // column's width so the amber runs straight down into the
-                  // block below it rather than stepping sideways a row in, and
-                  // unlabelled: the corner is a shape, not a caption, and the
-                  // window's name is already its title in the task switcher.
-                  SizedBox(
-                    width: kLcarsNavWidth,
-                    child: ClipRRect(
-                      // Square below, so the bracket flows down into the rail
-                      // instead of closing itself off — and the rail must not
-                      // turn a second corner, see [LcarsCornerScope].
-                      borderRadius: BorderRadius.only(
-                        topLeft: Radius.circular(t.elbowRadius),
-                      ),
-                      child: ChromeElbow(
-                        // The identity colour the deck gives its CMDR block
-                        // (4b's L1-L3).
-                        color: t.primary,
-                        height: _windowBarHeight,
-                      ),
+    // Every block but the corner leaves the seam under it; the corner runs the
+    // whole height instead, because the block directly below it is the rail's
+    // opening block in the same colour and the same width. A gap between two
+    // halves of one amber column head reads as a mistake, where the same gap
+    // between the dark drag filler and the band below it is the run's own
+    // rhythm. Hence `start` alignment and per-child padding rather than one
+    // pad around the lot.
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // The corner and the filler are the drag surface; the controls to
+        // their right are deliberately outside it.
+        Expanded(
+          child: applyWindowBarGestures(
+            spec,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // The bracket's corner, and nothing else. Drawn to the nav
+                // column's width so the amber runs straight down into the
+                // block below it rather than stepping sideways a row in, and
+                // unlabelled: the corner is a shape, not a caption, and the
+                // window's name is already its title in the task switcher.
+                SizedBox(
+                  width: kLcarsNavWidth,
+                  child: ClipRRect(
+                    // Square below, so the bracket flows down into the rail
+                    // instead of closing itself off — and the rail must not
+                    // turn a second corner, see [LcarsCornerScope].
+                    borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(t.elbowRadius),
+                    ),
+                    child: ChromeElbow(
+                      // The identity colour the deck gives its CMDR block
+                      // (4b's L1-L3).
+                      color: t.primary,
+                      height: _windowBarHeight + _seam,
                     ),
                   ),
-                  const SizedBox(width: _seam),
-                  // Inert filler: the block that makes the run span the window,
-                  // and the easiest part of the bar to grab for a drag.
-                  Expanded(
+                ),
+                const SizedBox(width: _seam),
+                // Inert filler: the block that makes the run span the window,
+                // and the easiest part of the bar to grab for a drag.
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: _seam),
                     child: ChromeElbow(
                       color: t.divider,
                       height: _windowBarHeight,
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
-          for (var i = 0; i < controls.length; i++) ...[
-            const SizedBox(width: _seam),
-            Tooltip(
+        ),
+        for (var i = 0; i < controls.length; i++) ...[
+          const SizedBox(width: _seam),
+          Padding(
+            padding: const EdgeInsets.only(bottom: _seam),
+            child: Tooltip(
               message: controls[i].label,
               child: ClipRRect(
                 // Square at the trailing end: that edge is the window's, and
@@ -1224,9 +1236,9 @@ class LcarsChrome extends Chrome {
                 ),
               ),
             ),
-          ],
+          ),
         ],
-      ),
+      ],
     );
   }
 

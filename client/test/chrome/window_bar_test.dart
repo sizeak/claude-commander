@@ -260,6 +260,23 @@ void main() {
       expect(clip.borderRadius, BorderRadius.zero);
     });
 
+    // The corner runs the full height of the bar while every other block
+    // leaves the seam under it. The block directly below the corner is the
+    // rail's opening block — same colour, same width — so a gap there splits
+    // one amber column head in two, where the same gap under the dark drag
+    // filler is the run's own rhythm.
+    testWidgets('the corner alone carries no seam beneath it', (tester) async {
+      await pumpLcars(tester);
+
+      final bar = tester.getRect(find.byType(ChromeWindowBar));
+      expect(tester.getRect(corner()).bottom, bar.bottom);
+      expect(
+        tester.getRect(find.widgetWithText(ChromeElbow, 'CLOSE')).bottom,
+        bar.bottom - 4,
+        reason: 'the controls keep the seam',
+      );
+    });
+
     // The other half of the deal, and the only thing that holds it: the bar
     // turning the corner is pointless if the rail turns it again 4px below.
     testWidgets('the rail beneath does not turn the corner again', (
