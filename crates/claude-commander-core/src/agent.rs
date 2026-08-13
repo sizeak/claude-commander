@@ -90,8 +90,9 @@ static OMP_WORKING_HINT_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Pane-content substrings Oh My Pi renders in an overlay that is blocking on a
 /// user decision. The tool-approval options cover a session whose title state
 /// indicator has been turned off; the plan-review options cover the case the
-/// title cannot report at all, because omp ends the turn (title state `idle`)
-/// before showing its full-screen plan review.
+/// title cannot report at all, because the turn ends *underneath* an open plan
+/// review and drives the title to `idle` — see [`omp_title_state`] for the
+/// sequencing and its receipt.
 ///
 /// Receipt (omp 17.2.15): both option sets are verbatim from omp's own bundle —
 /// the approval options are its `allow_once`/`allow_always` option table, and
@@ -325,11 +326,11 @@ impl AgentKind {
             // agent state: `OC | <session title>` on a session that has been
             // titled (truncated to 40 chars), `OC | <plugin id>` on a plugin
             // view, and a bare `OpenCode` on the home view or before the
-            // session has a title. It can also be absent entirely — the feature
-            // is switchable, by `OPENCODE_DISABLE_TERMINAL_TITLE` or its
-            // in-app toggle, which clears the title to the empty string. None
-            // of those distinguish Working from Idle, so fall through to
-            // content.
+            // session has a title. It can also be neither: setting
+            // `OPENCODE_DISABLE_TERMINAL_TITLE` returns from the effect before
+            // any title is set, leaving whatever the pane already had, and the
+            // in-app toggle clears it to the empty string. None of those
+            // distinguish Working from Idle, so fall through to content.
             //
             // Receipt (opencode 1.17.15): those branches are the entire body of
             // the one reactive effect that composes a title, and it reads only
@@ -456,22 +457,37 @@ fn opencode_content_state(content: &str) -> AgentState {
 /// degrades to `| Working… [esc]` and its statusline brand to a literal `pi` —
 /// the title still read `π > …` idle and `π ⠼ …` working.
 ///
-/// Two glyphs are deliberately not treated as conclusive:
+/// The idle `>` is deliberately *not* treated as conclusive: it returns `None`
+/// rather than `Some(Idle)`, because omp's turn ends before its full-screen plan
+/// review is dismissed — so an idle title can sit above an overlay that is
+/// waiting on the user. Falling through lets [`omp_content_state`] see the
+/// overlay. Receipt (omp 17.2.15): plan mode's own system prompt ends the turn
+/// on the `xd://propose` write ("Turn ends ONLY: … writes plan … to
+/// `xd://propose`"); the review overlay is dispatched from the *tool-result*
+/// handler and deliberately not awaited (its rejection is only `.catch`-logged),
+/// while `idle` is set from the terminal turn-end event. So the overlay is
+/// raised first and the title goes idle underneath it. The cost of falling
+/// through is one extra `capture-pane` per fresh detection — the same price
+/// OpenCode already pays, and absorbed by the detector's own state cache.
 ///
-/// - `>` (idle) returns `None` rather than `Some(Idle)`, because omp ends the
-///   turn *before* raising its full-screen plan review — so an idle title can
-///   sit above an overlay that is waiting on the user. Falling through lets
-///   [`omp_content_state`] see the overlay. It costs nothing: pane content is
-///   captured through the same cache either way.
-/// - A spinner frame reaches this function only when the pane title survived
-///   tmux intact. tmux replaces every non-ASCII character of a pane title with
-///   `_` when its server's locale is not UTF-8, so a working omp session can
-///   report `_ _ <label>` — the brand *and* the spinner flattened. Reproduced on
-///   tmux 3.6a: identical `printf` of `π ⠦ Probe` round-tripped byte-for-byte
-///   under `LANG=en_GB.UTF-8` and came back `_ _ Probe` under `LANG=C` and under
-///   an unset locale. That case is left to the content fallback, which is
-///   unaffected (pane *cells* keep their UTF-8 regardless), rather than inferred
-///   from the replacement character.
+/// The flattened `_` in the glyph position is read as the spinner. tmux replaces
+/// every non-ASCII character of a pane title with `_` when its server's locale
+/// is not UTF-8, so a working omp session reports `_ _ <label>` — brand and
+/// spinner both flattened — which is what the author's own sessions look like.
+/// The inference is exact rather than a guess about tmux: the glyph position
+/// holds one of exactly four values and three of them (`!`, `>`, `:`) are ASCII
+/// that passes through untouched, so a replaced glyph can only have been a
+/// spinner frame. It cannot mask a pending prompt either, since `attention`
+/// renders the ASCII `!` and plan review leaves the ASCII `>`. Should tmux ever
+/// substitute something else, this arm simply stops matching and the content
+/// fallback covers it.
+///
+/// Receipts: flattening reproduced on tmux 3.6a — an identical `printf` of
+/// `π ⠦ Probe` round-tripped byte-for-byte under `LANG=en_GB.UTF-8` but came
+/// back `_ _ Probe` under `LANG=C` and under an unset locale. Only the *title*
+/// is affected; pane cells keep their UTF-8 either way, confirmed on a
+/// POSIX-locale server whose `capture-pane` returned `⠇`/`⟨esc⟩` intact while
+/// that same pane's title read `_ _ <label>`.
 fn omp_title_state(title: &str) -> Option<AgentState> {
     let mut tokens = title.split_whitespace();
     // The brand prefix is a single character (`π`, or `_` once tmux has
@@ -485,6 +501,9 @@ fn omp_title_state(title: &str) -> Option<AgentState> {
         "!" => Some(AgentState::WaitingForInput),
         ":" => Some(AgentState::Working),
         glyph if has_braille_spinner(glyph) => Some(AgentState::Working),
+        // The spinner is the glyph position's only non-ASCII inhabitant, so a
+        // glyph tmux has flattened to `_` was one.
+        "_" => Some(AgentState::Working),
         _ => None,
     }
 }
@@ -498,6 +517,14 @@ fn omp_title_state(title: &str) -> Option<AgentState> {
 /// in flight and is dropped when it ends (verified — an idle pane carries no
 /// interrupt hint at all). So "no working hint and no overlay" is a positive
 /// idle reading rather than an absence of information.
+///
+/// The attention markers are ordinary English phrases, so a session whose pane
+/// happens to *display* one — an agent reading this very file, say — reads
+/// `WaitingForInput` while it is merely working. That is the safe direction (a
+/// spurious needs-attention flag holds hibernation off; it can never kill a live
+/// session), and Codex's `"needs your approval."` shares the weakness. The
+/// title is what carries a real approval anyway: omp flips it to `!`, which this
+/// fallback is only consulted in the absence of.
 fn omp_content_state(content: &str) -> AgentState {
     if OMP_ATTENTION_MARKERS
         .iter()
@@ -857,10 +884,20 @@ mod tests {
             AgentKind::Omp.title_state("_ ! Promote model loaders to api"),
             Some(AgentState::WaitingForInput)
         );
-        // The spinner flattens to `_` too. That is left to the content fallback
-        // rather than inferred from tmux's replacement character.
+        // The spinner flattens to `_` too, and is still read as Working: the
+        // glyph position holds one of exactly four values, and the other three
+        // are ASCII that tmux passes through, so a replaced glyph can only have
+        // been a spinner frame. Without this, every session on a non-UTF-8 tmux
+        // server — which is what the author's own are — loses the title signal
+        // for Working entirely and rests on the content fallback alone.
         assert_eq!(
             AgentKind::Omp.title_state("_ _ Promote model loaders to api"),
+            Some(AgentState::Working)
+        );
+        // The flattened brand alone is not enough: an idle or attention glyph
+        // still wins, so the inference cannot mask a pending prompt.
+        assert_eq!(
+            AgentKind::Omp.title_state("_ > Promote model loaders"),
             None
         );
     }
@@ -1260,6 +1297,50 @@ mod tests {
                 "marker {marker:?} should signal WaitingForInput"
             );
         }
+    }
+
+    #[test]
+    fn each_omp_attention_marker_is_pinned_by_an_independent_literal() {
+        // The loop above builds its input *from* the marker constant, so it
+        // cannot catch a typo in one. These are the same option rows spelt out
+        // independently — verbatim from omp 17.2.15, where the approval options
+        // come from its `allow_once`/`allow_always` table and the plan-review
+        // options from the literal list passed to `showPlanReview`
+        // (`["Approve and execute", "Approve and compact context", <keep>,
+        // "Refine plan"]`, under the heading `Plan mode - next step`).
+        //
+        // Each input carries exactly ONE option, which is the point: with two in
+        // the same string, either one matching would mask a typo in the other.
+        for content in [
+            "   \u{276F} Allow once\n",
+            "     Always allow\n",
+            "   \u{276F} Approve and execute\n",
+            "     Refine plan\n",
+        ] {
+            assert_eq!(
+                AgentKind::Omp.content_state(content),
+                AgentState::WaitingForInput,
+                "option row {content:?} should signal WaitingForInput"
+            );
+        }
+    }
+
+    #[test]
+    fn omp_content_plan_review_overlay_is_waiting() {
+        // The whole overlay as a session actually shows it, so the realistic
+        // shape is pinned alongside the isolated options above.
+        let content = concat!(
+            " Plan mode - next step\n",
+            " \u{276F} Approve and execute\n",
+            "   Approve and compact context\n",
+            "   Approve and keep context\n",
+            "   Refine plan\n",
+            " esc cancel\n",
+        );
+        assert_eq!(
+            AgentKind::Omp.content_state(content),
+            AgentState::WaitingForInput
+        );
     }
 
     #[test]

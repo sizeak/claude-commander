@@ -132,7 +132,7 @@ pub enum Commands {
         #[arg(short, long)]
         mode: Option<String>,
 
-        /// Model to run the agent with (Claude or Codex)
+        /// Model to run the agent with (Claude, Codex, OpenCode or omp)
         #[arg(long)]
         model: Option<String>,
 
