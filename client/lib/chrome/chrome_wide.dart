@@ -492,7 +492,7 @@ class LcarsWide extends StatelessWidget {
                     SizedBox(
                       key: const ValueKey('wide-nav'),
                       width: _lcarsNavWidth,
-                      child: _nav(t, accent, bleed),
+                      child: _nav(context, t, accent, bleed),
                     ),
                     // Both columns beside this gap bleed into the band, so it
                     // is filled across it — see [lcarsBandSeam]. Its fill ends
@@ -589,14 +589,23 @@ class LcarsWide extends StatelessWidget {
   /// the mode destinations, the live needs-input count, inert filler that
   /// absorbs the slack, the new-session block, and a closing settings elbow. Only
   /// the first and last blocks are rounded, so the column reads as one bracket.
-  Widget _nav(CommanderTokens t, Color accent, EdgeInsets bleed) {
+  Widget _nav(
+    BuildContext context,
+    CommanderTokens t,
+    Color accent,
+    EdgeInsets bleed,
+  ) {
     final newSession = spec.newSession;
     final settings = spec.settings;
     final blocks = <Widget>[
       ChromeElbow(
         bleed: EdgeInsets.only(top: bleed.top),
         color: accent,
-        corner: ElbowCorner.topLeft,
+        // None under the desktop window bar, whose name cap has already turned
+        // the frame's corner — see [LcarsCornerScope].
+        corner: LcarsCornerScope.of(context)
+            ? ElbowCorner.none
+            : ElbowCorner.topLeft,
         height: 74,
         label: 'CMDR',
         labelAlignment: Alignment.bottomRight,

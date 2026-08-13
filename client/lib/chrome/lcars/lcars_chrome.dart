@@ -88,11 +88,12 @@ class LcarsChrome extends Chrome {
     EdgeInsets bleed,
   ) {
     final back = shouldShowBack(context, spec);
+    final corner = _openingCorner(context);
     final blocks = <Widget>[
       ChromeElbow(
         bleed: EdgeInsets.only(top: bleed.top),
         color: back ? t.primary : t.nav,
-        corner: ElbowCorner.topLeft,
+        corner: corner,
         height: back ? 62 : 74,
         // With no back affordance the top block carries the screen's LCARS
         // identifier instead ("47-A"), as the deck's root screens do.
@@ -139,6 +140,13 @@ class LcarsChrome extends Chrome {
 
     return _railColumn(t, blocks);
   }
+
+  /// The corner a rail's opening block turns — none when something above the
+  /// frame has already turned it. Only the desktop window bar does, and only
+  /// there does a second rounded corner appear mid-window under a bar that has
+  /// already curved away from it. See [LcarsCornerScope].
+  static ElbowCorner _openingCorner(BuildContext context) =>
+      LcarsCornerScope.of(context) ? ElbowCorner.none : ElbowCorner.topLeft;
 
   /// A rail: [blocks] stacked at the deck's 5px pitch, in a column
   /// [CommanderTokens.railWidth] wide. Shared by the page rail and the view rail
@@ -1019,7 +1027,7 @@ class LcarsChrome extends Chrome {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _viewRail(spec, t, accent, bleed),
+        _viewRail(context, spec, t, accent, bleed),
         _railGutter(bleed, accent),
         // Flush right, like [buildPage] and the shell's footer — see
         // [buildShell] for why the 10dp margin all three used to carry went.
@@ -1038,6 +1046,7 @@ class LcarsChrome extends Chrome {
   /// [bleed] goes to the identifier block alone — the rest of the column is
   /// interior, below the status bar the identifier bleeds into.
   Widget _viewRail(
+    BuildContext context,
     ChromeViewRailSpec spec,
     CommanderTokens t,
     Color accent,
@@ -1049,7 +1058,7 @@ class LcarsChrome extends Chrome {
       ChromeElbow(
         bleed: bleed,
         color: accent,
-        corner: ElbowCorner.topLeft,
+        corner: _openingCorner(context),
         height: 74,
         label: spec.code,
         labelAlignment: Alignment.bottomRight,
@@ -1163,9 +1172,18 @@ class LcarsChrome extends Chrome {
               Row(
                 children: [
                   ClipRRect(
-                    borderRadius: _runEnds(0, count, t.pillRadius),
+                    // The bracket's corner, not a pill end: this bar is the top
+                    // of the frame, so the elbow radius belongs here and the
+                    // rail beneath must not draw a second one — see
+                    // [LcarsCornerScope]. Square below, so the bracket flows
+                    // down into that rail instead of closing itself off.
+                    borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(t.elbowRadius),
+                    ),
                     child: ChromeElbow(
-                      color: t.nav,
+                      // The window's identity block, which the deck paints
+                      // amber wherever it draws one (4b's CMDR in L1-L3).
+                      color: t.primary,
                       labelColor: t.canvas,
                       height: _windowBarHeight,
                       label: t.caseLabel(spec.title),

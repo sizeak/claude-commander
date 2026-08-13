@@ -90,3 +90,31 @@ Widget lcarsBandSeam({
     ),
   );
 }
+
+/// Whether the frame's top-left corner is already drawn *above* the shell.
+///
+/// True under the desktop window bar, whose name cap carries the elbow radius
+/// and so is the bracket's corner. The rail beneath must then not draw a second
+/// one: two corners means the bracket appears to start mid-window, below a bar
+/// that already turned it. False everywhere else — every mobile frame, and every
+/// test that does not opt in, which is why no existing reference moves.
+class LcarsCornerScope extends InheritedWidget {
+  /// Whether something above already turned the frame's corner.
+  final bool takenAbove;
+
+  const LcarsCornerScope({
+    super.key,
+    required this.takenAbove,
+    required super.child,
+  });
+
+  static bool of(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<LcarsCornerScope>()
+          ?.takenAbove ??
+      false;
+
+  @override
+  bool updateShouldNotify(LcarsCornerScope oldWidget) =>
+      takenAbove != oldWidget.takenAbove;
+}
