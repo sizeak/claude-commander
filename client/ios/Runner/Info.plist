@@ -26,6 +26,21 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- `PlatformImagePicker.supportsCamera` is true on iOS, so the image-attach
+	     sheet offers the camera. iOS terminates a process that reaches the
+	     camera with no usage description, so this string is what keeps that
+	     option from being a guaranteed crash. The gallery half needs no string:
+	     image_picker_ios goes through PHPicker. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Attach a photo to a Claude Commander session by taking it with the camera.</string>
+	<!-- iOS 14+ gates traffic to local-network addresses behind user consent,
+	     BSD sockets included — so the Rust transport is not exempt. The headline
+	     case is a commander server on the same LAN; without this string the
+	     prompt is never shown and the connection is denied outright. Loopback
+	     and Tailscale's 100.x are unaffected, which is why a tunnelled test
+	     passes regardless. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connect to a Claude Commander server on your local network to list sessions and attach to their terminals.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

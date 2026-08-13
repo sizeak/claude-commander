@@ -306,6 +306,16 @@ jobs:
       - name: Fetch Flutter Packages
         run: nix develop .#clientApple -c bash -c 'rm -rf ~/.pub-cache/git && cd client && flutter pub get'
 
+      # cargokit's rustup.dart resolves `rustup` from ~/.cargo/bin *before* PATH
+      # (see flake.nix's `mkRustupShim`), and GitHub's macOS images ship a real
+      # one there — the Restore Cargo Cache step above relies on that same
+      # preinstalled Rust. Left alone, both builds below would `rustup target
+      # add` the iOS triples over the network and compile with the runner's
+      # toolchain, so `clientAppleRust`/`clientAppleTargets` would never be
+      # exercised and dropping a triple from the flake would leave CI green.
+      - name: Shadow Rustup With The Flake Toolchain
+        run: nix develop .#clientApple -c bash -c 'mkdir -p ~/.cargo/bin && ln -sf "$(command -v rustup)" ~/.cargo/bin/rustup'
+
       # The simulator build is the one that exercises the whole Apple path end
       # to end: CocoaPods, cargokit's Rust staticlib for the iOS triples, and
       # the xcrun shim's delegation to the host Xcode. It needs no signing

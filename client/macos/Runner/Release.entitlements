@@ -4,5 +4,23 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- `image_picker` resolves to `file_selector_macos` here, and under the
+	     sandbox the open panel returning a path grants nothing on its own:
+	     without this the read of the file the user just chose fails. -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<!-- The whole app is a client of a commander server. The sandbox blocks
+	     outbound sockets at the socket layer, so this covers reqwest inside the
+	     Rust cdylib and the /ws/attach WebSocket alike — without it every
+	     connect fails with a permission error and nothing works. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- Keychain Sharing, which flutter_secure_storage_darwin requires on
+	     macOS: a sandboxed app with no keychain group gets errSecMissingEntitlement
+	     (-34018) from SecItem*, and the server list load that runs before the
+	     first frame would throw out of main(). Empty array = the app's own
+	     default group, which is all we need (no App Groups). -->
+	<key>keychain-access-groups</key>
+	<array/>
 </dict>
 </plist>

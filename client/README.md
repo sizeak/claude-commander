@@ -3,8 +3,9 @@
 Cross-platform Flutter client for [claude-commander-server](../crates/claude-commander-server) —
 the GUI counterpart to the terminal UI, for whichever device you're not sitting at
 a `claude-commander` shell on. Verified targets today are **Linux desktop** and
-**Android**. iOS/macOS now have runners (`client/ios`, `client/macos`), app icons and
-dev-shell support, but no build has been run yet — see [iOS / macOS](#ios--macos).
+**Android**. **iOS** (simulator) and **macOS** desktop build and run, and both builds
+are covered by CI; device builds still need a signing identity — see
+[iOS / macOS](#ios--macos).
 The app is kept Apple-safe as it grows: `reqwest` uses `rustls` (no OpenSSL to
 cross-build), and Linux-only desktop dependencies are gated behind `isLinux` in the
 dev shell.
@@ -226,7 +227,7 @@ libs are any use to the other:
 - `LD_LIBRARY_PATH=/usr/lib:…` — lets Nix-built libepoxy find the system Mesa EGL at runtime (Linux desktop only).
 - `flutter config --enable-ios` / `--enable-macos-desktop` (macOS only) — both are opt-in in Flutter's own per-user config (`~/.config/flutter_settings`), so checking the runners into the repo doesn't switch them on.
 - `CC_`/`CXX_`/`AR_`/`CARGO_TARGET_*_LINKER` for `aarch64-apple-ios`, `aarch64-apple-ios-sim` and `x86_64-apple-ios` (macOS only) — pointed at Xcode's toolchain, since Nix's cc wrapper injects `-mmacos-version-min` (which clang rejects alongside `-miphoneos-version-min`) and `NIX_LDFLAGS` (which drags the macOS `libiconv` into an iOS link). The darwin triples are left on Nix's toolchain — that host is what it is built for.
-- `IPHONEOS_DEPLOYMENT_TARGET=13.0` (macOS only) — the Runner's own minimum. Unpinned, cc-rs takes the SDK's default while rustc still defaults to iOS 10, and the mismatch fails the link on compiler-rt symbols (`___chkstk_darwin`) that libSystem no longer carries.
+- `IPHONEOS_DEPLOYMENT_TARGET` (macOS only) — read out of the Runner's own pbxproj (**15.0** today, lowest configuration wins) rather than restated, so the two cannot drift. Unpinned, cc-rs takes the SDK's default while rustc still defaults these triples to iOS 10, and the mismatch fails the link on compiler-rt symbols (`___chkstk_darwin`) that libSystem no longer carries.
 - `PATH` gets an `xcrun` shim ahead of the stdenv's (macOS only) — see `clientXcrunShim` in `flake.nix`. Dart's native-assets build hooks run each `hooks/build.dart` under a filtered environment that keeps `PATH` but drops `DEVELOPER_DIR`, and nixpkgs' `xcrun` stub can only find an SDK through that variable. Without the shim it returns `error: unable to find sdk: 'macosx'`, the string is passed to clang as `-isysroot`, and any hook-built C/ObjC source dies on a missing `assert.h`/`Foundation.h`. `objective_c` is a transitive dependency, so this took plain `flutter test` down on macOS — nothing Apple-specific required.
 - `client/rust/target/release → debug` symlink — frb's `ioDirectory` looks for `release/`; the symlink means a debug build is found immediately.
 - Creates the Android AVD `cctest` (android-35, google\_apis, x86\_64, Pixel 6) on first entry if it doesn't already exist.
@@ -369,7 +370,16 @@ flutter run -d emulator-5554
 
 ### iOS / macOS
 
-Scaffolded but **not yet built**. What exists:
+Both build: `flutter build ios --simulator` and `flutter build macos` run green, and
+CI's `client-apple` job runs both on every push. The minimum iOS is **15.0** — the
+oldest floor that costs nothing: iOS 13, 14 and 15 all shipped to the same devices
+(iPhone 6s and later), iOS 16 is where Apple dropped them, and 15 is also the oldest
+simulator Xcode 26 can run and the point where rustc's `aarch64-apple-ios-sim` floor
+(14.0) stops forcing a version-mismatch warning into every simulator link. Flutter's
+own hard floor is 13.0 (`ios_deployment_target_migration.dart` rewrites anything
+below it), so 15.0 needs no compatibility shims. macOS minimum is 15.0.
+
+What exists:
 
 - `client/ios` and `client/macos` runners, from `flutter create --platforms=ios,macos
   --org com.claudecommander .`. Bundle id `com.claudecommander.claudeCommanderClient`
@@ -391,11 +401,17 @@ C toolchain rather than the shell's, because rustls resolves to `aws-lc-rs` here
 and `CARGO_TARGET_*_LINKER` for the iOS triples to arrange that (see `flake.nix` for
 what each one is working around).
 
-What has not happened: no `flutter build ios`/`macos`, so the Xcode half is unproven
-end to end. The Podfiles are there (`flutter pub get` writes them once a runner
-exists) but no `pod install` has — so there is no `Podfile.lock`, cargokit's
-`build_pod.sh` has never run, and nothing is signed. Expect the first build to need
-`sudo xcodebuild -runFirstLaunch` and a signing team in Xcode.
+The Xcode half is proven too: `pod install` has run for both platforms (their
+`Podfile.lock`s are committed), cargokit's `build_pod.sh` produces the staticlib the
+Xcode build links, and the iOS app boots in a simulator. A fresh Mac still needs
+`sudo xcodebuild -runFirstLaunch` before the first build.
+
+What has **not** happened: no signed device build, and nothing is launched in CI —
+device builds need a signing identity that a fork's PR cannot have, and booting a
+simulator runtime in CI is slow enough to want its own task. The macOS app is sandboxed
+(`macos/Runner/*.entitlements`), so anything new that touches the network, the
+keychain or user-selected files needs its entitlement added there or it fails only at
+runtime — never at build time, which is why CI cannot catch it.
 
 > `flutter create` copies its templates straight out of the read-only Nix store, so
 > the files it writes are mode `444`. Run `chmod -R u+w client/ios client/macos` after
@@ -465,7 +481,7 @@ The integration/e2e server tests self-skip when tmux is absent (a runtime check,
 | 2 | Session detail + lifecycle (kill/restart/delete/create) | Done |
 | 3 | Live terminal (WebSocket, `xterm.dart`) | Done |
 | 4 | Review/diff + inline comments, apply | Done |
-| 5 | iOS / macOS | Runners, icons and dev-shell support in place; no build run yet |
+| 5 | iOS / macOS | iOS simulator + macOS desktop build and run, CI-covered; no signed device build |
 | 6 | Shared `claude-commander-client` transport crate (also backs the TUI's remote sessions) | Done |
 | 7 | Adaptive desktop shell (master-detail), programs-list editing, multi-server seams | Done / in progress |
 | 8 | Image attach (picker, camera, clipboard, Ctrl+V) | Done |
