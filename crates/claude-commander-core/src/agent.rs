@@ -458,17 +458,18 @@ fn opencode_content_state(content: &str) -> AgentState {
 /// the title still read `π > …` idle and `π ⠼ …` working.
 ///
 /// The idle `>` is deliberately *not* treated as conclusive: it returns `None`
-/// rather than `Some(Idle)`, because omp's turn ends before its full-screen plan
-/// review is dismissed — so an idle title can sit above an overlay that is
+/// rather than `Some(Idle)`, because omp ends the turn *before* raising its
+/// full-screen plan review — so an idle title can sit above an overlay that is
 /// waiting on the user. Falling through lets [`omp_content_state`] see the
-/// overlay. Receipt (omp 17.2.15): plan mode's own system prompt ends the turn
-/// on the `xd://propose` write ("Turn ends ONLY: … writes plan … to
-/// `xd://propose`"); the review overlay is dispatched from the *tool-result*
-/// handler and deliberately not awaited (its rejection is only `.catch`-logged),
-/// while `idle` is set from the terminal turn-end event. So the overlay is
-/// raised first and the title goes idle underneath it. The cost of falling
-/// through is one extra `capture-pane` per fresh detection — the same price
-/// OpenCode already pays, and absorbed by the detector's own state cache.
+/// overlay. Receipt (omp 17.2.15): `handlePlanApproval` awaits an internal
+/// `session.abort()` — bracketed by `markPlanInternalAbortPending` /
+/// `clearPlanInternalAbortPending`, and called out in omp's own changelog as
+/// the "internal approval abort" — which forcibly ends the turn, and only then
+/// calls `showPlanReview`. The idle title follows from the terminal turn-end
+/// event. The cost of falling through is one extra `capture-pane` per fresh
+/// detection, the same price OpenCode already pays; note the hibernation loop
+/// and several `CommanderService` paths construct their detector with a
+/// `Duration::ZERO` cache deliberately, so they pay it on every tick.
 ///
 /// The flattened `_` in the glyph position is read as the spinner. tmux replaces
 /// every non-ASCII character of a pane title with `_` when its server's locale
@@ -522,9 +523,11 @@ fn omp_title_state(title: &str) -> Option<AgentState> {
 /// happens to *display* one — an agent reading this very file, say — reads
 /// `WaitingForInput` while it is merely working. That is the safe direction (a
 /// spurious needs-attention flag holds hibernation off; it can never kill a live
-/// session), and Codex's `"needs your approval."` shares the weakness. The
-/// title is what carries a real approval anyway: omp flips it to `!`, which this
-/// fallback is only consulted in the absence of.
+/// session), and Codex's `"needs your approval."` shares the weakness. Where the
+/// state indicator is on, a real approval also flips the title to `!` and this
+/// fallback is never reached for it — but with the indicator off (`π: <label>`)
+/// these markers are the *only* approval signal, which is what they are here
+/// for, so they cannot be tightened away.
 fn omp_content_state(content: &str) -> AgentState {
     if OMP_ATTENTION_MARKERS
         .iter()
