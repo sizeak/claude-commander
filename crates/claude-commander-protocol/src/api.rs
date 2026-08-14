@@ -202,6 +202,13 @@ pub struct ProjectInfo {
     pub main_branch: String,
     /// Session ids belonging to this project (order as stored).
     pub session_ids: Vec<SessionId>,
+    /// URL of the repo's `origin` remote, or `None` when it has none. Clients
+    /// compare it against a candidate clone URL via
+    /// [`canonical_repo_slug`](crate::github::canonical_repo_slug) to tell which
+    /// repos are already registered — never by string equality, since the same
+    /// repo has several spellings. Additive; older servers omit it.
+    #[serde(default)]
+    pub origin_url: Option<String>,
 }
 
 /// Why a background fast-forward of a project's main branch was held back.
@@ -586,6 +593,7 @@ mod tests {
                 repo_path: PathBuf::from("/repo"),
                 main_branch: "main".to_string(),
                 session_ids: vec![sid],
+                origin_url: Some("git@github.com:sizeak/claude-commander.git".to_string()),
             }],
             sessions: vec![],
             cascade_paused: Some(sid),
@@ -601,6 +609,10 @@ mod tests {
         let json = serde_json::to_string(&snapshot).unwrap();
         let back: WorkspaceSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.projects.len(), 1);
+        assert_eq!(
+            back.projects[0].origin_url.as_deref(),
+            Some("git@github.com:sizeak/claude-commander.git")
+        );
         assert_eq!(back.cascade_paused, Some(sid));
         assert!(back.project_pull.contains_key(&pid));
         assert!(back.server.gh_available);
@@ -620,6 +632,23 @@ mod tests {
         assert!(snap.pending_comment_sessions.is_empty());
         assert!(snap.project_pull.is_empty());
         assert!(snap.operations.is_empty());
+    }
+
+    /// `origin_url` is additive: a payload from a server that predates it must
+    /// still deserialize, with the field absent rather than the whole snapshot
+    /// failing.
+    #[test]
+    fn project_info_defaults_origin_url_from_an_older_server() {
+        let json = r#"{
+            "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+            "name": "repo",
+            "repo_path": "/repo",
+            "main_branch": "main",
+            "session_ids": []
+        }"#;
+        let info: ProjectInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.name, "repo");
+        assert_eq!(info.origin_url, None);
     }
 
     #[test]

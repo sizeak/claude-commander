@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:claude_commander_client/chrome/lcars/bleed.dart';
 import 'package:claude_commander_client/chrome/lcars/elbow.dart';
 import 'package:claude_commander_client/pages/activity_page.dart';
 import 'package:claude_commander_client/pages/session_list_page.dart';
@@ -14,6 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../support/fake_commander_api.dart';
 import '../support/fixtures.dart';
+import '../support/insets.dart';
 
 /// The two views that frame themselves with a `ChromeViewRail`, under both
 /// chromes. Mission Control must keep the branded header and the rounded controls
@@ -64,11 +66,13 @@ void main() {
     ) async {
       await connect(tester, fleet());
 
-      // The header `_FleetHeader` used to build: brand mark, title, counts, ⚙.
+      // The header `_FleetHeader` used to build: brand mark, title, counts.
       expect(find.byType(BrandMark), findsOneWidget);
       expect(find.text('Fleet'), findsOneWidget);
       expect(find.text('1 active · 1 total · 1 server'), findsOneWidget);
-      expect(find.byIcon(Icons.settings), findsOneWidget);
+      // Its ⚙ is not here any more: settings is a shell action, carried by the
+      // phone shell's bottom bar so both tabs reach the same one.
+      expect(find.byIcon(Icons.settings), findsNothing);
 
       // The search box and the Recent/All toggle with its mode indicator.
       expect(find.byType(TextField), findsOneWidget);
@@ -104,14 +108,16 @@ void main() {
     ) async {
       await connect(tester, fleet(tokens: lcarsTokens));
 
-      // The rail: the view identifier, a block per slice, the mode readout, and
-      // the settings action closing it — with the content column's cap opposite.
+      // The rail: the view identifier, a block per slice, and the mode readout —
+      // with the content column's cap opposite.
       expect(find.text('47-A'), findsOneWidget);
       expect(find.widgetWithText(ChromeElbow, 'RECENT'), findsOneWidget);
       expect(find.widgetWithText(ChromeElbow, 'ALL'), findsOneWidget);
       expect(find.widgetWithText(ChromeElbow, 'GROUPED'), findsOneWidget);
-      expect(find.widgetWithText(ChromeElbow, 'SETTINGS'), findsOneWidget);
       expect(find.byType(ChromeElbowCap), findsOneWidget);
+      // The rail no longer closes with a settings elbow: the shell's footer
+      // carries that block, and its bottom-left corner with it.
+      expect(find.widgetWithText(ChromeElbow, 'SETTINGS'), findsNothing);
 
       // The content column carries the uppercased title and its count line.
       expect(find.text('FLEET'), findsOneWidget);
@@ -196,6 +202,66 @@ void main() {
 
       // Nothing is waiting in this fixture, so the filtered feed is empty.
       expect(find.text('Nothing needs you'), findsOneWidget);
+    });
+  });
+
+  group('LCARS top band', () {
+    testWidgets('the rail and the cap meet the physical top edge', (
+      tester,
+    ) async {
+      useInsets(tester, top: 24);
+      // Connected, like every other test here: an unconnected store leaves
+      // `workspace` null, which renders the list's `CircularProgressIndicator`
+      // and hangs `pumpAndSettle` forever on its animation.
+      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+      unawaited(store.connect());
+      await tester.pumpWidget(
+        LcarsBleedScope(
+          bleed: const EdgeInsets.only(top: 24),
+          child: fleet(tokens: lcarsTokens),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The `top == 0` pair holds even without any bleed wired to these two
+      // widgets — nothing in this harness holds the rail off the physical
+      // edge to begin with (there is no `SafeArea` here, deliberately: see
+      // `buildShell`'s doc comment). They are regression guards against one
+      // being reintroduced anywhere in the view rail's subtree, not proof the
+      // bleed reached anything.
+      expect(tester.getRect(find.byType(ChromeElbowCap)).top, 0);
+      expect(tester.getRect(find.byType(ChromeElbow).first).top, 0);
+      // These two are what actually pin the bleed. The identifier block grows
+      // by exactly the top inset on top of its unbled height (74), which is
+      // only true once `_viewRail` passes `bleed` through to it. The cap's
+      // bled height is not its unbled height (16) plus the inset — it swaps
+      // to the fixed 1dp bled height instead, so this is `kElbowCapBledHeight`
+      // plus the inset rather than `16 + 24`.
+      expect(
+        tester.getSize(find.byType(ChromeElbowCap)).height,
+        kElbowCapBledHeight + 24,
+      );
+      expect(tester.getRect(find.byType(ChromeElbow).first).height, 74 + 24);
+    });
+
+    // Same rule as the footer, mirrored: the identifier is bottom-aligned in its
+    // block, so a top bleed must leave it exactly where the safe region had it.
+    testWidgets('the identifier holds the safe region', (tester) async {
+      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+      unawaited(store.connect());
+      await tester.pumpWidget(fleet(tokens: lcarsTokens));
+      await tester.pumpAndSettle();
+      final flat = tester.getRect(find.text('47-A')).center.dy;
+
+      await tester.pumpWidget(
+        LcarsBleedScope(
+          bleed: const EdgeInsets.only(top: 24),
+          child: fleet(tokens: lcarsTokens),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getRect(find.text('47-A')).center.dy, flat + 24);
     });
   });
 }

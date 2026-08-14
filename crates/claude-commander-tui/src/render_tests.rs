@@ -1308,6 +1308,12 @@ fn test_preview_to_shell_view_switch_no_clear() {
 ///
 /// It asserts on a *default* config — i.e. telemetry nominally on — so it tests
 /// the build-level backstop, not merely a fixture that opts out.
+///
+/// Caveat worth knowing: `scripts/verify.sh` and `ci.yml` export
+/// `DO_NOT_TRACK=1`, under which this passes via that route regardless of the
+/// feature clause. So it is a bare `cargo test` that actually exercises the
+/// clause — which is also the case that matters, since that is what a developer
+/// runs and what has no other backstop.
 #[test]
 fn telemetry_is_never_live_in_this_crates_tests() {
     let nominally_on = claude_commander_core::config::TelemetryConfig {

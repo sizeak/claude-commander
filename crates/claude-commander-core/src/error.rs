@@ -187,6 +187,54 @@ pub enum GitError {
 
     #[error("Invalid reference: {0}")]
     InvalidRef(String),
+
+    /// The `gh` CLI is not installed or not runnable.
+    ///
+    /// Distinct from `OperationFailed` on purpose: the repo picker renders this
+    /// as its own state ("install the GitHub CLI to browse your repos") rather
+    /// than as a generic failure, and it is the one gh outcome a user can fix
+    /// without seeing gh's own stderr.
+    #[error("GitHub CLI (gh) is not installed or not runnable")]
+    GhUnavailable,
+
+    /// A clone ran past its time budget and was killed.
+    ///
+    /// Distinct from `OperationFailed` for the same reason as `GhUnavailable`:
+    /// it is actionable (a huge repo on a slow link wants a larger
+    /// `clone_timeout_secs`), and the process was killed, so there is no
+    /// subprocess stderr worth surfacing.
+    #[error("clone timed out after {secs}s")]
+    CloneTimedOut { secs: u64 },
+
+    /// A GitHub repo listing ran past its time budget and was killed.
+    ///
+    /// **Deliberately not folded into `GhUnavailable`.** That variant means "gh
+    /// is missing or unauthenticated", and the picker answers it with "install /
+    /// log in to the GitHub CLI" — advice that is actively wrong for a user whose
+    /// working `gh` merely took too long over a large account. Nor is it
+    /// `OperationFailed`: the process was killed, so there is no subprocess
+    /// stderr to pass on, and the actionable answer is a larger
+    /// `repo_list_timeout_secs`. Same reasoning as [`Self::CloneTimedOut`],
+    /// separate variant because the two carry different budgets and different
+    /// remedies.
+    #[error("listing GitHub repos timed out after {secs}s")]
+    RepoListTimedOut { secs: u64 },
+
+    /// A clone source or destination name was refused by the
+    /// [`claude_commander_protocol::github`] validators.
+    ///
+    /// Distinct from `OperationFailed` for the same reason as `GhUnavailable` and
+    /// `CloneTimedOut`, plus one more that only applies here: nothing failed. The
+    /// *request* is malformed, so a caller mapping errors onto a transport needs
+    /// to answer "you sent something unusable" rather than "the server broke" —
+    /// the server maps this to a 400 and every other `GitError` to a 500. A
+    /// rejection folded into `OperationFailed` is indistinguishable from a real
+    /// git failure, and the caller has no way to tell them apart.
+    ///
+    /// Built only by `clone_source_rejected`, which redacts the message, so a
+    /// credentialed source cannot be quoted back through this variant.
+    #[error("{0}")]
+    CloneSourceRejected(String),
 }
 
 /// Configuration errors

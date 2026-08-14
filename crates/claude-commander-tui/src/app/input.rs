@@ -915,11 +915,11 @@ impl App {
             }
 
             Modal::QuickSwitch {
+                mode,
                 query,
                 matches,
                 selected_idx,
                 scroll,
-                ..
             } => {
                 use claude_commander_core::config::keybindings::BindableAction;
 
@@ -929,6 +929,19 @@ impl App {
                     if super::edit_text_input(query, key) {
                         self.refilter_quick_switch();
                     }
+                    return;
+                }
+
+                // Ctrl-R re-lists the repo picker. It has to be a *modified* key:
+                // the picker is fuzzy-filterable, so a plain `r` is query text
+                // (see the branch above) and could never mean "refresh".
+                if *mode == PaletteMode::GithubRepoPicker
+                    && key.code == KeyCode::Char('r')
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                {
+                    self.refetch_github_repos();
                     return;
                 }
 
@@ -1300,13 +1313,24 @@ impl App {
     /// the command, or apply the section move.
     pub(super) async fn activate_quick_switch_selection(&mut self) {
         // Clone the selected item so the borrow on `matches` is released
-        // before we mutate `modal` and dispatch.
-        let selected = match &self.ui_state.modal {
+        // before we mutate `modal` and dispatch. `unmatched` carries the typed
+        // query for the one mode that can act without a highlighted row.
+        let (selected, unmatched) = match &self.ui_state.modal {
             Modal::QuickSwitch {
+                mode,
+                query,
                 matches,
                 selected_idx,
                 ..
-            } => matches.get(*selected_idx).cloned(),
+            } => (
+                matches.get(*selected_idx).cloned(),
+                // The repo picker's "clone something not in the list" path: with
+                // no row matching, the query itself is the clone source. Mirrors
+                // the checkout modal, where an unmatched query is used as-is.
+                (*mode == PaletteMode::GithubRepoPicker)
+                    .then(|| query.value().trim().to_string())
+                    .filter(|q| !q.is_empty()),
+            ),
             _ => return,
         };
         match selected {
@@ -1345,6 +1369,21 @@ impl App {
                     on_confirm: ConfirmAction::RemoveRemoteServer { name },
                 };
             }
+            Some(QuickSwitchItem::GithubRepo {
+                full_name,
+                dir_name,
+                ..
+            }) => {
+                let backend = self.ui_state.repo_picker.backend;
+                self.open_clone_dest_prompt(
+                    backend,
+                    claude_commander_protocol::github::CloneSource::Github {
+                        full_name: full_name.clone(),
+                    },
+                    &full_name,
+                    &dir_name,
+                );
+            }
             Some(QuickSwitchItem::ProgramChange {
                 session_id,
                 program,
@@ -1361,7 +1400,14 @@ impl App {
                     },
                 };
             }
-            None => {}
+            // No row is highlighted. Only the repo picker can still act: the
+            // typed text is a clone URL (validated in `open_clone_url_prompt`,
+            // which leaves the picker open and says why if it's refused).
+            None => {
+                if let Some(typed) = unmatched {
+                    self.open_clone_url_prompt(&typed);
+                }
+            }
         }
     }
 
@@ -1551,6 +1597,9 @@ impl App {
                     "Enter path to git repository:".to_string(),
                     InputAction::AddProject,
                 );
+            }
+            UserCommand::CloneRepository => {
+                self.handle_clone_repository();
             }
             UserCommand::ScanDirectory => {
                 self.open_path_input(

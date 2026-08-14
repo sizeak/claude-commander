@@ -41,8 +41,14 @@ fn isolated_tmux_tmpdir(temp_dir: &TempDir) -> PathBuf {
 /// links the core crate as a normal dependency (compiled without `--test`), so
 /// telemetry would otherwise be live here. Centralising the disable means a new
 /// test can't forget it. Guarded by `isolated_config_store_disables_telemetry`.
+///
+/// It also pins `projects_dir`, whose default is the user's REAL `~/Projects`,
+/// so a test that reaches the clone paths checks repositories out under
+/// `temp_dir` instead of the developer's own projects directory. Guarded by
+/// `isolated_config_store_pins_projects_dir`.
 fn create_isolated_config_store(temp_dir: &TempDir, mut config: Config) -> Arc<ConfigStore> {
     config.tmux_tmpdir = Some(isolated_tmux_tmpdir(temp_dir));
+    config.projects_dir = Some(temp_dir.path().join("projects"));
     config.telemetry.enabled = false;
     let config_path = temp_dir.path().join("config.toml");
     let toml = toml::to_string_pretty(&config).unwrap();
@@ -81,6 +87,22 @@ async fn isolated_config_store_disables_telemetry() {
     assert!(
         !service.telemetry().is_active(),
         "integration-test services must not emit telemetry (would pollute production OpenObserve)"
+    );
+}
+
+/// Guard: `create_isolated_config_store` must pin the projects directory into
+/// the temp dir. `projects_dir` defaults to the user's REAL `~/Projects`, and
+/// the repo-clone paths write there — so an unpinned helper would clone into
+/// the developer's own projects directory from `cargo test` / CI. Fails if that
+/// pin is dropped.
+#[tokio::test]
+async fn isolated_config_store_pins_projects_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_store = create_isolated_config_store(&temp_dir, Config::default());
+    let projects_dir = config_store.read().projects_dir().unwrap();
+    assert!(
+        projects_dir.starts_with(temp_dir.path()),
+        "isolated test configs must not clone into the real ~/Projects (got {projects_dir:?})"
     );
 }
 
@@ -402,6 +424,10 @@ async fn test_session_manager_restart() {
         // This test bypasses `create_isolated_config_store`, so pin the tmux
         // socket dir directly to keep it off the developer's real server.
         tmux_tmpdir: Some(isolated_tmux_tmpdir(&state_temp_dir)),
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
@@ -1481,6 +1507,10 @@ async fn test_failed_finalize_removes_created_worktree() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         tmux_tmpdir: Some(long_socket_dir),
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
     let config_path = state_temp_dir.path().join("config.toml");
@@ -1553,6 +1583,10 @@ async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
@@ -1649,6 +1683,10 @@ async fn test_manual_kill_marks_session_for_resume_on_wake() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
@@ -1830,6 +1868,10 @@ async fn test_fresh_restart_clears_hibernation_marker() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. This test bypasses
+        // `create_isolated_config_store`, so pin it directly.
+        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
@@ -2032,4 +2074,75 @@ async fn test_paste_image_writes_file_and_injects_path() {
     drop(repo_temp_dir);
     drop(state_temp_dir);
     drop(worktrees_dir);
+}
+
+/// Build a service over an isolated config/state pair, for the project-registration
+/// tests below. No tmux is touched, but the config still pins the isolated socket
+/// dir and `projects_dir` (see `create_isolated_config_store`).
+fn service_for(temp_dir: &TempDir) -> claude_commander_core::api::CommanderService {
+    use claude_commander_core::api::CommanderService;
+    use claude_commander_core::telemetry::FrontendInfo;
+
+    let config_store = create_isolated_config_store(temp_dir, Config::default());
+    let store = create_isolated_store(temp_dir);
+    CommanderService::new(
+        config_store,
+        store,
+        FrontendInfo::new("integration-test", "0.0.0"),
+    )
+}
+
+/// `ensure_project` is the idempotent counterpart to `add_project`: a path that is
+/// already registered answers with the existing id instead of registering the same
+/// checkout twice.
+///
+/// This is the behaviour both frontends' "register this existing checkout" flows
+/// depend on, so it is pinned here rather than left to the callers.
+#[tokio::test]
+async fn ensure_project_returns_the_existing_id_for_a_registered_path() {
+    let (_repo, repo_path) = create_test_repo().await;
+    let temp_dir = TempDir::new().unwrap();
+    let service = service_for(&temp_dir);
+
+    let first = service.ensure_project(repo_path.clone()).await.unwrap();
+    let second = service.ensure_project(repo_path.clone()).await.unwrap();
+
+    assert_eq!(first, second, "the same path must answer with the same id");
+    assert_eq!(
+        service.list_projects().await.len(),
+        1,
+        "a repeated ensure must not register a second project"
+    );
+}
+
+/// The same guarantee for a path that is *not* the repo's canonical spelling.
+///
+/// `add_project` stores `fs::canonicalize`d paths (`session/manager/projects.rs`),
+/// so a dedupe that compared the caller's raw path against the stored one would
+/// miss every non-canonical spelling and register a duplicate — and the callers
+/// hand over exactly such paths: a server-reported clone destination under a
+/// symlinked projects dir, or anything under a symlinked `TMPDIR`/`/var` (macOS).
+/// A symlink is the portable way to produce a second spelling of one directory.
+#[tokio::test]
+async fn ensure_project_deduplicates_a_non_canonical_spelling_of_the_same_repo() {
+    let (_repo, repo_path) = create_test_repo().await;
+    let temp_dir = TempDir::new().unwrap();
+    let link = temp_dir.path().join("link-to-repo");
+    std::os::unix::fs::symlink(&repo_path, &link).unwrap();
+    let service = service_for(&temp_dir);
+
+    // Register through the canonical path, then ensure through the symlink: one
+    // checkout, two spellings.
+    let first = service.add_project(repo_path.clone()).await.unwrap();
+    let second = service.ensure_project(link.clone()).await.unwrap();
+
+    assert_eq!(
+        first, second,
+        "a symlinked spelling of a registered repo must resolve to the same project"
+    );
+    assert_eq!(
+        service.list_projects().await.len(),
+        1,
+        "the symlinked spelling must not register a second project"
+    );
 }

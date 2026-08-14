@@ -54,6 +54,24 @@ impl App {
                             .unwrap_or_else(|| "(default)".into()),
                         "worktrees_dir",
                     ),
+                    SettingsRow::text(
+                        "Projects Directory",
+                        c.projects_dir
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(default)".into()),
+                        "projects_dir",
+                    ),
+                    SettingsRow::text(
+                        "Clone Timeout (s)",
+                        c.clone_timeout_secs.to_string(),
+                        "clone_timeout_secs",
+                    ),
+                    SettingsRow::text(
+                        "Repo List Timeout (s)",
+                        c.repo_list_timeout_secs.to_string(),
+                        "repo_list_timeout_secs",
+                    ),
                     SettingsRow::toggle(
                         "Per-Repo Worktree Dirs",
                         c.per_repo_worktree_dirs,
@@ -349,6 +367,7 @@ impl App {
                     theme_row!("Modal Error", modal_error),
                     theme_row!("Status Bar BG", status_bar_bg),
                     theme_row!("Status Bar FG", status_bar_fg),
+                    theme_row!("Status Bar Accent", status_bar_accent),
                 ]
             }
         }
@@ -962,6 +981,42 @@ impl App {
                         Some(PathBuf::from(value))
                     };
                 }
+                "projects_dir" => {
+                    self.config.projects_dir = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
+                }
+                "clone_timeout_secs" => match value.parse::<u64>() {
+                    Ok(v) if v >= 30 => {
+                        self.config.clone_timeout_secs = v;
+                    }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Clone Timeout must be at least 30 seconds".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
+                // Same 30s floor as the clone timeout, and for the same reason: a
+                // sub-30s budget cannot list a large account, and there is no page
+                // cap to fall back on, so it would produce an empty picker rather
+                // than a short one. No zero-disables case — the whole point of the
+                // bound is that an abandoned `gh api --paginate` gets killed.
+                "repo_list_timeout_secs" => match value.parse::<u64>() {
+                    Ok(v) if v >= 30 => {
+                        self.config.repo_list_timeout_secs = v;
+                    }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Repo List Timeout must be at least 30 seconds".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
                 "editor" => {
                     self.config.editor = if value.is_empty() || value == "(auto)" {
                         None
@@ -1227,7 +1282,8 @@ impl App {
                             modal_warning,
                             modal_error,
                             status_bar_bg,
-                            status_bar_fg
+                            status_bar_fg,
+                            status_bar_accent
                         );
                     }
                 }

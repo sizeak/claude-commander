@@ -25,6 +25,11 @@ path = "src/lib.rs"
 # IS the desktop frontend, so it is the consumer that genuinely wants core's
 # `audio` (mic/speaker for conversation mode) and `clipboard` (Ctrl+V paste).
 claude-commander-core = { path = "../claude-commander-core" }
+# The wire contracts, taken directly rather than through core's legacy DTO
+# re-exports. Per CLAUDE.md a shared *rule* lives in protocol, not core — the
+# add-project-from-GitHub flow uses its `github` slug validation and
+# `redact_credentials` so the TUI enforces the same contract the server does.
+claude-commander-protocol = { path = "../claude-commander-protocol" }
 
 # Terminal rendering. Core depends on `ratatui-core` only, for the `Color` in
 # `[theme]` config values — full ratatui (widgets, layout, backends) lives here.

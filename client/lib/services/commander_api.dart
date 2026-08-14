@@ -146,12 +146,54 @@ abstract class CommanderApi {
 
   Future<String> addProject({required String handle, required String path});
 
+  /// Register a project by server-side path, or return the id of the project
+  /// already registered for it.
+  ///
+  /// The idempotent counterpart to [addProject], which registers
+  /// unconditionally. The dedupe rule — and how a path is resolved to a
+  /// repository root before comparing — belongs to the server; a client that
+  /// reimplemented it would be a second definition free to drift.
+  Future<String> ensureProject({required String handle, required String path});
+
   Future<void> removeProject({required String handle, required String id});
 
   Future<ScanResultDto> scanDirectory({
     required String handle,
     required String path,
   });
+
+  /// Every repo the server-side `gh` user can clone. The list is the *server's*
+  /// to produce, so a phone with no `gh` still gets a picker; a server without
+  /// `gh` throws, which the picker words as an inline banner rather than a dead
+  /// screen.
+  Future<List<GithubRepo>> githubRepos({required String handle});
+
+  /// Start a clone. The returned job's status is **not** terminal — every
+  /// outcome arrives through [cloneJob], so the caller polls from here.
+  Future<CloneJobDto> startClone({
+    required String handle,
+    required CloneRequestDto request,
+  });
+
+  /// One poll of a clone job. **Null is a normal answer**: the server prunes
+  /// finished jobs, so "gone" is not a failure.
+  Future<CloneJobDto?> cloneJob({
+    required String handle,
+    required CloneJobId id,
+  });
+
+  /// Reduce a clone source to a stable `host/owner/name` identity, or null when
+  /// it has none (a local path, a `file://` URL, or a repo with no origin).
+  ///
+  /// Pure string work with no server involved, hence no handle. It sits on the
+  /// seam anyway so widget tests can reach it without a live bridge — and so the
+  /// picker's badge compares canonical forms produced by the *one* definition in
+  /// `claude_commander_protocol::github`, never a second Dart implementation of
+  /// the rule.
+  ///
+  /// **Two nulls are not a match.** Callers must treat a null on either side as
+  /// "no identity", not as an identity that can be equal to another null.
+  Future<String?> canonicalRepoSlug({required String url});
 
   Future<OperationStatusDto> cascadeMerge({
     required String handle,
@@ -232,11 +274,19 @@ abstract class CommanderApi {
   /// (a fresh UUID) that keys the control channel — so several attaches can be
   /// live against one server (e.g. a persistent desktop terminal pane). The
   /// server is resolved via [handle]; the control calls below key by [attachId].
+  ///
+  /// [cols]/[rows] are the caller's *laid-out* terminal size. They ride in the
+  /// WS handshake so the server can size the PTY before spawning
+  /// `tmux attach-session`, which puts tmux's very first paint at the width
+  /// that will render it; a size announced only afterwards arrives too late to
+  /// prevent that paint (see [terminalResize]).
   Stream<terminal.TerminalEvent> attachTerminal({
     required String handle,
     required String attachId,
     required String sessionId,
     required AttachKind kind,
+    required int cols,
+    required int rows,
   });
 
   Future<void> terminalSendInput({
@@ -463,6 +513,12 @@ class RustCommanderApi implements CommanderApi {
       simple.addProject(handle: handle, path: path);
 
   @override
+  Future<String> ensureProject({
+    required String handle,
+    required String path,
+  }) => simple.ensureProject(handle: handle, path: path);
+
+  @override
   Future<void> removeProject({required String handle, required String id}) =>
       simple.removeProject(handle: handle, id: id);
 
@@ -471,6 +527,26 @@ class RustCommanderApi implements CommanderApi {
     required String handle,
     required String path,
   }) => simple.scanDirectory(handle: handle, path: path);
+
+  @override
+  Future<List<GithubRepo>> githubRepos({required String handle}) =>
+      simple.githubRepos(handle: handle);
+
+  @override
+  Future<CloneJobDto> startClone({
+    required String handle,
+    required CloneRequestDto request,
+  }) => simple.startClone(handle: handle, request: request);
+
+  @override
+  Future<CloneJobDto?> cloneJob({
+    required String handle,
+    required CloneJobId id,
+  }) => simple.cloneJob(handle: handle, id: id);
+
+  @override
+  Future<String?> canonicalRepoSlug({required String url}) =>
+      simple.canonicalRepoSlug(url: url);
 
   @override
   Future<OperationStatusDto> cascadeMerge({
@@ -598,11 +674,15 @@ class RustCommanderApi implements CommanderApi {
     required String attachId,
     required String sessionId,
     required AttachKind kind,
+    required int cols,
+    required int rows,
   }) => terminal.attachTerminal(
     handle: handle,
     attachId: attachId,
     sessionId: sessionId,
     kind: kind,
+    cols: cols,
+    rows: rows,
   );
 
   @override

@@ -6,6 +6,20 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# Superseding a pull request cancels its in-flight run — pushing twice in quick
+# succession used to run two full passes, and the first one's result is thrown
+# away anyway.
+#
+# Push runs get a per-run group rather than a per-branch one, which keeps them
+# out of the mechanism entirely. `cancel-in-progress: false` does not mean "never
+# cancelled": GitHub holds at most one *pending* run per group, so a third merge
+# arriving while the first is still building would cancel the second one's
+# queued run — losing the fat-LTO build for that commit, which is the one thing
+# the `nix` job's main-only build exists to guarantee.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Environment-level backstop against usage telemetry leaking to the live
 # OpenObserve endpoint from CI. The baked ingest credential is compiled into
 # every build, and `cfg!(test)` only suppresses the *core* crate's own unit
@@ -36,6 +50,9 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    permissions:
+      # cache purging
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,14 +67,39 @@ jobs:
             keep-env-derivations = true
             keep-outputs = true
 
+      # Shared with the Build & Test and Packaging jobs: all three enter the same
+      # default dev shell, so they were storing one identical 1.26 GB closure
+      # three times over — against a hard 10 GB per-repo cache limit, which the
+      # repo was exceeding, so entries were being evicted and jobs randomly took
+      # the cold path. Keyed on flake.nix + flake.lock, which is what the closure
+      # is built from — crane's devShell takes the checks' inputsFrom, not their
+      # cargoArtifacts, so Cargo.lock does not belong in this key and including
+      # it only threw the shell away on every dependency bump. This job owns the
+      # save — it is the fastest of the three, and one writer means they don't
+      # race for the same key.
       - name: Restore Nix Store Cache
         uses: nix-community/cache-nix-action@v7
         with:
-          primary-key: nix-clippy-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
-          restore-prefixes-first-match: nix-clippy-${{ runner.os }}-
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
+          gc-max-store-size-linux: 4G
+          purge: true
+          purge-prefixes: nix-devshell-${{ runner.os }}-
+          purge-created: 0
+          purge-last-accessed: P1DT12H
+          purge-primary-key: never
 
+      # Shared with Build & Test and Packaging for the same reason: three copies
+      # of the same registry + workspace debug target dir, ~1.6 GB in total. All
+      # three compile the same dependency graph in the same dev profile — only
+      # the seven workspace crates' own artefacts differ — so Build & Test owns
+      # the save: its linked test binaries are the costlier half to rebuild,
+      # whereas clippy re-lints the workspace from cached dependencies cheaply.
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-workspace
+          save-if: false
 
       - name: Run Clippy
         run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
@@ -79,20 +121,59 @@ jobs:
             keep-env-derivations = true
             keep-outputs = true
 
+      # `[profile.release]`'s fat LTO + `codegen-units = 1` re-optimise the whole
+      # dependency graph in one largely serial LLVM pass — ~11 of this job's 12
+      # minutes, and the reason crane's cached dependency artefacts buy so little.
+      # Pull requests therefore build `.#claude-commander-ci` (same derivation,
+      # LTO off), which still exercises the source filter, the read-only-vendor
+      # preBuild workaround, bindgen in the sandbox and wrapProgram. Pushes to
+      # `main` build the real `.#default` too, so the profile AUR / Homebrew /
+      # `nix build` users compile is verified on every merge.
+      #
+      # A cargo profile override re-fingerprints every dependency, so the two
+      # variants have distinct dependency derivations. `main` therefore builds
+      # BOTH: a cache saved by a pull request lives in that PR's scope, and a PR
+      # can only restore from its own ref, its base branch, or the default
+      # branch — so if only PRs ever built the CI variant, its dependencies
+      # would never reach a scope other PRs can read and every PR's first run
+      # would compile ~600 crates cold, which is worse than the 12 minutes this
+      # is meant to fix. Both variants share one store cache, so one entry
+      # carries both dependency sets. Nobody waits on the post-merge run.
+      - name: Select Build Variant
+        id: variant
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "attrs=.#claude-commander-ci" >> "$GITHUB_OUTPUT"
+          else
+            echo "attrs=.#claude-commander-ci .#default" >> "$GITHUB_OUTPUT"
+          fi
+
+      # flake.nix is in the key, not just flake.lock: it defines the derivations
+      # and the dev shells, so editing buildInputs or the src filter changes the
+      # closure while flake.lock stands still. cache-nix-action does not
+      # overwrite on an exact primary-key hit, so without this the stale entry
+      # would hit forever and the new closure would be rebuilt on every run until
+      # some unrelated lockfile bump finally moved the key.
       - name: Restore Nix Store Cache
         uses: nix-community/cache-nix-action@v7
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
+          primary-key: nix-build-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock') }}
+          restore-prefixes-first-match: nix-build-${{ runner.os }}-
           gc-max-store-size-linux: 4G
           purge: true
-          purge-prefixes: nix-${{ runner.os }}-
+          purge-prefixes: nix-build-${{ runner.os }}-
           purge-created: 0
           purge-last-accessed: P1DT12H
           purge-primary-key: never
 
+      # The flake's `src` filter decides what a rebuild costs: every file it
+      # admits is part of the derivation hash, so one that isn't a build input
+      # forces a needless full rebuild. Cheap (evaluation only, no build).
+      - name: Check Nix Source Filter
+        run: ./scripts/check-nix-src-filter.sh
+
       - name: Build
-        run: nix build
+        run: nix build ${{ steps.variant.outputs.attrs }}
 
   test:
     name: Build & Test
@@ -111,14 +192,19 @@ jobs:
             keep-env-derivations = true
             keep-outputs = true
 
+      # Nix store cache: restore-only, the Clippy job owns the save.
+      # Cargo cache: this job owns the save (see the Clippy job's comments).
       - name: Restore Nix Store Cache
         uses: nix-community/cache-nix-action@v7
         with:
-          primary-key: nix-test-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
-          restore-prefixes-first-match: nix-test-${{ runner.os }}-
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
+          save: false
 
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-workspace
 
       - name: Build
         run: nix develop -c cargo build --workspace --all-targets
@@ -140,14 +226,22 @@ jobs:
             keep-env-derivations = true
             keep-outputs = true
 
+      # Both restore-only — Clippy owns the Nix store cache, Build & Test the
+      # Cargo one. `cargo install --path` builds in its own temporary target
+      # directory, so what this job gets out of the Cargo cache is the populated
+      # registry rather than reusable artefacts.
       - name: Restore Nix Store Cache
         uses: nix-community/cache-nix-action@v7
         with:
-          primary-key: nix-packaging-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
-          restore-prefixes-first-match: nix-packaging-${{ runner.os }}-
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
+          save: false
 
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-workspace
+          save-if: false
 
       # Mirrors the Homebrew formula's install step, which is
       # `cargo install --locked --root <prefix> --path <crate>`. Every other job
@@ -174,6 +268,9 @@ jobs:
   client:
     name: Client Tests
     runs-on: ubuntu-latest
+    permissions:
+      # cache purging
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -193,11 +290,23 @@ jobs:
             keep-env-derivations = true
             keep-outputs = true
 
+      # Keeps its own cache: the clientCi shell (Flutter, GTK, Mesa) shares
+      # little with the default shell. Bounded and purged like the others — it
+      # was the largest entry in the repo at 3.83 GB and had neither. Keyed on
+      # this job's own inputs: `**/Cargo.lock` used to match client/rust's
+      # lockfile *and* the core one, so a core dependency bump discarded the
+      # Flutter toolchain along with it.
       - name: Restore Nix Store Cache
         uses: nix-community/cache-nix-action@v7
         with:
-          primary-key: nix-client-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock', 'client/pubspec.lock') }}
+          primary-key: nix-client-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'client/rust/Cargo.lock', 'client/pubspec.lock') }}
           restore-prefixes-first-match: nix-client-${{ runner.os }}-
+          gc-max-store-size-linux: 6G
+          purge: true
+          purge-prefixes: nix-client-${{ runner.os }}-
+          purge-created: 0
+          purge-last-accessed: P1DT12H
+          purge-primary-key: never
 
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
@@ -230,6 +339,21 @@ jobs:
 
       - name: Run Dart Unit Tests
         run: nix develop .#clientCi -c bash -c 'cd client && flutter test'
+
+      # A failing golden is otherwise undiagnosable from here: the log gives a
+      # percentage and a pixel count, never what moved, and the images the
+      # comparator writes die with the runner. `flutter test` drops isolated /
+      # masterImage / testImage PNGs into test/goldens/failures for exactly this.
+      # Failure-only, so a green run pays nothing; ignored when the run failed
+      # for some other reason and the directory does not exist.
+      - name: Upload Golden Failure Images
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures
+          path: client/test/goldens/failures/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Run cdylib Integration Tests
         run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test'

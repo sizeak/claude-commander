@@ -205,6 +205,23 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
   /// Mission Control uses 12 here against 13 for cards.
   final double controlRadius;
 
+  /// How far below a line box's centre this typeface draws its **capitals**, as
+  /// a fraction of the font size — the amount a vertically centred all-caps
+  /// label has to be lifted to look centred.
+  ///
+  /// A typeface property, not a layout choice, which is why it lives here
+  /// beside [sans] rather than in the widget. `Text` centres the line box, and
+  /// a face whose ascender reaches well above its capitals then draws them low
+  /// inside it. Antonio does: measured on painted pixels at 11/22/44/88px, its
+  /// caps sit 1.5/1.5/4.0/7.5 logical pixels low — 0.087 em, holding across an
+  /// eight-fold range. Space Grotesk measured 0.0/+0.5/−1.0/−0.5, no trend, so
+  /// Mission Control's is zero and its labels are untouched.
+  ///
+  /// Applied by `ChromeElbow` to vertically centred labels only; an edge-aligned
+  /// label is not claiming to be centred. See `test/chrome/elbow_label_test.dart`,
+  /// which is what holds these numbers to the fonts.
+  final double capInkDrop;
+
   final double pillRadius;
 
   /// The large radius on an LCARS elbow's single rounded corner. Zero in
@@ -259,6 +276,7 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
     required this.chrome,
     required this.cardRadius,
     required this.controlRadius,
+    required this.capInkDrop,
     required this.pillRadius,
     required this.elbowRadius,
     required this.railWidth,
@@ -362,6 +380,7 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
     ChromeKind? chrome,
     double? cardRadius,
     double? controlRadius,
+    double? capInkDrop,
     double? pillRadius,
     double? elbowRadius,
     double? railWidth,
@@ -403,6 +422,7 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
     chrome: chrome ?? this.chrome,
     cardRadius: cardRadius ?? this.cardRadius,
     controlRadius: controlRadius ?? this.controlRadius,
+    capInkDrop: capInkDrop ?? this.capInkDrop,
     pillRadius: pillRadius ?? this.pillRadius,
     elbowRadius: elbowRadius ?? this.elbowRadius,
     railWidth: railWidth ?? this.railWidth,
@@ -455,6 +475,7 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
       chrome: t < 0.5 ? chrome : other.chrome,
       cardRadius: lerpDouble(cardRadius, other.cardRadius, t)!,
       controlRadius: lerpDouble(controlRadius, other.controlRadius, t)!,
+      capInkDrop: lerpDouble(capInkDrop, other.capInkDrop, t)!,
       pillRadius: lerpDouble(pillRadius, other.pillRadius, t)!,
       elbowRadius: lerpDouble(elbowRadius, other.elbowRadius, t)!,
       railWidth: lerpDouble(railWidth, other.railWidth, t)!,
@@ -505,6 +526,7 @@ const missionControlTokens = CommanderTokens(
   diffGutterBg: Color(0xFF0C0E13),
   brandGradient: [Color(0xFFB3A6FF), Color(0xFF7C9DFF), Color(0xFF3FD6D0)],
   sans: 'SpaceGrotesk',
+  capInkDrop: 0,
   mono: 'JetBrainsMono',
   uppercaseLabels: false,
   chrome: ChromeKind.missionControl,
@@ -609,6 +631,7 @@ const lcarsTokens = CommanderTokens(
   // Deck P1 strokes the chevron mark in solid amber rather than a ramp.
   brandGradient: [Color(0xFFF7A01D), Color(0xFFF7A01D), Color(0xFFF7A01D)],
   sans: 'Antonio',
+  capInkDrop: 0.087,
   mono: 'JetBrainsMono',
   uppercaseLabels: true,
   chrome: ChromeKind.lcars,

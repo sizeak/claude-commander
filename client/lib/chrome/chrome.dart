@@ -228,3 +228,65 @@ Widget applyChromeInsets(ChromeInsets insets, Widget body) => switch (insets) {
 /// whether this route can actually pop.
 bool shouldShowBack(BuildContext context, ChromePageSpec spec) =>
     spec.showBack ?? Navigator.of(context).canPop();
+
+/// Makes a window bar's **empty region** draggable and double-tappable, shared by
+/// both chromes so the *window* half of the bar cannot diverge between themes —
+/// only its looks are the theme's business.
+///
+/// Wrap the title and filler only, never the controls. Wrapping the whole bar
+/// translucently instead looks equivalent and is not: two quick clicks on
+/// adjacent controls fall inside the double-tap slop, so the bar claims the
+/// second one and minimise-then-close silently becomes minimise-then-maximise.
+/// The drag surface [applyWindowBarGestures] produces, so a test can grab the
+/// bar without depending on what is drawn on it. It used to grab the title
+/// text, which stopped being a locator the moment LCARS dropped its title —
+/// and was never the right one anyway, since the surface is the point.
+const windowBarDragSurface = ValueKey('window-bar-drag');
+
+Widget applyWindowBarGestures(ChromeWindowBarSpec spec, Widget dragRegion) =>
+    GestureDetector(
+      key: windowBarDragSurface,
+      behavior: HitTestBehavior.opaque,
+      onPanStart: (_) => spec.onDragStart(),
+      onDoubleTap: spec.onDoubleTap,
+      child: dragRegion,
+    );
+
+/// One control in a window bar: an icon for Mission Control, a short block
+/// [code] for LCARS, and the [label] both use as its tooltip.
+typedef WindowBarControl = ({
+  IconData icon,
+  String code,
+  String label,
+  bool destructive,
+  VoidCallback onTap,
+});
+
+/// The window bar's three controls, as data.
+///
+/// Shared so the button order — minimise, maximise, close — is one decision
+/// rather than two, and so the labels, which are the tooltips *and* the
+/// accessibility names, cannot drift between themes.
+List<WindowBarControl> windowBarControls(ChromeWindowBarSpec spec) => [
+  (
+    icon: Icons.remove,
+    code: 'MIN',
+    label: 'Minimise',
+    destructive: false,
+    onTap: spec.onMinimize,
+  ),
+  (
+    icon: spec.isMaximized ? Icons.filter_none : Icons.crop_square,
+    code: spec.isMaximized ? 'RES' : 'MAX',
+    label: spec.isMaximized ? 'Restore' : 'Maximise',
+    destructive: false,
+    onTap: spec.onToggleMaximize,
+  ),
+  (
+    icon: Icons.close,
+    code: 'CLOSE',
+    label: 'Close',
+    destructive: true,
+    onTap: spec.onClose,
+  ),
+];

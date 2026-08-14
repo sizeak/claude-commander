@@ -78,14 +78,55 @@ pub enum ClientControl {
     /// `kind` selects the agent pane (default) or the paired shell pane; it is
     /// omitted on the wire for an agent attach, so an old client's
     /// `{"type":"attach","session_id":…}` frame parses unchanged.
+    ///
+    /// `cols`/`rows` are the client's terminal size. They are carried *here*,
+    /// in the handshake, rather than left to the first [`Resize`](Self::Resize)
+    /// because a `resize` cannot arrive until a round trip after `ready` — and
+    /// tmux paints a full screen into the socket the moment the attach spawns.
+    /// A client that announced its size only afterwards therefore always
+    /// received one paint at the server's fallback geometry, which its emulator
+    /// wrapped at its own (narrower) width; tmux's follow-up repaint is
+    /// incremental and carries no full-screen clear, so that mis-wrapped
+    /// content was never corrected and the two screens stayed desynchronised
+    /// for the life of the attach. Sizing the PTY before `tmux attach-session`
+    /// is spawned removes the window entirely instead of racing it.
+    ///
+    /// The no-full-screen-clear half is a claim about tmux, so here is its
+    /// receipt: capture the raw WS byte stream across an attach, send a
+    /// `resize`, and grep the bytes that follow — the post-resize repaint
+    /// contains no `ESC[2J` or `ESC[3J`. Measured at ~1.9 KB of purely
+    /// incremental redraw against a pane holding a full screen of wide text.
+    ///
+    /// Both are optional so an old client's frame still parses (the server then
+    /// falls back to its default geometry) and a new client still works against
+    /// an old server, which ignores the fields and gets the pre-existing
+    /// behaviour from the follow-up `resize`.
     Attach {
         session_id: String,
         #[serde(default, skip_serializing_if = "AttachKind::is_agent")]
         kind: AttachKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
     },
     /// Resize the remote PTY. Sent whenever the client's terminal viewport
     /// changes.
     Resize { cols: u16, rows: u16 },
+    /// Force the remote tmux client to repaint its whole visible screen.
+    ///
+    /// Sent when a client has drawn something *over* the terminal — the TUI's
+    /// in-session switcher paints the palette on top of the live pane — and
+    /// needs the region it covered restored. The server answers it with
+    /// `tmux refresh-client`, which repaints without disturbing a scrolled
+    /// copy-mode view (a resize round-trip would lose that anchor, which is why
+    /// this is its own message rather than a resize to the same size).
+    ///
+    /// Purely additive: a server that predates it takes the `Err` arm of its
+    /// control-frame match and logs the frame as malformed, leaving the attach
+    /// up. A new client against an old server therefore just keeps a stale
+    /// rectangle until the pane next emits output.
+    Refresh,
     /// Explicitly detach: kill the `tmux attach-session` child but leave the
     /// tmux session (and the program inside it) running.
     Detach,
@@ -195,11 +236,14 @@ mod tests {
 
     #[test]
     fn client_attach_round_trip() {
-        // An agent attach omits `kind` on the wire (byte-identical to the
-        // pre-`kind` frame), so old and new peers agree.
+        // An agent attach with no size omits both `kind` and the dimensions on
+        // the wire (byte-identical to the pre-`kind` frame), so old and new
+        // peers agree.
         let msg = ClientControl::Attach {
             session_id: "abc123".into(),
             kind: AttachKind::Agent,
+            cols: None,
+            rows: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"attach","session_id":"abc123"}"#);
@@ -212,11 +256,32 @@ mod tests {
         let msg = ClientControl::Attach {
             session_id: "abc123".into(),
             kind: AttachKind::Shell,
+            cols: None,
+            rows: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(
             json,
             r#"{"type":"attach","session_id":"abc123","kind":"shell"}"#
+        );
+        assert_eq!(ClientControl::from_text(&json).unwrap(), msg);
+    }
+
+    /// The handshake must be able to carry the client's geometry, so the server
+    /// can size the PTY *before* spawning `tmux attach-session` and tmux never
+    /// paints a screen at a width the client will re-wrap.
+    #[test]
+    fn client_attach_with_size_round_trip() {
+        let msg = ClientControl::Attach {
+            session_id: "abc123".into(),
+            kind: AttachKind::Agent,
+            cols: Some(39),
+            rows: Some(40),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"attach","session_id":"abc123","cols":39,"rows":40}"#
         );
         assert_eq!(ClientControl::from_text(&json).unwrap(), msg);
     }
@@ -232,6 +297,27 @@ mod tests {
             ClientControl::Attach {
                 session_id: "abc123".into(),
                 kind: AttachKind::Agent,
+                cols: None,
+                rows: None,
+            }
+        );
+    }
+
+    /// A client that predates the size fields must still parse, and must be
+    /// distinguishable from one that sent a size — `None` is what tells the
+    /// server to fall back to its own default geometry.
+    #[test]
+    fn old_attach_frame_without_size_parses_as_no_size() {
+        let parsed =
+            ClientControl::from_text(r#"{"type":"attach","session_id":"abc123","kind":"shell"}"#)
+                .unwrap();
+        assert_eq!(
+            parsed,
+            ClientControl::Attach {
+                session_id: "abc123".into(),
+                kind: AttachKind::Shell,
+                cols: None,
+                rows: None,
             }
         );
     }
@@ -245,6 +331,25 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"resize","cols":120,"rows":40}"#);
         assert_eq!(ClientControl::from_text(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn client_refresh_round_trip() {
+        let msg = ClientControl::Refresh;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"refresh"}"#);
+        assert_eq!(ClientControl::from_text(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn an_unknown_control_tag_is_an_error_not_a_panic() {
+        // `refresh` was added after the first servers shipped. Its safety as an
+        // additive change rests on the receiver treating an unrecognised frame
+        // as a *parse error* it can log and ignore (see the server's steady-state
+        // match) rather than something that tears the attach down. Pin that:
+        // a new client against an old server must only lose the repaint.
+        let err = ClientControl::from_text(r#"{"type":"not_a_real_control"}"#);
+        assert!(err.is_err(), "unknown tags must not deserialize");
     }
 
     #[test]

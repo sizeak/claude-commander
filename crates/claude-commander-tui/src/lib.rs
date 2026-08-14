@@ -20,7 +20,6 @@
 
 pub mod error;
 pub mod hotkey;
-pub mod picker;
 pub mod theme;
 
 mod app;

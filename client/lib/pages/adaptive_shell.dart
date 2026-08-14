@@ -147,6 +147,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                 onTap: () => _setMode(_RailMode.activity),
               ),
             ],
+            // The LCARS frame's accent follows the active view, amber on Fleet
+            // and lilac on Activity — the same split the phone frames make
+            // through `ChromeViewRailSpec.style`.
+            style: _mode == _RailMode.fleet
+                ? ChromeViewRailStyle.branded
+                : ChromeViewRailStyle.plain,
             needsInputCount: needsInput,
             activeCount: active,
             totalCount: total,

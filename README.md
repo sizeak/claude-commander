@@ -2,12 +2,13 @@
 
 A high-performance terminal UI for managing Claude coding sessions, written in Rust.
 
-![Claude Commander kanban board](docs/images/board.svg)
+![The session list grouped by section, with PR stacks nested and a live preview of the selected session's agent](docs/images/stacked.svg)
 
 ## Features
 
 - **Async-first architecture** - Non-blocking tmux and git operations
 - **Hierarchical session model** - Projects contain worktree sessions
+- **Add a project from GitHub** - Add a project by picking one of your GitHub repos, or by URL, and it's cloned in ready to go
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Kanban board UI** - Full-screen board with sections as columns and sessions as project-coloured cards
 - **Live preview pane** - In the list views, a right-hand pane with Preview / Info / Shell tabs: Preview and Shell tail the selected session's agent and shell output as it happens, Info shows its metadata and PR detail (`Tab` cycles, `<`/`>` resizes)
@@ -84,10 +85,11 @@ See the full [keyboard shortcuts](#keyboard-shortcuts) below, and the
 
 The session list can be shown four ways, cycled with `v`: three **list**
 views — grouped by **project**, by **section**, or by **section with
-PR stacks** — and the full-screen kanban **board**. The list starts in the
-project-grouped view; press `v` to rotate project → sections → stacks → board →
-project. When no `[[sections]]` are configured the two section views render
-identically to the project view, so `v` skips them and simply toggles between
+PR stacks** — and the full-screen kanban **board**. A first run starts in the
+section-with-stacks view when `[[sections]]` are configured and in the
+project-grouped view when they aren't; press `v` to rotate project → sections →
+stacks → board → project. When no `[[sections]]` are configured the two section
+views render identically to the project view, so `v` skips them and simply toggles between
 the project list and the board. The chosen view is remembered across restarts.
 
 The three list views pair the list with a **right-hand pane** carrying
@@ -102,6 +104,8 @@ expanded with the **Toggle section** command (unbound by default; bind a key in
 Settings or run it from the command palette).
 
 #### Board
+
+![The kanban board: sections as columns, sessions as project-coloured cards, projects in the sidebar](docs/images/board.svg)
 
 Each **column** is a section, and
 every session is its own **card**: the border is coloured by project and its
@@ -203,7 +207,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `1`–`99` | Jump to session by number |
 | palette only | Toggle section — collapse/expand the section under the cursor in the section list views (unbound by default) |
 | `Space` | Quick-switch palette (sessions and commands) |
-| `Ctrl-Space` | Quick-switch palette (same shortcut as the in-session switcher) |
+| `Ctrl-Space` | Quick-switch palette (the same shortcut, and the same palette, as the in-session switcher) |
 | `Shift+Space` | Command palette (commands only) |
 | `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |
@@ -227,7 +231,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `m` | Move a card to another column (a stacked session moves with its whole stack; manual override — see [Session List Sections](docs/configuration.md#session-list-sections)) |
 | `r` or `Alt-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
 | palette only | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
-| palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`) for the selected session and relaunch it with a fresh conversation |
+| palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`, `omp`) for the selected session and relaunch it with a fresh conversation |
 | `g` | Generate AI summary (available while an Info surface is showing — the modal or the right pane's Info tab) |
 | `Tab` / `Shift-Tab` | Cycle the right pane forward / back through Preview, Info and Shell (list views only; the board is full-screen). A project row has no agent pane, so it cycles Shell ↔ Info |
 | `<` / `>` | Narrow / widen the session list, moving the divider between it and the right pane (list views only) |
@@ -244,7 +248,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 | `Ctrl-q` | Detach and return to the board |
 | `Ctrl-\` | Switch between the Claude and shell sessions |
 | `Alt-r` | Switch to this session's review diff (and `Alt-r` in the diff switches back) — Claude sessions only. Uses `Alt-r` rather than `Ctrl-r` so the shell's `Ctrl-r` reverse-history-search is never shadowed |
-| `Ctrl-Space` | Open the in-session switcher popup to jump to another claude-commander session without detaching |
+| `Ctrl-Space` | Open the quick-switch palette over the session, to jump to another claude-commander session without detaching. It is the same palette as `Ctrl-Space` in the board, so it lists remote sessions and commands too; `Esc` returns you to the pane. Switching between two local sessions never detaches |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
 | `Ctrl-v` | **Remote sessions only:** paste an image from your local clipboard into the Claude prompt. The image is uploaded to the server, saved to a temp file, and its path is typed into the prompt. On a local session `Ctrl-v` is forwarded to Claude, which reads your clipboard directly. If the clipboard holds no image, `Ctrl-v` is forwarded unchanged |
 
@@ -271,6 +275,32 @@ tree header, or run **"Edit server's program list…"** from the palette, to ope
 Settings → Programs targeting that server. In the Programs tab, `t` cycles which
 backend (local or a remote server) you're editing; edits are saved to the chosen
 backend as you make them.
+
+## Flutter Client
+
+For the times you're not at a terminal, [`client/`](client/README.md) is a
+cross-platform GUI client for the same `claude-commander-server` — verified on
+**Linux desktop** and **Android**. It connects to as many servers as you like at
+once and groups their sessions together, and it carries the parts of the TUI that
+matter away from the keyboard: live agent state, the attached terminal over
+WebSocket, and the diff review with line comments.
+
+Below the 900px breakpoint it's a stacked phone flow — fleet list, then session
+detail, then the live agent terminal. It ships two themes, **Mission Control**
+(the default) and **LCARS**, switchable from settings:
+
+<p align="center">
+  <img src="docs/images/client-sessions.png" alt="The client's fleet list on a phone: sessions grouped by project with agent-state glyphs and PR badges" width="31%">
+  &nbsp;
+  <img src="docs/images/client-terminal.png" alt="The client on a phone attached to a session's agent terminal" width="31%">
+  &nbsp;
+  <img src="docs/images/client-lcars.png" alt="The same fleet list on a phone in the LCARS theme: black background, amber and lilac elbow chrome" width="31%">
+</p>
+
+Above it, the same page bodies become a desktop layout: the fleet list beside a
+workspace whose Overview / Agent / Shell / Changes tabs switch in place.
+
+![The client on the desktop: fleet list on the left, the selected session's live agent terminal on the right](docs/images/client-desktop.png)
 
 ## Documentation
 

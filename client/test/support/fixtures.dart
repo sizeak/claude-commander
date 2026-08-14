@@ -23,6 +23,12 @@ SessionInfo sessionInfo({
   SessionStatus status = SessionStatus.running,
   String program = 'bash',
   String projectName = 'my-repo',
+
+  /// The owning project, defaulting to one derived from [id] — i.e. every
+  /// session is its own project unless a test says otherwise. Pass the same
+  /// value to two sessions to put them in one group, which is what the list's
+  /// grouping keys on; sharing only [projectName] is not enough.
+  String? projectId,
   int? prNumber,
   PrState prState = PrState.open,
   bool unread = false,
@@ -41,7 +47,9 @@ SessionInfo sessionInfo({
     branch: branch,
     status: status,
     program: program,
-    projectId: ProjectId(field0: uuid),
+    projectId: ProjectId(
+      field0: projectId == null ? uuid : UuidValue.fromString(projectId),
+    ),
     projectName: projectName,
     prNumber: prNumber,
     prUrl: null,
@@ -70,12 +78,64 @@ ProjectInfoDto projectInfo({
   String name = 'my-repo',
   String repoPath = '/srv/repos/my-repo',
   String mainBranch = 'main',
+
+  /// The repo's `origin` remote. Defaults to null — a project registered from a
+  /// local path with no remote — because that is the shape the repo picker's
+  /// "already added" badge must NOT treat as a match against anything.
+  String? originUrl,
 }) => ProjectInfoDto(
   id: ProjectId(field0: UuidValue.fromString(id)),
   name: name,
   repoPath: repoPath,
   mainBranch: mainBranch,
   sessionIds: const [],
+  originUrl: originUrl,
+);
+
+/// A clone job as a frontend polls it. Defaults to `Running`, the status
+/// `startClone` essentially always answers with.
+CloneJobDto cloneJob({
+  String id = 'cccccccc-2222-3333-4444-555555555555',
+  String sourceLabel = 'acme/widget',
+  String dest = '/srv/projects/widget',
+  CloneStatusDto status = const CloneStatusDto(
+    kind: CloneStatusKind.running,
+    message: '',
+    isGitRepo: false,
+  ),
+}) => CloneJobDto(
+  id: CloneJobId(field0: UuidValue.fromString(id)),
+  sourceLabel: sourceLabel,
+  dest: dest,
+  status: status,
+);
+
+/// A picker row. [cloneUrl] defaults to the https spelling GitHub's API reports
+/// and [sshUrl] to the scp spelling `gh` clones with, so a test can pit one
+/// against the other the way the badge has to.
+GithubRepo githubRepo({
+  required String owner,
+  required String name,
+  String? cloneUrl,
+  String? sshUrl,
+  String? description,
+  bool private = false,
+  bool fork = false,
+  bool archived = false,
+  String defaultBranch = 'main',
+  DateTime? pushedAt,
+}) => GithubRepo(
+  fullName: '$owner/$name',
+  owner: owner,
+  name: name,
+  description: description,
+  private: private,
+  fork: fork,
+  archived: archived,
+  defaultBranch: defaultBranch,
+  cloneUrl: cloneUrl ?? 'https://github.com/$owner/$name.git',
+  sshUrl: sshUrl ?? 'git@github.com:$owner/$name.git',
+  pushedAt: pushedAt,
 );
 
 SessionDetail sessionDetail({

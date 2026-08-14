@@ -7,7 +7,11 @@
 
 mod auto_pull;
 mod backend;
+mod bounded;
+mod clone;
+mod clone_jobs;
 mod diff;
+mod github;
 // Public as a module rather than glob-re-exported like its siblings: the TUI
 // kicks off a background `git lfs pull`, and `git::lfs::pull` says what it does
 // where a glob-exported `git::pull` would sit ambiguously beside `auto_pull`'s.
@@ -20,7 +24,10 @@ mod worktree_include;
 
 pub use auto_pull::*;
 pub use backend::*;
+pub use clone::*;
+pub use clone_jobs::*;
 pub use diff::*;
+pub use github::*;
 pub use pr::*;
 pub use review_diff::*;
 pub use summary::*;

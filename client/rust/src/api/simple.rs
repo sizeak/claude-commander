@@ -18,10 +18,12 @@ use claude_commander_client::{RemoteClient, RemoteServerSpec, SecretString};
 use claude_commander_protocol::api::{
     BranchInfo, CreateOptions, CreateSessionOpts, ProgramInfo, SessionDetail, SessionInfo,
 };
+use claude_commander_protocol::github::{CloneJobId, GithubRepo};
 use claude_commander_protocol::session::{SessionId, SessionStatus};
 
 use crate::api::mirrors::{
-    AgentStatesSnapshotDto, OperationStatusDto, PreviewDataDto, WorkspaceSnapshotDto,
+    AgentStatesSnapshotDto, CloneJobDto, CloneRequestDto, OperationStatusDto, PreviewDataDto,
+    WorkspaceSnapshotDto,
 };
 use crate::api::registry::{call, map_client_err, parse_project_id, parse_session_id, with_client};
 
@@ -291,6 +293,20 @@ pub fn add_project(handle: String, path: String) -> Result<String> {
     Ok(id.as_uuid().to_string())
 }
 
+/// Register a project by server-side path, or return the id of the project
+/// already registered for it; returns a full-id string either way.
+///
+/// The idempotent counterpart to [`add_project`], and what a "register this
+/// existing checkout" offer must call: the path it was handed is frequently
+/// already a project, and `add_project` would register a second entry for the
+/// same repository. The dedupe (including how a path is resolved to a repository)
+/// is the server's — no client restates the rule.
+pub fn ensure_project(handle: String, path: String) -> Result<String> {
+    let client = with_client(&handle)?;
+    let id = call(client.ensure_project(PathBuf::from(path)))?;
+    Ok(id.as_uuid().to_string())
+}
+
 /// Remove a project (its sessions must already be gone).
 pub fn remove_project(handle: String, id: String) -> Result<()> {
     let client = with_client(&handle)?;
@@ -311,6 +327,74 @@ pub fn scan_directory(handle: String, path: String) -> Result<ScanResultDto> {
         added: scan.added as u32,
         skipped: scan.skipped as u32,
     })
+}
+
+// -- GitHub repos / repository clone --
+
+/// Every repo the server-side `gh` user can clone, for the repo picker.
+///
+/// The list is the *server's* to produce: `gh` runs where the checkout will land,
+/// so a phone with no `gh` and no GitHub credentials still gets a picker. A server
+/// without `gh` answers 503, which arrives here as an error a UI can word as
+/// "install gh on the server" rather than as a generic failure.
+pub fn github_repos(handle: String) -> Result<Vec<GithubRepo>> {
+    let client = with_client(&handle)?;
+    call(client.github_repos())
+}
+
+/// Start a clone, returning the created job (the route answers 202 with the whole
+/// job, so the id, the destination and the first status arrive together).
+///
+/// **The returned status is not a terminal status.** Every outcome — success,
+/// failure, and an already-occupied destination — is reported through
+/// [`clone_job`], so this reads `Running` essentially always. Poll from here; the
+/// cadence is the caller's (nothing in this crate loops).
+///
+/// An unusable source or destination name is refused with a 400, which surfaces
+/// as an error carrying the server's *already-redacted* reason. Nothing on this
+/// path builds a message out of the request's source: a hand-pasted URL can carry
+/// `user:token@` userinfo, and the rejection strings are redacted where they are
+/// constructed in `claude-commander-protocol` precisely so no hop has to remember
+/// to.
+pub fn start_clone(handle: String, request: CloneRequestDto) -> Result<CloneJobDto> {
+    let client = with_client(&handle)?;
+    Ok(call(client.start_clone(request.into()))?.into())
+}
+
+/// One poll of a clone job.
+///
+/// **`None` is a normal answer, not an error.** The server prunes jobs a while
+/// after they finish, so a client that keeps polling (or resumes with an id it
+/// stored across a restart) must read "gone" rather than a failure it would
+/// surface as a broken connection.
+///
+/// Takes the typed [`CloneJobId`] straight off the job [`start_clone`] returned,
+/// unlike the session/project routes above which take a full-UUID `String`. Those
+/// ids reach Dart as strings already (`SessionInfo.id`, `create_session`); a clone
+/// job id only ever comes from a `CloneJobDto`, so a `String` parameter would add
+/// a stringify-and-reparse round trip that can only introduce failures.
+pub fn clone_job(handle: String, id: CloneJobId) -> Result<Option<CloneJobDto>> {
+    let client = with_client(&handle)?;
+    Ok(call(client.clone_job(id))?.map(Into::into))
+}
+
+/// Reduce a clone source to a stable `host/owner/name` identity, or `None` when it
+/// has none (a local path or a `file://` URL — a local checkout has no GitHub
+/// identity, so it never earns an "already added" badge).
+///
+/// Pure string work with no server involved, so it needs no handle. Exposed so
+/// the repo picker's badge compares canonical forms through
+/// [`claude_commander_protocol::github::canonical_repo_slug`] — the single
+/// definition the server and the Rust client already use — rather than through a
+/// second Dart implementation of the rule. Raw strings would miss most matches:
+/// `gh repo clone` honours the user's configured `git_protocol`, so a repo cloned
+/// by `gh` typically has an `ssh://` origin while the API reports `https://`.
+///
+/// Safe to feed a credentialed URL: the host is taken after the userinfo
+/// delimiter (`github.rs`'s `host_of` splits on the last `@`), so a
+/// `user:token@` component never reaches the returned slug.
+pub fn canonical_repo_slug(url: String) -> Option<String> {
+    claude_commander_protocol::github::canonical_repo_slug(&url)
 }
 
 // -- Cascade / push-stack --
@@ -343,4 +427,120 @@ pub fn cascade_abandon(handle: String) -> Result<()> {
 pub fn request_pr_refresh(handle: String) -> Result<()> {
     let client = with_client(&handle)?;
     call(client.request_pr_refresh())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The badge's whole reason for existing: an added repo's `ssh://` origin and
+    /// the picker's `https://` clone URL must compare equal through this
+    /// function. Pinned here — not only in the protocol crate — because this
+    /// wrapper is what Dart actually calls, and a wrapper that trimmed, lowered
+    /// or otherwise pre-chewed its argument would break the comparison while the
+    /// protocol tests stayed green.
+    #[test]
+    fn slug_agrees_across_the_spellings_of_one_repo() {
+        let expect = Some("github.com/sizeak/claude-commander".to_string());
+        for form in [
+            "git@github.com:sizeak/claude-commander.git",
+            "ssh://git@github.com/sizeak/claude-commander",
+            "https://github.com/sizeak/claude-commander.git",
+            "https://github.com/SizeAk/Claude-Commander",
+        ] {
+            assert_eq!(
+                canonical_repo_slug(form.to_string()),
+                expect,
+                "form: {form}"
+            );
+        }
+
+        // A local checkout has no GitHub identity, so it never earns a badge.
+        assert_eq!(canonical_repo_slug("/srv/mirrors/foo".to_string()), None);
+        assert_eq!(
+            canonical_repo_slug("file:///srv/mirrors/foo".to_string()),
+            None
+        );
+    }
+
+    /// A pasted credentialed URL must not smuggle its secret into the slug — the
+    /// slug is a user-facing string the picker compares and could display.
+    #[test]
+    fn slug_never_carries_the_pasted_credential() {
+        let slug = canonical_repo_slug(
+            "https://sizeak:ghp_s3cr3tt0ken@github.com/sizeak/claude-commander.git".to_string(),
+        )
+        .expect("a credentialed https url still has a repo identity");
+        assert_eq!(slug, "github.com/sizeak/claude-commander");
+        assert!(
+            !slug.contains("ghp_") && !slug.contains("sizeak:"),
+            "the userinfo component must not reach the slug, got {slug}"
+        );
+    }
+
+    /// A credentialed clone source must not reach Dart through a *failed* call.
+    ///
+    /// **Why this goes through the generated codec rather than asserting on the
+    /// error's `Display`.** frb hands an `anyhow::Error` to Dart by serializing
+    /// `format!("{:?}", self)` — `Debug`, i.e. the whole `Caused by:` chain
+    /// (`frb_generated.rs`, `impl SseEncode for anyhow::Error`). So a
+    /// `.context("cloning {url}")` added anywhere on this path would be invisible
+    /// to a test that read `err.to_string()` (which prints only the outermost
+    /// context) while being fully visible in the page's generic error render.
+    /// Encoding through the real `SseEncode` impl is what closes that gap, and
+    /// asserting on the serialized *bytes* means nothing between here and the
+    /// wire can be the place the secret is dropped.
+    ///
+    /// Network-free and server-free: the handle points at a port nothing listens
+    /// on, so the call fails on connect. Any route on this path errors the same
+    /// way, and the request carrying the credential is what matters.
+    #[test]
+    fn a_failed_clone_never_encodes_the_credential_for_dart() {
+        use crate::api::mirrors::{CloneRequestDto, CloneSourceDto, CloneSourceKind};
+        use crate::frb_generated::SseEncode;
+        use flutter_rust_bridge::for_generated::SseSerializer;
+
+        const USERINFO_SECRET: &str = "ghp_dart_visible_leak_9f3a1c";
+        const BEARER_SECRET: &str = "bearer_dart_visible_leak_4b7e2d";
+
+        // Grab a free port and drop the listener, so connecting is refused.
+        let addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let handle = crate::api::registry::connect_server(
+            format!("http://{addr}"),
+            Some(BEARER_SECRET.to_string()),
+        )
+        .expect("connect_server does not probe reachability");
+
+        let err = start_clone(
+            handle.clone(),
+            CloneRequestDto {
+                source: CloneSourceDto {
+                    kind: CloneSourceKind::Url,
+                    value: format!(
+                        "https://sizeak:{USERINFO_SECRET}@github.com/sizeak/claude-commander.git"
+                    ),
+                },
+                dest_name: None,
+            },
+        );
+        crate::api::registry::disconnect_server(handle);
+        let Err(err) = err else {
+            panic!("a refused connection must be an error, not a job")
+        };
+
+        // The exact bytes the bridge would put on the wire for Dart.
+        let mut serializer = SseSerializer::new();
+        err.sse_encode(&mut serializer);
+        let encoded = String::from_utf8_lossy(&serializer.cursor.into_inner()).to_string();
+
+        for secret in [USERINFO_SECRET, BEARER_SECRET, "sizeak:"] {
+            assert!(
+                !encoded.contains(secret),
+                "the Dart-visible error carries {secret:?}: {encoded}"
+            );
+        }
+    }
 }

@@ -119,8 +119,9 @@ async-trait = "0.1"
 # PTY for terminal attachment
 pty-process = { version = "0.5", features = ["async"] }
 
-# Unix system calls (safe wrappers)
-nix = { version = "0.31", features = ["term", "poll", "fs", "user"] }
+# Unix system calls (safe wrappers). `signal` is what lets `git::clone` kill a
+# timed-out clone's whole process group rather than just the process it spawned.
+nix = { version = "0.31", features = ["term", "poll", "fs", "user", "signal"] }
 
 # Fuzzy matching for the quick-select palette and session lookup. Stays here:
 # `session/types.rs` ranks sessions with it, so it is not frontend-only.

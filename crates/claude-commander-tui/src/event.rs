@@ -58,8 +58,14 @@ pub enum StateUpdate {
     StatusChanged { session_id: SessionId },
     /// Diff updated
     DiffUpdated { session_id: SessionId },
-    /// Project added
-    ProjectAdded { project_id: ProjectId },
+    /// A project was registered on `backend_id` from a background task (the
+    /// "register the existing checkout" answer to an occupied clone
+    /// destination). The handler refreshes that backend's view and the tree.
+    ProjectAdded {
+        /// Backend the project was added to; indexes `Vec<BackendHandle>`.
+        backend_id: usize,
+        project_id: ProjectId,
+    },
     /// Session added
     SessionAdded { session_id: SessionId },
     /// Session removed
@@ -235,6 +241,43 @@ pub enum StateUpdate {
         backend_id: usize,
         result: std::result::Result<(), String>,
     },
+    /// The GitHub repo listing for the open clone picker finished (or failed).
+    /// Spawned off the event loop because `gh api --paginate` has no server-side
+    /// timeout and a large account takes many seconds — blocking here would
+    /// freeze the UI for the whole listing.
+    GithubReposLoaded {
+        /// Backend the listing was requested from; indexes `Vec<BackendHandle>`.
+        backend_id: usize,
+        /// The picker generation this fetch was spawned under. A late arrival
+        /// whose generation no longer matches (the user pressed Ctrl-R again) is
+        /// dropped rather than clobbering the newer listing's state.
+        generation: u64,
+        /// `Err` carries a *state*, not a dead end: a host without `gh`, or an
+        /// unauthenticated one, still leaves the picker's URL path usable.
+        result: std::result::Result<Vec<claude_commander_protocol::github::GithubRepo>, String>,
+    },
+    /// A poll of an in-flight clone job came back. Emitted roughly once a second
+    /// by the poll task until the job reaches a terminal status; there is no
+    /// cancellation — jobs are bounded server-side by `clone_timeout_secs`.
+    CloneJobUpdated {
+        /// Backend running the clone; indexes `Vec<BackendHandle>`.
+        backend_id: usize,
+        /// The source the clone was started from, carried so the handler can
+        /// re-offer a destination-name prompt when the first name turned out to
+        /// be occupied — without parking the pending request on `AppUiState`.
+        ///
+        /// This is the string the user typed, so a `CloneSource::Url` may carry
+        /// `user:token@` credentials. Never log it and never render it: pass it
+        /// through `redact_credentials` first (as `spawn_clone` and
+        /// `apply_clone_job_update` do), or prefer the job's already-redacted
+        /// `source_label`. Nothing Debug-prints a `StateUpdate` today, and that
+        /// is load-bearing here.
+        source: claude_commander_protocol::github::CloneSource,
+        /// `Ok(Some(job))` is a poll result (terminal or not); `Ok(None)` means
+        /// the job was pruned or never issued (absence, not failure); `Err`
+        /// carries a transport/backend error and stops the poll.
+        result: std::result::Result<Option<claude_commander_protocol::github::CloneJob>, String>,
+    },
     /// A background `git lfs pull` for a freshly-created session finished
     /// (success or failure), so its `⇣ LFS` row marker can be cleared.
     LfsPullFinished { session_id: SessionId },
@@ -320,6 +363,9 @@ pub enum UserCommand {
     PushStack,
     /// Create new project
     NewProject,
+    /// Clone a repository into the projects directory and register it as a
+    /// project: opens the GitHub repo picker (palette-only)
+    CloneRepository,
     /// Checkout an existing branch into a new worktree session
     CheckoutBranch,
     /// Delete/kill current session
@@ -510,6 +556,11 @@ impl UserCommand {
             UserCommand::ShowSettings => Some("ui.settings"),
             UserCommand::EditServerPrograms => Some("ui.edit_server_programs"),
             UserCommand::QuickSwitch => Some("ui.quick_switch"),
+            // The *domain* feature (`clone_project`) is recorded inside
+            // `CommanderService::start_clone`, which covers every frontend.
+            // This names the distinct UI event of opening the repo picker —
+            // reusing `clone_project` here would double-count it.
+            UserCommand::CloneRepository => Some("ui.clone_repository"),
             UserCommand::MoveToSection => Some("ui.move_to_section"),
             UserCommand::ToggleViewMode => Some("ui.toggle_view_mode"),
             UserCommand::ToggleSection => Some("ui.toggle_section"),
@@ -540,6 +591,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::CascadeAbandon => Self::CascadeAbandon,
             BindableAction::PushStack => Self::PushStack,
             BindableAction::NewProject => Self::NewProject,
+            BindableAction::CloneRepository => Self::CloneRepository,
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
             BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
@@ -1163,6 +1215,23 @@ mod tests {
             UserCommand::RemoveRemoteServer.telemetry_feature(),
             Some("server.remove_remote")
         );
+    }
+
+    #[test]
+    fn test_clone_repository_maps_from_palette_and_records_a_ui_feature() {
+        // Palette-only command: reachable via the BindableAction conversion,
+        // never from a key (it has no default binding).
+        assert!(matches!(
+            UserCommand::from(BindableAction::CloneRepository),
+            UserCommand::CloneRepository
+        ));
+        // The service records the *domain* feature `clone_project` inside
+        // `start_clone`; the chokepoint records opening the picker, which is a
+        // distinct UI event and must not reuse that name (it would double-count
+        // against the other frontends).
+        let feature = UserCommand::CloneRepository.telemetry_feature();
+        assert_eq!(feature, Some("ui.clone_repository"));
+        assert_ne!(feature, Some("clone_project"));
     }
 
     #[test]

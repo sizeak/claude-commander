@@ -380,6 +380,10 @@ pub struct ThemeOverrides {
     // Status bar
     pub status_bar_bg: Option<ColorValue>,
     pub status_bar_fg: Option<ColorValue>,
+    /// Accent for the hotkey letter in `[n]ew session` and the board's top-bar
+    /// title. Distinct from `text_accent` because both are painted *on the status
+    /// bar*, so they must contrast with `status_bar_bg` rather than the canvas.
+    pub status_bar_accent: Option<ColorValue>,
 }
 
 #[cfg(test)]

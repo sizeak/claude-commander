@@ -10,10 +10,12 @@ import 'package:claude_commander_client/state/commander_store_scope.dart';
 import 'package:claude_commander_client/state/workspace_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
+import 'package:claude_commander_client/window/window_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'support/fake_commander_api.dart';
+import 'support/fake_window_service.dart';
 import 'support/fixtures.dart';
 
 /// A second server, deliberately not on the loopback host so the `local` /
@@ -42,21 +44,28 @@ void main() {
 
   tearDown(() => workspace.dispose());
 
-  /// Hosts the page the way `main()` does: both scopes above the `MaterialApp`,
+  /// Hosts the page the way `main()` does: the scopes above the `MaterialApp`,
   /// with the app rebuilt on a theme change so a selection actually rethemes.
-  Widget wrap(WorkspaceStore workspace) => WorkspaceScope(
-    workspace: workspace,
-    child: ThemeScope(
-      controller: theme,
-      child: ListenableBuilder(
-        listenable: theme,
-        builder: (context, _) => MaterialApp(
-          theme: themeDataFor(theme.tokens),
-          home: const SettingsPage(),
+  ///
+  /// [window] defaults to null, which is the phone case — and the case every test
+  /// that predates the window section is asserting.
+  Widget wrap(WorkspaceStore workspace, {WindowController? window}) =>
+      WorkspaceScope(
+        workspace: workspace,
+        child: WindowScope(
+          controller: window,
+          child: ThemeScope(
+            controller: theme,
+            child: ListenableBuilder(
+              listenable: theme,
+              builder: (context, _) => MaterialApp(
+                theme: themeDataFor(theme.tokens),
+                home: const SettingsPage(),
+              ),
+            ),
+          ),
         ),
-      ),
-    ),
-  );
+      );
 
   /// Pushes a route and lets its transition finish, without `pumpAndSettle` —
   /// the pages pushed here may hold a progress indicator, which never settles.
@@ -190,6 +199,72 @@ void main() {
 
     await tapAndPush(tester, find.text('Theme'));
     expect(find.byType(ThemePickerPage), findsOneWidget);
+  });
+
+  group('the window section', () {
+    WindowController newWindow() => WindowController(
+      store: InMemoryPrefStore(),
+      service: FakeWindowService(),
+    );
+
+    testWidgets('is absent where there is no window to manage', (tester) async {
+      // The phone: no controller in scope, so the section has nothing to say and
+      // does not appear. No platform check anywhere in the page.
+      await tester.pumpWidget(wrap(workspace));
+      await tester.pumpAndSettle();
+
+      expect(find.text('WINDOW'), findsNothing);
+      expect(find.text('Full screen'), findsNothing);
+    });
+
+    testWidgets('reports both states and their shortcuts', (tester) async {
+      await tester.pumpWidget(wrap(workspace, window: newWindow()));
+      await tester.pumpAndSettle();
+
+      expect(find.text('WINDOW'), findsOneWidget);
+      expect(find.text('OFF'), findsOneWidget);
+      expect(find.text('HIDDEN'), findsOneWidget);
+      // The rows are where the shortcuts are documented in the app itself.
+      expect(find.text('F11'), findsOneWidget);
+      expect(find.text('Shift+F11'), findsOneWidget);
+    });
+
+    testWidgets('tapping the fullscreen row drives the window', (tester) async {
+      final window = newWindow();
+      await tester.pumpWidget(wrap(workspace, window: window));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Full screen'));
+      await tester.pumpAndSettle();
+
+      expect(window.fullscreen, isTrue);
+      expect(find.text('ON'), findsOneWidget);
+    });
+
+    testWidgets('tapping the frame row restores the native title bar', (
+      tester,
+    ) async {
+      final window = newWindow();
+      await tester.pumpWidget(wrap(workspace, window: window));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Window frame'));
+      await tester.pumpAndSettle();
+
+      expect(window.titleBar, TitleBarMode.native);
+      expect(find.text('NATIVE'), findsOneWidget);
+    });
+
+    testWidgets('follows a change made by the F11 shortcut', (tester) async {
+      final window = newWindow();
+      await tester.pumpWidget(wrap(workspace, window: window));
+      await tester.pumpAndSettle();
+
+      await window.setFullscreen(true);
+      await tester.pumpAndSettle();
+
+      expect(find.text('ON'), findsOneWidget);
+    });
   });
 
   testWidgets('the theme row follows a selection made elsewhere', (
