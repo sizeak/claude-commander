@@ -8479,3 +8479,211 @@ fn the_help_modal_documents_the_clone_picker() {
         "help must document the re-fetch key"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Quick-switch status glyphs
+// ---------------------------------------------------------------------------
+
+/// Render *only* the open quick-switch palette into a fresh buffer.
+///
+/// A full `App::render` would draw the session tree underneath the modal, and
+/// the tree row for the same session carries the very glyph these tests are
+/// looking for — so an assertion against the whole frame would pass even with
+/// the palette drawing the wrong icon.
+///
+/// The geometry is the production geometry: `quick_switch_areas` +
+/// `render_quick_switch`, exactly as `render_modal` calls them.
+fn palette_terminal(app: &App) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal
+        .draw(|f| {
+            let Modal::QuickSwitch {
+                mode,
+                query,
+                matches,
+                selected_idx,
+                scroll,
+            } = &app.ui_state.modal
+            else {
+                panic!("the quick-switch palette must be open");
+            };
+            let (modal_area, rows_area) = modals::quick_switch_areas(f.area(), matches.len());
+            app.render_quick_switch(
+                f,
+                modal_area,
+                rows_area,
+                *mode,
+                query,
+                matches,
+                *selected_idx,
+                *scroll,
+            );
+        })
+        .unwrap();
+    terminal
+}
+
+fn palette_text(app: &App) -> String {
+    buffer_text(&palette_terminal(app))
+}
+
+/// Cell coordinates of the first occurrence of `needle` in a rendered buffer.
+///
+/// Row-by-row rather than over the flattened string, so a match can't straddle
+/// the wrap between two rows; the byte offset of each cell's symbol is recorded
+/// as the row is built, which keeps the mapping exact for multi-byte glyphs.
+fn find_cell(
+    terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+    needle: &str,
+) -> (u16, u16) {
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area;
+    for y in area.y..area.y + area.height {
+        let mut row = String::new();
+        let mut offsets: Vec<(usize, u16)> = Vec::new();
+        for x in area.x..area.x + area.width {
+            offsets.push((row.len(), x));
+            row.push_str(buffer[(x, y)].symbol());
+        }
+        if let Some(byte) = row.find(needle) {
+            let (_, x) = offsets
+                .iter()
+                .find(|(off, _)| *off == byte)
+                .expect("a match starts on a cell boundary");
+            return (*x, y);
+        }
+    }
+    panic!("{needle:?} was not rendered");
+}
+
+#[tokio::test]
+async fn quick_switch_rows_show_the_live_status_glyph_the_session_list_shows() {
+    use crate::tui::widgets::status_glyph::{SPINNER_FRAMES, session_status_glyph};
+
+    // The palette derived its icon from `SessionStatus` alone, so every running
+    // session read as an idle `●`: a working agent, one waiting for input and
+    // one with unread output were indistinguishable from an idle one, and none
+    // of them matched the tree row for the same session.
+    for (agent_state, unread) in [
+        (Some(AgentState::Working), false),
+        (Some(AgentState::WaitingForInput), false),
+        (Some(AgentState::Idle), true),
+        (Some(AgentState::Idle), false),
+        (None, false),
+    ] {
+        let (mut snap, sid, _pid) = snapshot_with_one_session();
+        snap.sessions[0].unread = unread;
+        let mut app = make_test_app();
+        app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+        if let Some(state) = agent_state {
+            app.backend_mut_for_test(BackendId(0))
+                .view
+                .agent_states
+                .states
+                .insert(sid, state);
+        }
+
+        app.open_quick_switch_with_mode(PaletteMode::Unified).await;
+
+        // The tree's own glyph for the same inputs is the expectation: this
+        // pins the two surfaces together rather than restating the precedence.
+        let (glyph, _) = session_status_glyph(
+            &app.theme,
+            app.ui_state.tick_count,
+            SessionStatus::Running,
+            agent_state,
+            unread,
+        )
+        .expect("a running session always has a glyph");
+        let text = palette_text(&app);
+        assert!(
+            text.contains(&format!("{glyph} remote-sess")),
+            "expected {glyph:?} beside the session for \
+             agent_state={agent_state:?} unread={unread}: {text}"
+        );
+    }
+
+    // The spinner is the animated one, not a frozen frame: a later tick shows a
+    // later frame.
+    let (snap, sid, _pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    app.backend_mut_for_test(BackendId(0))
+        .view
+        .agent_states
+        .states
+        .insert(sid, AgentState::Working);
+    app.ui_state.tick_count = 3;
+    app.open_quick_switch_with_mode(PaletteMode::Unified).await;
+    assert!(
+        palette_text(&app).contains(&format!("{} remote-sess", SPINNER_FRAMES[1])),
+        "the palette's spinner must advance with the tick count"
+    );
+}
+
+#[tokio::test]
+async fn refiltering_the_palette_keeps_the_live_status_glyph() {
+    // The refilter path rebuilds the rows from scratch on every keystroke, so it
+    // has to carry the same live state as the open path — otherwise typing a
+    // single character resets every row to a plain `●`.
+    let (snap, sid, _pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    app.backend_mut_for_test(BackendId(0))
+        .view
+        .agent_states
+        .states
+        .insert(sid, AgentState::WaitingForInput);
+
+    app.open_quick_switch_with_mode(PaletteMode::Unified).await;
+    if let Modal::QuickSwitch { query, .. } = &mut app.ui_state.modal {
+        query.handle(tui_input::InputRequest::InsertChar('r'));
+    }
+    app.refilter_quick_switch();
+
+    assert!(
+        palette_text(&app).contains("? remote-sess"),
+        "the waiting glyph must survive a refilter"
+    );
+}
+
+#[tokio::test]
+async fn an_unread_palette_row_is_bold_like_its_tree_row() {
+    // The `◆` glyph is only half of how the tree marks unread output — it bolds
+    // the title too (`tree_list/render.rs`). `buffer_text` flattens the buffer to
+    // symbols, so no other assertion here can see a modifier: without this test
+    // the bold arm could be deleted and every palette test would stay green.
+    for unread in [true, false] {
+        let (mut snap, _sid, _pid) = snapshot_with_one_session();
+        snap.sessions[0].unread = unread;
+        let mut app = make_test_app();
+        app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+        app.open_quick_switch_with_mode(PaletteMode::Unified).await;
+
+        // Move the highlight off the session row: the selection style wins over
+        // the unread style (as it does in the tree, whose highlight is itself
+        // bold), so on the selected row there would be nothing to observe.
+        if let Modal::QuickSwitch {
+            matches,
+            selected_idx,
+            ..
+        } = &mut app.ui_state.modal
+        {
+            assert!(matches.len() > 1, "need a second row to park the cursor on");
+            *selected_idx = 1;
+        }
+
+        let terminal = palette_terminal(&app);
+        let (x, y) = find_cell(&terminal, "remote-sess");
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)]
+                .modifier
+                .contains(Modifier::BOLD),
+            unread,
+            "unread={unread} must decide whether the palette bolds the title"
+        );
+    }
+}
