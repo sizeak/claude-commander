@@ -445,9 +445,23 @@
               # which clang rejects outright next to -miphoneos-version-min. The
               # TLS stack makes that unavoidable rather than theoretical: rustls
               # resolves to aws-lc-rs here, so aws-lc-sys compiles C and arm64
-              # assembly on the way to the staticlib. Only the iOS triples are
-              # redirected — the darwin ones are this host, and Nix's toolchain
-              # is the right answer for those.
+              # assembly on the way to the staticlib.
+              #
+              # The darwin triples are redirected too, which they were not at
+              # first: they are this host, so Nix's toolchain looked like the
+              # right answer for them. It is not, under an Xcode-driven build.
+              # cargokit runs cargo from an Xcode script phase, and
+              # `clientXcodeEnvScrub` has to unset CC/CXX/AR/LD before delegating
+              # (Xcode reads them as build settings), so a *host* build script —
+              # objc-sys, libc, proc-macro2 — links through bare `cc`, i.e. Nix's
+              # wrapper stripped of the environment it needs. On a maintainer's
+              # Mac that still linked; on a GitHub arm64 runner it does not, and
+              # `flutter build ios` dies with "linking with `cc` failed" naming
+              # three build scripts and nothing else (Flutter mangles Xcode's
+              # paths to `Pods/SEVERE:0:0`, so the real ld message never
+              # surfaces). Build scripts are host artefacts, and
+              # CARGO_TARGET_<HOST>_LINKER does govern their link while
+              # cross-compiling — verified directly, not assumed.
               #
               # Resolved through xcrun, not by joining paths onto DEVELOPER_DIR:
               # only `xcodebuild` sits directly under it, while the compilers live
@@ -467,11 +481,16 @@
               # cdylib that fails, which cargokit does not even consume — it takes
               # the staticlib — but `crate-type` lists both, so one failing link
               # fails the build.
-              for iosTriple in aarch64_apple_ios aarch64_apple_ios_sim x86_64_apple_ios; do
-                export "CC_$iosTriple=$xcodeClang"
-                export "CXX_$iosTriple=$xcodeClangxx"
-                export "AR_$iosTriple=$xcodeAr"
-                export "CARGO_TARGET_$(echo "$iosTriple" | tr 'a-z' 'A-Z')_LINKER=$xcodeClang"
+              #
+              # Both darwin triples, not just this host's: a maintainer on an
+              # Intel Mac cross-links the arm64 slice and hits the same wrapper.
+              for appleTriple in aarch64_apple_ios aarch64_apple_ios_sim \
+                                 x86_64_apple_ios aarch64_apple_darwin \
+                                 x86_64_apple_darwin; do
+                export "CC_$appleTriple=$xcodeClang"
+                export "CXX_$appleTriple=$xcodeClangxx"
+                export "AR_$appleTriple=$xcodeAr"
+                export "CARGO_TARGET_$(echo "$appleTriple" | tr 'a-z' 'A-Z')_LINKER=$xcodeClang"
               done
 
               # Both halves have to agree on the minimum, and left alone they do
