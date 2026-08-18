@@ -896,10 +896,15 @@ mod tests {
             "the second ensure must return the id the first created"
         );
 
+        // Projects are stored under `repo_identity` — the *canonicalized* repo
+        // root — so compare against that spelling, not the raw `TempDir` path.
+        // They differ wherever the temp dir sits behind a symlink, e.g. macOS's
+        // `/tmp` → `/private/tmp`.
+        let canonical = tokio::fs::canonicalize(&repo_path).await.unwrap();
         let projects = service.list_projects().await;
         let matching: Vec<_> = projects
             .iter()
-            .filter(|p| p.repo_path == repo_path)
+            .filter(|p| p.repo_path == canonical)
             .map(|p| p.id)
             .collect();
         assert_eq!(
