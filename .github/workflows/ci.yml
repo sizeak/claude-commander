@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,7 +55,7 @@ jobs:
       actions: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Run clippy through the Nix dev shell so system dependencies (ALSA via
       # rodio, pkg-config, …) come from flake.nix — the single source of truth —
@@ -112,7 +112,7 @@ jobs:
       actions: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v30
@@ -180,7 +180,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Build and test through the Nix dev shell: tmux, git, ALSA and the Rust
       # toolchain all come from flake.nix. Tests run outside the Nix build
@@ -217,7 +217,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v30
@@ -273,7 +273,7 @@ jobs:
       actions: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # The launcher-icon test reads the SVG masters under client/tool/icon,
           # and *.svg is LFS-tracked (.gitattributes) — without this the test
@@ -316,7 +316,7 @@ jobs:
       # The Flutter SDK comes from the Nix store (cached above); this caches the
       # downloaded pub packages so `flutter pub get` doesn't re-fetch every run.
       - name: Restore Pub Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.pub-cache
           key: pub-${{ runner.os }}-${{ hashFiles('client/pubspec.lock') }}
@@ -348,7 +348,7 @@ jobs:
       # for some other reason and the directory does not exist.
       - name: Upload Golden Failure Images
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: golden-failures
           path: client/test/goldens/failures/
