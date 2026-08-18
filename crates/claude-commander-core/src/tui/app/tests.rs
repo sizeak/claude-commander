@@ -5499,6 +5499,70 @@ async fn restart_confirm_spawns_against_owning_backend_and_toasts() {
 }
 
 #[tokio::test]
+async fn reset_confirm_takes_the_no_resume_path_and_toasts_reset() {
+    // Reset must reach the backend's *fresh* restart, not the resuming one —
+    // the whole point of the command — and say so in the toast. The mock records
+    // the two paths separately so this can't pass by accident.
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+
+    app.handle_confirm(super::ConfirmAction::ResetSession {
+        session_id: remote_sid,
+    })
+    .await;
+
+    loop {
+        match app.event_loop.next().await.expect("a reset event") {
+            AppEvent::StateUpdate(su @ StateUpdate::RestartFinished { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    let mock = remote_mock(&app, BackendId(1));
+    assert_eq!(
+        mock.reset_sessions(),
+        vec![remote_sid],
+        "reset must route to the owning backend's no-resume restart"
+    );
+    assert!(
+        mock.restarted_sessions().is_empty(),
+        "reset must NOT fall through to the resuming restart"
+    );
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("a status toast after reset");
+    assert!(msg.contains("reset"), "toast: {msg}");
+}
+
+#[test]
+fn reset_confirm_message_names_session_and_promises_no_resume() {
+    use super::actions::reset_confirm_message;
+
+    let msg = reset_confirm_message(Some("fix-parser"));
+    assert!(msg.contains("\"fix-parser\""), "message: {msg}");
+    assert!(msg.contains("no resume"), "message: {msg}");
+    assert!(msg.contains("new conversation"), "message: {msg}");
+    // Falls back to a generic subject rather than an empty quote.
+    assert!(reset_confirm_message(None).contains("this session"));
+}
+
+#[test]
+fn is_command_available_gates_reset_on_a_selected_session() {
+    let mut ui = AppUiState {
+        selected_backend_connected: true,
+        ..AppUiState::default()
+    };
+    assert!(!ui.is_command_available(BindableAction::ResetSession));
+    ui.selected_session_id = Some(SessionRef::new(BackendId(1), SessionId::new()));
+    assert!(ui.is_command_available(BindableAction::ResetSession));
+}
+
+#[tokio::test]
 async fn change_program_confirm_spawns_against_owning_backend_and_routes_program() {
     // Confirming a program change must spawn `change_program` on the OWNING
     // backend (not the local one) with the chosen command, off the event loop.

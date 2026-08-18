@@ -67,6 +67,9 @@ skip_lfs_smudge = true
 
 # Pass `--resume` when restarting/recreating a session so the agent picks up
 # where it left off. Set to false to start the program fresh each time.
+# This is the default for every restart; to override it for one session without
+# touching config, run **Reset session** from the command palette — that
+# relaunches the pane with no resume, whatever this says.
 resume_session = true
 
 # Automatically hibernate idle sessions to free memory (see "Idle-session
@@ -297,6 +300,7 @@ state_sync_interval_ms = 2000
 # grow_left_pane = [">"]                   # move it right
 # quit = ["q", "Ctrl-c"]
 # toggle_keep_alive = ["K"]                # palette-only by default; bind a key here
+# reset_session = ["Ctrl-r"]               # palette-only by default; bind a key here
 
 # Remote claude-commander servers. Each entry adds a server node to the
 # session tree with that server's projects and sessions under it (full

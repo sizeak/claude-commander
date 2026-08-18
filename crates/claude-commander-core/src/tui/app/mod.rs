@@ -36,7 +36,7 @@ use ratatui::{
 use tracing::{debug, error, info, warn};
 use tui_input::Input;
 
-use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
+use super::event::{AppEvent, EventLoop, InputEvent, RestartKind, StateUpdate, UserCommand};
 use super::path_completer::PathCompleter;
 use super::theme::Theme;
 use super::widgets::board::{
@@ -1376,6 +1376,11 @@ pub enum ConfirmAction {
     RestartSession {
         session_id: SessionId,
     },
+    /// Relaunch a session's pane *without* resuming, discarding the agent's
+    /// conversation.
+    ResetSession {
+        session_id: SessionId,
+    },
     /// Change a session's program (agent) to `program` and relaunch it fresh.
     ChangeProgram {
         session_id: SessionId,
@@ -1772,6 +1777,7 @@ impl AppUiState {
             | BindableAction::DeleteSession
             | BindableAction::RenameSession
             | BindableAction::RestartSession
+            | BindableAction::ResetSession
             | BindableAction::ChangeProgram
             | BindableAction::ToggleKeepAlive
             | BindableAction::OpenPullRequest

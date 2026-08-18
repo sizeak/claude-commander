@@ -140,6 +140,10 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
+    async fn restart_session_fresh(&self, _id: SessionId) -> BResult<()> {
+        self.unavailable()
+    }
+
     async fn delete_session(&self, _id: SessionId) -> BResult<()> {
         self.unavailable()
     }

@@ -1935,6 +1935,25 @@ async fn test_fresh_restart_clears_hibernation_marker() {
         "tmux session should be recreated by fresh restart"
     );
 
+    // The id-keyed entry point is the one the operator's Reset command reaches
+    // (the TUI holds a `SessionId`, not a tmux name). Drive it too, so the
+    // name-resolution wrapper is covered rather than assumed.
+    manager.restart_session_fresh(&session_id).await.unwrap();
+    {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::Running,
+            "reset by id should leave the session Running"
+        );
+        assert!(!s.hibernated);
+    }
+    assert!(
+        manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "reset by id should resolve the tmux name and recreate the pane"
+    );
+
     // Cleanup
     let _ = manager.kill_session(&session_id, true).await;
     drop(repo_temp_dir);
