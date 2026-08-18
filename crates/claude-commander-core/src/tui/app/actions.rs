@@ -153,6 +153,29 @@ pub(super) fn restart_confirm_message(
     }
 }
 
+/// The Reset-confirmation body. Unlike [`restart_confirm_message`] this needs no
+/// local/remote split: a reset never resumes, whichever host it runs on, so the
+/// promise is the same on both. Names the session because Reset is palette-only
+/// — the operator may be several keystrokes from the row they selected.
+///
+/// The hibernation caveat is folded into the wording rather than conditioned on
+/// a flag: `SessionInfo` carries no `hibernated` field (it is not on the wire
+/// DTO), and "any conversation it would otherwise have resumed" is true of a
+/// hibernated session — whose wake-up resume is exactly what makes hibernation
+/// non-destructive — without needing to know.
+pub(super) fn reset_confirm_message(title: Option<&str>) -> String {
+    let subject = match title {
+        Some(title) => format!("\"{title}\""),
+        None => "this session".to_string(),
+    };
+    format!(
+        "Reset session {subject}?\nThis kills its tmux session and starts a fresh one with \
+         no resume, so the agent begins a new conversation — any conversation it would \
+         otherwise have resumed (including one preserved by hibernation) is discarded.\nThe \
+         worktree, branch and commits are untouched."
+    )
+}
+
 impl App {
     /// Open `Modal::PathInput` at the current working directory with its
     /// subdirectory list already populated.
@@ -1201,19 +1224,22 @@ impl App {
         };
     }
 
-    /// Gather session matches for a query (empty query = all sessions).
+    /// Score every backend's sessions against `query`, as unsorted palette rows.
     ///
-    /// Non-empty queries are ranked by fuzzy score (best match first);
-    /// empty queries fall back to most-recently-attached order.
-    pub(super) async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
+    /// Both palette build paths go through this: [`Self::gather_quick_switch_matches`]
+    /// when the palette opens, and [`Self::refilter_quick_switch`] on each
+    /// keystroke. They used to be two copies of this loop, which is how the two
+    /// drifted apart — keep it one function so a field added here reaches both.
+    ///
+    /// Every backend's sessions, not just local: the palette mirrors the whole
+    /// tree. `project_name` carries the session's own project label, matching
+    /// how the tree groups it; selection resolves the owning backend by session
+    /// id (`backend_of_session`). Read from the snapshots rather than the board
+    /// so an active project filter never narrows the palette.
+    fn scored_palette_sessions(&self, query: &str) -> Vec<(i64, QuickSwitchMatch)> {
         let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
-
-        // Every backend's sessions, not just local — the palette mirrors the
-        // whole tree (and the refilter path already builds from `list_items`,
-        // which spans all backends). `project_name` carries the session's own
-        // project label, matching how the tree groups it; selection resolves
-        // the owning backend by session id (`backend_of_session`).
         for handle in &self.backends {
+            let agent_states = &handle.view.agent_states.states;
             for session in &handle.view.snapshot.sessions {
                 if session.status == SessionStatus::Creating {
                     continue;
@@ -1238,12 +1264,25 @@ impl App {
                         branch: session.branch.clone(),
                         project_name: session.project_name.clone(),
                         status: session.status,
+                        // The live half of the row. Without these the palette
+                        // draws a plain `●` for every running session, agreeing
+                        // with neither the tree nor the agent.
+                        agent_state: agent_states.get(&session.session_id).copied(),
+                        unread: session.unread,
                         last_attached_at: session.last_attached_at,
                     },
                 ));
             }
         }
+        scored
+    }
 
+    /// Gather session matches for a query (empty query = all sessions).
+    ///
+    /// Non-empty queries are ranked by fuzzy score (best match first);
+    /// empty queries fall back to most-recently-attached order.
+    pub(super) async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
+        let mut scored = self.scored_palette_sessions(query);
         sort_palette_matches(&mut scored, query.is_empty());
         scored.into_iter().map(|(_, m)| m).collect()
     }
@@ -1348,7 +1387,7 @@ impl App {
     }
 
     /// Re-filter the quick-switch matches based on the current query.
-    /// Rebuilds from the board so backspace can widen results.
+    /// Rebuilds from the backend snapshots so backspace can widen results.
     pub(super) fn refilter_quick_switch(&mut self) {
         // Snapshot the inputs we need so the closure borrow on self doesn't
         // conflict with the `&mut self.ui_state.modal` below.
@@ -1382,43 +1421,11 @@ impl App {
         }
 
         // Build the session rows synchronously from every backend's snapshot so
-        // the refilter runs without awaiting the store lock on each keystroke.
-        // Read the snapshots (not the board) so an active project filter never
-        // narrows the palette — quick-switch always spans the whole tree,
-        // mirroring `gather_quick_switch_matches`.
+        // the refilter runs without awaiting the store lock on each keystroke —
+        // the same rows the open path builds, from the same helper.
         let mut scored_sessions: Vec<(i64, QuickSwitchMatch)> = Vec::new();
         if eff_mode == PaletteMode::Unified {
-            for handle in &self.backends {
-                for session in &handle.view.snapshot.sessions {
-                    if session.status == SessionStatus::Creating {
-                        continue;
-                    }
-                    // Score against title, branch and program; best field wins.
-                    // Matches `gather_quick_switch_matches` so a session found on
-                    // program name at open doesn't vanish on the first keystroke.
-                    let score = [
-                        session.title.as_str(),
-                        session.branch.as_str(),
-                        session.program.as_str(),
-                    ]
-                    .iter()
-                    .filter_map(|s| crate::fuzzy::fuzzy_score(s, eff_query))
-                    .max();
-                    let Some(score) = score else { continue };
-                    scored_sessions.push((
-                        score,
-                        QuickSwitchMatch {
-                            session_id: session.session_id,
-                            title: session.title.clone(),
-                            branch: session.branch.clone(),
-                            project_name: session.project_name.clone(),
-                            status: session.status,
-                            last_attached_at: session.last_attached_at,
-                        },
-                    ));
-                }
-            }
-
+            scored_sessions = self.scored_palette_sessions(eff_query);
             // Empty query ranks by recency (newest attach first), matching the
             // pinned "Recent" block and the in-session switcher; a real query
             // ranks by fuzzy score.
@@ -1486,6 +1493,21 @@ impl App {
                 title: "Restart Session".to_string(),
                 message,
                 on_confirm: ConfirmAction::RestartSession {
+                    session_id: sref.id,
+                },
+            };
+        }
+    }
+
+    /// Handle reset session — show confirmation. The no-resume sibling of
+    /// [`Self::handle_restart_session`].
+    pub(super) fn handle_reset_session(&mut self) {
+        if let Some(sref) = self.ui_state.selected_session_id {
+            let title = self.session(sref).map(|s| s.title.clone());
+            self.ui_state.modal = Modal::Confirm {
+                title: "Reset Session".to_string(),
+                message: reset_confirm_message(title.as_deref()),
+                on_confirm: ConfirmAction::ResetSession {
                     session_id: sref.id,
                 },
             };
@@ -2780,6 +2802,31 @@ impl App {
                     let _ = tx
                         .send(AppEvent::StateUpdate(StateUpdate::RestartFinished {
                             backend_id: backend_id.0,
+                            kind: RestartKind::Restart,
+                            result,
+                        }))
+                        .await;
+                });
+            }
+            ConfirmAction::ResetSession { session_id } => {
+                // Same shape as RestartSession, but through the backend's
+                // no-resume path so the agent starts a new conversation.
+                let backend_id = self.backend_of_session(session_id);
+                self.ui_state.status_message = Some((
+                    "Resetting session…".to_string(),
+                    Instant::now() + Duration::from_secs(30),
+                ));
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let result = backend
+                        .restart_session_fresh(session_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::RestartFinished {
+                            backend_id: backend_id.0,
+                            kind: RestartKind::Reset,
                             result,
                         }))
                         .await;
@@ -2806,6 +2853,7 @@ impl App {
                     let _ = tx
                         .send(AppEvent::StateUpdate(StateUpdate::RestartFinished {
                             backend_id: backend_id.0,
+                            kind: RestartKind::Restart,
                             result,
                         }))
                         .await;

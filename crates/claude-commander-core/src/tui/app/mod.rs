@@ -36,7 +36,7 @@ use ratatui::{
 use tracing::{debug, error, info, warn};
 use tui_input::Input;
 
-use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
+use super::event::{AppEvent, EventLoop, InputEvent, RestartKind, StateUpdate, UserCommand};
 use super::path_completer::PathCompleter;
 use super::theme::Theme;
 use super::widgets::board::{
@@ -44,7 +44,7 @@ use super::widgets::board::{
 };
 use super::widgets::{
     InfoContent, InfoProjectData, InfoSessionData, InfoView, Preview, PreviewState, TreeList,
-    TreeListState,
+    TreeListState, status_glyph,
 };
 use crate::api::{CommanderService, DiffSide};
 use crate::backend::{
@@ -514,6 +514,13 @@ pub struct QuickSwitchMatch {
     pub branch: String,
     pub project_name: String,
     pub status: SessionStatus,
+    /// Live agent sub-state, from the owning backend's poller. Carried so the
+    /// palette row can draw the *same* glyph the tree draws for the session
+    /// (`session_status_glyph`) — `status` alone renders every running session
+    /// as an idle `●`, whatever its agent is doing.
+    pub agent_state: Option<AgentState>,
+    /// Whether the session has unread output, for the same reason.
+    pub unread: bool,
     /// Most-recent attach time, used to rank the palette by recency when the
     /// query is empty (newest first, mirroring the pinned "Recent" block).
     /// `None` for sessions never attached, which sort to the bottom.
@@ -1369,6 +1376,11 @@ pub enum ConfirmAction {
     RestartSession {
         session_id: SessionId,
     },
+    /// Relaunch a session's pane *without* resuming, discarding the agent's
+    /// conversation.
+    ResetSession {
+        session_id: SessionId,
+    },
     /// Change a session's program (agent) to `program` and relaunch it fresh.
     ChangeProgram {
         session_id: SessionId,
@@ -1765,6 +1777,7 @@ impl AppUiState {
             | BindableAction::DeleteSession
             | BindableAction::RenameSession
             | BindableAction::RestartSession
+            | BindableAction::ResetSession
             | BindableAction::ChangeProgram
             | BindableAction::ToggleKeepAlive
             | BindableAction::OpenPullRequest

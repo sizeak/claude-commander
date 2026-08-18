@@ -591,13 +591,18 @@ pub trait CommanderBackend: Send + Sync {
     async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId>;
     async fn kill_session(&self, id: SessionId) -> BResult<()>;
     async fn restart_session(&self, id: SessionId) -> BResult<()>;
-    /// Restart a session with a *fresh* agent conversation (no `--resume`). The
-    /// attach loop calls this when the agent process exits mid-attach. The
-    /// default resumes (a remote backend has no separate fresh path yet);
-    /// [`LocalBackend`] overrides it with the no-resume restart.
-    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()> {
-        self.restart_session(id).await
-    }
+    /// Restart a session with a *fresh* agent conversation (no `--resume`),
+    /// discarding whatever the agent would otherwise have resumed. Two callers:
+    /// the attach loop, when the agent process exits mid-attach, and the
+    /// operator's Reset command.
+    ///
+    /// Deliberately **required**, not defaulted. It was defaulted to
+    /// `restart_session` while only [`LocalBackend`] implemented it, which meant
+    /// a remote session's "fresh" restart silently *resumed* — the one thing the
+    /// caller asked it not to do. Every backend now answers for itself, so a
+    /// backend that cannot restart fresh has to say so rather than quietly
+    /// doing the opposite.
+    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()>;
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
     /// Change a session's launch program (the agent harness that runs) and

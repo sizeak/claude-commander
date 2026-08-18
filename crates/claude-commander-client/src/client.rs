@@ -505,6 +505,14 @@ impl RemoteClient {
         self.post_empty_ok(self.session_url(id, &["restart"])).await
     }
 
+    /// Restart a session with a *fresh* agent conversation — the server relaunches
+    /// the pane without the agent's resume flag, whatever its own
+    /// `resume_session` config says.
+    pub async fn restart_session_fresh(&self, id: SessionId) -> ClientResult<()> {
+        self.post_empty_ok(self.session_url(id, &["restart-fresh"]))
+            .await
+    }
+
     pub async fn delete_session(&self, id: SessionId) -> ClientResult<()> {
         self.delete_ok(self.session_url(id, &[])).await
     }

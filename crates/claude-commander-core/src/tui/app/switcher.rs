@@ -219,7 +219,14 @@ impl App {
                 // The tree isn't visible under the palette and the pane is frozen
                 // anyway, so background refreshes can wait until we resume; only
                 // the palette's own state matters here.
-                AppEvent::StateUpdate(_) | AppEvent::Tick => continue,
+                AppEvent::StateUpdate(_) => continue,
+                // A tick redraws (top of the loop) and advances the animation
+                // clock — the status glyphs include a spinner, which would
+                // otherwise sit frozen on whatever frame the TUI last drew.
+                AppEvent::Tick => {
+                    self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
+                    continue;
+                }
                 AppEvent::Quit => self.ui_state.should_quit = true,
             }
 
@@ -516,6 +523,8 @@ mod tests {
             branch: "b".to_string(),
             project_name: "p".to_string(),
             status: SessionStatus::Running,
+            agent_state: None,
+            unread: false,
             last_attached_at: None,
         })
     }

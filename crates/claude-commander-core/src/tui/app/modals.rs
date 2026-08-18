@@ -1253,37 +1253,32 @@ impl App {
 
             match item {
                 QuickSwitchItem::Session(m) => {
-                    let status_icon = match m.status {
-                        SessionStatus::Creating
-                        | SessionStatus::Merging
-                        | SessionStatus::Pushing => "⠋",
-                        SessionStatus::Running => "●",
-                        SessionStatus::Stopped => "○",
-                        SessionStatus::CascadePaused => "⏸",
-                    };
-                    let status_color = match m.status {
-                        SessionStatus::Creating
-                        | SessionStatus::Merging
-                        | SessionStatus::Pushing => self.theme.status_creating,
-                        SessionStatus::Running => self.theme.status_running,
-                        SessionStatus::Stopped => self.theme.status_stopped,
-                        SessionStatus::CascadePaused => self.theme.agent_waiting,
-                    };
-
-                    let mut spans = vec![
-                        Span::styled(
-                            format!(" {} ", status_icon),
-                            Style::default().fg(status_color),
-                        ),
-                        Span::styled(
-                            m.title.clone(),
-                            if is_selected {
-                                self.theme.selection()
-                            } else {
-                                Style::default()
-                            },
-                        ),
-                    ];
+                    // The tree's own glyph, from the shared helper: the palette
+                    // used to switch on `SessionStatus` alone, which drew every
+                    // running session as an idle `●` however its agent was doing
+                    // — so the same session read differently in the two places.
+                    let mut spans = Vec::new();
+                    if let Some((glyph, color)) = status_glyph::session_status_glyph(
+                        &self.theme,
+                        self.ui_state.tick_count,
+                        m.status,
+                        m.agent_state,
+                        m.unread,
+                    ) {
+                        spans.push(Span::styled(
+                            format!(" {glyph} "),
+                            Style::default().fg(color),
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        m.title.clone(),
+                        match (is_selected, m.unread) {
+                            (true, _) => self.theme.selection(),
+                            // Unread titles are bold in the tree too.
+                            (false, true) => Style::default().add_modifier(Modifier::BOLD),
+                            (false, false) => Style::default(),
+                        },
+                    ));
                     if let Some(shown_branch) = crate::session::display_branch(&m.title, &m.branch)
                     {
                         spans.push(Span::styled(
