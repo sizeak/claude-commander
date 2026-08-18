@@ -371,7 +371,14 @@ flutter run -d emulator-5554
 ### iOS / macOS
 
 Both build: `flutter build ios --simulator` and `flutter build macos` run green, and
-CI's `client-apple` job runs both on every push. The minimum iOS is **15.0** — the
+CI's `client-apple` job runs both on every PR — taking the Rust toolchain,
+CocoaPods and the `xcrun` shim from `.#clientApple` but the **Flutter SDK from
+the Flutter action**, pinned to the version the flake provides and read back out
+of it. nixpkgs' darwin Flutter cannot build for iOS: its engine
+`Flutter.xcframework` carries a malformed x86_64 simulator slice and `ld` stops
+at "X86_64 slice extends beyond end of file". A local `nix develop .#clientApple`
+hits the same wall, so build iOS with a Flutter on `PATH` (Homebrew, fvm or a
+manual SDK) — which is what the repo's scripts already prefer. The minimum iOS is **15.0** — the
 oldest floor that costs nothing: iOS 13, 14 and 15 all shipped to the same devices
 (iPhone 6s and later), iOS 16 is where Apple dropped them, and 15 is also the oldest
 simulator Xcode 26 can run and the point where rustc's `aarch64-apple-ios-sim` floor
