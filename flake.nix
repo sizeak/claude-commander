@@ -370,6 +370,36 @@
           unset SDKROOT LD CC CXX AR AS NM RANLIB STRIP OBJCOPY OBJDUMP SIZE STRINGS
           unset MACOSX_DEPLOYMENT_TARGET IPHONEOS_DEPLOYMENT_TARGET
         '';
+        # The same scrub, plus a host DEVELOPER_DIR, as a *command* — for anything
+        # that talks to Xcode without going through `xcrun`. The shim below only
+        # sees calls routed via xcrun, which is how nixpkgs' patched Flutter
+        # behaves; a stock Flutter (Homebrew, fvm, or CI's Flutter action) runs
+        # `xcodebuild` itself and never reaches it. Such a build inherits this
+        # shell's DEVELOPER_DIR — the Nix apple-sdk, which is not an Xcode — plus
+        # every Nix toolchain variable as a build-setting override.
+        #
+        # Nothing in the failure names any of that. `xcodebuild -showBuildSettings`
+        # just returns nothing, so `productBundleIdentifier` is null and Flutter
+        # exits with "Application not configured for iOS" — which reads as a
+        # missing client/ios directory. That cost two full macOS CI runs to place,
+        # hence a named wrapper rather than a line of exports at each call site.
+        #
+        #   cc-xcode-env flutter build ios --simulator
+        clientXcodeEnv = clientPkgs.writeShellScriptBin "cc-xcode-env" ''
+          set -eu
+          hostDeveloperDir="$(unset DEVELOPER_DIR; /usr/bin/xcode-select -p 2>/dev/null || true)"
+          if [ ! -x "$hostDeveloperDir/usr/bin/xcodebuild" ]; then
+            echo "cc-xcode-env: no Xcode selected — 'xcode-select -p' found no xcodebuild." >&2
+            echo "  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer" >&2
+            exit 1
+          fi
+          # Ahead of the stdenv's xcbuild stub, which is what a bare `xcodebuild`
+          # would otherwise resolve to.
+          export DEVELOPER_DIR="$hostDeveloperDir"
+          export PATH="$hostDeveloperDir/usr/bin:$PATH"
+          ${clientXcodeEnvScrub}
+          exec "$@"
+        '';
         clientXcrunShim = clientPkgs.writeShellScriptBin "xcrun" ''
           hostXcrun() {
             unset DEVELOPER_DIR
@@ -412,7 +442,7 @@
             # Ahead of the stdenv's own xcbuild stub: nix develop puts stdenv's
             # bin dirs before this shell's inputs, so PATH order is the whole
             # point and buildInputs would be too late. See `clientXcrunShim`.
-            export PATH="${clientXcrunShim}/bin:$PATH"
+            export PATH="${clientXcodeEnv}/bin:${clientXcrunShim}/bin:$PATH"
 
             # Both are opt-in in Flutter's own config, and `flutter config` writes
             # to ~/.config/flutter_settings — i.e. it is per-user host state, not

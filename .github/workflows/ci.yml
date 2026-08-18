@@ -438,19 +438,8 @@ jobs:
       # Captured from `command -v` rather than trusting the action's FLUTTER_ROOT:
       # `nix develop` prepends its own bin dirs, so the flake's flutter would win
       # on PATH inside every step below unless this one is re-prepended by hand.
-      #
-      # The host Xcode's bin dir rides along for a second reason. The shell's
-      # `xcrun` shim delegates `xcodebuild` to the host, but only when it is
-      # invoked *through* xcrun; a bare `xcodebuild` resolves to the stdenv's
-      # xcbuild stub instead. nixpkgs' patched Flutter went through xcrun, a
-      # stock one does not — so `xcodebuild -showBuildSettings` returned nothing,
-      # `productBundleIdentifier` came back null, and Flutter reported
-      # "Application not configured for iOS", which reads as a missing
-      # client/ios rather than a stubbed tool.
-      - name: Record The Apple Tool Paths
-        run: |
-          echo "CC_FLUTTER_BIN=$(dirname "$(command -v flutter)")" >> "$GITHUB_ENV"
-          echo "CC_XCODE_BIN=$(/usr/bin/xcode-select -p)/usr/bin" >> "$GITHUB_ENV"
+      - name: Record The Flutter SDK Path
+        run: echo "CC_FLUTTER_BIN=$(dirname "$(command -v flutter)")" >> "$GITHUB_ENV"
 
       # Same stale-git-dep hazard as the Linux client job; see the note there.
       # No dev shell needed: `pub get` wants nothing the flake provides, and it
@@ -475,9 +464,8 @@ jobs:
       - name: Report The Apple Toolchain
         run: |
           nix develop .#clientApple -c bash -c '
-            export PATH="$CC_FLUTTER_BIN:$CC_XCODE_BIN:$PATH"
-            echo "xcode-select: $(/usr/bin/xcode-select -p)"
-            xcodebuild -version
+            export PATH="$CC_FLUTTER_BIN:$PATH"
+            cc-xcode-env sh -c "echo DEVELOPER_DIR=\$DEVELOPER_DIR; xcodebuild -version"
             for t in flutter dart xcodebuild xcrun rustc cargo rustup pod; do
               printf "%-10s %s\n" "$t" "$(command -v "$t" || echo MISSING)"
             done
@@ -490,12 +478,12 @@ jobs:
       # the xcrun shim's delegation to the host Xcode. It needs no signing
       # identity, so it runs on a bare runner.
       - name: Build iOS (Simulator)
-        run: nix develop .#clientApple -c bash -c 'export PATH="$CC_FLUTTER_BIN:$CC_XCODE_BIN:$PATH" && cd client && flutter build ios --simulator --debug'
+        run: nix develop .#clientApple -c bash -c 'export PATH="$CC_FLUTTER_BIN:$PATH" && cd client && cc-xcode-env flutter build ios --simulator --debug'
 
       # The macOS runner signs ad-hoc (CODE_SIGN_IDENTITY = "-"), so this needs
       # no Developer ID either.
       - name: Build macOS
-        run: nix develop .#clientApple -c bash -c 'export PATH="$CC_FLUTTER_BIN:$CC_XCODE_BIN:$PATH" && cd client && flutter build macos --debug'
+        run: nix develop .#clientApple -c bash -c 'export PATH="$CC_FLUTTER_BIN:$PATH" && cd client && cc-xcode-env flutter build macos --debug'
 
       # Not covered here: launching either app. The iOS app boots and runs in a
       # simulator locally, but doing it in CI means booting a runtime and
