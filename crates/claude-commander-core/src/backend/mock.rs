@@ -46,6 +46,10 @@ pub struct MockBackend {
     reconciled: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::restart_session`], for routing asserts.
     restarted: Mutex<Vec<SessionId>>,
+    /// Sessions passed to [`Self::restart_session_fresh`], for routing asserts.
+    /// Kept separate from `restarted` so a test can tell a fresh (no-resume)
+    /// restart from a resuming one — the whole point of the Reset command.
+    reset: Mutex<Vec<SessionId>>,
     /// `(session, program)` pairs passed to [`Self::change_program`], for
     /// call-recording asserts.
     program_changes: Mutex<Vec<(SessionId, String)>>,
@@ -122,6 +126,7 @@ impl MockBackend {
             created: Mutex::new(Vec::new()),
             reconciled: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
+            reset: Mutex::new(Vec::new()),
             program_changes: Mutex::new(Vec::new()),
             pr_refresh_calls: Mutex::new(0),
             read_marked: Mutex::new(Vec::new()),
@@ -192,6 +197,11 @@ impl MockBackend {
     /// Sessions passed to [`Self::restart_session`], in call order.
     pub fn restarted_sessions(&self) -> Vec<SessionId> {
         self.restarted.lock().unwrap().clone()
+    }
+
+    /// Sessions passed to [`Self::restart_session_fresh`], in call order.
+    pub fn reset_sessions(&self) -> Vec<SessionId> {
+        self.reset.lock().unwrap().clone()
     }
 
     /// How many times [`Self::request_pr_refresh`] has been called.
@@ -408,6 +418,12 @@ impl CommanderBackend for MockBackend {
     async fn restart_session(&self, id: SessionId) -> BResult<()> {
         self.guard()?;
         self.restarted.lock().unwrap().push(id);
+        Ok(())
+    }
+
+    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()> {
+        self.guard()?;
+        self.reset.lock().unwrap().push(id);
         Ok(())
     }
 

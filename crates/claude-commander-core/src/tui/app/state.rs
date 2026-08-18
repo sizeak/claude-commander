@@ -337,12 +337,16 @@ impl App {
                 self.apply_clone_job_update(BackendId(backend_id), source, result)
                     .await;
             }
-            StateUpdate::RestartFinished { backend_id, result } => {
+            StateUpdate::RestartFinished {
+                backend_id,
+                kind,
+                result,
+            } => {
                 let backend_id = BackendId(backend_id);
                 match result {
                     Ok(()) => {
                         self.ui_state.status_message = Some((
-                            "Session restarted".to_string(),
+                            kind.success_toast().to_string(),
                             Instant::now() + Duration::from_secs(3),
                         ));
                         // Refresh off the event loop; BackendChanged folds the
@@ -352,7 +356,7 @@ impl App {
                     }
                     Err(e) => {
                         self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to restart: {e}"),
+                            message: format!("{}: {e}", kind.error_prefix()),
                         };
                     }
                 }

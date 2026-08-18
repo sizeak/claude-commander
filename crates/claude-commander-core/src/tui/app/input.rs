@@ -1630,6 +1630,9 @@ impl App {
             UserCommand::RestartSession => {
                 self.handle_restart_session();
             }
+            UserCommand::ResetSession => {
+                self.handle_reset_session();
+            }
             UserCommand::ChangeProgram => {
                 self.handle_change_program();
             }
