@@ -465,7 +465,7 @@ jobs:
         run: |
           nix develop .#clientApple -c bash -c '
             export PATH="$CC_FLUTTER_BIN:$PATH"
-            cc-xcode-env sh -c "echo DEVELOPER_DIR=\$DEVELOPER_DIR; xcodebuild -version"
+            cc-xcode-env sh -c "echo DEVELOPER_DIR=\$DEVELOPER_DIR; echo xcrun=\$(command -v xcrun); xcodebuild -version; /usr/bin/arch -arm64e xcrun xcodebuild -version >/dev/null 2>&1 && echo arm64e-xcrun=ok || echo arm64e-xcrun=FAILED"
             for t in flutter dart xcodebuild xcrun rustc cargo rustup pod; do
               printf "%-10s %s\n" "$t" "$(command -v "$t" || echo MISSING)"
             done

@@ -370,6 +370,23 @@
           unset SDKROOT LD CC CXX AR AS NM RANLIB STRIP OBJCOPY OBJDUMP SIZE STRINGS
           unset MACOSX_DEPLOYMENT_TARGET IPHONEOS_DEPLOYMENT_TARGET
         '';
+        # Apple's own xcrun, for cc-xcode-env's PATH. Pointing DEVELOPER_DIR at
+        # the host Xcode is not enough on its own: `xcodebuild` lives in
+        # Developer/usr/bin but `xcrun` does not — it is /usr/bin/xcrun — so a
+        # lookup still lands on the shim below.
+        #
+        # Harmless on an Intel Mac, fatal on Apple silicon, which is why this only
+        # ever failed in CI. `xcodeproj.dart` prefixes every Xcode command with
+        # `/usr/bin/arch -arm64e` on a darwin_arm64 host to force them out of
+        # Rosetta, and the shim is a shell script whose interpreter is Nix's bash:
+        # plain arm64, no arm64e slice, so `arch` cannot exec it. Every
+        # `xcrun xcodebuild -version` probe then fails, Flutter decides no Xcode is
+        # installed, and the only thing it says is "Application not configured for
+        # iOS" — naming neither xcrun, nor arch, nor a version.
+        clientHostXcrun = clientPkgs.runCommand "cc-host-xcrun" { } ''
+          mkdir -p $out/bin
+          ln -s /usr/bin/xcrun $out/bin/xcrun
+        '';
         # The same scrub, plus a host DEVELOPER_DIR, as a *command* — for anything
         # that talks to Xcode without going through `xcrun`. The shim below only
         # sees calls routed via xcrun, which is how nixpkgs' patched Flutter
@@ -396,7 +413,7 @@
           # Ahead of the stdenv's xcbuild stub, which is what a bare `xcodebuild`
           # would otherwise resolve to.
           export DEVELOPER_DIR="$hostDeveloperDir"
-          export PATH="$hostDeveloperDir/usr/bin:$PATH"
+          export PATH="${clientHostXcrun}/bin:$hostDeveloperDir/usr/bin:$PATH"
           ${clientXcodeEnvScrub}
           exec "$@"
         '';
