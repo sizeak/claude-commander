@@ -49,7 +49,20 @@ CC_AVD="${CC_AVD:-cctest}"
 # Dev shell providing flutter/dart. `.#clientCi` is the slim one CI uses and
 # that client/tool/dart-format.sh re-enters; `.#client` additionally carries the
 # Android SDK/NDK and is what dev-run.sh's android target needs.
-CC_CLIENT_SHELL="${CC_CLIENT_SHELL:-.#clientCi}"
+#
+# `.#clientCi` is Linux-only — it pulls xvfb-run, gtk3, mesa and libGL
+# unconditionally, so it does not evaluate on darwin at all. A Mac therefore
+# takes `.#clientApple`, which carries the same Flutter/Dart toolchain; the same
+# substitution client/tool/dart-format.sh makes. Without it every client lane
+# fails on a Mac with no flutter on PATH, and `CC_FORCE_NIX=1` — which skips the
+# PATH shortcut, and which CLAUDE.md makes mandatory for golden changes — fails
+# unconditionally.
+if [ -z "${CC_CLIENT_SHELL:-}" ]; then
+  case "$(uname -s)" in
+    Darwin) CC_CLIENT_SHELL=".#clientApple" ;;
+    *) CC_CLIENT_SHELL=".#clientCi" ;;
+  esac
+fi
 CC_ANDROID_SHELL="${CC_ANDROID_SHELL:-.#client}"
 
 # ---------------------------------------------------------------------------

@@ -41,7 +41,15 @@ fi
 if command -v dart >/dev/null 2>&1; then
   exec dart format "${mode[@]}" "${targets[@]}"
 elif command -v nix >/dev/null 2>&1; then
-  exec nix develop .#clientCi -c dart format "${mode[@]}" "${targets[@]}"
+  # `clientCi` is the Linux CI shell — GTK, xvfb and Mesa — and it does not
+  # evaluate on darwin at all, so a macOS contributor's pre-commit hook fails
+  # here rather than formatting anything. `clientApple` is the darwin
+  # equivalent and carries the same Flutter/Dart toolchain.
+  case "$(uname -s)" in
+    Darwin) shell=".#clientApple" ;;
+    *) shell=".#clientCi" ;;
+  esac
+  exec nix develop "$shell" -c dart format "${mode[@]}" "${targets[@]}"
 else
   echo "dart-format: no 'dart' on PATH and no 'nix' to provide one." >&2
   echo "             Enter the client dev shell first: nix develop .#client" >&2
