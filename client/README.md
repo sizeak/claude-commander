@@ -378,15 +378,29 @@ CI's `client-apple` job runs both on every PR. Everything comes from
 version the flake provides (read back out of the shell, so the two cannot
 drift).
 
-That one exception is a measured nixpkgs bug, not a preference: on
-`aarch64-darwin`, the Flutter engine's
-`Flutter.xcframework/ios-arm64_x86_64-simulator/Flutter.framework/Flutter` is
-**26,320 bytes** with a fat header whose arm64 slice runs past EOF, so `ld` stops
-at "X86_64 slice extends beyond end of file". The same file in the
-`x86_64-darwin` Flutter is **75 MB** and `lipo`-clean, which is why iOS builds
-fine from the dev shell on an Intel Mac and cannot on Apple silicon. The job
-prints `lipo -detailed_info` for that binary every run, so the day nixpkgs fixes
-it, dropping the action is a one-line change. That is the SDK only: everything else in the job — the Rust toolchain, CocoaPods,
+That exception applies to the **iOS build only** — `flutter pub get` and the
+macOS build still use the flake's Flutter — and it is a measured upstream bug
+rather than a preference. In `flutter-artifacts-ios-aarch64-darwin`, the path
+`bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator/Flutter.framework/Flutter`
+holds a **26,320-byte, non-executable** stub whose fat header claims an arm64
+slice past EOF, so `ld` stops at "X86_64 slice extends beyond end of file". The
+same path in the `x86_64-darwin` artifact is the real **78,153,424-byte** engine,
+and on `aarch64-darwin` that binary is present but filed under `extension_safe/`.
+Check it yourself, no Mac required:
+
+```
+nix store ls -lR --store https://cache.nixos.org \
+  $(nix derivation show -r "$(nix eval --raw nixpkgs#flutter341.drvPath)" \
+    | grep -oE '/nix/store/[a-z0-9]{32}-flutter-artifacts-ios-aarch64-darwin' | sort -u | head -1) \
+  | grep 'ios-arm64_x86_64-simulator/Flutter.framework/Flutter$'
+```
+
+This is **not** "nixpkgs Flutter is broken on Apple silicon": Android, web,
+desktop and the macOS engine artifacts are all intact (the macOS engine is the
+same size on both darwin systems). Only the iOS artifact set is affected, which
+is also why iOS builds fine from the dev shell on an Intel Mac. The job prints
+`lipo -detailed_info` for that binary every run, so the day nixpkgs ships an
+intact artifact, dropping the action is a one-line change. That is the SDK only: everything else in the job — the Rust toolchain, CocoaPods,
 `cc-xcode-env`, the `xcrun` shim — still comes from the shell. Building iOS
 locally through `nix develop .#clientApple` works on an Intel Mac (verified:
 stock *and* Nix Flutter both produce a simulator `Runner.app` there); on Apple
