@@ -372,13 +372,26 @@ flutter run -d emulator-5554
 ### iOS / macOS
 
 Both build: `flutter build ios --simulator` and `flutter build macos` run green, and
-CI's `client-apple` job runs both on every PR, entirely through
-`nix develop .#clientApple` — same Flutter, Rust toolchain, CocoaPods and Xcode
-plumbing a maintainer gets. Building iOS locally through `nix develop .#clientApple` is verified on both
-architectures: an Intel Mac (stock *and* Nix Flutter both produce a simulator
-`Runner.app`) and CI's Apple-silicon runner. Drive Xcode through `cc-xcode-env`
-either way — see the shellHook notes above for what goes wrong without it, and
-why the failure names nothing useful. The minimum iOS is **15.0** — the
+CI's `client-apple` job runs both on every PR. Everything comes from
+`.#clientApple` — Rust toolchain, CocoaPods, `cc-xcode-env`, the `xcrun` shim —
+**except the Flutter SDK**, which comes from the Flutter action pinned to the
+version the flake provides (read back out of the shell, so the two cannot
+drift).
+
+That one exception is a measured nixpkgs bug, not a preference: on
+`aarch64-darwin`, the Flutter engine's
+`Flutter.xcframework/ios-arm64_x86_64-simulator/Flutter.framework/Flutter` is
+**26,320 bytes** with a fat header whose arm64 slice runs past EOF, so `ld` stops
+at "X86_64 slice extends beyond end of file". The same file in the
+`x86_64-darwin` Flutter is **75 MB** and `lipo`-clean, which is why iOS builds
+fine from the dev shell on an Intel Mac and cannot on Apple silicon. The job
+prints `lipo -detailed_info` for that binary every run, so the day nixpkgs fixes
+it, dropping the action is a one-line change. That is the SDK only: everything else in the job — the Rust toolchain, CocoaPods,
+`cc-xcode-env`, the `xcrun` shim — still comes from the shell. Building iOS
+locally through `nix develop .#clientApple` works on an Intel Mac (verified:
+stock *and* Nix Flutter both produce a simulator `Runner.app` there); on Apple
+silicon the Nix Flutter's engine hits the malformed slice above, so use a Flutter
+on `PATH` there — the repo's scripts already prefer one. The minimum iOS is **15.0** — the
 oldest floor that costs nothing: iOS 13, 14 and 15 all shipped to the same devices
 (iPhone 6s and later), iOS 16 is where Apple dropped them, and 15 is also the oldest
 simulator Xcode 26 can run and the point where rustc's `aarch64-apple-ios-sim` floor
