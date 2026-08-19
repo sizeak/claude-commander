@@ -411,41 +411,9 @@ jobs:
           key: pub-${{ runner.os }}-${{ hashFiles('client/pubspec.lock') }}
           restore-keys: pub-${{ runner.os }}-
 
-      # The one thing this job does NOT take from the flake: the Flutter SDK.
-      # nixpkgs' darwin Flutter ships the engine's Flutter.xcframework with a
-      # malformed x86_64 simulator slice — `ld` rejects it with "X86_64 slice
-      # extends beyond end of file" before any of our code is reached, and no
-      # cache is involved (the first two runs of this job built the store cold).
-      # Everything else still comes from `.#clientApple`: the Rust toolchain,
-      # CocoaPods, the xcrun shim and the deployment-target export. The version
-      # is read back out of the flake rather than restated here, so CI cannot
-      # drift onto an SDK no maintainer uses — which was the whole reason for
-      # running these builds through the dev shell in the first place.
-      - name: Resolve The Flake's Flutter Version
-        id: flutter
-        run: |
-          v="$(nix develop .#clientApple -c flutter --version --machine \
-                 | python3 -c 'import json,sys; print(json.load(sys.stdin)["frameworkVersion"])')"
-          echo "Flake provides Flutter $v"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-
-      - name: Install Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ steps.flutter.outputs.version }}
-          cache: true
-
-      # Captured from `command -v` rather than trusting the action's FLUTTER_ROOT:
-      # `nix develop` prepends its own bin dirs, so the flake's flutter would win
-      # on PATH inside every step below unless this one is re-prepended by hand.
-      - name: Record The Flutter SDK Path
-        run: echo "CC_FLUTTER_BIN=$(dirname "$(command -v flutter)")" >> "$GITHUB_ENV"
-
       # Same stale-git-dep hazard as the Linux client job; see the note there.
-      # No dev shell needed: `pub get` wants nothing the flake provides, and it
-      # must resolve against the same SDK the builds below use.
       - name: Fetch Flutter Packages
-        run: rm -rf ~/.pub-cache/git && cd client && flutter pub get
+        run: nix develop .#clientApple -c bash -c 'rm -rf ~/.pub-cache/git && cd client && flutter pub get'
 
       # cargokit's rustup.dart resolves `rustup` from ~/.cargo/bin *before* PATH
       # (see flake.nix's `mkRustupShim`), and GitHub's macOS images ship a real
@@ -464,8 +432,13 @@ jobs:
       - name: Report The Apple Toolchain
         run: |
           nix develop .#clientApple -c bash -c '
-            export PATH="$CC_FLUTTER_BIN:$PATH"
             cc-xcode-env sh -c "echo DEVELOPER_DIR=\$DEVELOPER_DIR; echo xcrun=\$(command -v xcrun); xcodebuild -version; /usr/bin/arch -arm64e xcrun xcodebuild -version >/dev/null 2>&1 && echo arm64e-xcrun=ok || echo arm64e-xcrun=FAILED"
+            # The engine slice that failed to link when this job first ran the
+            # flake Flutter. Printed so a recurrence is one line to diagnose
+            # instead of a second archaeology session.
+            engine="$(dirname "$(command -v flutter)")/../bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator/Flutter.framework/Flutter"
+            ls -lL "$engine" 2>/dev/null || echo "engine binary not found at $engine"
+            cc-xcode-env lipo -detailed_info "$engine" 2>&1 | head -20 || echo "lipo failed"
             for t in flutter dart xcodebuild xcrun rustc cargo rustup pod; do
               printf "%-10s %s\n" "$t" "$(command -v "$t" || echo MISSING)"
             done
@@ -478,12 +451,12 @@ jobs:
       # the xcrun shim's delegation to the host Xcode. It needs no signing
       # identity, so it runs on a bare runner.
       - name: Build iOS (Simulator)
-        run: nix develop .#clientApple -c bash -c 'export PATH="$CC_FLUTTER_BIN:$PATH" && cd client && cc-xcode-env flutter build ios --simulator --debug'
+        run: nix develop .#clientApple -c bash -c 'cd client && cc-xcode-env flutter build ios --simulator --debug'
 
       # The macOS runner signs ad-hoc (CODE_SIGN_IDENTITY = "-"), so this needs
       # no Developer ID either.
       - name: Build macOS
-        run: nix develop .#clientApple -c bash -c 'export PATH="$CC_FLUTTER_BIN:$PATH" && cd client && cc-xcode-env flutter build macos --debug'
+        run: nix develop .#clientApple -c bash -c 'cd client && cc-xcode-env flutter build macos --debug'
 
       # Not covered here: launching either app. The iOS app boots and runs in a
       # simulator locally, but doing it in CI means booting a runtime and
