@@ -233,6 +233,19 @@ assert_eq "mentions $CC_OUTPUT_SENTINEL inline" \
 mentions $CC_OUTPUT_SENTINEL inline")" \
   "the marker must be its own line"
 
+echo "== cc_first_pid =="
+assert_eq "15232" "$(cc_first_pid "15232")" "a single pid passes through"
+assert_eq "15232" "$(cc_first_pid "15232
+")" "a trailing newline is stripped"
+# adb's shell hands stdout back with CRLF line endings.
+assert_eq "15232" "$(cc_first_pid "$(printf '15232\r\n')")" "a trailing CR is stripped"
+# A multi-process app: the activity's process is first.
+assert_eq "15232" "$(cc_first_pid "15232 15240 15251")" "the first of several pids wins"
+# The launch check keys off empty meaning "not running", so nothing may fake a pid.
+assert_eq "" "$(cc_first_pid "")" "no output means not running"
+assert_eq "" "$(cc_first_pid "$(printf '\r\n')")" "a bare line ending means not running"
+assert_eq "" "$(cc_first_pid "not a pid")" "non-numeric output means not running"
+
 echo "== cc_android_package_id =="
 fixture_dir="$(mktemp -d)"
 # shellcheck disable=SC2064  # expand $fixture_dir now, while it is still set

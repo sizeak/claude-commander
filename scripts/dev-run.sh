@@ -452,24 +452,40 @@ target_android() {
     return "$EXIT_LAUNCH"
   }
 
-  # ASSUMPTION, not verified here (no device was attached when this was written):
-  # that monkey reports success even when the app dies on startup. The mechanism
-  # is that monkey's job is to dispatch the LAUNCHER intent and it exits once it
-  # has, without waiting to see whether the process survives -- so its status
-  # reflects delivery, not health. Cheap to confirm or refute: launch a build with
-  # a deliberate crash in main() and compare monkey's exit code against logcat.
-  # Either way the logcat check below is the real signal, so a wrong assumption
-  # here costs nothing.
+  # monkey's status reflects intent *delivery*, not app health: its job is to
+  # dispatch the LAUNCHER intent and it exits once it has, without waiting to see
+  # whether the process survives. So the health check is the process itself.
+  #
+  # It has to be, because a log grep alone cannot tell the two apart -- and the
+  # grep this replaced (any line matching `AndroidRuntime`, unscoped, over the
+  # whole buffer) matched monkey's own `D AndroidRuntime: >>>>>> START ...` lines
+  # and so failed every *successful* launch with EXIT_LAUNCH. Verified against a
+  # Pixel 8a: a healthy app reports a pid and logs nothing at error level, and
+  # `adb shell am force-stop` clears the pid.
   sleep 4
-  local crashes
-  crashes="$(cc_capture_in_shell "$CC_ANDROID_SHELL" adb \
-    "adb -s $dev_arg logcat -d 2>/dev/null | grep -iE 'FATAL EXCEPTION|AndroidRuntime|E/flutter' | head -20" || true)"
-  if [ -n "$crashes" ]; then
-    cc_error "the app logged errors on startup:"
-    printf '%s\n' "$crashes" | sed 's/^/    | /'
+  local pid
+  pid="$(cc_capture_in_shell "$CC_ANDROID_SHELL" adb \
+    "adb -s $dev_arg shell pidof $(cc_quote_args "$pkg")" || true)"
+  # The first pid is the process hosting the launched activity.
+  pid="$(cc_first_pid "$pid")"
+  if [ -z "$pid" ]; then
+    cc_error "the app is not running after launch:"
+    cc_capture_in_shell "$CC_ANDROID_SHELL" adb \
+      "adb -s $dev_arg logcat -d 2>/dev/null | grep -E 'FATAL EXCEPTION|E AndroidRuntime|E/AndroidRuntime' | tail -20" \
+      | sed 's/^/    | /'
     return "$EXIT_LAUNCH"
   fi
-  cc_info "running cleanly on $device"
+  # Error level only, and only from the app's own process. `--pid` is what keeps
+  # another app's noise -- and monkey's -- out of the verdict.
+  local errors
+  errors="$(cc_capture_in_shell "$CC_ANDROID_SHELL" adb \
+    "adb -s $dev_arg logcat -d --pid=$pid 2>/dev/null | grep -E 'FATAL EXCEPTION|E AndroidRuntime|E/AndroidRuntime|E flutter|E/flutter' | head -20" || true)"
+  if [ -n "$errors" ]; then
+    cc_error "the app logged errors on startup (pid $pid):"
+    printf '%s\n' "$errors" | sed 's/^/    | /'
+    return "$EXIT_LAUNCH"
+  fi
+  cc_info "running cleanly on $device (pid $pid)"
 }
 
 # ---------------------------------------------------------------------------

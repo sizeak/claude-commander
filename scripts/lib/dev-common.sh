@@ -237,6 +237,26 @@ cc_android_package_id() {
   printf '%s\n' "$id"
 }
 
+# cc_first_pid <pidof_output> -- the first pid in `adb shell pidof` output, or
+# empty if there is none.
+#
+# `pidof` prints one pid per process of a multi-process app, space separated, and
+# nothing at all when the package is not running -- which is the whole signal
+# after a launch, so it must survive a trailing newline and CR (adb's shell hands
+# back CRLF) without turning "not running" into a bogus pid or vice versa.
+cc_first_pid() {
+  local raw="${1:-}"
+  raw="${raw%%$'\n'*}"   # first line only
+  raw="${raw%$'\r'}"     # ... minus adb's CR
+  raw="${raw%% *}"       # ... first field of a multi-process app
+  # Anything that is not wholly digits -- an error message, an empty line, or
+  # nothing at all -- is "not running", never a pid.
+  case "$raw" in
+    "" | *[!0-9]*) printf '\n' ;;
+    *) printf '%s\n' "$raw" ;;
+  esac
+}
+
 # cc_apk_path <debug|release> -- APK path relative to client/.
 cc_apk_path() {
   case "${1:-}" in
