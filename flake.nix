@@ -687,11 +687,23 @@
             flutter config --android-sdk "$ANDROID_SDK_ROOT" >/dev/null 2>&1 || true
 ${clientPkgs.lib.optionalString clientPkgs.stdenv.hostPlatform.isDarwin clientAppleShellHook}
             # ---- Linux desktop: EGL + Rust cdylib discovery ----
-            # Flutter Linux uses system Mesa EGL (libEGL_mesa.so) for display
-            # rendering.  The Nix-built libepoxy probes for EGL at runtime; it must
-            # find /usr/lib/libEGL_mesa.so (Arch system Mesa), so prepend /usr/lib.
-            # Android/iOS toolchains are unaffected by this path entry.
-            export LD_LIBRARY_PATH="/usr/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            # LD_LIBRARY_PATH is deliberately left alone here.  Flutter Linux
+            # renders through system Mesa EGL, and the Nix-built libepoxy only
+            # finds /usr/lib/libEGL_mesa.so if /usr/lib is on the path — but
+            # LD_LIBRARY_PATH is process-wide *and* is searched ahead of a Nix
+            # binary's DT_RUNPATH, so naming either libc directory there imposes
+            # that libc on every binary the shell runs.  That is fine only while
+            # the host's glibc and nixpkgs' are ABI-compatible, and once they part
+            # (Arch 2.44 vs nixpkgs 2.42, which dropped the private
+            # __pointer_chk_guard) neither order works: `/usr/lib` first kills
+            # every store binary including `bash`, and the store glibc first kills
+            # every system one, taking Gradle's chain — and so the Android build —
+            # with it.  Unset, each binary resolves its own libc and both halves of
+            # the toolchain work (verified by an `assembleDebug` that fails under
+            # either ordering).  So the Linux desktop target has no system EGL for
+            # as long as the two glibcs are split: re-add /usr/lib around
+            # `flutter run -d linux` in dev-run.sh once they are compatible again,
+            # rather than here, where it reaches everything.
             # flutter_rust_bridge's generated ioDirectory is 'rust/target/release/',
             # but a debug build puts the cdylib in rust/target/debug/.  Symlink
             # release -> debug so Dart's dlopen via FRB finds the library after the
