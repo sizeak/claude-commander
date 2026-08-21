@@ -68,6 +68,13 @@ class TerminalBody extends StatefulWidget {
   /// means [DateTime.now].
   final DateTime Function()? clock;
 
+  /// Builds the emulator each (re)attach writes into. Injectable so a test can
+  /// drive the emulator-failure path of [_TerminalBodyState._write], which by
+  /// definition has no reachable trigger through the real one: any sequence that
+  /// still threw would be a bug to fix in the pinned `xterm` fork, not a fixture
+  /// to build a test on. `null` means the real emulator.
+  final Terminal Function()? terminalFactory;
+
   const TerminalBody({
     super.key,
     required this.api,
@@ -78,6 +85,7 @@ class TerminalBody extends StatefulWidget {
     this.imagePicker,
     this.clipboardImages,
     this.clock,
+    this.terminalFactory,
   });
 
   @override
@@ -170,6 +178,11 @@ class _TerminalBodyState extends State<TerminalBody>
   /// front.
   DateTime? _leftForegroundAt;
 
+  /// How many times the emulator has thrown while parsing output. Non-zero means
+  /// the grid no longer matches the pane and cannot catch up on its own — see
+  /// [_write].
+  int _writeFailures = 0;
+
   // Throughput meter: bytes this second, refreshed on a 1s tick.
   int _totalBytes = 0;
   int _windowBytes = 0;
@@ -206,7 +219,7 @@ class _TerminalBodyState extends State<TerminalBody>
   /// is all that is needed; the emulator cannot do it for us, as this fork's
   /// parser leaves RIS (`ESC c`) unimplemented (core/escape/parser.dart:104).
   void _resetEmulator() {
-    _terminal = Terminal(maxLines: 10000);
+    _terminal = widget.terminalFactory?.call() ?? Terminal(maxLines: 10000);
     // The controller outlives the terminal (we own it), but its selection is a
     // pair of `CellAnchor`s holding `BufferLine`s of the buffer being discarded
     // (ui/controller.dart:21-22, core/buffer/line.dart:367-381). Nothing
@@ -219,9 +232,7 @@ class _TerminalBodyState extends State<TerminalBody>
     // which only fires its callback on `close`), while the chunked UTF-8 decoder
     // still buffers a partial multibyte codepoint split across WS frames until
     // it completes.
-    _decoder = utf8.decoder.startChunkedConversion(
-      _ChunkSink((str) => _terminal.write(str)),
-    );
+    _decoder = utf8.decoder.startChunkedConversion(_ChunkSink(_write));
     _terminal.onOutput = (data) {
       unawaited(
         widget.api.terminalSendInput(
@@ -235,6 +246,47 @@ class _TerminalBodyState extends State<TerminalBody>
         widget.api.terminalResize(attachId: _attachId, cols: cols, rows: rows),
       );
     };
+  }
+
+  /// Feed one decoded chunk to the emulator, containing a parser failure to the
+  /// chunk that caused it.
+  ///
+  /// An emulator that throws mid-parse abandons the rest of the chunk, and tmux
+  /// repaints incrementally with no full-screen clear — so those bytes never come
+  /// again and the grid is wrong from that point on for the life of the attach.
+  /// Left to propagate, the throw is also an uncaught async error *per chunk*,
+  /// and reporting one (a stack trace built and dumped on the UI thread) for
+  /// every screenful of a busy pane is itself enough to starve the frame budget
+  /// on a phone. That pair is what an `omp` pane looked like before the pinned
+  /// fork stopped `CSI 1 K` at column 0 throwing out of `Terminal.write`
+  /// (guarded by `terminal_page_test.dart`, and by `BufferLine.eraseRange`'s own
+  /// tests in the fork).
+  ///
+  /// So: report the first one, keep the attach up, and say on the status bar that
+  /// the pane is stale. Nothing here can repair the grid — only a fresh attach
+  /// repaints the whole screen onto a blank one, which is exactly what the
+  /// reconnect button already does.
+  void _write(String text) {
+    try {
+      _terminal.write(text);
+    } catch (e, stack) {
+      final first = _writeFailures == 0;
+      _writeFailures++;
+      if (first) {
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: e,
+            stack: stack,
+            library: 'claude-commander',
+            context: ErrorDescription(
+              'writing pane output to the terminal emulator (further '
+              'failures on this attach are counted, not reported)',
+            ),
+          ),
+        );
+      }
+      if (mounted) setState(() {});
+    }
   }
 
   /// Cache the heartbeat deadline. No [setState]: nothing renders from it.
@@ -766,6 +818,18 @@ class _TerminalBodyState extends State<TerminalBody>
               style: t.meta(size: 10, color: t.textMuted),
             ),
           ),
+          // Only ever visible after the emulator has thrown, which the fork's
+          // own tests say it should not: the pane is stale and cannot recover
+          // from the byte stream, so point at the reconnect that can.
+          if (_writeFailures > 0) ...[
+            Icon(Icons.warning_amber_rounded, size: 13, color: t.attention),
+            const SizedBox(width: 4),
+            Text(
+              'stale — reconnect',
+              style: t.meta(size: 10, color: t.attention),
+            ),
+            const SizedBox(width: 8),
+          ],
           Text(
             '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
             style: t.meta(size: 10, color: t.textFaint),
@@ -828,6 +892,10 @@ class TerminalPage extends StatelessWidget {
   /// deadline; `null` means [DateTime.now].
   final DateTime Function()? clock;
 
+  /// Forwarded to [TerminalBody] so a test can drive its emulator-failure path;
+  /// `null` means the real emulator.
+  final Terminal Function()? terminalFactory;
+
   const TerminalPage({
     super.key,
     required this.api,
@@ -837,6 +905,7 @@ class TerminalPage extends StatelessWidget {
     this.imagePicker,
     this.clipboardImages,
     this.clock,
+    this.terminalFactory,
   });
 
   @override
@@ -859,6 +928,7 @@ class TerminalPage extends StatelessWidget {
         imagePicker: imagePicker,
         clipboardImages: clipboardImages,
         clock: clock,
+        terminalFactory: terminalFactory,
       ),
     );
   }
