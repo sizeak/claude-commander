@@ -7,6 +7,7 @@ import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
 import '../theme/agent_glyphs.dart';
 import '../theme/tokens.dart';
+import '../util/error_text.dart';
 import '../util/format.dart';
 import '../util/session_filter.dart';
 import '../widgets/session_chips.dart';
@@ -397,7 +398,7 @@ class _SessionListBodyState extends State<SessionListBody> {
       final store = failed.first;
       return _InlineNote(
         icon: Icons.cloud_off,
-        text: store.error.toString(),
+        text: errorText(store.error!),
         action: ('Retry', store.retry),
         color: CommanderTokens.of(context).danger,
       );
@@ -518,7 +519,7 @@ class _ServerSection extends StatelessWidget {
         return [
           _InlineNote(
             icon: Icons.cloud_off,
-            text: store.error.toString(),
+            text: errorText(store.error!),
             action: ('Retry', store.retry),
             color: CommanderTokens.of(context).danger,
           ),
@@ -706,7 +707,7 @@ class _ConnectionStrip extends StatelessWidget {
       ConnectionStateKind.degraded => (
         connection.reason.isEmpty
             ? 'Connection degraded'
-            : 'Degraded: ${connection.reason}',
+            : 'Degraded: ${errorText(connection.reason, capitalize: false)}',
         t.danger,
       ),
     };
@@ -860,7 +861,9 @@ class _ServerHeader extends StatelessWidget {
       ),
       ConnectionStateKind.degraded => (
         t.idle,
-        conn.reason.isEmpty ? 'unreachable' : conn.reason,
+        conn.reason.isEmpty
+            ? 'unreachable'
+            : errorText(conn.reason, capitalize: false, maxLength: 40),
         t.danger,
         true,
       ),
@@ -888,7 +891,13 @@ class _ServerHeader extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 9),
-            Flexible(
+            // The name owns the majority of the row and the note is capped at
+            // the rest: a degraded server's reason is the longest thing that can
+            // land in that slot, and with the note unbounded it crushed the name
+            // to a stub ("192…") on a phone. Both ellipsize, so neither can win
+            // the whole row.
+            Expanded(
+              flex: 3,
               child: Text(
                 store.config.name,
                 maxLines: 1,
@@ -901,12 +910,15 @@ class _ServerHeader extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            const Spacer(),
-            Text(
-              note ?? '$count · $tag',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: t.meta(size: 10, color: noteColor ?? t.textMuted),
+            Flexible(
+              flex: 2,
+              child: Text(
+                note ?? '$count · $tag',
+                maxLines: 1,
+                textAlign: TextAlign.end,
+                overflow: TextOverflow.ellipsis,
+                style: t.meta(size: 10, color: noteColor ?? t.textMuted),
+              ),
             ),
           ],
         ),
@@ -941,6 +953,10 @@ class _InlineNote extends StatelessWidget {
           Text(
             text,
             textAlign: TextAlign.center,
+            // Belt and braces on top of `errorText`: whatever lands here, the
+            // note stays a note rather than pushing the list off screen.
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(color: t.textMuted),
           ),
           if (action != null) ...[

@@ -15,6 +15,7 @@ import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../theme/terminal_theme.dart';
 import '../theme/tokens.dart';
+import '../util/error_text.dart';
 
 /// Live attached terminal, layout-agnostic (no Scaffold, no route). Streams raw
 /// PTY bytes from the cdylib WS bridge into an `xterm.dart` [Terminal], forwards
@@ -559,7 +560,7 @@ class _TerminalBodyState extends State<TerminalBody>
       if (bytes == null) return;
       await _uploadImage(bytes);
     } catch (e) {
-      _notify('Could not attach image: $e');
+      _notify('Could not attach image: ${errorText(e, capitalize: false)}');
     }
   }
 
@@ -659,7 +660,7 @@ class _TerminalBodyState extends State<TerminalBody>
         return;
       }
     } catch (e) {
-      _notify('Could not attach image: $e');
+      _notify('Could not attach image: ${errorText(e, capitalize: false)}');
       return;
     } finally {
       if (mounted) setState(() => _imageBusy = false);

@@ -5,6 +5,7 @@ import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../theme/tokens.dart';
+import '../util/error_text.dart';
 import 'projects_page.dart';
 
 /// Form for creating a session. The project is picked from the server's
@@ -116,9 +117,11 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _submitting = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to create: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to create: ${errorText(e, capitalize: false)}'),
+        ),
+      );
       return;
     }
 
@@ -134,7 +137,10 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Session created; setting section failed: $e'),
+              content: Text(
+                'Session created; setting section failed: '
+                '${errorText(e, capitalize: false)}',
+              ),
             ),
           );
         }

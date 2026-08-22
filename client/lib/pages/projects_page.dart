@@ -4,6 +4,7 @@ import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../theme/tokens.dart';
+import '../util/error_text.dart';
 import 'clone_repo_page.dart';
 
 /// Manages the server's registered projects (git repos). Lists each project's
@@ -181,7 +182,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
     try {
       await action();
     } catch (e) {
-      _snack('Failed: $e');
+      _snack('Failed: ${errorText(e, capitalize: false)}');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -322,7 +323,12 @@ class _ProjectTileState extends State<_ProjectTile> {
     if (_error != null) {
       return Padding(
         padding: const EdgeInsets.all(16),
-        child: Text('Failed to load branches: $_error'),
+        child: Text(
+          'Failed to load branches: '
+          '${errorText(_error!, capitalize: false)}',
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
+        ),
       );
     }
     final branches = _branches;
