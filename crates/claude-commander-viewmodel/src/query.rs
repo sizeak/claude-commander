@@ -205,34 +205,36 @@ mod tests {
     /// tie. Two frontends on different threads would then rank the same list
     /// differently, which is precisely what this crate exists to prevent.
     ///
-    /// Asserts the actual property (same inputs, same answer, whatever ran
-    /// before) rather than the mechanism, so it still guards if the fix changes.
+    /// Asserts the property (same inputs, same answer, whatever ran in between)
+    /// rather than the mechanism, so it still guards if the fix changes.
+    ///
+    /// Two details are load-bearing, and a first attempt at widening this test
+    /// got them wrong badly enough to pass against the very bug it guards:
+    /// each pair must be a *tight* score → contaminate → re-score triple, and the
+    /// contaminating haystack must be *longer* than the one under test. Taking
+    /// every baseline up front instead grows the shared buffer before any
+    /// contamination, after which a shorter haystack cannot disturb it.
+    ///
+    /// Never asserts an absolute score, only its stability, so other tests
+    /// sharing the process cannot make this flaky in either direction.
     #[test]
     fn scoring_is_independent_of_call_history() {
-        let alone = fuzzy_score("list-session", "session");
-
-        // Contaminating call: a longer haystack for the same needle, which is
-        // what grew the shared scratch buffer.
-        let _ = fuzzy_score("s-e-s-s-i-o-n", "session");
-        assert_eq!(
-            fuzzy_score("list-session", "session"),
-            alone,
-            "score changed after scoring a longer haystack first"
-        );
-
-        // And a spread of unrelated work, in case some other call pattern leaks.
-        for (h, n) in [
-            ("authentication-service", "auth"),
-            ("a-very-long-branch-name-indeed", "brnch"),
-            ("payments", "pay"),
-        ] {
-            let _ = fuzzy_score(h, n);
+        // (haystack, needle, a LONGER haystack scored in between)
+        const CASES: &[(&str, &str, &str)] = &[
+            ("list-session", "session", "s-e-s-s-i-o-n"),
+            ("auth-fix", "auth", "authentication-service-implementation"),
+            ("payments", "pay", "pay-me-nts-over-a-much-longer-branch"),
+            ("andr", "andr", "a-n-d-r-oid-with-padding-to-be-longer"),
+        ];
+        for (haystack, needle, longer) in CASES {
+            let before = fuzzy_score(haystack, needle);
+            let _ = fuzzy_score(longer, needle);
+            assert_eq!(
+                fuzzy_score(haystack, needle),
+                before,
+                "score for ({haystack:?}, {needle:?}) changed after scoring {longer:?}"
+            );
         }
-        assert_eq!(
-            fuzzy_score("list-session", "session"),
-            alone,
-            "score changed after unrelated scoring"
-        );
     }
 
     /// The ordering the shared-matcher bug used to destroy: a haystack whose
