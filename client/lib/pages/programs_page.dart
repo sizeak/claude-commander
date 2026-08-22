@@ -4,6 +4,7 @@ import '../chrome/chrome.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../theme/tokens.dart';
+import '../util/error_text.dart';
 
 /// Edits the server's launch-program list (`PUT /api/config/programs`). Each row
 /// is a `{label, command}` pair the create-session form offers as a choice.
@@ -102,9 +103,11 @@ class _ProgramsPageState extends State<ProgramsPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Save failed: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Save failed: ${errorText(e, capitalize: false)}'),
+        ),
+      );
     }
   }
 
@@ -137,7 +140,7 @@ class _ProgramsPageState extends State<ProgramsPage> {
 
   Widget _body(BuildContext context) {
     if (_loadError != null) {
-      return _ErrorView(error: _loadError.toString(), onRetry: _load);
+      return _ErrorView(error: errorText(_loadError!), onRetry: _load);
     }
     final rows = _rows;
     if (rows == null) {
@@ -258,7 +261,12 @@ class _ErrorView extends StatelessWidget {
         const SizedBox(height: 12),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Text(error, textAlign: TextAlign.center),
+          child: Text(
+            error,
+            textAlign: TextAlign.center,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
         const SizedBox(height: 16),
         Center(

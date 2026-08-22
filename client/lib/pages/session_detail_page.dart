@@ -6,6 +6,7 @@ import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../theme/tokens.dart';
+import '../util/error_text.dart';
 import '../widgets/session_chips.dart';
 import 'review_page.dart';
 import 'terminal_page.dart';
@@ -173,7 +174,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.toString());
+      setState(() => _error = errorText(e));
     } finally {
       _fetching = false;
     }
@@ -251,9 +252,9 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed: ${errorText(e, capitalize: false)}')),
+      );
     }
   }
 
@@ -317,9 +318,9 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed: ${errorText(e, capitalize: false)}')),
+      );
     }
   }
 
@@ -352,9 +353,9 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed: ${errorText(e, capitalize: false)}')),
+      );
     }
   }
 
@@ -808,6 +809,8 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
             Expanded(
               child: Text(
                 error,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onErrorContainer,
                 ),
