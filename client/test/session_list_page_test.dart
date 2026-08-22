@@ -7,6 +7,7 @@ import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
 import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/util/session_filter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -19,6 +20,20 @@ void main() {
   late WorkspaceStore workspace;
 
   setUp(() {
+    // The page filters and ranks inside `build`, and the real scorer is in the
+    // cdylib, which `flutter test` does not load. A subsequence stand-in is
+    // enough for these tests: they assert which rows survive a query, not how
+    // the shared scorer ranks them (that is covered by
+    // `claude-commander-viewmodel`'s own tests).
+    debugSessionScorer = (session, query) {
+      final q = query.toLowerCase();
+      for (final field in [session.title, session.branch, session.program]) {
+        if (field.toLowerCase().contains(q)) return field.length;
+      }
+      return null;
+    };
+    addTearDown(() => debugSessionScorer = null);
+
     api = FakeCommanderApi();
     store = CommanderStore(api: api, config: testConfig);
     workspace = WorkspaceStore.withStores([store]);

@@ -1,77 +1,58 @@
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import '../src/rust/api/mirrors.dart';
+import '../src/rust/api/query.dart' as rust;
 
-/// Session search + recency helpers, mirroring the TUI's semantics.
+/// Session search + recency helpers.
 ///
-/// These are deliberately Flutter-free so they unit-test without a widget pump.
-/// The Rust core matches with `SkimMatcherV2`; here we re-implement a
-/// case-insensitive subsequence scorer in Dart (chosen over an FFI bridge). It
-/// won't be byte-identical to Skim, but preserves the properties the UI relies
-/// on: a subsequence matches, a non-subsequence doesn't, and a tighter/earlier
-/// hit ranks above a looser/later one.
-
-/// A fuzzy subsequence score for [needle] within [haystack], or null when
-/// [needle] is not a subsequence. Higher is a better match. An empty needle
-/// scores 0 (matches everything), mirroring `fuzzy::fuzzy_score`.
+/// Scoring is **not** implemented here any more. It used to be a Dart port of
+/// the Rust scorer, which drifted: the port was greedy where Skim is optimal, so
+/// the app and the terminal ranked the same session list differently. Both now
+/// call one implementation in `claude-commander-viewmodel`, bridged
+/// synchronously (see `rust/src/api/query.rs` for why sync).
 ///
-/// Match/no-match is exact (a subsequence always scores), so All-mode filtering
-/// is precise. The *score* is greedy — it commits to the leftmost occurrence of
-/// each char rather than Skim's DP optimum — so ranking between two haystacks
-/// that both contain a tight hit can be slightly off. That only nudges the
-/// Recent tab's ordering, never whether a row shows.
-int? fuzzyScore(String haystack, String needle) {
-  if (needle.isEmpty) return 0;
-  final h = haystack.toLowerCase();
-  final n = needle.toLowerCase();
+/// The ordering helpers below are still Dart — they are generic sorts over
+/// whatever key a caller supplies, which is not worth an FFI crossing — and need
+/// no widget pump to unit-test.
 
-  var hi = 0;
-  var score = 0;
-  var lastMatch = -2; // guarantees the first match is never "contiguous"
-  var firstMatch = -1;
+/// Score [needle] against [haystack]. Null when [needle] is not a subsequence
+/// of [haystack]; higher is a better match. An empty needle scores 0.
+///
+/// Delegates to the shared Rust scorer, so this ranks identically to the TUI.
+/// Calls the native library, so it is unavailable under `flutter test` — inject
+/// a stand-in via [matchingSessions]'s `score` parameter instead.
+int? fuzzyScore(String haystack, String needle) =>
+    rust.fuzzyScore(haystack: haystack, needle: needle);
 
-  for (var ni = 0; ni < n.length; ni++) {
-    final c = n.codeUnitAt(ni);
-    var matched = false;
-    while (hi < h.length) {
-      if (h.codeUnitAt(hi) == c) {
-        firstMatch = firstMatch < 0 ? hi : firstMatch;
-        // Reward matches that continue a run and those on a word boundary, so
-        // "auth" scores higher against "auth-fix" than against "a-u-t-h".
-        score += (hi == lastMatch + 1) ? 10 : 1;
-        if (hi == 0 || _isBoundary(h.codeUnitAt(hi - 1))) score += 5;
-        lastMatch = hi;
-        hi++;
-        matched = true;
-        break;
-      }
-      hi++;
-    }
-    if (!matched) return null;
-  }
-
-  // An earlier first hit is better; nudge the score down by where matching began.
-  return score - firstMatch;
-}
-
-/// True when [codeUnit] is a separator that makes the next char a word start.
-bool _isBoundary(int codeUnit) {
-  final isAlnum =
-      (codeUnit >= 0x30 && codeUnit <= 0x39) || // 0-9
-      (codeUnit >= 0x61 && codeUnit <= 0x7a); // a-z (haystack is lowercased)
-  return !isAlnum;
-}
-
-/// The best fuzzy score for [query] across a session's title, branch, and
-/// program — the same three fields the TUI's `WorktreeSession::fuzzy_score`
-/// scores. `projectName` is shown in the list but, as in the TUI, not matched.
-/// Returns null when the query matches none of the fields.
+/// The best fuzzy score for [query] across a session's title, branch and
+/// program. Null when none of them match.
+///
+/// The field set and "best field wins" live with the scorer in Rust, so the
+/// app cannot rank on a different set of fields than the TUI does. The project
+/// name is not matched.
 int? sessionFuzzyScore(SessionInfo session, String query) {
-  int? best;
-  for (final field in [session.title, session.branch, session.program]) {
-    final score = fuzzyScore(field, query);
-    if (score != null && (best == null || score > best)) best = score;
-  }
-  return best;
+  final override = debugSessionScorer;
+  if (override != null) return override(session, query);
+  return rust.sessionScore(
+    title: session.title,
+    branch: session.branch,
+    program: session.program,
+    query: query,
+  );
 }
+
+/// Test-only replacement for the scorer, used when it cannot be passed in.
+///
+/// [matchingSessions] takes a `score` parameter and that is the seam to prefer.
+/// This exists for the path that has none: `session_list_page.dart` filters and
+/// ranks inside `build`, so a widget test rendering it reaches the scorer with no
+/// opportunity to inject one — and `flutter test` has no native library for the
+/// real scorer to call into. Production never assigns this.
+///
+/// Set it in `setUp` and clear it in `tearDown`; leaving it set would silently
+/// change scoring for every later test in the same file.
+@visibleForTesting
+int? Function(SessionInfo session, String query)? debugSessionScorer;
 
 /// Whether a session's tmux process is still alive — every status except
 /// `stopped`. Mirrors the Rust `SessionStatus::is_active`. The Recent tab
@@ -83,14 +64,19 @@ extension SessionStatusActive on SessionStatus {
 
 /// [sessions] that match [query], in original order. An empty query keeps them
 /// all. Used to filter a project group in place without reordering it.
+/// [score] defaults to the shared Rust scorer. It is a parameter so this stays
+/// unit-testable: `flutter test` runs without the native library, so a test
+/// passes its own scorer rather than reaching the real one (the same reason
+/// `test/support/fake_diff_layout.dart` exists for the diff engine).
 List<SessionInfo> matchingSessions(
   Iterable<SessionInfo> sessions,
-  String query,
-) {
+  String query, {
+  int? Function(SessionInfo, String) score = sessionFuzzyScore,
+}) {
   if (query.isEmpty) return sessions.toList();
   return [
     for (final s in sessions)
-      if (sessionFuzzyScore(s, query) != null) s,
+      if (score(s, query) != null) s,
   ];
 }
 
