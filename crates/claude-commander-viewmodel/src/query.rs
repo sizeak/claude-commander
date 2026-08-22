@@ -12,7 +12,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 /// score deterministically. It keeps per-thread scratch buffers
 /// (`m_cache: CachedThreadLocal<RefCell<Vec<MatrixCell>>>`,
 /// fuzzy-matcher-0.3.7 `src/skim.rs:610`) and grows them with
-/// `matrix.resize(rows * cols, MatrixCell::default())` (`src/skim.rs:394`).
+/// `matrix.resize(rows * cols, MatrixCell::default())` (`src/skim.rs:395`).
 /// `Vec::resize` initialises only the *new* elements, so cells left over from a
 /// longer previous haystack keep that call's DP values, and the matrix build
 /// reads cells this call never wrote. The score therefore depends on what the
@@ -31,6 +31,11 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 ///
 /// Cost, measured: a 180-field keystroke (60 sessions × 3 fields) takes ~114µs
 /// with a fresh matcher against ~87µs shared — 27µs against a 16.7ms frame.
+///
+/// Determinism here makes the frontends agree only while they resolve the *same*
+/// `fuzzy-matcher`. The TUI and the Flutter cdylib have separate lockfiles
+/// (`Cargo.lock`, `client/rust/Cargo.lock`); both pin 0.3.7 today. Sharing this
+/// source cannot drift, but that version can — bump it in both or not at all.
 /// `ignore_case` matches regardless of needle case, preserving the original
 /// lowercase-then-contains behaviour users were used to.
 fn matcher() -> SkimMatcherV2 {
@@ -217,6 +222,14 @@ mod tests {
     ///
     /// Never asserts an absolute score, only its stability, so other tests
     /// sharing the process cannot make this flaky in either direction.
+    ///
+    /// It can, however, *false-negative* in isolation: the `thread_local` crate
+    /// reuses thread ids once a test thread exits, so under a reintroduced shared
+    /// matcher this test can inherit an already-contaminated cache, start from the
+    /// contaminated value and find it stable. Measured at roughly 1 run in 4.
+    /// [`boundary_run_outranks_a_buried_contiguous_run`] is the reliable sentinel
+    /// — it builds its own contamination inside one test thread — so if these are
+    /// ever trimmed, that is the one that must survive.
     #[test]
     fn scoring_is_independent_of_call_history() {
         // (haystack, needle, a LONGER haystack scored in between)

@@ -4548,6 +4548,57 @@ fn snapshot_with_attach_times(
     )
 }
 
+/// The palette must score a session's branch and program, not only its title —
+/// and must not score the project name.
+///
+/// `gather_quick_switch_matches` hands four `&str`s to
+/// `viewmodel::session_score`, so the type system cannot catch a call site that
+/// passes the wrong field or drops one. Argument *order* is provably harmless
+/// (the scorer is a symmetric max over the three), which leaves "passed the
+/// wrong field entirely" as the real failure mode — and every other palette test
+/// uses an empty query, which never reaches the scorer at all.
+#[tokio::test]
+async fn palette_scores_branch_and_program_but_not_project_name() {
+    use claude_commander_core::session::{Project, SessionStatus, WorktreeSession};
+
+    let mut state = claude_commander_core::config::AppState::default();
+    // Title, branch, program and project name share no subsequence with each
+    // other's queries, so each assertion below can only pass via its own field.
+    let mut project = Project::new("zzproj", std::path::PathBuf::from("/tmp/p"), "main");
+    let pid = project.id;
+    let mut session = WorktreeSession::new(
+        pid,
+        "alpha",
+        "feat-uniquebranch",
+        std::path::PathBuf::new(),
+        "opencode",
+    );
+    session.status = SessionStatus::Running;
+    let sid = session.id;
+    project.add_worktree(sid);
+    state.sessions.insert(sid, session);
+    state.projects.insert(pid, project);
+    let snap = claude_commander_core::api::workspace_snapshot_from_state(&state);
+
+    let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    for (query, field) in [("uniquebranch", "branch"), ("opencode", "program")] {
+        let matches = app.gather_quick_switch_matches(query).await;
+        assert!(
+            matches.iter().any(|m| m.session_id == sid),
+            "the palette must match on a session's {field} (query {query:?})"
+        );
+    }
+
+    let matches = app.gather_quick_switch_matches("zzproj").await;
+    assert!(
+        !matches.iter().any(|m| m.session_id == sid),
+        "the palette must NOT match a session on its project name"
+    );
+}
+
 /// Both palette build paths (initial `gather_quick_switch_matches` and the
 /// per-keystroke `refilter_quick_switch`) must order an empty query by
 /// most-recent attach, newest first, with never-attached sessions last.
