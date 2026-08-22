@@ -1226,16 +1226,15 @@ impl App {
                 if session.status == SessionStatus::Creating {
                     continue;
                 }
-                // Best fuzzy score across title/branch/program — mirrors
-                // `WorktreeSession::fuzzy_score` over the DTO fields.
-                let Some(score) = [
-                    session.title.as_str(),
-                    session.branch.as_str(),
-                    session.program.as_str(),
-                ]
-                .iter()
-                .filter_map(|s| claude_commander_viewmodel::fuzzy_score(s, query))
-                .max() else {
+                // The field set and "best field wins" live with the scorer, so
+                // this cannot rank on a different set than the session list or
+                // the Flutter client do.
+                let Some(score) = claude_commander_viewmodel::session_score(
+                    &session.title,
+                    &session.branch,
+                    &session.program,
+                    query,
+                ) else {
                     continue;
                 };
                 scored.push((

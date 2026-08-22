@@ -23,10 +23,15 @@
 //!
 //! # Why not `claude-commander-protocol`
 //!
-//! Protocol is what the server and its clients must **agree** on — change it and
-//! the wire breaks. A view-model is how *one* client interprets a snapshot;
-//! nothing has to agree, and it can churn freely. Keeping them apart is what
-//! keeps "is this a wire change?" answerable.
+//! Both are shared and neither has host deps, so the split is about *who* has to
+//! agree. Protocol is a contract with a peer over a wire: a running server and a
+//! shipped client must agree on it, so changing it is a compatibility question.
+//! This crate is shared only among in-tree frontends, which are rebuilt
+//! together — so it can churn freely without any *wire* peer agreeing, while the
+//! frontends themselves must still agree with each other, which is the whole
+//! reason the logic is here rather than copied per client.
+//!
+//! Keeping them apart is what keeps "is this a wire change?" answerable.
 
 pub mod query;
 

@@ -5,13 +5,36 @@
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use std::sync::OnceLock;
 
-fn matcher() -> &'static SkimMatcherV2 {
-    static M: OnceLock<SkimMatcherV2> = OnceLock::new();
-    // `ignore_case` matches regardless of needle case — preserves the
-    // original lowercase-then-contains behaviour users were used to.
-    M.get_or_init(|| SkimMatcherV2::default().ignore_case())
+/// A matcher for one scoring call.
+///
+/// Built per call, deliberately, because a **reused** `SkimMatcherV2` does not
+/// score deterministically. It keeps per-thread scratch buffers
+/// (`m_cache: CachedThreadLocal<RefCell<Vec<MatrixCell>>>`,
+/// fuzzy-matcher-0.3.7 `src/skim.rs:610`) and grows them with
+/// `matrix.resize(rows * cols, MatrixCell::default())` (`src/skim.rs:394`).
+/// `Vec::resize` initialises only the *new* elements, so cells left over from a
+/// longer previous haystack keep that call's DP values, and the matrix build
+/// reads cells this call never wrote. The score therefore depends on what the
+/// thread scored before.
+///
+/// That is not academic. With one shared matcher, scoring `"s-e-s-s-i-o-n"`
+/// against `"session"` (145) before `"list-session"` (142 alone) makes the
+/// second report 145 too — turning a strict ordering into a tie. The whole point
+/// of this crate is that the TUI and the Flutter client rank a list identically,
+/// and they run on different threads with different histories, so a
+/// history-dependent scorer cannot deliver that.
+///
+/// `use_cache(false)` is NOT the fix: in 0.3.7 that path does
+/// `cell.replace(vec![])` on caches whose `RefCell` borrows are still live
+/// (`src/skim.rs:929-933`) and panics with "already borrowed".
+///
+/// Cost, measured: a 180-field keystroke (60 sessions × 3 fields) takes ~114µs
+/// with a fresh matcher against ~87µs shared — 27µs against a 16.7ms frame.
+/// `ignore_case` matches regardless of needle case, preserving the original
+/// lowercase-then-contains behaviour users were used to.
+fn matcher() -> SkimMatcherV2 {
+    SkimMatcherV2::default().ignore_case()
 }
 
 /// Score `needle` against `haystack` using Skim-style fuzzy matching.
@@ -171,6 +194,58 @@ mod tests {
         assert!(
             decoy < boundaries,
             "a leading decoy should score below a clean boundary run: {decoy} vs {boundaries}"
+        );
+    }
+
+    /// The scorer must be a *function* of its arguments.
+    ///
+    /// It was not: with the shared `SkimMatcherV2` this crate first shipped,
+    /// scoring `"s-e-s-s-i-o-n"` first left stale DP cells that pushed
+    /// `"list-session"` from 142 to 145 — collapsing a strict ordering into a
+    /// tie. Two frontends on different threads would then rank the same list
+    /// differently, which is precisely what this crate exists to prevent.
+    ///
+    /// Asserts the actual property (same inputs, same answer, whatever ran
+    /// before) rather than the mechanism, so it still guards if the fix changes.
+    #[test]
+    fn scoring_is_independent_of_call_history() {
+        let alone = fuzzy_score("list-session", "session");
+
+        // Contaminating call: a longer haystack for the same needle, which is
+        // what grew the shared scratch buffer.
+        let _ = fuzzy_score("s-e-s-s-i-o-n", "session");
+        assert_eq!(
+            fuzzy_score("list-session", "session"),
+            alone,
+            "score changed after scoring a longer haystack first"
+        );
+
+        // And a spread of unrelated work, in case some other call pattern leaks.
+        for (h, n) in [
+            ("authentication-service", "auth"),
+            ("a-very-long-branch-name-indeed", "brnch"),
+            ("payments", "pay"),
+        ] {
+            let _ = fuzzy_score(h, n);
+        }
+        assert_eq!(
+            fuzzy_score("list-session", "session"),
+            alone,
+            "score changed after unrelated scoring"
+        );
+    }
+
+    /// The ordering the shared-matcher bug used to destroy: a haystack whose
+    /// every character sits on a word boundary outranks one where the match is
+    /// contiguous but buried. Restored as a regression test now that the scorer
+    /// is deterministic enough to assert it.
+    #[test]
+    fn boundary_run_outranks_a_buried_contiguous_run() {
+        let boundaries = fuzzy_score("s-e-s-s-i-o-n", "session").unwrap();
+        let buried = fuzzy_score("list-session", "session").unwrap();
+        assert!(
+            boundaries > buried,
+            "all-boundary should outrank a buried run: {boundaries} vs {buried}"
         );
     }
 }

@@ -53,10 +53,14 @@ pub fn session_score(
     claude_commander_viewmodel::session_score(&title, &branch, &program, &query).map(narrow)
 }
 
-/// Narrow a score to `i32`, saturating. Skim scores are in the tens to low
-/// hundreds, so this never fires in practice; saturating rather than wrapping
-/// means that even if it somehow did, the *ordering* callers depend on survives
-/// (a bigger score stays bigger) instead of inverting.
+/// Narrow a score to `i32`, saturating.
+///
+/// Lossless, and provably so rather than just improbably: Skim computes scores
+/// in `i32` (`fuzzy-matcher-0.3.7 src/skim.rs:350`, `MatrixCell.m_score`) and
+/// widens to `i64` only on return, so no value reaching here can exceed the
+/// range. Saturation is the belt: it is weakly monotone, so even an impossible
+/// out-of-range score could only *tie* two entries, never invert the ordering
+/// callers depend on.
 fn narrow(score: i64) -> i32 {
     score.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }

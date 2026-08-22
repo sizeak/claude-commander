@@ -15,15 +15,6 @@ import '../src/rust/api/query.dart' as rust;
 /// whatever key a caller supplies, which is not worth an FFI crossing — and need
 /// no widget pump to unit-test.
 
-/// Score [needle] against [haystack]. Null when [needle] is not a subsequence
-/// of [haystack]; higher is a better match. An empty needle scores 0.
-///
-/// Delegates to the shared Rust scorer, so this ranks identically to the TUI.
-/// Calls the native library, so it is unavailable under `flutter test` — inject
-/// a stand-in via [matchingSessions]'s `score` parameter instead.
-int? fuzzyScore(String haystack, String needle) =>
-    rust.fuzzyScore(haystack: haystack, needle: needle);
-
 /// The best fuzzy score for [query] across a session's title, branch and
 /// program. Null when none of them match.
 ///
