@@ -3103,8 +3103,8 @@ pub(super) fn filter_keybinding_rows(rows: Vec<SettingsRow>, query: &str) -> Vec
         return with_section_spacers(rows);
     }
     let matches = |row: &SettingsRow| {
-        claude_commander_core::fuzzy::fuzzy_score(&row.label, query).is_some()
-            || claude_commander_core::fuzzy::fuzzy_score(row.text_value(), query).is_some()
+        claude_commander_viewmodel::fuzzy_score(&row.label, query).is_some()
+            || claude_commander_viewmodel::fuzzy_score(row.text_value(), query).is_some()
     };
 
     let mut out: Vec<SettingsRow> = Vec::new();

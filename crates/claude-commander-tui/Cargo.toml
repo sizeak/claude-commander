@@ -30,6 +30,9 @@ claude-commander-core = { path = "../claude-commander-core" }
 # add-project-from-GitHub flow uses its `github` slug validation and
 # `redact_credentials` so the TUI enforces the same contract the server does.
 claude-commander-protocol = { path = "../claude-commander-protocol" }
+# Session/palette matching, shared with the Flutter client so both frontends rank
+# a session list identically.
+claude-commander-viewmodel = { path = "../claude-commander-viewmodel" }
 
 # Terminal rendering. Core depends on `ratatui-core` only, for the `Color` in
 # `[theme]` config values — full ratatui (widgets, layout, backends) lives here.

@@ -1234,7 +1234,7 @@ impl App {
                     session.program.as_str(),
                 ]
                 .iter()
-                .filter_map(|s| claude_commander_core::fuzzy::fuzzy_score(s, query))
+                .filter_map(|s| claude_commander_viewmodel::fuzzy_score(s, query))
                 .max() else {
                     continue;
                 };
@@ -1926,7 +1926,7 @@ impl App {
         let mut scored: Vec<(i64, QuickSwitchItem)> = Vec::new();
         for repo in &self.ui_state.repo_picker.repos {
             let Some(score) =
-                claude_commander_core::fuzzy::fuzzy_score(&repo.full_name, filter_query)
+                claude_commander_viewmodel::fuzzy_score(&repo.full_name, filter_query)
             else {
                 continue;
             };

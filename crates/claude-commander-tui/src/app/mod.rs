@@ -1306,7 +1306,7 @@ impl ProjectPicker {
     /// Recompute `filtered` from `filter`, re-anchoring the highlight onto the
     /// previously-selected project when it survives (else clamp to the top).
     /// An empty filter shows every project in name order; otherwise entries are
-    /// ranked best-fuzzy-match first via `claude_commander_core::fuzzy::fuzzy_score`.
+    /// ranked best-fuzzy-match first via `claude_commander_viewmodel::fuzzy_score`.
     pub fn apply_filter(&mut self) {
         let prev_id = self.selected_id();
         if self.filter.is_empty() {
@@ -1317,7 +1317,7 @@ impl ProjectPicker {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, c)| {
-                    claude_commander_core::fuzzy::fuzzy_score(&c.name, &self.filter).map(|s| (i, s))
+                    claude_commander_viewmodel::fuzzy_score(&c.name, &self.filter).map(|s| (i, s))
                 })
                 .collect();
             // Highest score first; ties keep the original (name-sorted) order.
@@ -1859,7 +1859,7 @@ impl AppUiState {
                 continue;
             }
             let label = action.description();
-            let Some(score) = claude_commander_core::fuzzy::fuzzy_score(label, filter_query) else {
+            let Some(score) = claude_commander_viewmodel::fuzzy_score(label, filter_query) else {
                 continue;
             };
             scored.push((

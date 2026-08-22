@@ -94,6 +94,7 @@ cc_crate_for_alias() {
   case "$alias" in
     core) printf 'claude-commander-core\n' ;;
     tui) printf 'claude-commander-tui\n' ;;
+    viewmodel | vm) printf 'claude-commander-viewmodel\n' ;;
     cli | commander) printf 'claude-commander\n' ;;
     server) printf 'claude-commander-server\n' ;;
     protocol) printf 'claude-commander-protocol\n' ;;
@@ -102,7 +103,7 @@ cc_crate_for_alias() {
     test-support) printf 'claude-commander-test-support\n' ;;
     claude-commander | claude-commander-*) printf '%s\n' "$alias" ;;
     *)
-      cc_error "unknown crate '$alias' (try: core tui cli server protocol remote client test-support)"
+      cc_error "unknown crate '$alias' (try: core viewmodel tui cli server protocol remote client test-support)"
       return 1
       ;;
   esac

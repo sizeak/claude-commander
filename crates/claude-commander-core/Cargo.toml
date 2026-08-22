@@ -23,6 +23,10 @@ path = "src/lib.rs"
 # Shared wire types (DTOs + WS protocol) — also consumed by the server and the
 # mobile/desktop clients, so the serde shape has a single source of truth.
 claude-commander-protocol = { path = "../claude-commander-protocol" }
+# Session matching/ranking. Lives in `claude-commander-viewmodel` rather than here
+# so the Flutter client's cdylib can share it — core is host-bound and the cdylib
+# cannot depend on it, which is how the Dart scorer came to diverge.
+claude-commander-viewmodel = { path = "../claude-commander-viewmodel" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -123,9 +127,6 @@ pty-process = { version = "0.5", features = ["async"] }
 # timed-out clone's whole process group rather than just the process it spawned.
 nix = { version = "0.31", features = ["term", "poll", "fs", "user", "signal"] }
 
-# Fuzzy matching for the quick-select palette and session lookup. Stays here:
-# `session/types.rs` ranks sessions with it, so it is not frontend-only.
-fuzzy-matcher = "0.3"
 
 # RGBA→PNG encoding for pasted screenshots (`paste_image.rs`). The *rendering*
 # of those images is the frontend's job and lives with ratatui-image there;

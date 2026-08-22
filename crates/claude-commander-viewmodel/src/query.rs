@@ -1,4 +1,7 @@
-//! Fuzzy (subsequence) matching used by the quick-select palette.
+//! Matching a typed query against sessions.
+//!
+//! The scorer is shared rather than reimplemented per frontend: the TUI and the
+//! Flutter client rank the same session list, so they must score it the same way.
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -22,6 +25,21 @@ pub fn fuzzy_score(haystack: &str, needle: &str) -> Option<i64> {
         return Some(0);
     }
     matcher().fuzzy_match(haystack, needle)
+}
+
+/// Best fuzzy score for `query` across a session's title, branch and program —
+/// or `None` when no field matches. The fields, and "best field wins", are the
+/// ranking rule the palette and the client's session search both apply.
+///
+/// Takes the three fields as `&str` rather than a session struct on purpose:
+/// both a core `WorktreeSession` and a protocol `SessionInfo` can call it, and
+/// it crosses the Flutter client's FFI boundary without marshalling a struct.
+/// The project name is deliberately *not* matched.
+pub fn session_score(title: &str, branch: &str, program: &str, query: &str) -> Option<i64> {
+    [title, branch, program]
+        .iter()
+        .filter_map(|s| fuzzy_score(s, query))
+        .max()
 }
 
 #[cfg(test)]
@@ -59,5 +77,30 @@ mod tests {
         let tight = fuzzy_score("android", "andr").unwrap();
         let loose = fuzzy_score("a-n-d-r-oid", "andr").unwrap();
         assert!(tight > loose, "tight={tight} loose={loose}");
+    }
+
+    #[test]
+    fn session_score_takes_the_best_field() {
+        // "payments" matches the title exactly and the branch loosely; the
+        // better field must win, so the pair is not merely "some match".
+        let title_only = fuzzy_score("payments", "payments").unwrap();
+        let best = session_score("payments", "feat/pay-ments-api", "claude", "payments").unwrap();
+        assert_eq!(best, title_only);
+    }
+
+    #[test]
+    fn session_score_matches_on_branch_or_program_too() {
+        assert!(session_score("unrelated", "feature-auth", "claude", "auth").is_some());
+        assert!(session_score("unrelated", "main", "opencode", "opencode").is_some());
+    }
+
+    #[test]
+    fn session_score_is_none_when_no_field_matches() {
+        assert!(session_score("alpha", "beta", "claude", "zzz").is_none());
+    }
+
+    #[test]
+    fn session_score_empty_query_matches() {
+        assert_eq!(session_score("a", "b", "c", ""), Some(0));
     }
 }

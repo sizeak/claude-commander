@@ -801,6 +801,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "claude-commander-protocol",
+ "claude-commander-viewmodel",
  "cpal",
  "crossterm",
  "diffgrid",
@@ -808,7 +809,6 @@ dependencies = [
  "figment",
  "filetime",
  "futures",
- "fuzzy-matcher",
  "gix",
  "hound",
  "image",
@@ -905,6 +905,7 @@ dependencies = [
  "chrono",
  "claude-commander-core",
  "claude-commander-protocol",
+ "claude-commander-viewmodel",
  "crossterm",
  "diffgrid",
  "directories",
@@ -930,6 +931,13 @@ dependencies = [
  "unicode-width",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "claude-commander-viewmodel"
+version = "0.34.0"
+dependencies = [
+ "fuzzy-matcher",
 ]
 
 [[package]]
