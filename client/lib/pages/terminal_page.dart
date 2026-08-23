@@ -15,6 +15,7 @@ import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../theme/terminal_theme.dart';
 import '../theme/tokens.dart';
+import '../util/ctrl_chord.dart';
 import '../util/error_text.dart';
 
 /// Live attached terminal, layout-agnostic (no Scaffold, no route). Streams raw
@@ -146,6 +147,12 @@ class _TerminalBodyState extends State<TerminalBody>
   /// platform round trip with a multi-second timeout.
   bool _imageBusy = false;
 
+  /// True while the on-screen Ctrl key is armed, i.e. the next character the
+  /// keyboard produces is to be folded into its control byte. Held here rather
+  /// than in [_ModifierBar] because it is consumed by terminal *output* (see
+  /// [_sendText]), which the bar never sees.
+  bool _ctrlArmed = false;
+
   /// True only around the upload itself, which is what the spinner reports.
   /// Deliberately narrower than [_imageBusy]: a spinner while the bottom sheet
   /// or the OS picker is in front of the user tells them nothing, and an
@@ -234,14 +241,7 @@ class _TerminalBodyState extends State<TerminalBody>
     // still buffers a partial multibyte codepoint split across WS frames until
     // it completes.
     _decoder = utf8.decoder.startChunkedConversion(_ChunkSink(_write));
-    _terminal.onOutput = (data) {
-      unawaited(
-        widget.api.terminalSendInput(
-          attachId: _attachId,
-          bytes: utf8.encode(data),
-        ),
-      );
-    };
+    _terminal.onOutput = _sendText;
     _terminal.onResize = (cols, rows, pixelWidth, pixelHeight) {
       unawaited(
         widget.api.terminalResize(attachId: _attachId, cols: cols, rows: rows),
@@ -484,6 +484,19 @@ class _TerminalBodyState extends State<TerminalBody>
   void _send(List<int> bytes) => unawaited(
     widget.api.terminalSendInput(attachId: _attachId, bytes: bytes),
   );
+
+  /// Everything the emulator wants to send: typed characters, the escape
+  /// sequences its input handler builds for special keys, pastes, and its own
+  /// replies to device queries. The single funnel is what lets an armed Ctrl
+  /// (see [_ctrlArmed]) reach a chord the on-screen row has no key for — the
+  /// soft keyboard's characters arrive here and nowhere else.
+  void _sendText(String data) {
+    final chord = _ctrlArmed ? ctrlChord(data) : null;
+    if (chord != null && chord.consumed) {
+      setState(() => _ctrlArmed = false);
+    }
+    _send(utf8.encode(chord?.output ?? data));
+  }
 
   // -- image attach --------------------------------------------------------
 
@@ -771,7 +784,13 @@ class _TerminalBodyState extends State<TerminalBody>
                       ),
                     ),
                     // Rides up with the pane, landing just above the keyboard.
-                    if (widget.showModifierBar) _ModifierBar(onSend: _send),
+                    if (widget.showModifierBar)
+                      _ModifierBar(
+                        onSend: _send,
+                        ctrlArmed: _ctrlArmed,
+                        onToggleCtrl: () =>
+                            setState(() => _ctrlArmed = !_ctrlArmed),
+                      ),
                   ],
                 ),
               ),
@@ -954,10 +973,22 @@ class _ChunkSink implements Sink<String> {
 enum _ImageSource { gallery, camera, clipboard }
 
 /// On-screen keys for touch — the modifiers and arrows a soft keyboard can't
-/// easily produce. Each sends the raw byte sequence the PTY expects.
+/// easily produce. Each sends the raw byte sequence the PTY expects, except
+/// `Ctrl`, which arms [ctrlArmed] so the *next* character typed on the keyboard
+/// becomes a chord: the row has room for a handful of presets (^C, ^D, …) and
+/// this is how the rest — ^W, ^X, ^O — are reachable at all from a phone.
 class _ModifierBar extends StatelessWidget {
   final void Function(List<int> bytes) onSend;
-  const _ModifierBar({required this.onSend});
+
+  /// Whether the Ctrl key is currently armed. Owned by the parent, which is
+  /// where the arm is spent (on the next character the emulator sends).
+  final bool ctrlArmed;
+  final VoidCallback onToggleCtrl;
+  const _ModifierBar({
+    required this.onSend,
+    required this.ctrlArmed,
+    required this.onToggleCtrl,
+  });
 
   static const _esc = [0x1b];
   static const _tab = [0x09];
@@ -996,6 +1027,7 @@ class _ModifierBar extends StatelessWidget {
         children: [
           _key(context, 'Esc', () => onSend(_esc)),
           _key(context, 'Tab', () => onSend(_tab)),
+          _key(context, 'Ctrl', onToggleCtrl, armed: ctrlArmed),
           _key(context, '^C', () => onSend(_ctrlC)),
           _key(context, '^D', () => onSend(_ctrlD)),
           _key(context, '^Z', () => onSend(_ctrlZ)),
@@ -1020,12 +1052,21 @@ class _ModifierBar extends StatelessWidget {
   /// A single key pill: a raised mono chip that fires its raw byte sequence on
   /// tap. Deliberately not a Material button so it matches the deck's flat pills
   /// and stays compact in the horizontal strip.
-  Widget _key(BuildContext context, String label, VoidCallback onTap) {
+  ///
+  /// [armed] is for the sticky Ctrl: a held modifier has to be visible, or the
+  /// keystroke after it lands somewhere the user didn't ask for with nothing on
+  /// screen to explain why.
+  Widget _key(
+    BuildContext context,
+    String label,
+    VoidCallback onTap, {
+    bool armed = false,
+  }) {
     final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3),
       child: Material(
-        color: t.surface,
+        color: armed ? t.surfaceSelected : t.surface,
         borderRadius: BorderRadius.circular(7),
         child: InkWell(
           onTap: onTap,
@@ -1035,14 +1076,14 @@ class _ModifierBar extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(7),
-              border: Border.all(color: t.border),
+              border: Border.all(color: armed ? t.primary : t.border),
             ),
             child: Text(
               label,
               style: t.meta(
                 size: 10.5,
                 weight: FontWeight.w600,
-                color: t.textBright,
+                color: armed ? t.primary : t.textBright,
               ),
             ),
           ),
