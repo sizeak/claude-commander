@@ -594,6 +594,119 @@ void main() {
     expect(api.lastCall('attachTerminal')!.args['kind'], AttachKind.shell);
   });
 
+  group('the on-screen Ctrl key', () {
+    // The row can only carry a fixed handful of chords, so Ctrl arms the *next*
+    // character instead of sending one of its own. It sits directly after Tab,
+    // ahead of the preset ^C/^D chords it generalises.
+    Finder ctrlKey() => find.text('Ctrl');
+
+    /// The soft keyboard's path into the emulator: a typed character reaches
+    /// `Terminal.onOutput` exactly as `textInput` does here.
+    Future<void> type(WidgetTester tester, String text) async {
+      readTerminal(tester).textInput(text);
+      await tester.pump();
+    }
+
+    List<int>? lastInput() =>
+        api.lastCall('terminalSendInput')?.args['bytes'] as List<int>?;
+
+    testWidgets('sits between Tab and the preset chords', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      final tab = tester.getCenter(find.text('Tab')).dx;
+      final ctrl = tester.getCenter(ctrlKey()).dx;
+      final ctrlC = tester.getCenter(find.text('^C')).dx;
+
+      expect(ctrl, greaterThan(tab));
+      expect(ctrl, lessThan(ctrlC));
+    });
+
+    testWidgets('folds the next typed character into its control byte', (
+      tester,
+    ) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      await type(tester, 'w');
+
+      expect(lastInput(), [0x17]);
+    });
+
+    testWidgets('arms one keystroke only', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      await type(tester, 'w');
+      await type(tester, 'w');
+
+      expect(lastInput(), utf8.encode('w'));
+    });
+
+    testWidgets('sends unmodified characters when it is not armed', (
+      tester,
+    ) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await type(tester, 'w');
+
+      expect(lastInput(), utf8.encode('w'));
+    });
+
+    testWidgets('a second tap disarms it', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      await type(tester, 'w');
+
+      expect(lastInput(), utf8.encode('w'));
+    });
+
+    // A held arm has to be visible, or the next keystroke lands somewhere the
+    // user did not expect with nothing on screen to explain why.
+    testWidgets('shows that it is armed', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      Color? fill() => tester
+          .widget<Material>(
+            find.ancestor(of: ctrlKey(), matching: find.byType(Material)).first,
+          )
+          .color;
+      final resting = fill();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+
+      expect(fill(), isNot(resting));
+    });
+
+    // A paste is not the keystroke the arm was set for: eating it would both
+    // mangle the pasted text and leave the user's Ctrl silently spent.
+    testWidgets('a paste does not consume the arm', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      readTerminal(tester).paste('hello');
+      await tester.pump();
+      expect(lastInput(), utf8.encode('hello'));
+
+      await type(tester, 'w');
+      expect(lastInput(), [0x17]);
+    });
+  });
+
   group('image attach', () {
     late FakeImagePicker picker;
     late FakeClipboardImageReader clipboard;
