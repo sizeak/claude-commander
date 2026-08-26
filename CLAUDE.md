@@ -169,7 +169,7 @@ Unit tests are co-located in source files (`#[cfg(test)]`). Integration tests in
 
 Both capture **symbols only, not styles** — that's `TestBackend`'s limitation too. Colour and highlighting stay the job of targeted assertions (e.g. `selected_session_row_is_highlighted`). Run `cargo insta review` to accept or update; never blind-accept a diff, because these are the tests that only fail when rendering genuinely changed.
 
-Snapshots are easy to lose by accident, and this repo has the worked example. #260 deleted `render_tests.rs` and all 27 snapshots as collateral of removing the right-hand preview pane, without saying so; the orphaned `insta` dependency then looked like dead weight and was dropped too. #267 promptly restored the pane — so the coverage had been discarded for a change that was itself reverted. All 27 tests are back, and 27 of 27 snapshots reproduce their pre-#260 bytes exactly.
+Snapshots are easy to lose by accident, and this repo has the worked example. #260 deleted `render_tests.rs` and all 27 snapshots as collateral of removing the right-hand preview pane, without saying so; the orphaned `insta` dependency then looked like dead weight and was dropped too. #267 promptly restored the pane — so the coverage had been discarded for a change that was itself reverted. The tests and snapshots are back.
 
 The lesson: **if a change invalidates a snapshot, re-point it at the new UI — don't delete the file.** A deleted snapshot leaves nothing to notice when the UI comes back.
 
