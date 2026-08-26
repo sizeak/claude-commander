@@ -1,7 +1,8 @@
 # cargo-mutants configuration for claude-commander.
 #
-# Scope: pure-logic modules, across both `claude-commander-core` and the
-# `claude-commander-tui` frontend crate. Files in `examine_globs` are
+# Scope: pure-logic modules, across `claude-commander-core`, the
+# `claude-commander-tui` frontend crate and the host-free
+# `claude-commander-viewmodel` tier. Files in `examine_globs` are
 # side-effect-free enough that mutating them only exercises in-process
 # behaviour; any IO functions co-located in these files are excluded by name in
 # `exclude_re` below. Files that primarily perform real tmux/git/filesystem work
@@ -15,7 +16,10 @@
 # failing. `widgets/tree_list/pr_colors.rs` had already gone stale before the
 # frontend was extracted (#260 moved it up to `widgets/pr_colors.rs`), and
 # `widgets/preview.rs` was deleted by #260 then restored by #267 along with the
-# right-hand pane — it is listed again here. `widgets/status_glyph.rs` and
+# right-hand pane — it is listed again here. And `core/src/fuzzy.rs` went stale
+# the moment the scorer moved to `viewmodel/src/query.rs`, which is the entry
+# below: the hazard this note warns about fires on the very next move, so
+# re-resolve these globs when you relocate a file. `widgets/status_glyph.rs` and
 # `widgets/board/` are pure-logic candidates deliberately NOT added yet:
 # widening mutation scope is its own call.
 
@@ -24,7 +28,7 @@ examine_globs = [
     "crates/claude-commander-core/src/tmux/state.rs",
     "crates/claude-commander-core/src/session/types.rs",
     "crates/claude-commander-core/src/config/keybindings.rs",
-    "crates/claude-commander-core/src/fuzzy.rs",
+    "crates/claude-commander-viewmodel/src/query.rs",
     "crates/claude-commander-core/src/error.rs",
     "crates/claude-commander-core/src/git/diff.rs",
     "crates/claude-commander-tui/src/digit_accumulator.rs",

@@ -8,14 +8,17 @@
 //! [`TuiError::Core`] deliberately has **no** `#[from]`. Terminal failures and
 //! library failures stay distinguishable, and because there is no blanket
 //! conversion, every point where a core error becomes a TUI error has to be
-//! written out. There are exactly two ([`crate::picker::run_session_picker`]
-//! loading `AppState`, and `App::run` propagating a failed tmux probe), which is
-//! few enough that making them explicit costs nothing and documents the seam.
+//! written out. There is exactly **one** — `App::run` propagating a failed tmux
+//! probe — which is few enough that making it explicit costs nothing and
+//! documents the seam. (There were two until #286 deleted the
+//! `display-popup` session picker, whose `AppState` load was the other.)
 //!
 //! Functions whose failures are *only* core's keep returning
-//! [`claude_commander_core::Result`] unchanged — see `prefs::persist` and
-//! `app::actions::load_branch_entries`. Wrapping those would add noise without
-//! adding information.
+//! [`claude_commander_core::Result`] unchanged — `prefs::persist`,
+//! `app::actions::load_branch_entries` and `app::switcher::drive_attach`.
+//! Wrapping those would add noise without adding information; that the absent
+//! `#[from]` forces the choice is the point, and #286's new fallible path is
+//! what proved it.
 
 use thiserror::Error;
 

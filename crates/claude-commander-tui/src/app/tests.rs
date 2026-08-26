@@ -2044,10 +2044,16 @@ fn make_test_app_with_path() -> (App, std::path::PathBuf) {
     // `projects_dir` defaults to the user's REAL `~/Projects`, which the
     // repo-clone paths write into. Pin it under `tmp` so no App built here can
     // clone outside the temp tree.
-    let config = Config {
+    let mut config = Config {
         projects_dir: Some(tmp.path().join("projects")),
         ..Config::default()
     };
+    // Telemetry is opt-out by default with a baked ingest token. The crate-wide
+    // backstop is core's `test-support` clause in `would_be_enabled`, but that
+    // is feature wiring; force the flag off in the config too so this harness
+    // cannot reach the production endpoint even if the wiring changes. Guarded
+    // by `make_test_app_disables_telemetry`.
+    config.telemetry.enabled = false;
     let config_store = Arc::new(ConfigStore::with_path(config, config_path.clone()));
     let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
     // Leak the TempDir so paths stay valid for the lifetime of the test.
@@ -2064,6 +2070,31 @@ fn make_test_app_with_path() -> (App, std::path::PathBuf) {
     // board. List-view tests flip `view_mode` explicitly.
     app.ui_state.view_mode = claude_commander_core::config::ViewMode::Board;
     (app, config_path)
+}
+
+/// Guard: an `App` from the shared fixture must not emit telemetry.
+///
+/// The crate-wide backstop is [`crate::render_tests`]'s
+/// `telemetry_is_never_live_in_this_crates_tests` — core is built with
+/// `test-support` here, so `would_be_enabled` is false whatever the config
+/// says. This is the second layer, and the one that survives the feature wiring
+/// being changed: every fixture that builds a `CommanderService` also forces
+/// the flag off in its own config, so a `cargo test` can never reach the
+/// production OpenObserve endpoint by way of this harness.
+#[test]
+fn make_test_app_disables_telemetry() {
+    let (app, _config_path) = make_test_app_with_path();
+    // Env-independent: assert the config flag itself. `is_active()` also
+    // returns false under `DO_NOT_TRACK` (exported for the whole of
+    // `verify.sh`), which would mask a dropped force-disable.
+    assert!(
+        !app.service.read_config().telemetry.enabled,
+        "make_test_app_with_path must force telemetry off in the config itself"
+    );
+    assert!(
+        !app.service.telemetry().is_active(),
+        "fixture-built apps must not emit telemetry (would pollute production OpenObserve)"
+    );
 }
 
 #[tokio::test]
