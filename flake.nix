@@ -57,21 +57,47 @@
         # endpoint. Hash-safe: the caller still supplies the sha256 and both
         # hosts serve byte-identical tarballs, so a wrong rewrite fails loudly
         # as a hash mismatch rather than silently substituting content.
+        #
+        # The result must keep the fetcher's *shape*, not just its behaviour.
+        # `fetchurl`/`fetchzip` are `makeOverridable` functors — an attrset
+        # with `__functor`, `__functionArgs`, `override`, `overrideDerivation`
+        # and friends — and nixpkgs' own stdenv bootstrap calls `.override` on
+        # them: user overlays are folded in *before* `stdenvOverrides`
+        # (`pkgs/top-level/stage.nix`, `toFix`), so each bootstrap stage's
+        # `stdenv.overrides` sees this overlay's `fetchzip` as `super.fetchzip`,
+        # and the Darwin stages do `super.fetchzip.override { inherit (self)
+        # fetchurl; }` unguarded (`pkgs/stdenv/darwin/default.nix:160`; the
+        # Linux stages never `.override` a fetcher, which is why CI's
+        # ubuntu-only jobs cannot see this). Returning a bare lambda here
+        # therefore fails every `nix develop`/`nix build` on macOS with
+        # "expected a set but found a function". So: keep the whole set,
+        # swap only `__functor`, and re-wrap `override`'s result so the
+        # redirect also holds for a fetcher derived via `.override`.
         redirectToCdn =
-          fetcher: args:
+          fetcher:
           let
             toCdn = builtins.replaceStrings
               [ "https://crates.io/api/v1/crates" ]
               [ "https://static.crates.io/crates" ];
+            redirected = args:
+              fetcher (
+                if args ? url then
+                  args // { url = toCdn args.url; }
+                else if args ? urls then
+                  args // { urls = map toCdn args.urls; }
+                else
+                  args
+              );
           in
-          fetcher (
-            if args ? url then
-              args // { url = toCdn args.url; }
-            else if args ? urls then
-              args // { urls = map toCdn args.urls; }
+          if builtins.isAttrs fetcher then
+            fetcher
+            // { __functor = _self: redirected; }
+            // (if fetcher ? override then
+              { override = overrides: redirectToCdn (fetcher.override overrides); }
             else
-              args
-          );
+              { })
+          else
+            redirected;
 
         cratesIoCdnOverlay = _final: prev: {
           # `fetchzip` (and `fetchCrate`, which wraps it) composes the
@@ -91,7 +117,13 @@
           inherit system;
           overlays = [ cratesIoCdnOverlay ];
         };
-        craneLib = crane.mkLib pkgs;
+        # The only consumer that needs the functor shape is the Darwin
+        # bootstrap, and CI evaluates on Linux alone — so check the shape
+        # directly, where every platform will see it fail. `?` is false on a
+        # bare lambda, so this is exactly the check the Darwin failure implied.
+        craneLib =
+          assert pkgs.fetchurl ? override && pkgs.fetchzip ? override;
+          crane.mkLib pkgs;
 
         # `src` is the package derivation's only source input: Nix hashes the
         # filtered tree and that hash lands in the .drv, so every file admitted
