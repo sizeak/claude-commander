@@ -1701,7 +1701,7 @@ mod stack_order_tests {
         for s in &sessions {
             project_titles
                 .entry(s.project_id)
-                .or_insert_with(|| format!("p-{}", &s.project_id.to_string()));
+                .or_insert_with(|| format!("p-{}", s.project_id));
         }
         for (pid, name) in project_titles {
             let mut project =

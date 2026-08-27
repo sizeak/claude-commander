@@ -347,7 +347,13 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
             _snack('Clone failed: ${current.status.message}');
             return _Attempt.done;
           case CloneStatusKind.destinationExists:
-            return _handleDestinationExists(current.status);
+            // Nothing is cloning any more, so drop the progress row before the
+            // dialog goes up rather than leaving it spinning behind it. The
+            // `finally` below did exactly that while this arm returned an
+            // un-awaited future; awaiting one moves it after the dialog, so
+            // clear it here and let the `finally` be a no-op.
+            if (mounted) setState(() => _job = null);
+            return await _handleDestinationExists(current.status);
         }
       }
     } finally {

@@ -86,7 +86,7 @@ impl PathCompleter {
         }
 
         if self.completions.len() == 1 {
-            let full = format!("{}/", &self.completions[0]);
+            let full = format!("{}/", self.completions[0]);
             self.completed_from = full.clone();
             return maybe_unexpand_tilde(value, &full);
         }
