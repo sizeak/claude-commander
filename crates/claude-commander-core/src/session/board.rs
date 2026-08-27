@@ -705,7 +705,7 @@ mod tests {
         for s in &sessions {
             project_titles
                 .entry(s.project_id)
-                .or_insert_with(|| format!("p-{}", &s.project_id.to_string()));
+                .or_insert_with(|| format!("p-{}", s.project_id));
         }
         let mut projects: Vec<ProjectInfo> = project_titles
             .into_iter()
