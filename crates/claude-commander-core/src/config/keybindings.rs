@@ -48,6 +48,7 @@ pub enum BindableAction {
     DeleteMergedPrSessions,
     RenameSession,
     RestartSession,
+    ResetSession,
     ChangeProgram,
     ToggleKeepAlive,
     RemoveProject,
@@ -102,6 +103,7 @@ impl BindableAction {
         Self::NewSession,
         Self::RenameSession,
         Self::RestartSession,
+        Self::ResetSession,
         Self::ChangeProgram,
         Self::ToggleKeepAlive,
         Self::DeleteSession,
@@ -181,6 +183,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
             Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
+            Self::ResetSession => "reset_session",
             Self::ChangeProgram => "change_program",
             Self::ToggleKeepAlive => "toggle_keep_alive",
             Self::RemoveProject => "remove_project",
@@ -242,6 +245,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
             Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
+            Self::ResetSession => "Reset session (restart without resuming)",
             Self::ChangeProgram => "Change program (agent)…",
             Self::ToggleKeepAlive => "Toggle keep-alive (never auto-hibernate)",
             Self::RemoveProject => "Remove project",
@@ -309,6 +313,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "delete merged",
             Self::RenameSession => "rename",
             Self::RestartSession => "restart",
+            Self::ResetSession => "reset",
             Self::ChangeProgram => "program",
             Self::ToggleKeepAlive => "keep alive",
             Self::RemoveProject => "remove project",
@@ -363,6 +368,7 @@ impl BindableAction {
             | Self::NewSession
             | Self::RenameSession
             | Self::RestartSession
+            | Self::ResetSession
             | Self::ChangeProgram
             | Self::ToggleKeepAlive
             | Self::DeleteSession
@@ -430,6 +436,7 @@ impl FromStr for BindableAction {
             "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
             "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
+            "reset_session" => Ok(Self::ResetSession),
             "change_program" => Ok(Self::ChangeProgram),
             "toggle_keep_alive" => Ok(Self::ToggleKeepAlive),
             "remove_project" => Ok(Self::RemoveProject),
@@ -790,6 +797,10 @@ impl Default for KeyBindings {
             BindableAction::RestartSession,
             vec![kb(KeyCode::Char('R'), shift)],
         );
+        // ResetSession has no default key — it's reachable via the command
+        // palette and can be bound explicitly in config. It throws away the
+        // agent's conversation, so keeping it off Shift-R's neighbouring keys is
+        // deliberate: a mistyped restart should not be a destructive one.
         // ToggleKeepAlive has no default key — it's reachable via the command
         // palette and can be bound explicitly in config. Keep-alive is a rarely
         // toggled, opt-in control, so it doesn't claim a top-level hotkey.
@@ -1755,6 +1766,29 @@ mod tests {
         assert!(kb.keys_for(BindableAction::RenameSession).is_empty());
         let r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&r), Some(BindableAction::OpenReviewDiff));
+    }
+
+    #[test]
+    fn test_reset_session_unbound_by_default() {
+        // Reset is palette-only: no default hotkey. Shift-R stays the *resuming*
+        // restart, so a mistyped restart can never discard a conversation.
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::ResetSession).is_empty());
+        let shift_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_r), Some(BindableAction::RestartSession));
+    }
+
+    #[test]
+    fn test_reset_session_config_name_round_trips() {
+        // The `[keybindings]` key operators write in config.toml.
+        assert_eq!(BindableAction::ResetSession.config_name(), "reset_session");
+        assert_eq!(
+            "reset_session".parse::<BindableAction>(),
+            Ok(BindableAction::ResetSession)
+        );
+        // Listed in ALL, so the palette and the help modal both surface it
+        // despite having no key.
+        assert!(BindableAction::ALL.contains(&BindableAction::ResetSession));
     }
 
     #[test]

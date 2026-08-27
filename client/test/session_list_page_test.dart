@@ -9,6 +9,7 @@ import 'package:claude_commander_client/state/commander_store_scope.dart';
 import 'package:claude_commander_client/state/workspace_store.dart';
 import 'package:claude_commander_client/util/session_filter.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_rust_bridge/flutter_rust_bridge.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'support/fake_commander_api.dart';
@@ -108,7 +109,33 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('boom'), findsOneWidget);
+    // Sentence-cased by `errorText`, which also drops Dart's 'Exception: '.
+    expect(find.text('Boom'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Retry'), findsOneWidget);
+  });
+
+  /// The regression behind [errorText]: an unreachable server threw the
+  /// bridge's `AnyhowException`, whose message is the Rust error's `Debug` form
+  /// — a `Stack backtrace:` and ten `<unknown>` frames — and the list rendered
+  /// it verbatim, filling the screen.
+  testWidgets('an unreachable server shows one line, not a Rust backtrace', (
+    tester,
+  ) async {
+    api.workspaceSnapshotError = AnyhowException(
+      'backend unavailable: could not connect to server\n'
+      '\n'
+      'Stack backtrace:\n'
+      '   0: <unknown>\n'
+      '   1: <unknown>\n'
+      '   2: __start_thread',
+    );
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Could not connect to server'), findsOneWidget);
+    expect(find.textContaining('Stack backtrace'), findsNothing);
+    expect(find.textContaining('AnyhowException'), findsNothing);
     expect(find.widgetWithText(FilledButton, 'Retry'), findsOneWidget);
   });
 
@@ -251,6 +278,63 @@ void main() {
       expect(find.text('BetaOnB'), findsOneWidget);
     },
   );
+
+  /// A degraded server's reason shares the group header with the server's own
+  /// name. With the reason unbounded it took whatever it wanted and squeezed the
+  /// name to a stub ("192…"), so the row named nothing. Asserted geometrically
+  /// (the name's painted box is the wider of the two) rather than by golden —
+  /// it is a layout rule, not a rasterisation.
+  testWidgets('a degraded reason cannot squeeze out the server name', (
+    tester,
+  ) async {
+    final apiA = FakeCommanderApi()..listSessionsResponse = const [];
+    final apiB = FakeCommanderApi()..listSessionsResponse = const [];
+    const longName = 'http://192.168.1.10:4900';
+    final storeA = CommanderStore(
+      api: apiA,
+      config: const ServerConfig(
+        id: 'a',
+        name: longName,
+        baseUrl: 'http://192.168.1.10:4900',
+        token: 't',
+      ),
+    );
+    final storeB = CommanderStore(
+      api: apiB,
+      config: const ServerConfig(
+        id: 'b',
+        name: 'codespace',
+        baseUrl: 'http://b:7878',
+        token: 't',
+      ),
+    );
+    final ws = WorkspaceStore.withStores([storeA, storeB]);
+    addTearDown(ws.dispose);
+    unawaited(storeA.connect());
+    unawaited(storeB.connect());
+
+    await tester.pumpWidget(
+      WorkspaceScope(
+        workspace: ws,
+        child: MaterialApp(
+          home: Scaffold(body: SessionListBody(onSelect: (_, _) {})),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    apiA.emitConnection(
+      const ConnectionStateDto(
+        kind: ConnectionStateKind.degraded,
+        reason: 'backend unavailable: could not connect to server',
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final name = tester.getSize(find.text(longName));
+    final note = tester.getSize(find.text('could not connect to server'));
+    expect(name.width, greaterThan(note.width));
+  });
 
   testWidgets('a long program name does not overflow a narrow tile', (
     tester,

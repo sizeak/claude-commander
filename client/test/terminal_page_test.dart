@@ -25,6 +25,7 @@ void main() {
     EdgeInsets viewInsets = EdgeInsets.zero,
     EdgeInsets viewPadding = const EdgeInsets.only(bottom: 24),
     DateTime Function()? clock,
+    Terminal Function()? terminalFactory,
   }) => MaterialApp(
     home: Builder(
       builder: (context) => MediaQuery(
@@ -40,6 +41,7 @@ void main() {
           handle: testHandle,
           session: sessionInfo(),
           clock: clock,
+          terminalFactory: terminalFactory,
         ),
       ),
     ),
@@ -95,6 +97,54 @@ void main() {
       for (var i = 0; i < buffer.lines.length; i++) buffer.lines[i].getText(),
     ].join();
     expect(text, contains('✓'));
+  });
+
+  // Agent TUIs repaint a line by erasing it from column 0 — `CSI 1 K` with the
+  // cursor already at column 0 — and `omp` emits that hundreds of times per
+  // screenful. It used to throw a RangeError out of `Terminal.write`, which
+  // abandoned the rest of that 8 KiB chunk: tmux only ever sends incremental
+  // repaints, so the discarded bytes never came again and the pane stayed
+  // garbled for the life of the attach. Guards the pinned `xterm` fork.
+  testWidgets('output containing an erase-to-cursor at column 0 still renders '
+      'the rest of its chunk', (tester) async {
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+
+    await emitAndPump(tester, output(utf8.encode('\x1b[1Kpost-erase')));
+
+    final buffer = readTerminal(tester).buffer;
+    final text = [
+      for (var i = 0; i < buffer.lines.length; i++) buffer.lines[i].getText(),
+    ].join();
+    expect(text, contains('post-erase'));
+  });
+
+  // An emulator that throws mid-parse loses the rest of that chunk, and tmux
+  // never resends it — so the pane is stale for the life of the attach. What
+  // must not also happen is the throw escaping: one uncaught async error per
+  // chunk, each dumping a stack trace on the UI thread, is what turned a
+  // garbled `omp` pane into an unresponsive app.
+  testWidgets('an emulator that throws leaves the attach up and says the pane '
+      'is stale', (tester) async {
+    await tester.pumpWidget(wrap(terminalFactory: _ThrowingTerminal.new));
+    await tester.pump();
+    await emitAndPump(tester, signal(TerminalEventKind.ready, 'sess'));
+
+    expect(find.textContaining('stale'), findsNothing);
+
+    await emitAndPump(tester, output(utf8.encode('anything')));
+
+    // Reported once, not swallowed.
+    expect(tester.takeException(), isA<StateError>());
+    // Still attached, and the pane is flagged rather than silently wrong.
+    expect(find.textContaining('attached: sess'), findsOneWidget);
+    expect(find.textContaining('stale'), findsOneWidget);
+
+    // A second failing chunk is counted, not re-reported: the flood is the
+    // problem, so only the first one raises.
+    await emitAndPump(tester, output(utf8.encode('more')));
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('stale'), findsOneWidget);
   });
 
   // The reconnect button must never be gated on the attach *looking* dead. If
@@ -544,6 +594,119 @@ void main() {
     expect(api.lastCall('attachTerminal')!.args['kind'], AttachKind.shell);
   });
 
+  group('the on-screen Ctrl key', () {
+    // The row can only carry a fixed handful of chords, so Ctrl arms the *next*
+    // character instead of sending one of its own. It sits directly after Tab,
+    // ahead of the preset ^C/^D chords it generalises.
+    Finder ctrlKey() => find.text('Ctrl');
+
+    /// The soft keyboard's path into the emulator: a typed character reaches
+    /// `Terminal.onOutput` exactly as `textInput` does here.
+    Future<void> type(WidgetTester tester, String text) async {
+      readTerminal(tester).textInput(text);
+      await tester.pump();
+    }
+
+    List<int>? lastInput() =>
+        api.lastCall('terminalSendInput')?.args['bytes'] as List<int>?;
+
+    testWidgets('sits between Tab and the preset chords', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      final tab = tester.getCenter(find.text('Tab')).dx;
+      final ctrl = tester.getCenter(ctrlKey()).dx;
+      final ctrlC = tester.getCenter(find.text('^C')).dx;
+
+      expect(ctrl, greaterThan(tab));
+      expect(ctrl, lessThan(ctrlC));
+    });
+
+    testWidgets('folds the next typed character into its control byte', (
+      tester,
+    ) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      await type(tester, 'w');
+
+      expect(lastInput(), [0x17]);
+    });
+
+    testWidgets('arms one keystroke only', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      await type(tester, 'w');
+      await type(tester, 'w');
+
+      expect(lastInput(), utf8.encode('w'));
+    });
+
+    testWidgets('sends unmodified characters when it is not armed', (
+      tester,
+    ) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await type(tester, 'w');
+
+      expect(lastInput(), utf8.encode('w'));
+    });
+
+    testWidgets('a second tap disarms it', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      await type(tester, 'w');
+
+      expect(lastInput(), utf8.encode('w'));
+    });
+
+    // A held arm has to be visible, or the next keystroke lands somewhere the
+    // user did not expect with nothing on screen to explain why.
+    testWidgets('shows that it is armed', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      Color? fill() => tester
+          .widget<Material>(
+            find.ancestor(of: ctrlKey(), matching: find.byType(Material)).first,
+          )
+          .color;
+      final resting = fill();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+
+      expect(fill(), isNot(resting));
+    });
+
+    // A paste is not the keystroke the arm was set for: eating it would both
+    // mangle the pasted text and leave the user's Ctrl silently spent.
+    testWidgets('a paste does not consume the arm', (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
+
+      await tester.tap(ctrlKey());
+      await tester.pump();
+      readTerminal(tester).paste('hello');
+      await tester.pump();
+      expect(lastInput(), utf8.encode('hello'));
+
+      await type(tester, 'w');
+      expect(lastInput(), [0x17]);
+    });
+  });
+
   group('image attach', () {
     late FakeImagePicker picker;
     late FakeClipboardImageReader clipboard;
@@ -873,4 +1036,13 @@ void main() {
       });
     });
   });
+}
+
+/// An emulator whose parser always fails. Stands in for a defect in the pinned
+/// `xterm` fork: the real one has no known sequence that throws (the one it did
+/// have — `CSI 1 K` at column 0 — is fixed and covered above), and a test for
+/// the failure path cannot wait for the next one.
+class _ThrowingTerminal extends Terminal {
+  @override
+  void write(String data) => throw StateError('parser failure');
 }

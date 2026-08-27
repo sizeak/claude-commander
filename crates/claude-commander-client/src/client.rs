@@ -32,21 +32,44 @@ use crate::error::{self, ClientError, ClientResult};
 use crate::spec::{RemoteServerSpec, SecretString};
 
 /// How long to wait for a TCP connection before treating the server as
-/// unreachable. Kept short so the poller's backoff engages promptly.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// unreachable.
+///
+/// This was 5s, chosen so the poller's backoff engaged promptly — too tight for
+/// the client's actual home, a phone. A handset reaching a LAN or VPN server
+/// routinely needs longer than one SYN retransmit: the radio may be leaving
+/// doze, Wi-Fi may still be associating, or a VPN tunnel may be re-establishing,
+/// and none of that is the server being down. Giving up at 5s rendered a healthy
+/// server as unreachable and dropped the poller into backoff, so the *next*
+/// attempt was a second or more away as well.
+///
+/// 15s spans the first four SYN attempts rather than the first three, which is
+/// the practical difference between "the network was waking up" and "nothing is
+/// listening". Receipt for the schedule: RFC 6298 §2.1 fixes the initial RTO at
+/// 1s and §5.5 doubles it per retransmit, and Linux retries a SYN
+/// `net.ipv4.tcp_syn_retries` times (default 6, `tcp(7)`) — so the SYNs go out
+/// at t≈0s, 1s, 3s, 7s, 15s. A *refused* connection still fails instantly; this
+/// budget only bounds the no-answer case.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Overall per-request ceiling (a slow branch-diff still fits comfortably).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Tighter per-request bound for interactive review reads/writes (list/create/
 /// delete comment, toggle-reviewed): these are quick store/file operations, so
 /// a user who fires one and waits shouldn't sit through the 30s
-/// [`REQUEST_TIMEOUT`] when a server has wedged — a few seconds surfaces the
-/// failure while still tolerating a slow link.
-const REVIEW_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// [`REQUEST_TIMEOUT`] when a server has wedged.
+///
+/// It cannot go below [`CONNECT_TIMEOUT`] — reqwest counts the connect inside
+/// the total request timeout, so a bound under the connect budget would fail a
+/// cold-but-healthy link before it ever got a chance to answer (asserted by
+/// `review_timeouts_are_bounded_between_write_and_request_ceiling`). It tracks
+/// the connect budget at exactly that floor: still half the ceiling, and once
+/// the pool has a live connection the request itself is the only thing spending
+/// the budget.
+const REVIEW_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Per-request bound for `apply_comments`. Longer than [`REVIEW_WRITE_TIMEOUT`]
 /// because the server does more work here — it recomposes a fresh review diff,
 /// re-anchors every comment, then detects the agent's state and sends keys into
 /// tmux — but still well under [`REQUEST_TIMEOUT`].
-const APPLY_COMMENTS_TIMEOUT: Duration = Duration::from_secs(15);
+const APPLY_COMMENTS_TIMEOUT: Duration = Duration::from_secs(20);
 /// Per-request bound for `GET /github/repos`, the one route that runs *longer*
 /// than [`REQUEST_TIMEOUT`] rather than shorter.
 ///
@@ -505,6 +528,14 @@ impl RemoteClient {
         self.post_empty_ok(self.session_url(id, &["restart"])).await
     }
 
+    /// Restart a session with a *fresh* agent conversation — the server relaunches
+    /// the pane without the agent's resume flag, whatever its own
+    /// `resume_session` config says.
+    pub async fn restart_session_fresh(&self, id: SessionId) -> ClientResult<()> {
+        self.post_empty_ok(self.session_url(id, &["restart-fresh"]))
+            .await
+    }
+
     pub async fn delete_session(&self, id: SessionId) -> ClientResult<()> {
         self.delete_ok(self.session_url(id, &[])).await
     }
@@ -833,6 +864,26 @@ fn diff_side_param(side: DiffSide) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The connect budget must outlast a link that is merely *waking* — the
+    /// phone client's normal case. On the RFC 6298 / Linux schedule cited on
+    /// [`CONNECT_TIMEOUT`] the SYNs go out at t≈0s, 1s, 3s, 7s, 15s; the old 5s
+    /// budget gave up after the one at 3s, so a server that answered a moment
+    /// later was rendered unreachable and the poller went into backoff on top.
+    /// Asserted at the constant level (no clock, no socket) so it stays
+    /// deterministic.
+    #[test]
+    fn the_connect_budget_outlasts_a_waking_link() {
+        assert!(
+            CONNECT_TIMEOUT >= Duration::from_secs(15),
+            "the connect budget must reach the SYN at ~7s with room to answer, \
+             got {CONNECT_TIMEOUT:?}"
+        );
+        assert!(
+            CONNECT_TIMEOUT < REQUEST_TIMEOUT,
+            "connecting must never be allowed to consume the whole request budget"
+        );
+    }
 
     /// Interactive review reads/writes must be bounded tighter than the 30s
     /// [`REQUEST_TIMEOUT`] so a wedged server surfaces promptly, and the heavier

@@ -28,6 +28,7 @@
 //! | `pending_comment_sessions` | `GET /api/comments/pending` |
 //! | `create_session` | `POST /api/sessions` → `{id}` |
 //! | `kill_session` / `restart_session` | `POST /api/sessions/{id}/kill` / `…/restart` |
+//! | `restart_session_fresh` | `POST /api/sessions/{id}/restart-fresh` (no resume) |
 //! | `delete_session` | `DELETE /api/sessions/{id}` |
 //! | `rename_session` / `set_section` | `PATCH /api/sessions/{id}` (tagged `op`) |
 //! | `mark_read` | `POST /api/sessions/{id}/read` |

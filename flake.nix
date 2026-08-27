@@ -183,13 +183,46 @@
         };
         # Slim host-only toolchain for the CI shell (no Android cross targets).
         fenixStable = fenix.packages.${system}.stable.toolchain;
-        clientRust = fenix.packages.${system}.combine [
+        # Rust std for the Apple targets cargokit maps Xcode's $PLATFORM_NAME /
+        # $ARCHS pair onto — see the `Target.all` table in
+        # client/rust_builder/cargokit/build_tool/lib/src/target.dart, which is
+        # the authority on which triples can ever be asked for. Both macOS
+        # arches are listed because `flutter build macos` is universal, so the
+        # non-host one is still required; both simulator triples because the
+        # simulator arch follows the Mac's, not the phone's.
+        #
+        # darwin-only, for the same reason the Android targets are unconditional:
+        # a target you cannot link is dead weight. Linking these needs Xcode,
+        # which Nix cannot package, so on Linux they would add closure for a
+        # build that can never run. Adding them here is also precisely what
+        # makes cargokit *see* them — the rustup shim below answers
+        # `rustup target list --installed` by enumerating the toolchain sysroot.
+        #
+        # The host's own triple is subtracted rather than listed: `fenixStable`
+        # (stable.toolchain) already carries rust-std for it, and `combine` joins
+        # these into one derivation, so naming it again is a duplicate-file
+        # collision. Unlike the Android targets — none of which can ever be the
+        # host — aarch64-apple-darwin *is* the host on Apple silicon, so this
+        # list is the first one that has to care.
+        clientAppleTargets =
+          clientPkgs.lib.optionals clientPkgs.stdenv.hostPlatform.isDarwin
+            (map (t: fenix.packages.${system}.targets.${t}.stable.rust-std)
+              (clientPkgs.lib.subtractLists
+                [ clientPkgs.stdenv.hostPlatform.rust.rustcTarget ]
+                [
+                  "aarch64-apple-darwin"
+                  "x86_64-apple-darwin"
+                  "aarch64-apple-ios"
+                  "aarch64-apple-ios-sim"
+                  "x86_64-apple-ios"
+                ]));
+        clientRust = fenix.packages.${system}.combine ([
           fenixStable
           fenix.packages.${system}.targets.aarch64-linux-android.stable.rust-std
           fenix.packages.${system}.targets.armv7-linux-androideabi.stable.rust-std
           fenix.packages.${system}.targets.x86_64-linux-android.stable.rust-std
           fenix.packages.${system}.targets.i686-linux-android.stable.rust-std
-        ];
+        ] ++ clientAppleTargets);
         # Platform 36 is required by recent plugins (path_provider_android →
         # jni_flutter compileSdk 36); the Nix SDK is read-only so every needed
         # platform must be listed here rather than auto-installed by Gradle.
@@ -278,6 +311,259 @@
         # host-only one — so each shell's shim exposes exactly its own targets.
         clientRustupShim = mkRustupShim clientRust;
         clientCiRustupShim = mkRustupShim fenixStable;
+        # Host toolchain plus the Apple targets and none of the Android ones, for
+        # the darwin CI job. `clientRust` would work, but its Android SDK/NDK is
+        # gigabytes a macOS runner downloads and never opens — and the GitHub
+        # Actions cache is a fixed budget shared with the Linux jobs, so paying
+        # it here evicts theirs. `clientAppleTargets` is already darwin-guarded,
+        # so on Linux this collapses to the host toolchain.
+        clientAppleRust = fenix.packages.${system}.combine ([ fenixStable ] ++ clientAppleTargets);
+        clientAppleRustupShim = mkRustupShim clientAppleRust;
+        # `xcrun` on darwin is nixpkgs' xcbuild stub, and it locates an SDK only
+        # via $DEVELOPER_DIR — which the stdenv sets, so it works for anything
+        # inheriting the shell's environment. Dart's native-assets build hooks do
+        # not: they run each `hooks/build.dart` under a filtered environment that
+        # keeps PATH but drops DEVELOPER_DIR/SDKROOT. The stub then fails with
+        # `error: unable to find sdk: 'macosx'`, that string lands in the
+        # `-isysroot` the hook passes to clang, and every C/ObjC source it builds
+        # fails on a missing `assert.h`/`Foundation.h`.
+        #
+        # This is not an Apple-build-only problem: `objective_c` arrives as a
+        # transitive dependency, so its hook runs for the *host* build — i.e.
+        # plain `flutter test` fails on macOS with no iOS/macOS target in sight.
+        # Hence a shim rather than an exported variable: PATH is the only channel
+        # that survives the filtering, so re-assert the SDK there.
+        #
+        # The other two branches are the same problem from the Apple-build side.
+        # The Nix apple-sdk carries the macOS SDK *only*, so any request for
+        # another Apple platform has to go to the host's Xcode: cc-rs asks
+        # `xcrun --show-sdk-path --sdk iphoneos` for its sysroot, and that is
+        # exactly where the `aarch64-apple-ios` staticlib build stops otherwise.
+        # And because the stub only understands the Nix SDK's layout, a
+        # DEVELOPER_DIR pointing at a real Xcode has to be handed off as well.
+        #
+        # DEVELOPER_DIR/SDKROOT are cleared before delegating: the host xcrun
+        # reads them too, and the shell's values would send it back into the Nix
+        # SDK it cannot make sense of.
+        #
+        # Everything else in `clientXcodeEnvScrub` goes for a different reason.
+        # `xcodebuild` reads the *process environment* as build-setting
+        # overrides: any variable whose name is a build setting silently beats
+        # the value in the project. The Nix stdenv exports a whole toolchain
+        # under exactly those names, so merely entering this shell rewrites the
+        # Runner's build settings. `LD` is the one with teeth — Xcode links
+        # through the clang driver, and `LD=ld` sends clang-driver flags to
+        # ld64 instead, so the build dies in a pod with
+        #   ld: -objc_abi_version '-Xlinker' not supported (expected 2)
+        # which names neither Nix nor the variable that caused it. Both
+        # deployment targets go too: Xcode sets whichever one its platform
+        # needs, and the other one, left over from the shell, is "conflicting
+        # deployment targets, both 'MACOSX_DEPLOYMENT_TARGET' and
+        # 'IPHONEOS_DEPLOYMENT_TARGET' are present in environment".
+        #
+        # Scrubbed per delegation rather than at shell entry, because these are
+        # also how a plain `cargo build` finds Nix's toolchain — only Xcode
+        # mistakes them for build settings. The iOS deployment floor that
+        # `cargo build` needs (see IPHONEOS_DEPLOYMENT_TARGET below) therefore
+        # survives in the shell while staying out of Xcode's environment.
+        clientXcodeEnvScrub = ''
+          unset SDKROOT LD CC CXX AR AS NM RANLIB STRIP OBJCOPY OBJDUMP SIZE STRINGS
+          unset MACOSX_DEPLOYMENT_TARGET IPHONEOS_DEPLOYMENT_TARGET
+        '';
+        # Apple's own xcrun, for cc-xcode-env's PATH. Pointing DEVELOPER_DIR at
+        # the host Xcode is not enough on its own: `xcodebuild` lives in
+        # Developer/usr/bin but `xcrun` does not — it is /usr/bin/xcrun — so a
+        # lookup still lands on the shim below.
+        #
+        # Harmless on an Intel Mac, fatal on Apple silicon, which is why this only
+        # ever failed in CI. `xcodeproj.dart` prefixes every Xcode command with
+        # `/usr/bin/arch -arm64e` on a darwin_arm64 host to force them out of
+        # Rosetta, and the shim is a shell script whose interpreter is Nix's bash:
+        # plain arm64, no arm64e slice, so `arch` cannot exec it. Every
+        # `xcrun xcodebuild -version` probe then fails, Flutter decides no Xcode is
+        # installed, and the only thing it says is "Application not configured for
+        # iOS" — naming neither xcrun, nor arch, nor a version.
+        clientHostXcrun = clientPkgs.runCommand "cc-host-xcrun" { } ''
+          mkdir -p $out/bin
+          ln -s /usr/bin/xcrun $out/bin/xcrun
+        '';
+        # The same scrub, plus a host DEVELOPER_DIR, as a *command* — for anything
+        # that talks to Xcode without going through `xcrun`. The shim below only
+        # sees calls routed via xcrun, which is how nixpkgs' patched Flutter
+        # behaves; a stock Flutter (Homebrew, fvm, or CI's Flutter action) runs
+        # `xcodebuild` itself and never reaches it. Such a build inherits this
+        # shell's DEVELOPER_DIR — the Nix apple-sdk, which is not an Xcode — plus
+        # every Nix toolchain variable as a build-setting override.
+        #
+        # Nothing in the failure names any of that. `xcodebuild -showBuildSettings`
+        # just returns nothing, so `productBundleIdentifier` is null and Flutter
+        # exits with "Application not configured for iOS" — which reads as a
+        # missing client/ios directory. That cost two full macOS CI runs to place,
+        # hence a named wrapper rather than a line of exports at each call site.
+        #
+        #   cc-xcode-env flutter build ios --simulator
+        clientXcodeEnv = clientPkgs.writeShellScriptBin "cc-xcode-env" ''
+          set -eu
+          hostDeveloperDir="$(unset DEVELOPER_DIR; /usr/bin/xcode-select -p 2>/dev/null || true)"
+          if [ ! -x "$hostDeveloperDir/usr/bin/xcodebuild" ]; then
+            echo "cc-xcode-env: no Xcode selected — 'xcode-select -p' found no xcodebuild." >&2
+            echo "  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer" >&2
+            exit 1
+          fi
+          # Ahead of the stdenv's xcbuild stub, which is what a bare `xcodebuild`
+          # would otherwise resolve to.
+          export DEVELOPER_DIR="$hostDeveloperDir"
+          export PATH="${clientHostXcrun}/bin:$hostDeveloperDir/usr/bin:$PATH"
+          ${clientXcodeEnvScrub}
+          exec "$@"
+        '';
+        clientXcrunShim = clientPkgs.writeShellScriptBin "xcrun" ''
+          hostXcrun() {
+            unset DEVELOPER_DIR
+            ${clientXcodeEnvScrub}
+            exec /usr/bin/xcrun "$@"
+          }
+          for arg in "$@"; do
+            case "$arg" in
+              # Apple platforms the Nix apple-sdk does not carry.
+              iphoneos|iphonesimulator|appletvos|appletvsimulator|watchos|watchsimulator|xros|xrsimulator)
+                hostXcrun "$@" ;;
+              # Tools the xcbuild stub does not carry at all. `xcodebuild` is
+              # the one that matters: Flutter probes for Xcode with `xcrun
+              # xcodebuild -version`, the stub answers "error: tool
+              # 'xcodebuild' not found", and Flutter reports that as
+              # "Application not configured for iOS" — which reads as a missing
+              # client/ios directory rather than a shim that declined to
+              # delegate. The rest are how Flutter enumerates and drives
+              # simulators and devices.
+              xcodebuild|xcdevice|simctl|devicectl|xcresulttool)
+                hostXcrun "$@" ;;
+            esac
+          done
+          if [ -z "''${DEVELOPER_DIR:-}" ]; then
+            export DEVELOPER_DIR=${clientPkgs.apple-sdk}
+          fi
+          if [ "$DEVELOPER_DIR" != "${clientPkgs.apple-sdk}" ]; then
+            ${clientXcodeEnvScrub}
+            exec /usr/bin/xcrun "$@"
+          fi
+          exec ${clientPkgs.xcbuild.xcrun}/bin/xcrun "$@"
+        '';
+        # The Apple half of `devShells.client`'s hook, lifted out so the darwin
+        # CI shell below can share it verbatim. Two shells that configure Xcode
+        # differently is the failure this prevents: CI would go green against a
+        # toolchain no maintainer actually uses. Everything Android or Linux
+        # stays behind in `devShells.client`.
+        clientAppleShellHook = ''
+            # ---- Apple platforms: iOS + macOS desktop ----
+            # Ahead of the stdenv's own xcbuild stub: nix develop puts stdenv's
+            # bin dirs before this shell's inputs, so PATH order is the whole
+            # point and buildInputs would be too late. See `clientXcrunShim`.
+            export PATH="${clientXcodeEnv}/bin:${clientXcrunShim}/bin:$PATH"
+
+            # Both are opt-in in Flutter's own config, and `flutter config` writes
+            # to ~/.config/flutter_settings — i.e. it is per-user host state, not
+            # something checking client/ios and client/macos into the repo turns
+            # on. Without these, `flutter devices`/`flutter build` simply refuse
+            # to see the two runners this shell exists to build.
+            flutter config --enable-ios >/dev/null 2>&1 || true
+            flutter config --enable-macos-desktop >/dev/null 2>&1 || true
+
+            # Xcode is a host prerequisite (see buildInputs). Resolve it once,
+            # here, and say so plainly at shell entry rather than letting the
+            # first `flutter build ios` fail several minutes in with a CocoaPods
+            # or codesign error.
+            #
+            # DEVELOPER_DIR has to come out of the environment for the probe to
+            # mean anything: the stdenv points it at the Nix apple-sdk, and
+            # `xcode-select -p` just echoes that back — so the check passes on a
+            # machine with no Xcode at all. Test for `xcodebuild` under the
+            # answer, since that is the tool whose absence actually bites.
+            xcodeDir="$(unset DEVELOPER_DIR; /usr/bin/xcode-select -p 2>/dev/null || true)"
+            if [ ! -x "$xcodeDir/usr/bin/xcodebuild" ]; then
+              echo "warning: no Xcode selected — 'xcode-select -p' found no xcodebuild."
+              echo "  iOS/macOS builds need a full Xcode (not just the CLI tools):"
+              echo "    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+              echo "    sudo xcodebuild -runFirstLaunch"
+            else
+              # The iOS triples need Xcode's C compiler, not this shell's. cc-rs
+              # falls back to plain `clang` off PATH for a target with no
+              # CC_<triple>, and the Nix wrapper injects -mmacos-version-min,
+              # which clang rejects outright next to -miphoneos-version-min. The
+              # TLS stack makes that unavoidable rather than theoretical: rustls
+              # resolves to aws-lc-rs here, so aws-lc-sys compiles C and arm64
+              # assembly on the way to the staticlib.
+              #
+              # The darwin triples are redirected too, which they were not at
+              # first: they are this host, so Nix's toolchain looked like the
+              # right answer for them. It is not, under an Xcode-driven build.
+              # cargokit runs cargo from an Xcode script phase, and
+              # `clientXcodeEnvScrub` has to unset CC/CXX/AR/LD before delegating
+              # (Xcode reads them as build settings), so a *host* build script —
+              # objc-sys, libc, proc-macro2 — links through bare `cc`, i.e. Nix's
+              # wrapper stripped of the environment it needs. On a maintainer's
+              # Mac that still linked; on a GitHub arm64 runner it does not, and
+              # `flutter build ios` dies with "linking with `cc` failed" naming
+              # three build scripts and nothing else (Flutter mangles Xcode's
+              # paths to `Pods/SEVERE:0:0`, so the real ld message never
+              # surfaces). Build scripts are host artefacts, and
+              # CARGO_TARGET_<HOST>_LINKER does govern their link while
+              # cross-compiling — verified directly, not assumed.
+              #
+              # Resolved through xcrun, not by joining paths onto DEVELOPER_DIR:
+              # only `xcodebuild` sits directly under it, while the compilers live
+              # in the selected toolchain (Toolchains/XcodeDefault.xctoolchain),
+              # whose name is not ours to assume.
+              xcodeClang="$(unset DEVELOPER_DIR SDKROOT; /usr/bin/xcrun --find clang 2>/dev/null || true)"
+              xcodeClangxx="$(unset DEVELOPER_DIR SDKROOT; /usr/bin/xcrun --find clang++ 2>/dev/null || true)"
+              xcodeAr="$(unset DEVELOPER_DIR SDKROOT; /usr/bin/xcrun --find ar 2>/dev/null || true)"
+              #
+              # The linker has to move with the compiler. rustc links the cdylib
+              # through Nix's cc wrapper otherwise, and that wrapper applies
+              # NIX_LDFLAGS — which names Nix's *macOS* libiconv. ld refuses it in
+              # an iOS link ("building for iOS Simulator, but linking in dylib
+              # built for macOS"). Only the simulator triple that shares the
+              # host's arch actually dies: on the device triple the arch mismatch
+              # downgrades it to a warning and the dylib is skipped. And it is the
+              # cdylib that fails, which cargokit does not even consume — it takes
+              # the staticlib — but `crate-type` lists both, so one failing link
+              # fails the build.
+              #
+              # Both darwin triples, not just this host's: a maintainer on an
+              # Intel Mac cross-links the arm64 slice and hits the same wrapper.
+              for appleTriple in aarch64_apple_ios aarch64_apple_ios_sim \
+                                 x86_64_apple_ios aarch64_apple_darwin \
+                                 x86_64_apple_darwin; do
+                export "CC_$appleTriple=$xcodeClang"
+                export "CXX_$appleTriple=$xcodeClangxx"
+                export "AR_$appleTriple=$xcodeAr"
+                export "CARGO_TARGET_$(echo "$appleTriple" | tr 'a-z' 'A-Z')_LINKER=$xcodeClang"
+              done
+
+              # Both halves have to agree on the minimum, and left alone they do
+              # not: cc-rs takes the SDK's own default (26.2 today) while rustc
+              # still defaults these triples to iOS 10, so the link asks libSystem
+              # for symbols that only came with the compiler-rt of that era
+              # (`___chkstk_darwin`, from aws-lc-sys' bignum assembly) and fails.
+              #
+              # Read out of the Runner instead of restated here, because a second
+              # copy of the number is a copy that will drift — and drift lands as
+              # that same link error rather than anything that names a version.
+              # The Xcode project is the original: Flutter, CocoaPods and cargokit
+              # all take the floor from it. Lowest wins if the configurations ever
+              # disagree. Entering the shell from outside the repo therefore leaves
+              # this unset, and a `cargo build` for an iOS triple fails on
+              # `___chkstk_darwin` — cd to the repo root rather than exporting one
+              # by hand.
+              if [ -f client/ios/Runner.xcodeproj/project.pbxproj ]; then
+                iosMin="$(sed -n 's/.*IPHONEOS_DEPLOYMENT_TARGET = \([0-9.]*\);.*/\1/p' \
+                  client/ios/Runner.xcodeproj/project.pbxproj | sort -V | head -1)"
+                if [ -n "$iosMin" ]; then
+                  export IPHONEOS_DEPLOYMENT_TARGET="$iosMin"
+                fi
+              fi
+            fi
+        '';
       in
       {
         checks = {
@@ -321,8 +607,11 @@
           name = "claude-commander-client";
           # Cross-platform toolchain: Rust + Android targets, the Android SDK/NDK,
           # JDK, and the Flutter/Dart/codegen/native-build tools. Usable on both
-          # Linux and macOS — the Linux-desktop GTK/X11 stack is appended only on
-          # Linux (macOS desktop is Cocoa, built via Xcode, not these libs).
+          # Linux and macOS, with each host's extra native stack appended
+          # conditionally: GTK/X11 on Linux, CocoaPods (plus the Apple Rust
+          # targets in `clientAppleTargets`) on macOS. Neither desktop's libs are
+          # any use to the other — macOS renders through Cocoa and builds via
+          # Xcode, which is a host prerequisite rather than a Nix input.
           buildInputs = [
             clientRust
             clientRustupShim
@@ -340,6 +629,27 @@
             pkg-config
             clang
             llvmPackages.libclang
+          ]) ++ clientPkgs.lib.optionals clientPkgs.stdenv.hostPlatform.isDarwin (with clientPkgs; [
+            # Apple platforms (client/ios, client/macos). Flutter shells out to
+            # `pod install` for both runners, because every plugin in this app
+            # ships a podspec — rust_builder's included, and that one is what
+            # runs cargokit's build_pod.sh to produce the Rust staticlib.
+            #
+            # Xcode is deliberately NOT here and cannot be: it is unpackageable
+            # (licence + Apple's installer), so it stays a host prerequisite and
+            # the shell inherits it from /usr/bin via xcode-select. That split is
+            # why the Apple side can't be made hermetic the way Android is.
+            cocoapods
+            # Real (samba) rsync, ahead of the one in /usr/bin. macOS 15 replaced
+            # that with openrsync, which accepts `--chmod` and then ignores it —
+            # silently, so nothing in the build says so. Flutter unpacks its
+            # engine framework with exactly that flag
+            # (flutter_tools/.../darwin.dart: `--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r`)
+            # precisely so the copy is writable; ignored, the mode comes from the
+            # source instead, and the source is the read-only Nix store. The build
+            # then dies in `lipo`, thinning that framework in place, with a
+            # "Permission denied" naming a temp file rather than the copy.
+            rsync
           ]) ++ clientPkgs.lib.optionals clientPkgs.stdenv.hostPlatform.isLinux (with clientPkgs; [
             # Linux desktop (bonus target) GTK / build deps Flutter needs.
             gtk3
@@ -375,13 +685,25 @@
             # Point Flutter at the Nix-provided SDK and silence analytics noise.
             flutter config --no-analytics >/dev/null 2>&1 || true
             flutter config --android-sdk "$ANDROID_SDK_ROOT" >/dev/null 2>&1 || true
-
+${clientPkgs.lib.optionalString clientPkgs.stdenv.hostPlatform.isDarwin clientAppleShellHook}
             # ---- Linux desktop: EGL + Rust cdylib discovery ----
-            # Flutter Linux uses system Mesa EGL (libEGL_mesa.so) for display
-            # rendering.  The Nix-built libepoxy probes for EGL at runtime; it must
-            # find /usr/lib/libEGL_mesa.so (Arch system Mesa), so prepend /usr/lib.
-            # Android/iOS toolchains are unaffected by this path entry.
-            export LD_LIBRARY_PATH="/usr/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            # LD_LIBRARY_PATH is deliberately left alone here.  Flutter Linux
+            # renders through system Mesa EGL, and the Nix-built libepoxy only
+            # finds /usr/lib/libEGL_mesa.so if /usr/lib is on the path — but
+            # LD_LIBRARY_PATH is process-wide *and* is searched ahead of a Nix
+            # binary's DT_RUNPATH, so naming either libc directory there imposes
+            # that libc on every binary the shell runs.  That is fine only while
+            # the host's glibc and nixpkgs' are ABI-compatible, and once they part
+            # (Arch 2.44 vs nixpkgs 2.42, which dropped the private
+            # __pointer_chk_guard) neither order works: `/usr/lib` first kills
+            # every store binary including `bash`, and the store glibc first kills
+            # every system one, taking Gradle's chain — and so the Android build —
+            # with it.  Unset, each binary resolves its own libc and both halves of
+            # the toolchain work (verified by an `assembleDebug` that fails under
+            # either ordering).  So the Linux desktop target has no system EGL for
+            # as long as the two glibcs are split: re-add /usr/lib around
+            # `flutter run -d linux` in dev-run.sh once they are compatible again,
+            # rather than here, where it reaches everything.
             # flutter_rust_bridge's generated ioDirectory is 'rust/target/release/',
             # but a debug build puts the cdylib in rust/target/debug/.  Symlink
             # release -> debug so Dart's dlopen via FRB finds the library after the
@@ -432,7 +754,7 @@
                 echo "   created another way, e.g. by Android Studio.)"
               fi
             fi
-            echo "entered claude-commander client dev shell (flutter + rust + android ndk)"
+            echo "entered claude-commander client dev shell (flutter + rust + android ndk${clientPkgs.lib.optionalString clientPkgs.stdenv.hostPlatform.isDarwin " + apple/cocoapods"})"
           '';
         };
 
@@ -490,6 +812,47 @@
               ln -sfT debug client/rust/target/release 2>/dev/null || true
             fi
           '';
+        };
+
+        # What `clientCi` is to the Linux job, this is to the darwin one: the
+        # client shell with the parts a CI runner cannot use taken out. No
+        # Android (see `clientAppleRust`), no GTK, no xvfb — just Flutter, the
+        # Apple Rust targets, and CocoaPods driving the host's Xcode.
+        #
+        # The Apple configuration itself is `clientAppleShellHook`, shared with
+        # `devShells.client` rather than restated, so CI cannot go green against
+        # a differently-configured toolchain than the one maintainers use.
+        #
+        # Evaluates on Linux (as a bare Flutter shell) instead of being guarded
+        # away, because `devShells` here is a flat attrset and a conditional
+        # entry would need the whole set restructured; nothing consumes it there.
+        devShells.clientApple = clientPkgs.mkShell {
+          name = "claude-commander-client-apple";
+          buildInputs = [
+            clientAppleRust
+            clientAppleRustupShim
+          ] ++ (with clientPkgs; [
+            flutter
+            dart
+            cmake
+            ninja
+            pkg-config
+            clang
+            llvmPackages.libclang
+          ]) ++ clientPkgs.lib.optionals clientPkgs.stdenv.hostPlatform.isDarwin (with clientPkgs; [
+            # Both are load-bearing for the same reasons they are in
+            # `devShells.client`: every plugin ships a podspec, and macOS's
+            # openrsync silently ignores the `--chmod` Flutter unpacks its
+            # engine framework with.
+            cocoapods
+            rsync
+          ]);
+
+          LIBCLANG_PATH = "${clientPkgs.llvmPackages.libclang.lib}/lib";
+
+          shellHook = ''
+            flutter config --no-analytics >/dev/null 2>&1 || true
+          '' + clientPkgs.lib.optionalString clientPkgs.stdenv.hostPlatform.isDarwin clientAppleShellHook;
         };
       }
     );

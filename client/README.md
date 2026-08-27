@@ -3,9 +3,12 @@
 Cross-platform Flutter client for [claude-commander-server](../crates/claude-commander-server) —
 the GUI counterpart to the terminal UI, for whichever device you're not sitting at
 a `claude-commander` shell on. Verified targets today are **Linux desktop** and
-**Android**. iOS/macOS are deferred (no Xcode toolchain here), but the app is kept
-macOS-safe as it grows: `reqwest` uses `rustls` (no OpenSSL to cross-build), and
-Linux-only desktop dependencies are gated behind `isLinux` in the dev shell.
+**Android**. **iOS** (simulator) and **macOS** desktop build and run, and both builds
+are covered by CI; device builds still need a signing identity — see
+[iOS / macOS](#ios--macos).
+The app is kept Apple-safe as it grows: `reqwest` uses `rustls` (no OpenSSL to
+cross-build), and Linux-only desktop dependencies are gated behind `isLinux` in the
+dev shell.
 
 The app talks to the server's HTTP REST API (`/api/…`) and its WebSocket terminal
 attach endpoint (`/ws/attach`) — the same server the TUI drives locally or attaches
@@ -205,17 +208,28 @@ SDK (platforms 34/35/36, build-tools, NDK r28 `28.0.13004108`, emulator + x86\_6
 system images), JDK 17, `cargo-ndk`, `flutter_rust_bridge_codegen`, CMake/Ninja/Clang
 for the native build, and `pkg-config`/`libclang`.
 
-On Linux the shell also provides the GTK/X11 stack Flutter needs for the desktop
-target (`gtk3`, `glib`, `pcre2`, `libepoxy`, `libx11`, `libsecret`), gated behind
-`isLinux` so the same shell definition works on macOS. macOS uses Cocoa built via
-Xcode — those libs are not in the shell on Darwin, and the desktop target itself is
-not yet verified there.
+Each host's extra native stack is appended conditionally, since neither desktop's
+libs are any use to the other:
+
+- **Linux** — the GTK/X11 stack Flutter needs for the desktop target (`gtk3`, `glib`,
+  `pcre2`, `libepoxy`, `libx11`, `libsecret`), gated behind `isLinux`.
+- **macOS** — CocoaPods (Flutter shells out to `pod install` for both Apple runners),
+  the Apple Rust targets (`clientAppleTargets` in `flake.nix`), an `xcrun` shim, and
+  Xcode-toolchain overrides for the iOS triples.
+  Cocoa itself comes from Xcode, which is a host prerequisite rather than a Nix input
+  — it can't be packaged, which is why the Apple side can't be hermetic the way
+  Android is. The shellHook warns at entry if no Xcode is selected.
 
 **What the shellHook sets up:**
 
 - `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `ANDROID_NDK_ROOT/HOME`, `ANDROID_NDK_VERSION`, `JAVA_HOME` — pointed at the Nix-provided SDK.
 - `flutter config --android-sdk` — points Flutter at the Nix SDK (read-only; no auto-install).
 - `LD_LIBRARY_PATH=/usr/lib:…` — lets Nix-built libepoxy find the system Mesa EGL at runtime (Linux desktop only).
+- `flutter config --enable-ios` / `--enable-macos-desktop` (macOS only) — both are opt-in in Flutter's own per-user config (`~/.config/flutter_settings`), so checking the runners into the repo doesn't switch them on.
+- `CC_`/`CXX_`/`AR_`/`CARGO_TARGET_*_LINKER` for `aarch64-apple-ios`, `aarch64-apple-ios-sim` and `x86_64-apple-ios` (macOS only) — pointed at Xcode's toolchain, since Nix's cc wrapper injects `-mmacos-version-min` (which clang rejects alongside `-miphoneos-version-min`) and `NIX_LDFLAGS` (which drags the macOS `libiconv` into an iOS link). The darwin triples are left on Nix's toolchain — that host is what it is built for.
+- `IPHONEOS_DEPLOYMENT_TARGET` (macOS only) — read out of the Runner's own pbxproj (**15.0** today, lowest configuration wins) rather than restated, so the two cannot drift. Unpinned, cc-rs takes the SDK's default while rustc still defaults these triples to iOS 10, and the mismatch fails the link on compiler-rt symbols (`___chkstk_darwin`) that libSystem no longer carries.
+- `PATH` gets a `cc-xcode-env` wrapper (macOS only) — run anything that drives Xcode *directly* through it: `cc-xcode-env flutter build ios --simulator`. It points `DEVELOPER_DIR` at the selected Xcode (the stdenv's is the Nix apple-sdk, which is not an Xcode), puts Apple's `xcodebuild` and `/usr/bin/xcrun` ahead of this shell's stubs, and applies the same environment scrub the `xcrun` shim uses when it delegates. Without it, `xcodebuild -showBuildSettings` returns nothing, `productBundleIdentifier` is null, and Flutter exits with "Application not configured for iOS" — which reads as a missing `client/ios`. **This bites on Apple silicon only:** `xcodeproj.dart` prefixes every Xcode command with `/usr/bin/arch -arm64e` on a `darwin_arm64` host, and the shim is a shell script whose interpreter is Nix's bash — plain arm64, no arm64e slice — so `arch` cannot exec it. An Intel Mac never takes that path, which is why this surfaced first in CI.
+- `PATH` gets an `xcrun` shim ahead of the stdenv's (macOS only) — see `clientXcrunShim` in `flake.nix`. Dart's native-assets build hooks run each `hooks/build.dart` under a filtered environment that keeps `PATH` but drops `DEVELOPER_DIR`, and nixpkgs' `xcrun` stub can only find an SDK through that variable. Without the shim it returns `error: unable to find sdk: 'macosx'`, the string is passed to clang as `-isysroot`, and any hook-built C/ObjC source dies on a missing `assert.h`/`Foundation.h`. `objective_c` is a transitive dependency, so this took plain `flutter test` down on macOS — nothing Apple-specific required.
 - `client/rust/target/release → debug` symlink — frb's `ioDirectory` looks for `release/`; the symlink means a debug build is found immediately.
 - Creates the Android AVD `cctest` (android-35, google\_apis, x86\_64, Pixel 6) on first entry if it doesn't already exist.
 
@@ -357,10 +371,86 @@ flutter run -d emulator-5554
 
 ### iOS / macOS
 
-Not yet built — needs a Mac with Xcode. The Rust side is kept buildable toward it
-(`staticlib` output, `rustls`-only TLS, no Linux-only deps in shared code paths),
-but there is no `staticlib` cross-compile target, no Xcode project wiring, and no
-verification here.
+Both build: `flutter build ios --simulator` and `flutter build macos` run green, and
+CI's `client-apple` job runs both on every PR. Everything comes from
+`.#clientApple` — Rust toolchain, CocoaPods, `cc-xcode-env`, the `xcrun` shim —
+**except the Flutter SDK**, which comes from the Flutter action pinned to the
+version the flake provides (read back out of the shell, so the two cannot
+drift).
+
+That exception applies to the **iOS build only** — `flutter pub get` and the
+macOS build still use the flake's Flutter — and it is a measured upstream bug
+rather than a preference. In `flutter-artifacts-ios-aarch64-darwin`, the path
+`bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator/Flutter.framework/Flutter`
+holds a **26,320-byte, non-executable** stub whose fat header claims an arm64
+slice past EOF, so `ld` stops at "X86_64 slice extends beyond end of file". The
+same path in the `x86_64-darwin` artifact is the real **78,153,424-byte** engine,
+and on `aarch64-darwin` that binary is present but filed under `extension_safe/`.
+Check it yourself, no Mac required:
+
+```
+nix store ls -lR --store https://cache.nixos.org \
+  $(nix derivation show -r "$(nix eval --raw nixpkgs#flutter341.drvPath)" \
+    | grep -oE '/nix/store/[a-z0-9]{32}-flutter-artifacts-ios-aarch64-darwin' | sort -u | head -1) \
+  | grep 'ios-arm64_x86_64-simulator/Flutter.framework/Flutter$'
+```
+
+This is **not** "nixpkgs Flutter is broken on Apple silicon": Android, web,
+desktop and the macOS engine artifacts are all intact (the macOS engine is the
+same size on both darwin systems). Only the iOS artifact set is affected, which
+is also why iOS builds fine from the dev shell on an Intel Mac. The job prints
+`lipo -detailed_info` for that binary every run, so the day nixpkgs ships an
+intact artifact, dropping the action is a one-line change. That is the SDK only: everything else in the job — the Rust toolchain, CocoaPods,
+`cc-xcode-env`, the `xcrun` shim — still comes from the shell. Building iOS
+locally through `nix develop .#clientApple` works on an Intel Mac (verified:
+stock *and* Nix Flutter both produce a simulator `Runner.app` there); on Apple
+silicon the Nix Flutter's engine hits the malformed slice above, so use a Flutter
+on `PATH` there — the repo's scripts already prefer one. The minimum iOS is **15.0** — the
+oldest floor that costs nothing: iOS 13, 14 and 15 all shipped to the same devices
+(iPhone 6s and later), iOS 16 is where Apple dropped them, and 15 is also the oldest
+simulator Xcode 26 can run and the point where rustc's `aarch64-apple-ios-sim` floor
+(14.0) stops forcing a version-mismatch warning into every simulator link. Flutter's
+own hard floor is 13.0 (`ios_deployment_target_migration.dart` rewrites anything
+below it), so 15.0 needs no compatibility shims. macOS minimum is 15.0.
+
+What exists:
+
+- `client/ios` and `client/macos` runners, from `flutter create --platforms=ios,macos
+  --org com.claudecommander .`. Bundle id `com.claudecommander.claudeCommanderClient`
+  (no underscores allowed, so it can't match the Android `applicationId` exactly);
+  display name "Claude Commander" on both, matching the Android `android:label`.
+- App icons for both, generated from their own masters — see
+  [`tool/icon/README.md`](tool/icon/README.md) for why the Apple platforms can't
+  share `icon_full.svg`.
+- Dev-shell support: CocoaPods, the four Apple Rust targets, the `xcrun` shim, and
+  `flutter config --enable-ios/--enable-macos-desktop`.
+- `rust_builder/{ios,macos}` podspecs, which ship with cargokit — `pod install` runs
+  `build_pod.sh` to produce the Rust staticlib, the same way the Android Gradle
+  plugin drives `cargo-ndk`.
+
+The Rust half is verified: `cargo build --target <triple>` produces the staticlib for
+each Apple triple from inside the shell with no extra environment. That needs Xcode's
+C toolchain rather than the shell's, because rustls resolves to `aws-lc-rs` here and
+`aws-lc-sys` compiles C and arm64 assembly — the shellHook exports `CC_`/`CXX_`/`AR_`
+and `CARGO_TARGET_*_LINKER` for the iOS triples to arrange that (see `flake.nix` for
+what each one is working around).
+
+The Xcode half is proven too: `pod install` has run for both platforms (their
+`Podfile.lock`s are committed), cargokit's `build_pod.sh` produces the staticlib the
+Xcode build links, and the iOS app boots in a simulator. A fresh Mac still needs
+`sudo xcodebuild -runFirstLaunch` before the first build.
+
+What has **not** happened: no signed device build, and nothing is launched in CI —
+device builds need a signing identity that a fork's PR cannot have, and booting a
+simulator runtime in CI is slow enough to want its own task. The macOS app is sandboxed
+(`macos/Runner/*.entitlements`), so anything new that touches the network, the
+keychain or user-selected files needs its entitlement added there or it fails only at
+runtime — never at build time, which is why CI cannot catch it.
+
+> `flutter create` copies its templates straight out of the read-only Nix store, so
+> the files it writes are mode `444`. Run `chmod -R u+w client/ios client/macos` after
+> adding a platform, or the next tool to touch them (`flutter_launcher_icons` was the
+> first here) fails with `Permission denied`.
 
 ## frb codegen loop
 
@@ -425,7 +515,7 @@ The integration/e2e server tests self-skip when tmux is absent (a runtime check,
 | 2 | Session detail + lifecycle (kill/restart/delete/create) | Done |
 | 3 | Live terminal (WebSocket, `xterm.dart`) | Done |
 | 4 | Review/diff + inline comments, apply | Done |
-| 5 | iOS / macOS | Not started (needs Mac + Xcode) |
+| 5 | iOS / macOS | iOS simulator + macOS desktop build and run, CI-covered; no signed device build |
 | 6 | Shared `claude-commander-client` transport crate (also backs the TUI's remote sessions) | Done |
 | 7 | Adaptive desktop shell (master-detail), programs-list editing, multi-server seams | Done / in progress |
 | 8 | Image attach (picker, camera, clipboard, Ctrl+V) | Done |

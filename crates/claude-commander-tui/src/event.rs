@@ -46,6 +46,34 @@ pub enum InputEvent {
     Paste(String),
 }
 
+/// Which flavour of pane relaunch a [`StateUpdate::RestartFinished`] is
+/// reporting, so the toast and the error prefix match what the operator asked
+/// for. `Restart` covers both the plain restart and a program change (which
+/// relaunches the pane); `Reset` is the no-resume relaunch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartKind {
+    Restart,
+    Reset,
+}
+
+impl RestartKind {
+    /// Transient status-bar message on success.
+    pub fn success_toast(self) -> &'static str {
+        match self {
+            Self::Restart => "Session restarted",
+            Self::Reset => "Session reset — fresh conversation",
+        }
+    }
+
+    /// Leading clause of the error modal's message, before `: {error}`.
+    pub fn error_prefix(self) -> &'static str {
+        match self {
+            Self::Restart => "Failed to restart",
+            Self::Reset => "Failed to reset",
+        }
+    }
+}
+
 /// State updates from background tasks
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
@@ -143,9 +171,12 @@ pub enum StateUpdate {
     },
     /// A background session restart finished. `Ok` toasts success; `Err` carries
     /// a transport/backend error string. `backend_id` indexes the backend the
-    /// restart ran on, so the post-op refresh hits the right view.
+    /// restart ran on, so the post-op refresh hits the right view. `kind` picks
+    /// the wording, since a reset and a restart are different promises to the
+    /// operator.
     RestartFinished {
         backend_id: usize,
+        kind: RestartKind,
         result: std::result::Result<(), String>,
     },
     /// A background per-session mutation (rename, section move) applied — refresh
@@ -376,6 +407,9 @@ pub enum UserCommand {
     RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
+    /// Reset current session: restart it *without* resuming, discarding the
+    /// agent's conversation (palette-only by default)
+    ResetSession,
     /// Change the program (agent) of the selected session and relaunch it
     ChangeProgram,
     /// Toggle keep-alive on the selected session (opt out of auto-hibernation)
@@ -502,6 +536,7 @@ impl UserCommand {
             | UserCommand::NewStackedSession
             | UserCommand::DeleteSession
             | UserCommand::RestartSession
+            | UserCommand::ResetSession
             | UserCommand::ChangeProgram
             | UserCommand::ToggleKeepAlive
             | UserCommand::NewProject
@@ -597,6 +632,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
+            BindableAction::ResetSession => Self::ResetSession,
             BindableAction::ChangeProgram => Self::ChangeProgram,
             BindableAction::ToggleKeepAlive => Self::ToggleKeepAlive,
             BindableAction::RemoveProject => Self::RemoveProject,
@@ -810,6 +846,9 @@ mod tests {
             UserCommand::NewSession,
             UserCommand::DeleteSession,
             UserCommand::RestartSession,
+            // Reset reaches `CommanderService::restart_session_fresh`, which
+            // records `session.restart_fresh` itself.
+            UserCommand::ResetSession,
             UserCommand::NewProject,
             UserCommand::OpenReviewDiff,
             // These reach an already-instrumented service method under the same
@@ -1261,5 +1300,29 @@ mod tests {
             UserCommand::from_key(key, &b),
             Some(UserCommand::TextInput('A'))
         ));
+    }
+
+    #[test]
+    fn test_reset_session_action_maps_to_command() {
+        // The palette dispatches by BindableAction, so an unbound action still
+        // has to convert.
+        assert!(matches!(
+            UserCommand::from(BindableAction::ResetSession),
+            UserCommand::ResetSession
+        ));
+    }
+
+    #[test]
+    fn test_restart_kind_wording_distinguishes_reset() {
+        // A reset and a restart are different promises: one preserves the
+        // conversation, one discards it. The toast must not blur them.
+        assert_eq!(RestartKind::Restart.success_toast(), "Session restarted");
+        assert_eq!(RestartKind::Restart.error_prefix(), "Failed to restart");
+        assert!(RestartKind::Reset.success_toast().contains("reset"));
+        assert_ne!(
+            RestartKind::Reset.success_toast(),
+            RestartKind::Restart.success_toast()
+        );
+        assert_eq!(RestartKind::Reset.error_prefix(), "Failed to reset");
     }
 }

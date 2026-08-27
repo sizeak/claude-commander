@@ -5,6 +5,7 @@ import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../theme/tokens.dart';
+import '../util/error_text.dart';
 
 /// How often a running clone job is polled. Flat, with no backoff: a job is
 /// already bounded server-side by `clone_timeout_secs`, so there is no runaway
@@ -304,7 +305,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
     } catch (e) {
       // The server redacts its own rejection messages where they are built, so
       // this is safe to show; nothing is added from `source`.
-      _snack('Could not start the clone: ${_message(e)}');
+      _snack('Could not start the clone: ${errorText(e, capitalize: false)}');
       return _Attempt.done;
     }
     if (!mounted) return _Attempt.done;
@@ -321,7 +322,9 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
             try {
               polled = await _store.cloneJob(started.id);
             } catch (e) {
-              _snack('Lost track of the clone: ${_message(e)}');
+              _snack(
+                'Lost track of the clone: ${errorText(e, capitalize: false)}',
+              );
               return _Attempt.done;
             }
             if (!mounted) return _Attempt.done;
@@ -397,7 +400,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
       if (!mounted) return _Attempt.done;
       Navigator.of(context).pop(true);
     } catch (e) {
-      _snack('Could not register $dest: ${_message(e)}');
+      _snack('Could not register $dest: ${errorText(e, capitalize: false)}');
     }
     return _Attempt.done;
   }
@@ -407,17 +410,6 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  /// A one-line rendering of a thrown error. The bridge's messages are already
-  /// phrased for a human and already redacted by the server; this only keeps a
-  /// multi-line one from taking over a snackbar.
-  String _message(Object error) {
-    final text = error.toString().trim();
-    final firstLine = text.split('\n').first;
-    return firstLine.length > 200
-        ? '${firstLine.substring(0, 200)}…'
-        : firstLine;
   }
 
   // --- rendering ----------------------------------------------------------
@@ -577,7 +569,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
   /// URL field above stays usable — the URL path never touches `gh`.
   Widget _errorBanner(Object error) {
     final t = CommanderTokens.of(context);
-    final message = _message(error);
+    final message = errorText(error);
     // A timeout on this route is nearly always the *listing* overrunning, not a
     // dead server, so word it that way. The server bounds its `gh api --paginate`
     // (`repo_list_timeout_secs`, 90s by default —

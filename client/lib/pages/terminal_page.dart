@@ -15,6 +15,8 @@ import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../theme/terminal_theme.dart';
 import '../theme/tokens.dart';
+import '../util/ctrl_chord.dart';
+import '../util/error_text.dart';
 
 /// Live attached terminal, layout-agnostic (no Scaffold, no route). Streams raw
 /// PTY bytes from the cdylib WS bridge into an `xterm.dart` [Terminal], forwards
@@ -68,6 +70,13 @@ class TerminalBody extends StatefulWidget {
   /// means [DateTime.now].
   final DateTime Function()? clock;
 
+  /// Builds the emulator each (re)attach writes into. Injectable so a test can
+  /// drive the emulator-failure path of [_TerminalBodyState._write], which by
+  /// definition has no reachable trigger through the real one: any sequence that
+  /// still threw would be a bug to fix in the pinned `xterm` fork, not a fixture
+  /// to build a test on. `null` means the real emulator.
+  final Terminal Function()? terminalFactory;
+
   const TerminalBody({
     super.key,
     required this.api,
@@ -78,6 +87,7 @@ class TerminalBody extends StatefulWidget {
     this.imagePicker,
     this.clipboardImages,
     this.clock,
+    this.terminalFactory,
   });
 
   @override
@@ -137,6 +147,12 @@ class _TerminalBodyState extends State<TerminalBody>
   /// platform round trip with a multi-second timeout.
   bool _imageBusy = false;
 
+  /// True while the on-screen Ctrl key is armed, i.e. the next character the
+  /// keyboard produces is to be folded into its control byte. Held here rather
+  /// than in [_ModifierBar] because it is consumed by terminal *output* (see
+  /// [_sendText]), which the bar never sees.
+  bool _ctrlArmed = false;
+
   /// True only around the upload itself, which is what the spinner reports.
   /// Deliberately narrower than [_imageBusy]: a spinner while the bottom sheet
   /// or the OS picker is in front of the user tells them nothing, and an
@@ -169,6 +185,11 @@ class _TerminalBodyState extends State<TerminalBody>
   /// When the app last dropped out of the foreground, or null while it is in
   /// front.
   DateTime? _leftForegroundAt;
+
+  /// How many times the emulator has thrown while parsing output. Non-zero means
+  /// the grid no longer matches the pane and cannot catch up on its own — see
+  /// [_write].
+  int _writeFailures = 0;
 
   // Throughput meter: bytes this second, refreshed on a 1s tick.
   int _totalBytes = 0;
@@ -206,7 +227,7 @@ class _TerminalBodyState extends State<TerminalBody>
   /// is all that is needed; the emulator cannot do it for us, as this fork's
   /// parser leaves RIS (`ESC c`) unimplemented (core/escape/parser.dart:104).
   void _resetEmulator() {
-    _terminal = Terminal(maxLines: 10000);
+    _terminal = widget.terminalFactory?.call() ?? Terminal(maxLines: 10000);
     // The controller outlives the terminal (we own it), but its selection is a
     // pair of `CellAnchor`s holding `BufferLine`s of the buffer being discarded
     // (ui/controller.dart:21-22, core/buffer/line.dart:367-381). Nothing
@@ -219,22 +240,54 @@ class _TerminalBodyState extends State<TerminalBody>
     // which only fires its callback on `close`), while the chunked UTF-8 decoder
     // still buffers a partial multibyte codepoint split across WS frames until
     // it completes.
-    _decoder = utf8.decoder.startChunkedConversion(
-      _ChunkSink((str) => _terminal.write(str)),
-    );
-    _terminal.onOutput = (data) {
-      unawaited(
-        widget.api.terminalSendInput(
-          attachId: _attachId,
-          bytes: utf8.encode(data),
-        ),
-      );
-    };
+    _decoder = utf8.decoder.startChunkedConversion(_ChunkSink(_write));
+    _terminal.onOutput = _sendText;
     _terminal.onResize = (cols, rows, pixelWidth, pixelHeight) {
       unawaited(
         widget.api.terminalResize(attachId: _attachId, cols: cols, rows: rows),
       );
     };
+  }
+
+  /// Feed one decoded chunk to the emulator, containing a parser failure to the
+  /// chunk that caused it.
+  ///
+  /// An emulator that throws mid-parse abandons the rest of the chunk, and tmux
+  /// repaints incrementally with no full-screen clear — so those bytes never come
+  /// again and the grid is wrong from that point on for the life of the attach.
+  /// Left to propagate, the throw is also an uncaught async error *per chunk*,
+  /// and reporting one (a stack trace built and dumped on the UI thread) for
+  /// every screenful of a busy pane is itself enough to starve the frame budget
+  /// on a phone. That pair is what an `omp` pane looked like before the pinned
+  /// fork stopped `CSI 1 K` at column 0 throwing out of `Terminal.write`
+  /// (guarded by `terminal_page_test.dart`, and by `BufferLine.eraseRange`'s own
+  /// tests in the fork).
+  ///
+  /// So: report the first one, keep the attach up, and say on the status bar that
+  /// the pane is stale. Nothing here can repair the grid — only a fresh attach
+  /// repaints the whole screen onto a blank one, which is exactly what the
+  /// reconnect button already does.
+  void _write(String text) {
+    try {
+      _terminal.write(text);
+    } catch (e, stack) {
+      final first = _writeFailures == 0;
+      _writeFailures++;
+      if (first) {
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: e,
+            stack: stack,
+            library: 'claude-commander',
+            context: ErrorDescription(
+              'writing pane output to the terminal emulator (further '
+              'failures on this attach are counted, not reported)',
+            ),
+          ),
+        );
+      }
+      if (mounted) setState(() {});
+    }
   }
 
   /// Cache the heartbeat deadline. No [setState]: nothing renders from it.
@@ -432,6 +485,19 @@ class _TerminalBodyState extends State<TerminalBody>
     widget.api.terminalSendInput(attachId: _attachId, bytes: bytes),
   );
 
+  /// Everything the emulator wants to send: typed characters, the escape
+  /// sequences its input handler builds for special keys, pastes, and its own
+  /// replies to device queries. The single funnel is what lets an armed Ctrl
+  /// (see [_ctrlArmed]) reach a chord the on-screen row has no key for — the
+  /// soft keyboard's characters arrive here and nowhere else.
+  void _sendText(String data) {
+    final chord = _ctrlArmed ? ctrlChord(data) : null;
+    if (chord != null && chord.consumed) {
+      setState(() => _ctrlArmed = false);
+    }
+    _send(utf8.encode(chord?.output ?? data));
+  }
+
   // -- image attach --------------------------------------------------------
 
   /// Offer the available image sources and act on the choice. Camera only
@@ -507,7 +573,7 @@ class _TerminalBodyState extends State<TerminalBody>
       if (bytes == null) return;
       await _uploadImage(bytes);
     } catch (e) {
-      _notify('Could not attach image: $e');
+      _notify('Could not attach image: ${errorText(e, capitalize: false)}');
     }
   }
 
@@ -607,7 +673,7 @@ class _TerminalBodyState extends State<TerminalBody>
         return;
       }
     } catch (e) {
-      _notify('Could not attach image: $e');
+      _notify('Could not attach image: ${errorText(e, capitalize: false)}');
       return;
     } finally {
       if (mounted) setState(() => _imageBusy = false);
@@ -718,7 +784,13 @@ class _TerminalBodyState extends State<TerminalBody>
                       ),
                     ),
                     // Rides up with the pane, landing just above the keyboard.
-                    if (widget.showModifierBar) _ModifierBar(onSend: _send),
+                    if (widget.showModifierBar)
+                      _ModifierBar(
+                        onSend: _send,
+                        ctrlArmed: _ctrlArmed,
+                        onToggleCtrl: () =>
+                            setState(() => _ctrlArmed = !_ctrlArmed),
+                      ),
                   ],
                 ),
               ),
@@ -766,6 +838,18 @@ class _TerminalBodyState extends State<TerminalBody>
               style: t.meta(size: 10, color: t.textMuted),
             ),
           ),
+          // Only ever visible after the emulator has thrown, which the fork's
+          // own tests say it should not: the pane is stale and cannot recover
+          // from the byte stream, so point at the reconnect that can.
+          if (_writeFailures > 0) ...[
+            Icon(Icons.warning_amber_rounded, size: 13, color: t.attention),
+            const SizedBox(width: 4),
+            Text(
+              'stale — reconnect',
+              style: t.meta(size: 10, color: t.attention),
+            ),
+            const SizedBox(width: 8),
+          ],
           Text(
             '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
             style: t.meta(size: 10, color: t.textFaint),
@@ -828,6 +912,10 @@ class TerminalPage extends StatelessWidget {
   /// deadline; `null` means [DateTime.now].
   final DateTime Function()? clock;
 
+  /// Forwarded to [TerminalBody] so a test can drive its emulator-failure path;
+  /// `null` means the real emulator.
+  final Terminal Function()? terminalFactory;
+
   const TerminalPage({
     super.key,
     required this.api,
@@ -837,6 +925,7 @@ class TerminalPage extends StatelessWidget {
     this.imagePicker,
     this.clipboardImages,
     this.clock,
+    this.terminalFactory,
   });
 
   @override
@@ -859,6 +948,7 @@ class TerminalPage extends StatelessWidget {
         imagePicker: imagePicker,
         clipboardImages: clipboardImages,
         clock: clock,
+        terminalFactory: terminalFactory,
       ),
     );
   }
@@ -883,10 +973,22 @@ class _ChunkSink implements Sink<String> {
 enum _ImageSource { gallery, camera, clipboard }
 
 /// On-screen keys for touch — the modifiers and arrows a soft keyboard can't
-/// easily produce. Each sends the raw byte sequence the PTY expects.
+/// easily produce. Each sends the raw byte sequence the PTY expects, except
+/// `Ctrl`, which arms [ctrlArmed] so the *next* character typed on the keyboard
+/// becomes a chord: the row has room for a handful of presets (^C, ^D, …) and
+/// this is how the rest — ^W, ^X, ^O — are reachable at all from a phone.
 class _ModifierBar extends StatelessWidget {
   final void Function(List<int> bytes) onSend;
-  const _ModifierBar({required this.onSend});
+
+  /// Whether the Ctrl key is currently armed. Owned by the parent, which is
+  /// where the arm is spent (on the next character the emulator sends).
+  final bool ctrlArmed;
+  final VoidCallback onToggleCtrl;
+  const _ModifierBar({
+    required this.onSend,
+    required this.ctrlArmed,
+    required this.onToggleCtrl,
+  });
 
   static const _esc = [0x1b];
   static const _tab = [0x09];
@@ -925,6 +1027,7 @@ class _ModifierBar extends StatelessWidget {
         children: [
           _key(context, 'Esc', () => onSend(_esc)),
           _key(context, 'Tab', () => onSend(_tab)),
+          _key(context, 'Ctrl', onToggleCtrl, armed: ctrlArmed),
           _key(context, '^C', () => onSend(_ctrlC)),
           _key(context, '^D', () => onSend(_ctrlD)),
           _key(context, '^Z', () => onSend(_ctrlZ)),
@@ -949,12 +1052,21 @@ class _ModifierBar extends StatelessWidget {
   /// A single key pill: a raised mono chip that fires its raw byte sequence on
   /// tap. Deliberately not a Material button so it matches the deck's flat pills
   /// and stays compact in the horizontal strip.
-  Widget _key(BuildContext context, String label, VoidCallback onTap) {
+  ///
+  /// [armed] is for the sticky Ctrl: a held modifier has to be visible, or the
+  /// keystroke after it lands somewhere the user didn't ask for with nothing on
+  /// screen to explain why.
+  Widget _key(
+    BuildContext context,
+    String label,
+    VoidCallback onTap, {
+    bool armed = false,
+  }) {
     final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3),
       child: Material(
-        color: t.surface,
+        color: armed ? t.surfaceSelected : t.surface,
         borderRadius: BorderRadius.circular(7),
         child: InkWell(
           onTap: onTap,
@@ -964,14 +1076,14 @@ class _ModifierBar extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(7),
-              border: Border.all(color: t.border),
+              border: Border.all(color: armed ? t.primary : t.border),
             ),
             child: Text(
               label,
               style: t.meta(
                 size: 10.5,
                 weight: FontWeight.w600,
-                color: t.textBright,
+                color: armed ? t.primary : t.textBright,
               ),
             ),
           ),

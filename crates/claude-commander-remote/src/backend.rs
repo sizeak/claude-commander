@@ -126,9 +126,9 @@ impl CommanderBackend for RemoteBackend {
     }
 
     // `startup_reconcile`, `reconcile_sections`, `reconcile_one_section`,
-    // `record_feature`, `flush_telemetry`, `restart_session_fresh`, and
-    // `apply_pr_results` all keep the trait defaults: the server reconciles and
-    // records telemetry itself, and applying PR results is a local-only loop.
+    // `record_feature`, `flush_telemetry`, and `apply_pr_results` all keep the
+    // trait defaults: the server reconciles and records telemetry itself, and
+    // applying PR results is a local-only loop.
 
     /// Ask the server to re-check PR metadata (it runs the PR-status loop).
     async fn request_pr_refresh(&self) -> BResult<()> {
@@ -227,6 +227,13 @@ impl CommanderBackend for RemoteBackend {
     async fn restart_session(&self, id: SessionId) -> BResult<()> {
         self.client
             .restart_session(id)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()> {
+        self.client
+            .restart_session_fresh(id)
             .await
             .map_err(into_backend_error)
     }
@@ -889,10 +896,15 @@ mod tests {
             "the second ensure must return the id the first created"
         );
 
+        // Projects are stored under `repo_identity` — the *canonicalized* repo
+        // root — so compare against that spelling, not the raw `TempDir` path.
+        // They differ wherever the temp dir sits behind a symlink, e.g. macOS's
+        // `/tmp` → `/private/tmp`.
+        let canonical = tokio::fs::canonicalize(&repo_path).await.unwrap();
         let projects = service.list_projects().await;
         let matching: Vec<_> = projects
             .iter()
-            .filter(|p| p.repo_path == repo_path)
+            .filter(|p| p.repo_path == canonical)
             .map(|p| p.id)
             .collect();
         assert_eq!(

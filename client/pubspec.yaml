@@ -89,13 +89,28 @@ dev_dependencies:
 # alongside the rendered PNGs). The adaptive background carries the dark navy
 # gradient; the green/yellow rank chevrons sit on the transparent foreground
 # layer.
+#
+# Each platform gets its own master rather than sharing icon_full.png, because
+# the three consume art differently and the mismatch is visible: iOS masks to
+# its own superellipse (so the art must be full-bleed and opaque), while macOS
+# masks nothing (so the art must carry Apple's 824/1024 inset itself). See the
+# header comments in icon_ios.svg / icon_macos.svg.
 flutter_launcher_icons:
   android: true
-  ios: false
   image_path: "tool/icon/icon_full.png"
   min_sdk_android: 21
   adaptive_icon_background: "tool/icon/icon_background.png"
   adaptive_icon_foreground: "tool/icon/icon_foreground.png"
+  ios: true
+  image_path_ios: "tool/icon/icon_ios.png"
+  # icon_ios.svg is drawn without transparency, so this is a backstop, not the
+  # mechanism: an App Store submission is rejected outright for an alpha channel
+  # in the app icon, and that failure surfaces at upload time rather than build
+  # time. Cheap insurance against a future edit reintroducing one.
+  remove_alpha_ios: true
+  macos:
+    generate: true
+    image_path: "tool/icon/icon_macos.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

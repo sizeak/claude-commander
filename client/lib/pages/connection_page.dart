@@ -5,6 +5,7 @@ import '../chrome/chrome.dart';
 import '../server_config.dart';
 import '../services/commander_api.dart';
 import '../theme/tokens.dart';
+import '../util/error_text.dart';
 import '../widgets/brand_mark.dart';
 
 /// Add / edit a server: enter a display name, URL, and bearer token, optionally
@@ -123,7 +124,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
         error: problem != null,
       );
     } catch (e) {
-      _snack('Connection failed: $e', error: true);
+      _snack(
+        'Connection failed: ${errorText(e, capitalize: false)}',
+        error: true,
+      );
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -140,7 +144,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
       try {
         failure = await _probe(cfg);
       } catch (e) {
-        failure = '$e';
+        failure = errorText(e);
       }
       if (failure != null && !await _confirmSaveAnyway(failure)) return;
       await widget.onSubmit(cfg);
@@ -148,7 +152,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
       // Add-as-home (first run) can't pop; the settings/servers route can.
       if (Navigator.of(context).canPop()) Navigator.of(context).pop();
     } catch (e) {
-      _snack('Save failed: $e', error: true);
+      _snack('Save failed: ${errorText(e, capitalize: false)}', error: true);
     } finally {
       if (mounted) setState(() => _busy = false);
     }

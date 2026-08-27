@@ -153,6 +153,29 @@ pub(super) fn restart_confirm_message(
     }
 }
 
+/// The Reset-confirmation body. Unlike [`restart_confirm_message`] this needs no
+/// local/remote split: a reset never resumes, whichever host it runs on, so the
+/// promise is the same on both. Names the session because Reset is palette-only
+/// — the operator may be several keystrokes from the row they selected.
+///
+/// The hibernation caveat is folded into the wording rather than conditioned on
+/// a flag: `SessionInfo` carries no `hibernated` field (it is not on the wire
+/// DTO), and "any conversation it would otherwise have resumed" is true of a
+/// hibernated session — whose wake-up resume is exactly what makes hibernation
+/// non-destructive — without needing to know.
+pub(super) fn reset_confirm_message(title: Option<&str>) -> String {
+    let subject = match title {
+        Some(title) => format!("\"{title}\""),
+        None => "this session".to_string(),
+    };
+    format!(
+        "Reset session {subject}?\nThis kills its tmux session and starts a fresh one with \
+         no resume, so the agent begins a new conversation — any conversation it would \
+         otherwise have resumed (including one preserved by hibernation) is discarded.\nThe \
+         worktree, branch and commits are untouched."
+    )
+}
+
 impl App {
     /// Open `Modal::PathInput` at the current working directory with its
     /// subdirectory list already populated.
@@ -1480,6 +1503,21 @@ impl App {
         }
     }
 
+    /// Handle reset session — show confirmation. The no-resume sibling of
+    /// [`Self::handle_restart_session`].
+    pub(super) fn handle_reset_session(&mut self) {
+        if let Some(sref) = self.ui_state.selected_session_id {
+            let title = self.session(sref).map(|s| s.title.clone());
+            self.ui_state.modal = Modal::Confirm {
+                title: "Reset Session".to_string(),
+                message: reset_confirm_message(title.as_deref()),
+                on_confirm: ConfirmAction::ResetSession {
+                    session_id: sref.id,
+                },
+            };
+        }
+    }
+
     /// Toggle keep-alive on the selected session (opt out of / back into
     /// auto-hibernation). Non-destructive, so it applies immediately and
     /// reports via a transient status message.
@@ -2774,6 +2812,31 @@ impl App {
                     let _ = tx
                         .send(AppEvent::StateUpdate(StateUpdate::RestartFinished {
                             backend_id: backend_id.0,
+                            kind: RestartKind::Restart,
+                            result,
+                        }))
+                        .await;
+                });
+            }
+            ConfirmAction::ResetSession { session_id } => {
+                // Same shape as RestartSession, but through the backend's
+                // no-resume path so the agent starts a new conversation.
+                let backend_id = self.backend_of_session(session_id);
+                self.ui_state.status_message = Some((
+                    "Resetting session…".to_string(),
+                    Instant::now() + Duration::from_secs(30),
+                ));
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let result = backend
+                        .restart_session_fresh(session_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::RestartFinished {
+                            backend_id: backend_id.0,
+                            kind: RestartKind::Reset,
                             result,
                         }))
                         .await;
@@ -2800,6 +2863,7 @@ impl App {
                     let _ = tx
                         .send(AppEvent::StateUpdate(StateUpdate::RestartFinished {
                             backend_id: backend_id.0,
+                            kind: RestartKind::Restart,
                             result,
                         }))
                         .await;

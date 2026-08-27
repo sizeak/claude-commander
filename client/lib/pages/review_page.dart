@@ -10,6 +10,7 @@ import '../src/rust/api/diff.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/review.dart' as rust;
 import '../theme/tokens.dart';
+import '../util/error_text.dart';
 import '../util/file_tree.dart';
 import '../widgets/diff_view.dart';
 import '../widgets/session_chips.dart';
@@ -104,7 +105,7 @@ class _ReviewBodyState extends State<ReviewBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.toString();
+        _error = errorText(e);
         _loading = false;
         _busy = false;
       });
@@ -138,7 +139,7 @@ class _ReviewBodyState extends State<ReviewBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      _snack('Refresh failed: $e');
+      _snack('Refresh failed: ${errorText(e, capitalize: false)}');
     }
   }
 
@@ -154,7 +155,7 @@ class _ReviewBodyState extends State<ReviewBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      _snack('Delete failed: $e');
+      _snack('Delete failed: ${errorText(e, capitalize: false)}');
     }
   }
 
@@ -172,7 +173,7 @@ class _ReviewBodyState extends State<ReviewBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      _snack('Apply failed: $e');
+      _snack('Apply failed: ${errorText(e, capitalize: false)}');
     }
   }
 
@@ -194,7 +195,7 @@ class _ReviewBodyState extends State<ReviewBody> {
         }
       });
     } catch (e) {
-      _snack('Toggle reviewed failed: $e');
+      _snack('Toggle reviewed failed: ${errorText(e, capitalize: false)}');
     } finally {
       if (mounted) setState(() => _toggling.remove(displayPath));
     }
@@ -297,7 +298,7 @@ class _ReviewBodyState extends State<ReviewBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      _snack('Comment failed: $e');
+      _snack('Comment failed: ${errorText(e, capitalize: false)}');
     }
   }
 
@@ -701,6 +702,8 @@ class _ReviewBodyState extends State<ReviewBody> {
             Text(
               error,
               textAlign: TextAlign.center,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
               style: Theme.of(context).textTheme.bodyMedium,
             ),
             const SizedBox(height: 16),
@@ -1245,7 +1248,7 @@ class _LaidOutDiffState extends State<_LaidOutDiff> {
       if (layout.hasHiddenContext && _text == null) _fetchText();
     } catch (e) {
       if (!mounted || gen != _generation) return;
-      setState(() => _error = e.toString());
+      setState(() => _error = errorText(e));
     }
   }
 
@@ -1283,7 +1286,9 @@ class _LaidOutDiffState extends State<_LaidOutDiff> {
       return Padding(
         padding: const EdgeInsets.all(16),
         child: Text(
-          'Could not lay out this diff: $error',
+          'Could not lay out this diff: ${errorText(error, capitalize: false)}',
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
           style: t.meta(color: t.danger),
         ),
       );
@@ -1409,7 +1414,7 @@ class _BinaryImageViewState extends State<_BinaryImageView> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.toString();
+        _error = errorText(e);
         _loading = false;
       });
     }
@@ -1450,7 +1455,12 @@ class _BinaryImageViewState extends State<_BinaryImageView> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (_error != null) ...[
-          Text('Failed: $_error', style: TextStyle(color: t.danger)),
+          Text(
+            'Failed: ${errorText(_error!, capitalize: false)}',
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: t.danger),
+          ),
           const SizedBox(height: 8),
         ],
         OutlinedButton.icon(

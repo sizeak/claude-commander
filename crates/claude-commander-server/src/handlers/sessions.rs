@@ -3,7 +3,7 @@
 //! Thin wrappers over `CommanderService`: `list_sessions`,
 //! `find_session`/`find_session_exact`, `get_session_detail`,
 //! `get_pane_content`, `create_session`, `kill_session`, `restart_session`,
-//! `delete_session`.
+//! `restart_session_fresh`, `delete_session`.
 
 use axum::{
     Json,
@@ -136,6 +136,20 @@ pub async fn restart(
 ) -> Result<StatusCode, ApiError> {
     let id = parse_session_id(&id)?;
     run_local(move || async move { state.service.restart_session(&id).await }).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /sessions/{id}/restart-fresh` → `restart_session_fresh` → 204.
+///
+/// Distinct from `/restart`: this one never passes the agent's resume flag, so
+/// the relaunched pane starts a *fresh* conversation regardless of the server's
+/// `resume_session` config or whether the session was hibernated.
+pub async fn restart_fresh(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let id = parse_session_id(&id)?;
+    run_local(move || async move { state.service.restart_session_fresh(&id).await }).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -272,6 +286,7 @@ mod tests {
             .route("/sessions/{q}/pane", get(super::pane))
             .route("/sessions/{id}/kill", post(super::kill))
             .route("/sessions/{id}/restart", post(super::restart))
+            .route("/sessions/{id}/restart-fresh", post(super::restart_fresh))
             .route(
                 "/sessions/{id}",
                 axum::routing::delete(super::delete).patch(super::patch),
@@ -429,6 +444,29 @@ mod tests {
             .unwrap();
         let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
         assert_eq!(status, 400);
+    }
+
+    /// The no-resume restart is its own route, reachable and validated like the
+    /// resuming one: a malformed id is a 400 and an unknown-but-valid id a 404
+    /// (which also proves `/restart-fresh` is wired and not shadowed by
+    /// `/restart`).
+    #[tokio::test]
+    async fn restart_fresh_validates_id_and_is_wired() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+
+        let req = Request::post("/sessions/not-a-uuid/restart-fresh")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 400);
+
+        let req = Request::post(format!("/sessions/{}/restart-fresh", uuid::Uuid::new_v4()))
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 404);
     }
 
     /// Preview for an unknown session id is a 404.
