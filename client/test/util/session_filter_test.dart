@@ -5,63 +5,24 @@ import 'package:flutter_test/flutter_test.dart';
 import '../support/fixtures.dart';
 
 void main() {
-  group('fuzzyScore', () {
-    test('empty needle matches everything with score 0', () {
-      expect(fuzzyScore('anything', ''), 0);
-    });
+  // Scoring itself is no longer implemented in Dart: `fuzzyScore` and
+  // `sessionFuzzyScore` delegate to the shared Rust scorer in
+  // `claude-commander-viewmodel`, which is what stops the app and the terminal
+  // ranking a session list differently. `flutter test` runs without the native
+  // library, so their behaviour cannot be asserted here — it is covered by that
+  // crate's own tests (`query.rs`: subsequence/case/empty-needle rules,
+  // contiguous-beats-gappy, earlier-beats-later, best-field-wins, and the two
+  // orderings the old Dart port inverted). Same split as
+  // `test/support/fake_diff_layout.dart` documents for the diff engine.
+  //
+  // What remains testable here is the Dart that is still Dart: the ordering and
+  // recency helpers, which take whatever scorer or key a caller supplies.
 
-    test('non-subsequence returns null', () {
-      expect(fuzzyScore('auth-fix', 'zzz'), isNull);
-      // Right chars, wrong order: not a subsequence.
-      expect(fuzzyScore('abc', 'cba'), isNull);
-    });
-
-    test('is case-insensitive', () {
-      expect(fuzzyScore('Auth-Fix', 'auth'), isNotNull);
-      expect(fuzzyScore('auth-fix', 'AUTH'), isNotNull);
-    });
-
-    test('contiguous match scores higher than a gappy one', () {
-      final tight = fuzzyScore('abcxyz', 'abc')!;
-      final gappy = fuzzyScore('axbxc', 'abc')!;
-      expect(tight, greaterThan(gappy));
-    });
-
-    test('earlier match scores higher than a later one', () {
-      final early = fuzzyScore('auth-service', 'auth')!;
-      final late = fuzzyScore('service-auth', 'auth')!;
-      expect(early, greaterThan(late));
-    });
-  });
-
-  group('sessionFuzzyScore', () {
-    test('matches against title, branch, and program', () {
-      final s = sessionInfo(
-        title: 'Refactor login',
-        branch: 'auth-refactor',
-        program: 'claude',
-      );
-      expect(sessionFuzzyScore(s, 'login'), isNotNull); // title
-      expect(sessionFuzzyScore(s, 'auth'), isNotNull); // branch
-      expect(sessionFuzzyScore(s, 'claude'), isNotNull); // program
-    });
-
-    test('does not match against projectName', () {
-      final s = sessionInfo(
-        title: 'unrelated',
-        branch: 'b',
-        program: 'p',
-        projectName: 'my-special-repo',
-      );
-      expect(sessionFuzzyScore(s, 'special'), isNull);
-    });
-
-    test('returns the best score across fields', () {
-      final s = sessionInfo(title: 'auth', branch: 'a-u-t-h', program: 'x');
-      // Contiguous hit in the title should beat the gappy branch hit.
-      expect(sessionFuzzyScore(s, 'auth'), fuzzyScore('auth', 'auth'));
-    });
-  });
+  /// Stand-in scorer. Deliberately trivial — these tests exercise filtering and
+  /// ordering, not scoring, so a real scorer here would only obscure which is
+  /// under test (and would need the native library).
+  int? fakeSessionScore(SessionInfo s, String query) =>
+      s.title.contains(query) ? s.title.length : null;
 
   group('sessionRecency', () {
     test('uses the attach time when the session has been attached', () {
@@ -172,7 +133,7 @@ void main() {
         id: '22222222-2222-2222-2222-555555555555',
         title: 'b',
       );
-      expect(matchingSessions([a, b], ''), [a, b]);
+      expect(matchingSessions([a, b], '', score: fakeSessionScore), [a, b]);
     });
 
     test('filters to matches, preserving input order', () {
@@ -185,19 +146,23 @@ void main() {
         id: '33333333-2222-2222-2222-555555555555',
         title: 'alphabet',
       );
-      expect(matchingSessions([alpha, beta, gamma], 'alph'), [alpha, gamma]);
+      expect(
+        matchingSessions([alpha, beta, gamma], 'alph', score: fakeSessionScore),
+        [alpha, gamma],
+      );
     });
   });
 
   group('rankByScore', () {
     test('orders best score first and drops null scores', () {
+      // Scores supplied directly: this asserts rankByScore's ordering and
+      // null-dropping, not how a scorer arrives at the numbers.
+      const scores = {'axbxc': 5, 'abcxyz': 10, 'zzz': null};
       final ranked = rankByScore<String>([
         'axbxc',
         'abcxyz',
         'zzz',
-      ], (s) => fuzzyScore(s, 'abc'));
-      // Both 'axbxc' and 'abcxyz' match; the tighter (contiguous) hit ranks
-      // first, and the non-match 'zzz' is dropped.
+      ], (s) => scores[s]);
       expect(ranked, ['abcxyz', 'axbxc']);
     });
 

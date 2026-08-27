@@ -12,7 +12,10 @@ mod clone;
 mod clone_jobs;
 mod diff;
 mod github;
-pub(crate) mod lfs;
+// Public as a module rather than glob-re-exported like its siblings: the TUI
+// kicks off a background `git lfs pull`, and `git::lfs::pull` says what it does
+// where a glob-exported `git::pull` would sit ambiguously beside `auto_pull`'s.
+pub mod lfs;
 mod pr;
 mod review_diff;
 mod summary;

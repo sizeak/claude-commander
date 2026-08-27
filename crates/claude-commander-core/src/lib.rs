@@ -1,23 +1,29 @@
-//! Claude Commander - A high-performance terminal UI for managing Claude coding sessions
+//! Claude Commander - managing Claude coding sessions over tmux and git worktrees
 //!
-//! This crate provides an async-first, actor-based architecture for managing
-//! multiple AI coding sessions through tmux and git worktrees.
+//! This crate is the frontend-agnostic library: an async-first architecture for
+//! managing multiple AI coding sessions through tmux and git worktrees, with no
+//! terminal UI of its own. The ratatui frontend lives in `claude-commander-tui`,
+//! and the HTTP/WebSocket frontend in `claude-commander-server`; both drive this
+//! crate through [`api::CommanderService`] and the
+//! [`backend::CommanderBackend`] trait. Keep it that way — see the layering
+//! notes in CLAUDE.md.
 //!
 //! # Architecture
 //!
-//! The application is built around several key actors:
-//! - **TUI Actor** - Handles terminal rendering and user input
-//! - **SessionManager Actor** - Coordinates session lifecycle
-//! - **TmuxActor** - Per-session tmux integration
-//! - **GitActor** - Per-session git operations
+//! - **[`api::CommanderService`]** - the single coordination layer every
+//!   frontend calls, owning the session manager and the state/config stores
+//! - **[`session::SessionManager`]** - session lifecycle (create/restart/delete)
+//! - **[`tmux`]** - per-session tmux integration
+//! - **[`git`]** - per-session git operations
 //!
 //! # Modules
 //!
 //! - [`session`] - Hierarchical session model (Projects and WorktreeSessions)
 //! - [`tmux`] - Async tmux integration with caching
 //! - [`git`] - Pure Rust git operations via gitoxide
-//! - [`tui`] - Event-driven terminal UI with ratatui
+//! - [`backend`] - The `CommanderBackend` trait a frontend talks to, local or remote
 //! - [`config`] - Configuration and state persistence
+//! - [`term_caps`] - Terminal colour capability detection
 //! - [`error`] - Error types
 
 pub mod agent;
@@ -29,14 +35,13 @@ pub mod comment;
 pub mod config;
 pub mod conversation;
 pub mod error;
-pub mod fuzzy;
 pub mod git;
 pub mod paste_image;
 pub mod reviewed;
 pub mod session;
 pub mod telemetry;
+pub mod term_caps;
 pub mod tmux;
-pub mod tui;
 
 pub use config::keybindings::editor_trigger_bytes;
 pub use config::{AppState, Config, StateStore};

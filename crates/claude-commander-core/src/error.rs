@@ -26,9 +26,6 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("TUI error: {0}")]
-    Tui(#[from] TuiError),
-
     #[error("TTS error: {0}")]
     Tts(#[from] TtsError),
 }
@@ -285,22 +282,6 @@ impl From<reqwest::Error> for TtsError {
     }
 }
 
-/// TUI-related errors
-#[derive(Error, Debug)]
-pub enum TuiError {
-    #[error("Failed to initialize terminal: {0}")]
-    InitFailed(String),
-
-    #[error("Failed to restore terminal: {0}")]
-    RestoreFailed(String),
-
-    #[error("Render error: {0}")]
-    RenderError(String),
-
-    #[error("Event handling error: {0}")]
-    EventError(String),
-}
-
 /// Result type alias using our error type
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -409,13 +390,6 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "test");
         let top_err: Error = io_err.into();
         assert!(matches!(top_err, Error::Io(_)));
-    }
-
-    #[test]
-    fn test_tui_error_conversion() {
-        let tui_err = TuiError::InitFailed("test".to_string());
-        let top_err: Error = tui_err.into();
-        assert!(matches!(top_err, Error::Tui(_)));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 
 import 'api/diff.dart';
 import 'api/mirrors.dart';
+import 'api/query.dart';
 import 'api/registry.dart';
 import 'api/review.dart';
 import 'api/simple.dart';
@@ -85,6 +86,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DiffStatDto dco_decode_box_autoadd_diff_stat_dto(dynamic raw);
+
+  @protected
+  int dco_decode_box_autoadd_i_32(dynamic raw);
 
   @protected
   ProjectId dco_decode_box_autoadd_project_id(dynamic raw);
@@ -268,6 +272,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DiffStatDto? dco_decode_opt_box_autoadd_diff_stat_dto(dynamic raw);
+
+  @protected
+  int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
 
   @protected
   ProjectId? dco_decode_opt_box_autoadd_project_id(dynamic raw);
@@ -462,6 +469,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DiffStatDto sse_decode_box_autoadd_diff_stat_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
   ProjectId sse_decode_box_autoadd_project_id(SseDeserializer deserializer);
@@ -687,6 +697,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DiffStatDto? sse_decode_opt_box_autoadd_diff_stat_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
   ProjectId? sse_decode_opt_box_autoadd_project_id(
@@ -924,6 +937,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     DiffStatDto self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_project_id(
@@ -1227,6 +1243,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     DiffStatDto? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_project_id(
