@@ -2043,9 +2043,12 @@ fn make_test_app_with_path() -> (App, std::path::PathBuf) {
     let state_path = tmp.path().join("state.json");
     // `projects_dir` defaults to the user's REAL `~/Projects`, which the
     // repo-clone paths write into. Pin it under `tmp` so no App built here can
-    // clone outside the temp tree.
+    // clone outside the temp tree. Same for `agent_temp_dir`, which defaults to
+    // the OS temp dir and is where pasted images (whose store's prune *deletes*
+    // files) and comment-apply briefs land.
     let mut config = Config {
         projects_dir: Some(tmp.path().join("projects")),
+        agent_temp_dir: Some(tmp.path().join("agent-temp")),
         ..Config::default()
     };
     // Telemetry is opt-out by default with a baked ingest token. The crate-wide

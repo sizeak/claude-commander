@@ -569,7 +569,7 @@ async fn ws_attach_stamps_last_attached_at() {
 ///
 /// The handler's own tests cover only the reject paths (400/404), which never
 /// touch disk or tmux; this is the happy path, so it needs the real fixture.
-/// Writes land under the harness's `paste_images_dir` (inside `data_dir`), never
+/// Writes land under the harness's `agent_temp_dir` (inside `data_dir`), never
 /// the real OS temp dir.
 #[tokio::test]
 async fn http_paste_image_writes_file_and_injects_path() {
