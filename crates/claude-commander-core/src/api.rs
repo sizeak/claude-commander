@@ -2658,9 +2658,14 @@ fn poll_tick_should_send(
 /// re-apply, which lost the earlier batch whenever a second Apply landed before
 /// the agent opened the first file — and those comments were already marked
 /// `Applied`, so nothing brought them back. A brief must therefore outlive the
-/// next Apply. The cost is one small file per Apply left for the OS temp
-/// sweeper; deliberately not pruned here, since the only file a prune could
-/// safely target is exactly the unread brief this uniqueness exists to keep.
+/// next Apply.
+///
+/// The cost is one small file per Apply, left behind for whatever sweeps the
+/// OS temp dir (distro-dependent on Linux, so assume nothing does). It is
+/// deliberately not pruned here: nothing can distinguish a read brief from an
+/// unread one, so the only file a prune could target is exactly the unread
+/// brief this uniqueness exists to keep — and a brief is a few KB written at
+/// human rates, unlike the remote-triggerable images `PasteImageStore` prunes.
 async fn write_apply_brief(base: &Path, session_id: SessionId, markdown: &str) -> Result<PathBuf> {
     let path = base.join(format!(
         "cc-comments-{}-{}.md",

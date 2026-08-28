@@ -46,9 +46,15 @@ fn isolated_tmux_tmpdir(temp_dir: &TempDir) -> PathBuf {
 /// so a test that reaches the clone paths checks repositories out under
 /// `temp_dir` instead of the developer's own projects directory. Guarded by
 /// `isolated_config_store_pins_projects_dir`.
+///
+/// And `agent_temp_dir`, whose default is the OS temp dir, so a test reaching
+/// the paste-image store (which *deletes* files when it prunes) or a
+/// comment-apply brief writes under `temp_dir` instead of the real `/tmp`.
+/// Guarded by `isolated_config_store_pins_agent_temp_dir`.
 fn create_isolated_config_store(temp_dir: &TempDir, mut config: Config) -> Arc<ConfigStore> {
     config.tmux_tmpdir = Some(isolated_tmux_tmpdir(temp_dir));
     config.projects_dir = Some(temp_dir.path().join("projects"));
+    config.agent_temp_dir = Some(temp_dir.path().join("agent-temp"));
     config.telemetry.enabled = false;
     let config_path = temp_dir.path().join("config.toml");
     let toml = toml::to_string_pretty(&config).unwrap();
@@ -103,6 +109,27 @@ async fn isolated_config_store_pins_projects_dir() {
     assert!(
         projects_dir.starts_with(temp_dir.path()),
         "isolated test configs must not clone into the real ~/Projects (got {projects_dir:?})"
+    );
+}
+
+/// Guard: `create_isolated_config_store` must pin the agent temp dir into the
+/// temp dir. It defaults to the OS temp dir, where the paste-image store's
+/// prune *deletes* files and comment-apply briefs accumulate — so an unpinned
+/// helper lets `cargo test` / CI write into (and prune) the developer's real
+/// `/tmp`. Fails if that pin is dropped.
+#[tokio::test]
+async fn isolated_config_store_pins_agent_temp_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_store = create_isolated_config_store(&temp_dir, Config::default());
+    let agent_temp_dir = config_store
+        .read()
+        .agent_temp_dir
+        .clone()
+        .expect("the helper must pin the agent temp dir");
+    assert!(
+        agent_temp_dir.starts_with(temp_dir.path()),
+        "isolated test configs must not write agent temp files to the real /tmp \
+         (got {agent_temp_dir:?})"
     );
 }
 
@@ -1987,19 +2014,22 @@ async fn test_paste_image_writes_file_and_injects_path() {
     let (repo_temp_dir, repo_path) = create_test_repo().await;
     let state_temp_dir = TempDir::new().unwrap();
     let worktrees_dir = TempDir::new().unwrap();
-    // Redirect the agent's temp files — paste-image writes (and the store's
-    // prune) and comment-apply briefs — into a TempDir instead of the real
-    // /tmp, per the repo's test-isolation rule.
-    let agent_temp_dir = TempDir::new().unwrap();
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
-        agent_temp_dir: Some(agent_temp_dir.path().to_path_buf()),
         ..Config::default()
     };
     // A manager (for setup) and a service (under test) share the same
     // config/state stores, so the service resolves the session the manager
-    // creates and both drive the same isolated tmux server.
+    // creates and both drive the same isolated tmux server. The helper pins
+    // `agent_temp_dir` under `state_temp_dir`, which is what keeps the
+    // paste-image write — and the store's prune, which *deletes* files — off
+    // the real /tmp.
     let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let agent_temp_dir = config_store
+        .read()
+        .agent_temp_dir
+        .clone()
+        .expect("the helper pins the agent temp dir");
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config_store.clone(), store.clone(), "");
     let service = CommanderService::new(
@@ -2034,7 +2064,7 @@ async fn test_paste_image_writes_file_and_injects_path() {
     // paste-images base (a TempDir here; the OS temp dir in production).
     assert!(path.exists(), "written image path should exist: {path:?}");
     assert_eq!(std::fs::read(&path).unwrap(), TINY_PNG);
-    assert!(path.starts_with(agent_temp_dir.path().join("paste-images")));
+    assert!(path.starts_with(agent_temp_dir.join("paste-images")));
 
     // (b) The path was typed into the pane (send-keys -l). Retry a few times to
     // absorb the tiny delay between finalize and the pane accepting input. Strip
