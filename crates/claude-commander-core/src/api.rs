@@ -634,19 +634,9 @@ impl CommanderService {
             .await?
             .ok_or_else(|| SessionError::TmuxSessionNotFound(query.to_string()))?;
 
-        // Store under the OS temp dir, not the data dir: the temp dir is
-        // space-free on every platform (macOS's data dir under `~/Library/
-        // Application Support/…` contains spaces, which the CLI would mis-parse
-        // in an unquoted injected path), and it's the same location
-        // `write_apply_brief` uses for comment-apply briefs — proven readable by
-        // the agent without a permission prompt. Tests override the base via
-        // `paste_images_dir` to keep writes (and the store's prune) off the real
-        // `/tmp`, per the repo's test-isolation rule.
-        let base = self
-            .read_config()
-            .paste_images_dir
-            .unwrap_or_else(std::env::temp_dir);
-        let store = crate::paste_image::PasteImageStore::new(&base);
+        // Store under the agent temp dir (see `Self::agent_temp_dir`), the same
+        // base comment-apply briefs use.
+        let store = crate::paste_image::PasteImageStore::new(&self.agent_temp_dir());
         let path = store.store(bytes)?;
 
         // Inject the path with `send-keys -l` (no Enter). Unlike automated
@@ -666,6 +656,21 @@ impl CommanderService {
         self.telemetry.feature("paste_image");
         debug!("pasted image for session {} -> {}", query, path.display());
         Ok(path)
+    }
+
+    /// Base directory for the temp files handed to the agent by path (pasted
+    /// images, comment-apply briefs).
+    ///
+    /// The OS temp dir, not the data dir: it is space-free on every platform
+    /// (macOS's data dir under `~/Library/Application Support/…` contains
+    /// spaces, which the CLI would mis-parse in an unquoted injected path), and
+    /// it is proven readable by the agent without a permission prompt. Tests
+    /// override it via [`Config::agent_temp_dir`] to keep writes (and the paste
+    /// store's prune) off the real `/tmp`, per the repo's test-isolation rule.
+    fn agent_temp_dir(&self) -> PathBuf {
+        self.read_config()
+            .agent_temp_dir
+            .unwrap_or_else(std::env::temp_dir)
     }
 
     pub async fn check_tmux(&self) -> Result<()> {
@@ -1522,7 +1527,12 @@ impl CommanderService {
         }
 
         // Compose the brief to an absolute temp path outside the worktree.
-        let path = write_apply_brief(*session_id, &compose_markdown(&title, &staged)).await?;
+        let path = write_apply_brief(
+            &self.agent_temp_dir(),
+            *session_id,
+            &compose_markdown(&title, &staged),
+        )
+        .await?;
         let count = staged.len();
 
         if !is_active {
@@ -2640,14 +2650,28 @@ fn poll_tick_should_send(
     !states_empty || commander_running != last_commander_running
 }
 
-/// Write the apply brief to a stable absolute path in the system temp dir
-/// (outside the worktree, so it's never committed). One file per session,
-/// overwritten on re-apply.
-async fn write_apply_brief(session_id: SessionId, markdown: &str) -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("cc-comments-{}.md", session_id.as_uuid()));
+/// Write the apply brief to a fresh absolute path under `base` (the OS temp
+/// dir in normal use, so it's outside the worktree and never committed).
+///
+/// The name carries the session id for legibility **and a per-apply UUID for
+/// uniqueness**: the path used to be session-stable and overwritten on
+/// re-apply, which lost the earlier batch whenever a second Apply landed before
+/// the agent opened the first file — and those comments were already marked
+/// `Applied`, so nothing brought them back. A brief must therefore outlive the
+/// next Apply. The cost is one small file per Apply left for the OS temp
+/// sweeper; deliberately not pruned here, since the only file a prune could
+/// safely target is exactly the unread brief this uniqueness exists to keep.
+async fn write_apply_brief(base: &Path, session_id: SessionId, markdown: &str) -> Result<PathBuf> {
+    let path = base.join(format!(
+        "cc-comments-{}-{}.md",
+        session_id.as_uuid(),
+        Uuid::new_v4()
+    ));
+    let save_failed = |e: std::io::Error| crate::error::ConfigError::SaveFailed(e.to_string());
+    tokio::fs::create_dir_all(base).await.map_err(save_failed)?;
     tokio::fs::write(&path, markdown)
         .await
-        .map_err(|e| crate::error::ConfigError::SaveFailed(e.to_string()))?;
+        .map_err(save_failed)?;
     Ok(path)
 }
 
@@ -3566,6 +3590,9 @@ mod tests {
         // repo-clone paths write into. Pin it so no service built here can
         // clone outside the temp tree.
         config.projects_dir = Some(dir.path().join("projects"));
+        // Same for the agent temp files (apply briefs, pasted images), which
+        // otherwise land in the real `/tmp`.
+        config.agent_temp_dir = Some(dir.path().join("agent-temp"));
         let config_store = Arc::new(ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),
@@ -3961,6 +3988,64 @@ mod tests {
                 .map(|c| c.id)
                 .collect::<Vec<_>>(),
             vec![orphan]
+        );
+    }
+
+    /// Regression: the brief used to be written to one path per *session*
+    /// (`cc-comments-<session>.md`) and overwritten on every Apply, so a second
+    /// Apply before the agent had opened the first file replaced its contents —
+    /// the first batch of comments was silently lost (and, once delivered, they
+    /// were already marked Applied, so nothing brought them back). Each Apply
+    /// must leave its own brief on disk, untouched by the next one.
+    #[tokio::test]
+    async fn each_apply_writes_its_own_brief_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+
+        let comment = async |text: &str| {
+            svc.create_comment(
+                &sid,
+                NewComment {
+                    file: "changed.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "two".to_string(),
+                    comment: text.to_string(),
+                },
+            )
+            .await
+            .unwrap()
+        };
+        let apply = async || match svc.apply_comments(&sid).await.unwrap() {
+            ApplyOutcome::Deferred { path, .. } => path,
+            other => panic!("expected Deferred, got {other:?}"),
+        };
+
+        comment("first note").await;
+        let first = apply().await;
+        comment("second note").await;
+        let second = apply().await;
+
+        assert_ne!(
+            first, second,
+            "a second Apply must not reuse the first brief's path"
+        );
+        assert!(
+            first.starts_with(dir.path()),
+            "briefs must honour the pinned `agent_temp_dir`, not the real /tmp (got {first:?})"
+        );
+        let first_md = std::fs::read_to_string(&first)
+            .expect("the first brief must survive a second Apply, unread or not");
+        assert!(
+            first_md.contains("first note"),
+            "the first brief must keep its own comments, got: {first_md}"
+        );
+        assert!(
+            std::fs::read_to_string(&second)
+                .unwrap()
+                .contains("second note"),
+            "the second brief must carry the newly staged comment"
         );
     }
 

@@ -1987,12 +1987,13 @@ async fn test_paste_image_writes_file_and_injects_path() {
     let (repo_temp_dir, repo_path) = create_test_repo().await;
     let state_temp_dir = TempDir::new().unwrap();
     let worktrees_dir = TempDir::new().unwrap();
-    // Redirect paste-image writes (and the store's prune) into a TempDir instead
-    // of the real /tmp/paste-images, per the repo's test-isolation rule.
-    let paste_dir = TempDir::new().unwrap();
+    // Redirect the agent's temp files — paste-image writes (and the store's
+    // prune) and comment-apply briefs — into a TempDir instead of the real
+    // /tmp, per the repo's test-isolation rule.
+    let agent_temp_dir = TempDir::new().unwrap();
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
-        paste_images_dir: Some(paste_dir.path().to_path_buf()),
+        agent_temp_dir: Some(agent_temp_dir.path().to_path_buf()),
         ..Config::default()
     };
     // A manager (for setup) and a service (under test) share the same
@@ -2033,7 +2034,7 @@ async fn test_paste_image_writes_file_and_injects_path() {
     // paste-images base (a TempDir here; the OS temp dir in production).
     assert!(path.exists(), "written image path should exist: {path:?}");
     assert_eq!(std::fs::read(&path).unwrap(), TINY_PNG);
-    assert!(path.starts_with(paste_dir.path().join("paste-images")));
+    assert!(path.starts_with(agent_temp_dir.path().join("paste-images")));
 
     // (b) The path was typed into the pane (send-keys -l). Retry a few times to
     // absorb the tiny delay between finalize and the pane accepting input. Strip
