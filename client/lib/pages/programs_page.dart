@@ -161,9 +161,13 @@ class _ProgramsPageState extends State<ProgramsPage> {
     return ReorderableListView.builder(
       padding: const EdgeInsets.only(bottom: 88),
       itemCount: rows.length,
-      onReorder: (from, to) {
+      // `onReorderItem`, not the deprecated `onReorder`: it hands over a
+      // `to` already decremented for the item removed at `from`, and is only
+      // called when the two still differ after that adjustment
+      // (flutter/lib/src/widgets/reorderable_list.dart:1016-1030). So the
+      // caller no longer compensates.
+      onReorderItem: (from, to) {
         setState(() {
-          if (to > from) to -= 1;
           final r = rows.removeAt(from);
           rows.insert(to, r);
         });

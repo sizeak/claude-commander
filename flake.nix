@@ -16,7 +16,7 @@
   outputs = { self, nixpkgs, crane, flake-utils, fenix }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        pkgs = import nixpkgs { inherit system; };
         craneLib = crane.mkLib pkgs;
 
         # `src` is the package derivation's only source input: Nix hashes the

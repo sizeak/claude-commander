@@ -60,6 +60,9 @@ assert_fails() {
 
 echo "== cc_crate_for_alias =="
 assert_eq "claude-commander-core" "$(cc_crate_for_alias core)" "core -> claude-commander-core"
+assert_eq "claude-commander-tui" "$(cc_crate_for_alias tui)" "tui -> claude-commander-tui"
+assert_eq "claude-commander-viewmodel" "$(cc_crate_for_alias viewmodel)" "viewmodel -> claude-commander-viewmodel"
+assert_eq "claude-commander-viewmodel" "$(cc_crate_for_alias vm)" "vm -> claude-commander-viewmodel"
 assert_eq "claude-commander" "$(cc_crate_for_alias cli)" "cli -> claude-commander"
 assert_eq "claude-commander" "$(cc_crate_for_alias commander)" "commander -> claude-commander"
 assert_eq "claude-commander-server" "$(cc_crate_for_alias server)" "server -> claude-commander-server"

@@ -190,10 +190,10 @@ impl Board {
             .collect()
     }
 
-    /// Selectable-row counts per addressable column, for
-    /// [`BoardState::sync`](crate::tui::widgets::board::BoardState::sync):
-    /// `counts[0]` is the sidebar project count, `counts[1..]` each section
-    /// column's flattened Worktree-row count.
+    /// Selectable-row counts per addressable column, consumed by the TUI's
+    /// `widgets::board::BoardState::sync` (plain text, not an intra-doc link —
+    /// that crate is downstream of core): `counts[0]` is the sidebar project
+    /// count, `counts[1..]` each section column's flattened Worktree-row count.
     pub fn selectable_row_counts(&self) -> Vec<usize> {
         std::iter::once(self.projects.len())
             .chain(self.columns.iter().map(|column| column.cards.len()))
@@ -555,7 +555,7 @@ fn attention_tier(item: &SessionListItem) -> u8 {
 /// stacked children follow their root in parent→child order at the single
 /// deeper indent. Generic over [`SessionNode`] so both persisted sessions and
 /// wire DTOs order identically.
-pub(crate) fn build_session_order<S: SessionNode>(sessions: &[&S]) -> Vec<(SessionId, bool)> {
+pub fn build_session_order<S: SessionNode>(sessions: &[&S]) -> Vec<(SessionId, bool)> {
     let mut root_sessions: Vec<&S> = Vec::new();
     let mut children_by_parent: HashMap<SessionId, Vec<&S>> = HashMap::new();
     for s in sessions {
@@ -599,7 +599,7 @@ pub(crate) fn build_session_order<S: SessionNode>(sessions: &[&S]) -> Vec<(Sessi
 
 /// Build a [`SessionListItem::Worktree`] row for a session DTO, optionally
 /// prefixing the title with a project name and flagging it as a stacked child.
-pub(crate) fn worktree_item(
+pub fn worktree_item(
     session: &SessionInfo,
     agent_states: &BTreeMap<SessionId, AgentState>,
     project_name_prefix: Option<&str>,
@@ -641,7 +641,7 @@ pub(crate) fn worktree_item(
 /// `SectionConfig::max_sessions` for user-defined sections, the top-level
 /// `in_progress_limit` for the implicit "In Progress" catch-all, or `None` when
 /// no limit is configured.
-pub(crate) fn resolve_section_limit(
+pub fn resolve_section_limit(
     name: &str,
     sections: &[SectionConfig],
     in_progress_limit: Option<u32>,
@@ -705,7 +705,7 @@ mod tests {
         for s in &sessions {
             project_titles
                 .entry(s.project_id)
-                .or_insert_with(|| format!("p-{}", &s.project_id.to_string()));
+                .or_insert_with(|| format!("p-{}", s.project_id));
         }
         let mut projects: Vec<ProjectInfo> = project_titles
             .into_iter()

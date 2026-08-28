@@ -83,11 +83,12 @@ pub fn test_state(data_dir: &TempDir, worktrees_dir: &TempDir) -> AppState {
     let mut config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         tmux_tmpdir: Some(tmux_tmpdir),
-        // Keep pasted-image writes — and the store's prune, which *deletes*
-        // files in this directory — under `data_dir` rather than the real OS
-        // temp dir. Without this, any suite exercising the paste-image route
-        // would litter (and prune) `/tmp/paste-images` on the developer's box.
-        paste_images_dir: Some(data_dir.path().join("paste")),
+        // Keep the temp files handed to the agent — pasted images (whose store
+        // *prunes*, i.e. deletes, files in this directory) and comment-apply
+        // briefs — under `data_dir` rather than the real OS temp dir. Without
+        // this, any suite exercising the paste-image route or Apply would litter
+        // (and prune) the developer's `/tmp`.
+        agent_temp_dir: Some(data_dir.path().join("agent-temp")),
         // And the same for cloned repositories, where the default is the user's
         // REAL `~/Projects`: a suite exercising the clone routes would check
         // repositories out into the developer's own projects directory.

@@ -765,6 +765,7 @@ dependencies = [
  "clap",
  "claude-commander-core",
  "claude-commander-remote",
+ "claude-commander-tui",
  "color-eyre",
  "nix 0.31.3",
  "serde_json",
@@ -795,13 +796,12 @@ dependencies = [
 name = "claude-commander-core"
 version = "0.35.0"
 dependencies = [
- "ansi-to-tui",
  "anyhow",
  "arboard",
  "async-trait",
  "chrono",
  "claude-commander-protocol",
- "color-eyre",
+ "claude-commander-viewmodel",
  "cpal",
  "crossterm",
  "diffgrid",
@@ -809,37 +809,26 @@ dependencies = [
  "figment",
  "filetime",
  "futures",
- "fuzzy-matcher",
  "gix",
  "hound",
  "image",
- "insta",
  "nix 0.31.3",
  "pretty_assertions",
  "proptest",
  "pty-process",
- "ratatui",
- "ratatui-image",
- "rayon",
+ "ratatui-core",
  "regex",
  "reqwest",
  "rodio",
  "serde",
  "serde_json",
- "syntect",
  "tempfile",
  "thiserror 2.0.18",
- "throbber-widgets-tui",
  "tokio",
  "tokio-test",
  "toml 1.1.2+spec-1.1.0",
  "toml_edit 0.25.12+spec-1.1.0",
  "tracing",
- "tracing-subscriber",
- "tui-input",
- "two-face",
- "unicode-segmentation",
- "unicode-width",
  "url",
  "uuid",
  "xxhash-rust",
@@ -906,6 +895,49 @@ dependencies = [
  "claude-commander-server",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "claude-commander-tui"
+version = "0.35.0"
+dependencies = [
+ "ansi-to-tui",
+ "chrono",
+ "claude-commander-core",
+ "claude-commander-protocol",
+ "claude-commander-viewmodel",
+ "crossterm",
+ "diffgrid",
+ "directories",
+ "futures",
+ "image",
+ "insta",
+ "nix 0.31.3",
+ "ratatui",
+ "ratatui-image",
+ "rayon",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tempfile",
+ "thiserror 2.0.18",
+ "throbber-widgets-tui",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tui-input",
+ "two-face",
+ "unicode-segmentation",
+ "unicode-width",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "claude-commander-viewmodel"
+version = "0.35.0"
+dependencies = [
+ "fuzzy-matcher",
 ]
 
 [[package]]

@@ -1,0 +1,5 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+expression: terminal.backend()
+---
+"Created session abc12345                                                                                                "

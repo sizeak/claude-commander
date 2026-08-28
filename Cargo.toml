@@ -11,6 +11,8 @@ exclude = ["client"]
 # never compile the server crate's web stack (axum/tower/hyper).
 default-members = [
     "crates/claude-commander-core",
+    "crates/claude-commander-viewmodel",
+    "crates/claude-commander-tui",
     "crates/claude-commander",
     "crates/claude-commander-remote",
     "crates/claude-commander-client",

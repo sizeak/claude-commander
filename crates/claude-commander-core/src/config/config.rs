@@ -157,13 +157,19 @@ pub struct Config {
     /// `TMUX_TMPDIR`). `None` touches the environment not at all.
     pub tmux_tmpdir: Option<PathBuf>,
 
-    /// Base directory for pasted-image temp files (remote image paste). `None`
+    /// Base directory for the temp files commander hands to the agent by path:
+    /// pasted images (remote image paste) and comment-apply briefs. `None`
     /// (normal use) means the OS temp dir, which is space-free on every platform
-    /// and readable by the agent. Set only by hermetic tests to redirect writes
-    /// (and the store's prune) into a `TempDir` instead of the real `/tmp`, per
-    /// the repo's test-isolation rule.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paste_images_dir: Option<PathBuf>,
+    /// and readable by the agent without a permission prompt. Set only by
+    /// hermetic tests to redirect those writes (and the paste store's prune)
+    /// into a `TempDir` instead of the real `/tmp`, per the repo's
+    /// test-isolation rule.
+    #[serde(
+        default,
+        alias = "paste_images_dir",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_temp_dir: Option<PathBuf>,
 
     /// Organize worktrees into per-repository subdirectories
     pub per_repo_worktree_dirs: bool,
@@ -552,7 +558,7 @@ impl Default for Config {
             clone_timeout_secs: default_clone_timeout_secs(),
             repo_list_timeout_secs: default_repo_list_timeout_secs(),
             tmux_tmpdir: None,
-            paste_images_dir: None,
+            agent_temp_dir: None,
             per_repo_worktree_dirs: false,
             editor: None,
             editor_gui: None,
@@ -1626,6 +1632,18 @@ show_session_program = false
             claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
         );
         assert!(config.projects_dir.is_none());
+    }
+
+    /// `agent_temp_dir` was once `paste_images_dir` (it now also holds the
+    /// comment-apply briefs). `config.toml` is never rewritten, so the old
+    /// spelling is permanently load-bearing and must keep resolving to the same
+    /// field.
+    #[test]
+    fn agent_temp_dir_accepts_its_former_name() {
+        let renamed: Config = toml::from_str("agent_temp_dir = \"/tmp/cc\"\n").unwrap();
+        let legacy: Config = toml::from_str("paste_images_dir = \"/tmp/cc\"\n").unwrap();
+        assert_eq!(renamed.agent_temp_dir, Some(PathBuf::from("/tmp/cc")));
+        assert_eq!(legacy.agent_temp_dir, renamed.agent_temp_dir);
     }
 
     /// A user who sets the knob gets their value, not the default — the whole

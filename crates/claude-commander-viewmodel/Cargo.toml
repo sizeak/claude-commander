@@ -1,0 +1,30 @@
+[package]
+name = "claude-commander-viewmodel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure client-side decisions over a workspace snapshot, shared by every Claude Commander frontend"
+
+# Only the `claude-commander` bin crate drives the release (single shared tag).
+[package.metadata.release]
+release = false
+
+[lib]
+name = "claude_commander_viewmodel"
+path = "src/lib.rs"
+
+# The defining constraint of this crate is what is NOT here. Every dependency
+# below is pure Rust and cross-compiles to mobile, because the Flutter client's
+# cdylib links this crate directly. Nothing that needs a terminal, a filesystem,
+# a subprocess or a socket may be added — that belongs in `claude-commander-core`
+# or in a frontend. A reviewer can check the rule by reading this block alone.
+[dependencies]
+# Skim-style subsequence scoring for the palette and session search.
+#
+# Deliberately the ONLY dependency for now. `claude-commander-protocol` will be
+# needed as soon as a slice lands that reasons about a DTO (`SessionStatus`, say),
+# but an unused dependency is cruft cargo will not warn about, so it is added when
+# a slice earns it rather than up front.
+fuzzy-matcher = "0.3"

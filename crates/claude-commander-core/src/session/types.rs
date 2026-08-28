@@ -343,14 +343,7 @@ impl WorktreeSession {
     /// Best fuzzy score across title, branch, and program — or `None` if
     /// no field matches. Used by the palette to rank results.
     pub fn fuzzy_score(&self, query: &str) -> Option<i64> {
-        [
-            self.title.as_str(),
-            self.branch.as_str(),
-            self.program.as_str(),
-        ]
-        .iter()
-        .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
-        .max()
+        claude_commander_viewmodel::session_score(&self.title, &self.branch, &self.program, query)
     }
 
     /// The instant from which this session has held its current branch name:
@@ -910,7 +903,7 @@ mod tests {
             PathBuf::from("/tmp"),
             "claude",
         );
-        let title_only = crate::fuzzy::fuzzy_score("payments", "payments").unwrap();
+        let title_only = claude_commander_viewmodel::fuzzy_score("payments", "payments").unwrap();
         let combined = session.fuzzy_score("payments").unwrap();
         assert_eq!(combined, title_only);
     }

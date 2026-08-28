@@ -7,12 +7,12 @@
 use std::fmt;
 
 use diffgrid::style::Appearance;
-use ratatui::style::Color;
+use ratatui_core::style::Color;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // ---------------------------------------------------------------------------
-// ColorValue — a serde-friendly wrapper around ratatui::style::Color
+// ColorValue — a serde-friendly wrapper around ratatui_core::style::Color
 // ---------------------------------------------------------------------------
 
 /// A user-facing color value that deserializes from:
@@ -393,7 +393,7 @@ mod tests {
     // ---- ColorValue deserialization -----------------------------------------
 
     /// Helper wrapper so we can test ColorValue via TOML key = value pairs
-    #[derive(Deserialize)]
+    #[derive(Deserialize, Serialize)]
     struct Wrap {
         c: ColorValue,
     }
@@ -426,6 +426,49 @@ mod tests {
     #[test]
     fn test_color_value_reset() {
         assert_eq!(parse_color("\"reset\"").0, Color::Reset);
+    }
+
+    /// Every form a `[theme]` value may take, pinned in one place with its
+    /// serialized spelling.
+    ///
+    /// `config.toml` is never rewritten, so each of these four forms is
+    /// permanently load-bearing: a user's file written years ago must still
+    /// parse. `ColorValue`'s `Serialize`/`Deserialize` are hand-written over a
+    /// `Color` owned by an external crate, which makes them exactly the kind of
+    /// thing a dependency swap can silently change — this asserts round-trip
+    /// stability so such a change fails loudly instead.
+    ///
+    /// The parse side is covered per-form above; what this adds is the
+    /// *serialize* direction (notably `Reset`, which no other round-trip test
+    /// reaches) and proof that parse and serialize agree.
+    #[test]
+    fn test_color_value_all_config_forms_roundtrip() {
+        // (TOML literal as it may appear in config.toml, parsed Color)
+        let cases = [
+            ("\"reset\"", Color::Reset),
+            ("\"dark_gray\"", Color::DarkGray),
+            ("117", Color::Indexed(117)),
+            ("\"#89b4fa\"", Color::Rgb(137, 180, 250)),
+        ];
+        for (literal, expected) in cases {
+            let parsed = parse_color(literal);
+            assert_eq!(parsed.0, expected, "parsing {literal}");
+
+            // Serializing must reproduce the same TOML literal, so a rewritten
+            // value re-parses identically.
+            let emitted = toml::to_string(&Wrap { c: parsed }).expect("serialize");
+            let emitted_value = emitted
+                .trim()
+                .strip_prefix("c = ")
+                .unwrap_or_else(|| panic!("unexpected TOML shape: {emitted:?}"))
+                .to_string();
+            assert_eq!(emitted_value, literal, "serializing {expected:?}");
+            assert_eq!(
+                parse_color(&emitted_value).0,
+                expected,
+                "re-parsing {emitted_value}"
+            );
+        }
     }
 
     // ---- AgentWorkingStyle deserialization ----------------------------------

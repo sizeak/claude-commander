@@ -1,0 +1,136 @@
+[package]
+name = "claude-commander-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ratatui terminal frontend for claude-commander"
+keywords = ["claude", "ai", "terminal", "tui", "tmux"]
+categories = ["command-line-utilities", "development-tools"]
+
+# Only the `claude-commander` bin crate drives the release (single shared tag).
+# Without this, cargo-release would try to create the same `vX.Y.Z` tag once per
+# member and the second attempt fails.
+[package.metadata.release]
+release = false
+
+[lib]
+name = "claude_commander_tui"
+path = "src/lib.rs"
+
+[dependencies]
+# The library this frontend renders. Default features stay ON here (unlike the
+# server/remote/client, which take core with `default-features = false`): this
+# IS the desktop frontend, so it is the consumer that genuinely wants core's
+# `audio` (mic/speaker for conversation mode) and `clipboard` (Ctrl+V paste).
+claude-commander-core = { path = "../claude-commander-core" }
+# The wire contracts, taken directly rather than through core's legacy DTO
+# re-exports. Per CLAUDE.md a shared *rule* lives in protocol, not core — the
+# add-project-from-GitHub flow uses its `github` slug validation and
+# `redact_credentials` so the TUI enforces the same contract the server does.
+claude-commander-protocol = { path = "../claude-commander-protocol" }
+# Session/palette matching, shared with the Flutter client so both frontends rank
+# a session list identically.
+claude-commander-viewmodel = { path = "../claude-commander-viewmodel" }
+
+# Terminal rendering. Core depends on `ratatui-core` only, for the `Color` in
+# `[theme]` config values — full ratatui (widgets, layout, backends) lives here.
+ratatui = "0.30"
+# `event-stream` is needed for the async `EventStream` the event loop selects on.
+# Core keeps plain crossterm (persisted `KeyCode`/`KeyModifiers` in the keybinding
+# map) but not this feature.
+crossterm = { version = "0.29", features = ["event-stream"] }
+# Text-input buffer (cursor/editing) for the review comment box and modals.
+tui-input = "0.15"
+# Renders a captured tmux pane's ANSI into ratatui `Text` for the preview pane.
+ansi-to-tui = "8"
+
+# The diff view-model and layout engine the review view renders through.
+#
+# The `rev` MUST stay identical to core's (and to `client/rust`'s — see #270).
+# Core's `Config.theme` embeds a `diffgrid::style::Appearance`, so two different
+# revs would make that two distinct types and this crate would stop type-checking
+# against core. Same hazard as the `ratatui`/`ratatui-core` pairing: a loud
+# compile error rather than silent breakage, but bump all three together.
+diffgrid = { git = "https://github.com/sizeak/diffgrid", rev = "83698a53458868c7c691d89dbb21e89fbc905afa" }
+
+# Column-accurate width and grapheme-safe slicing for the review view's own
+# width math (`chars().count()` is not a column count, and `chars().take(n)` can
+# split a combining sequence). Any width arithmetic outside `diffgrid` uses these.
+unicode-width = "0.2"
+unicode-segmentation = "1.13"
+
+# Content-hashes the laid-out review diff so a re-compose can tell "unchanged"
+# from "changed" without diffing the model.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Syntax highlighting for the review diff view (fancy-regex backend — pure
+# Rust, no C/oniguruma dependency). `two-face` supplies an extended syntax set
+# (the bat language set, incl. TypeScript/TSX/TOML/…) that syntect's bundled
+# defaults lack.
+syntect = { version = "5.3", default-features = false, features = [
+    "default-fancy",
+] }
+two-face = { version = "0.5", default-features = false, features = [
+    "syntect-fancy",
+] }
+
+# Throbber/spinner widget
+throbber-widgets-tui = "0.11"
+
+# Parallel syntax highlighting of the review diff's lines.
+rayon = "1.12.0"
+
+# Inline image rendering (pasted screenshots in the review view). Default
+# features include `chafa-dyn`, which needs the chafa C lib via pkg-config; we
+# only need the built-in protocols + crossterm integration.
+ratatui-image = { version = "11.0.6", default-features = false, features = [
+    "crossterm",
+    "image-defaults",
+] }
+image = "0.25"
+
+# Async runtime (background fetches, the event loop) + stream combinators.
+tokio = { workspace = true }
+futures = "0.3"
+
+# Serialization: `tui.json` prefs (serde/serde_json) and the settings modal's
+# round-trip of a `[theme]` colour value through TOML (toml).
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "1.1"
+
+# Timestamps rendered in the session list and the Alt+Tab picker.
+chrono = { version = "0.4", features = ["serde"] }
+# Comment ids in the review view.
+uuid = { version = "1.23", features = ["v4", "serde"] }
+
+# `~` expansion in the path-completion widget.
+directories = "6.0"
+# `flock` for the `tui.json` write lock.
+nix = { version = "0.31", features = ["fs"] }
+
+# This crate's own error enum (`TuiError`). Core's error hierarchy no longer has
+# a TUI variant, so terminal failures are typed here.
+thiserror = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Re-state core with `test-support` to reach its test scaffolding
+# (`backend::mock::MockBackend`, `api::workspace_snapshot_from_state`), which is
+# `#[cfg(test)]`-gated in core and therefore invisible across the crate boundary.
+# Being a dev-dependency, the feature is active for `cargo test` only — a plain
+# `cargo build` of this crate still gets core without it.
+claude-commander-core = { path = "../claude-commander-core", features = [
+    "test-support",
+] }
+# Temp directories for the prefs / path-completer tests.
+tempfile = "3.27"
+# Snapshot testing of rendered output (`src/render_tests.rs` and the board's
+# render tests), via ratatui's `TestBackend`. This belongs to the frontend crate:
+# core has nothing to render, which is why the dependency did not follow it.
+# `cargo insta review` to accept/update.
+insta = "1.48"

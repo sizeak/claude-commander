@@ -32,6 +32,12 @@ flutter_rust_bridge = { version = "=2.11.1", features = ["chrono", "uuid"] }
 # responses into these exact types, so drift fails loudly in Rust. The mirrors
 # in `api::mirrors` re-export these for flutter_rust_bridge.
 claude-commander-protocol = { path = "../../crates/claude-commander-protocol" }
+# Session matching/ranking, shared with the TUI so both frontends rank a session
+# list identically — the Dart port of this had drifted from the Rust original.
+# Its whole dependency tree is `fuzzy-matcher` (pure Rust), so it is safe for the
+# mobile cross-build, and it does NOT depend on `claude-commander-core`, so the
+# no-core rule for this crate still holds.
+claude-commander-viewmodel = { path = "../../crates/claude-commander-viewmodel" }
 # The pure HTTP + WebSocket transport (RemoteClient + Poller + attach). The
 # cdylib now drives this instead of hand-rolling reqwest/tungstenite, so the
 # whole server surface reaches Dart through one wrapped, opaque per-server handle.

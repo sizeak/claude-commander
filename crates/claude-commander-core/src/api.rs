@@ -32,13 +32,13 @@ use crate::git::{
 };
 use crate::reviewed::ReviewedStore;
 use crate::session::{
-    AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus,
-    WorktreeSession, apply_assignment, clear_override_and_reassign, decide_branch_reconcile,
-    program_with_agent_flags,
+    AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionLookup, SessionManager,
+    SessionStatus, WorktreeSession, apply_assignment, clear_override_and_reassign,
+    decide_branch_reconcile, find_session, find_session_exact, program_with_agent_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
+use crate::term_caps::ColorMode;
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
-use crate::tui::theme::Theme;
 
 /// High-level service that wraps `SessionManager`, state stores, and agent
 /// detection into a single entry point. Both the CLI and TUI route through
@@ -124,7 +124,7 @@ impl CommanderService {
         let manager = SessionManager::new(
             config_store.clone(),
             store.clone(),
-            Theme::default().tmux_status_style(),
+            ColorMode::detect().tmux_status_style(),
         );
         // Comments and reviewed marks live beside state.json under the same
         // data dir the `StateStore` resolved — *not* a freshly recomputed
@@ -441,22 +441,19 @@ impl CommanderService {
     /// Resolve a session by an *exact* title or full ID, surfacing ambiguity
     /// rather than picking arbitrarily. Used by destructive commands where a
     /// loose prefix match could act on the wrong session.
-    pub async fn find_session_exact(
-        &self,
-        query: &str,
-    ) -> Result<crate::cli::SessionLookup<SessionInfo>> {
+    pub async fn find_session_exact(&self, query: &str) -> Result<SessionLookup<SessionInfo>> {
         let state = self.store.read().await;
-        Ok(match crate::cli::find_session_exact(&state, query) {
-            crate::cli::SessionLookup::Found(session) => {
+        Ok(match find_session_exact(&state, query) {
+            SessionLookup::Found(session) => {
                 let project_name = state
                     .projects
                     .get(&session.project_id)
                     .map(|p| p.name.as_str())
                     .unwrap_or("unknown");
-                crate::cli::SessionLookup::Found(session_info_from_session(session, project_name))
+                SessionLookup::Found(session_info_from_session(session, project_name))
             }
-            crate::cli::SessionLookup::NotFound => crate::cli::SessionLookup::NotFound,
-            crate::cli::SessionLookup::Ambiguous(n) => crate::cli::SessionLookup::Ambiguous(n),
+            SessionLookup::NotFound => SessionLookup::NotFound,
+            SessionLookup::Ambiguous(n) => SessionLookup::Ambiguous(n),
         })
     }
 
@@ -467,7 +464,7 @@ impl CommanderService {
     ) -> Result<Option<SessionDetail>> {
         let (found, project_name) = {
             let state = self.store.read().await;
-            let Some(session) = crate::cli::find_session(&state, query) else {
+            let Some(session) = find_session(&state, query) else {
                 return Ok(None);
             };
             let pname = state
@@ -504,7 +501,7 @@ impl CommanderService {
         };
 
         let pane_content = if found.status.is_active() && lines.is_some() {
-            let n = lines.map(crate::cli::clamp_log_lines);
+            let n = lines.map(clamp_log_lines);
             capture_pane(&self.manager.tmux, &found.tmux_session_name, n).await?
         } else {
             None
@@ -524,13 +521,13 @@ impl CommanderService {
         lines: Option<usize>,
     ) -> Result<Option<String>> {
         let state = self.store.read().await;
-        let Some(session) = crate::cli::find_session(&state, query) else {
+        let Some(session) = find_session(&state, query) else {
             return Ok(None);
         };
         let tmux_name = session.tmux_session_name.clone();
         drop(state);
 
-        let n = lines.map(crate::cli::clamp_log_lines);
+        let n = lines.map(clamp_log_lines);
         capture_pane(&self.manager.tmux, &tmux_name, n).await
     }
 
@@ -540,7 +537,7 @@ impl CommanderService {
     /// session, reusing the same `find_session` matching the CLI/HTTP API use.
     pub async fn resolve_tmux_session(&self, query: &str) -> Result<Option<String>> {
         let state = self.store.read().await;
-        Ok(crate::cli::find_session(&state, query).map(|s| s.tmux_session_name.clone()))
+        Ok(find_session(&state, query).map(|s| s.tmux_session_name.clone()))
     }
 
     /// Resolve a session query to its **shell** pane's tmux session name,
@@ -553,7 +550,7 @@ impl CommanderService {
     pub async fn resolve_shell_tmux_session(&self, query: &str) -> Result<Option<String>> {
         let session_id = {
             let state = self.store.read().await;
-            crate::cli::find_session(&state, query).map(|s| s.id)
+            find_session(&state, query).map(|s| s.id)
         };
         match session_id {
             Some(id) => Ok(Some(self.manager.ensure_shell_session(&id).await?)),
@@ -576,7 +573,7 @@ impl CommanderService {
     ) -> Result<Option<String>> {
         let session_id = {
             let state = self.store.read().await;
-            crate::cli::find_session(&state, query).map(|s| s.id)
+            find_session(&state, query).map(|s| s.id)
         };
         let Some(id) = session_id else {
             return Ok(None);
@@ -637,19 +634,9 @@ impl CommanderService {
             .await?
             .ok_or_else(|| SessionError::TmuxSessionNotFound(query.to_string()))?;
 
-        // Store under the OS temp dir, not the data dir: the temp dir is
-        // space-free on every platform (macOS's data dir under `~/Library/
-        // Application Support/…` contains spaces, which the CLI would mis-parse
-        // in an unquoted injected path), and it's the same location
-        // `write_apply_brief` uses for comment-apply briefs — proven readable by
-        // the agent without a permission prompt. Tests override the base via
-        // `paste_images_dir` to keep writes (and the store's prune) off the real
-        // `/tmp`, per the repo's test-isolation rule.
-        let base = self
-            .read_config()
-            .paste_images_dir
-            .unwrap_or_else(std::env::temp_dir);
-        let store = crate::paste_image::PasteImageStore::new(&base);
+        // Store under the agent temp dir (see `Self::agent_temp_dir`), the same
+        // base comment-apply briefs use.
+        let store = crate::paste_image::PasteImageStore::new(&self.agent_temp_dir());
         let path = store.store(bytes)?;
 
         // Inject the path with `send-keys -l` (no Enter). Unlike automated
@@ -669,6 +656,21 @@ impl CommanderService {
         self.telemetry.feature("paste_image");
         debug!("pasted image for session {} -> {}", query, path.display());
         Ok(path)
+    }
+
+    /// Base directory for the temp files handed to the agent by path (pasted
+    /// images, comment-apply briefs).
+    ///
+    /// The OS temp dir, not the data dir: it is space-free on every platform
+    /// (macOS's data dir under `~/Library/Application Support/…` contains
+    /// spaces, which the CLI would mis-parse in an unquoted injected path), and
+    /// it is proven readable by the agent without a permission prompt. Tests
+    /// override it via [`Config::agent_temp_dir`] to keep writes (and the paste
+    /// store's prune) off the real `/tmp`, per the repo's test-isolation rule.
+    fn agent_temp_dir(&self) -> PathBuf {
+        self.read_config()
+            .agent_temp_dir
+            .unwrap_or_else(std::env::temp_dir)
     }
 
     pub async fn check_tmux(&self) -> Result<()> {
@@ -1525,7 +1527,12 @@ impl CommanderService {
         }
 
         // Compose the brief to an absolute temp path outside the worktree.
-        let path = write_apply_brief(*session_id, &compose_markdown(&title, &staged)).await?;
+        let path = write_apply_brief(
+            &self.agent_temp_dir(),
+            *session_id,
+            &compose_markdown(&title, &staged),
+        )
+        .await?;
         let count = staged.len();
 
         if !is_active {
@@ -2538,7 +2545,7 @@ fn pr_check_debounce_passed(
 /// now but [`AgentState::Working`] in the previous poll. Drives the unread
 /// marker. An empty `prev` (never polled, or cleared after an attach) yields no
 /// transitions, so a freshly-populated baseline can't produce false unread.
-pub(crate) fn detect_unread_transitions(
+pub fn detect_unread_transitions(
     prev: &BTreeMap<SessionId, AgentState>,
     new: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionId> {
@@ -2643,14 +2650,33 @@ fn poll_tick_should_send(
     !states_empty || commander_running != last_commander_running
 }
 
-/// Write the apply brief to a stable absolute path in the system temp dir
-/// (outside the worktree, so it's never committed). One file per session,
-/// overwritten on re-apply.
-async fn write_apply_brief(session_id: SessionId, markdown: &str) -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("cc-comments-{}.md", session_id.as_uuid()));
+/// Write the apply brief to a fresh absolute path under `base` (the OS temp
+/// dir in normal use, so it's outside the worktree and never committed).
+///
+/// The name carries the session id for legibility **and a per-apply UUID for
+/// uniqueness**: the path used to be session-stable and overwritten on
+/// re-apply, which lost the earlier batch whenever a second Apply landed before
+/// the agent opened the first file — and those comments were already marked
+/// `Applied`, so nothing brought them back. A brief must therefore outlive the
+/// next Apply.
+///
+/// The cost is one small file per Apply, left behind for whatever sweeps the
+/// OS temp dir (distro-dependent on Linux, so assume nothing does). It is
+/// deliberately not pruned here: nothing can distinguish a read brief from an
+/// unread one, so the only file a prune could target is exactly the unread
+/// brief this uniqueness exists to keep — and a brief is a few KB written at
+/// human rates, unlike the remote-triggerable images `PasteImageStore` prunes.
+async fn write_apply_brief(base: &Path, session_id: SessionId, markdown: &str) -> Result<PathBuf> {
+    let path = base.join(format!(
+        "cc-comments-{}-{}.md",
+        session_id.as_uuid(),
+        Uuid::new_v4()
+    ));
+    let save_failed = |e: std::io::Error| crate::error::ConfigError::SaveFailed(e.to_string());
+    tokio::fs::create_dir_all(base).await.map_err(save_failed)?;
     tokio::fs::write(&path, markdown)
         .await
-        .map_err(|e| crate::error::ConfigError::SaveFailed(e.to_string()))?;
+        .map_err(save_failed)?;
     Ok(path)
 }
 
@@ -2801,7 +2827,7 @@ fn init_telemetry(
     let install_id = ensure_install_id(store);
     let telemetry = Telemetry::init(&config.telemetry, frontend, &install_id);
     if telemetry.is_active() {
-        let env = EnvFingerprint::collect(Some(crate::tui::theme::ColorMode::detect().name()));
+        let env = EnvFingerprint::collect(Some(ColorMode::detect().name()));
         let snapshot = ConfigSnapshot::from_config(&config);
         telemetry.session_start(&env, &snapshot);
     }
@@ -2949,8 +2975,8 @@ fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<Sessi
 /// (the change-feed cache reads it); this synchronous, allocation-only
 /// projection is retained for the tree-builder tests, which feed a
 /// hand-constructed `AppState` through the same DTO builders.
-#[cfg(test)]
-pub(crate) fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
+#[cfg(any(test, feature = "test-support"))]
+pub fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         projects: build_project_info_list(state),
         sessions: build_session_info_list(state, true),
@@ -2967,7 +2993,7 @@ pub(crate) fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapsh
 }
 
 fn find_session_info(state: &AppState, query: &str) -> Option<SessionInfo> {
-    let session = crate::cli::find_session(state, query)?;
+    let session = find_session(state, query)?;
     let project_name = state
         .projects
         .get(&session.project_id)
@@ -2991,6 +3017,15 @@ async fn capture_pane(
         args.extend_from_slice(&["-S", &lines_arg]);
     }
     Ok(Some(executor.execute(&args).await?))
+}
+
+/// Maximum lines allowed for a pane-capture line count (the CLI `log` command's
+/// `--lines` flag, and the HTTP API's equivalent query parameter).
+pub(crate) const LOG_MAX_LINES: usize = 10_000;
+
+/// Clamp a requested line count to the allowed range [1, LOG_MAX_LINES].
+pub(crate) fn clamp_log_lines(requested: usize) -> usize {
+    requested.clamp(1, LOG_MAX_LINES)
 }
 
 // -- Repository clone helpers --
@@ -3151,6 +3186,29 @@ mod tests {
             state.sessions.insert(s.id, s);
         }
         state
+    }
+
+    // -- clamp_log_lines tests --
+
+    #[test]
+    fn clamp_log_lines_default_passthrough() {
+        assert_eq!(clamp_log_lines(100), 100);
+    }
+
+    #[test]
+    fn clamp_log_lines_zero_becomes_one() {
+        assert_eq!(clamp_log_lines(0), 1);
+    }
+
+    #[test]
+    fn clamp_log_lines_max_boundary() {
+        assert_eq!(clamp_log_lines(LOG_MAX_LINES), LOG_MAX_LINES);
+    }
+
+    #[test]
+    fn clamp_log_lines_over_max() {
+        assert_eq!(clamp_log_lines(LOG_MAX_LINES + 1), LOG_MAX_LINES);
+        assert_eq!(clamp_log_lines(usize::MAX), LOG_MAX_LINES);
     }
 
     #[test]
@@ -3537,6 +3595,9 @@ mod tests {
         // repo-clone paths write into. Pin it so no service built here can
         // clone outside the temp tree.
         config.projects_dir = Some(dir.path().join("projects"));
+        // Same for the agent temp files (apply briefs, pasted images), which
+        // otherwise land in the real `/tmp`.
+        config.agent_temp_dir = Some(dir.path().join("agent-temp"));
         let config_store = Arc::new(ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),
@@ -3932,6 +3993,64 @@ mod tests {
                 .map(|c| c.id)
                 .collect::<Vec<_>>(),
             vec![orphan]
+        );
+    }
+
+    /// Regression: the brief used to be written to one path per *session*
+    /// (`cc-comments-<session>.md`) and overwritten on every Apply, so a second
+    /// Apply before the agent had opened the first file replaced its contents —
+    /// the first batch of comments was silently lost (and, once delivered, they
+    /// were already marked Applied, so nothing brought them back). Each Apply
+    /// must leave its own brief on disk, untouched by the next one.
+    #[tokio::test]
+    async fn each_apply_writes_its_own_brief_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+
+        let comment = async |text: &str| {
+            svc.create_comment(
+                &sid,
+                NewComment {
+                    file: "changed.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "two".to_string(),
+                    comment: text.to_string(),
+                },
+            )
+            .await
+            .unwrap()
+        };
+        let apply = async || match svc.apply_comments(&sid).await.unwrap() {
+            ApplyOutcome::Deferred { path, .. } => path,
+            other => panic!("expected Deferred, got {other:?}"),
+        };
+
+        comment("first note").await;
+        let first = apply().await;
+        comment("second note").await;
+        let second = apply().await;
+
+        assert_ne!(
+            first, second,
+            "a second Apply must not reuse the first brief's path"
+        );
+        assert!(
+            first.starts_with(dir.path()),
+            "briefs must honour the pinned `agent_temp_dir`, not the real /tmp (got {first:?})"
+        );
+        let first_md = std::fs::read_to_string(&first)
+            .expect("the first brief must survive a second Apply, unread or not");
+        assert!(
+            first_md.contains("first note"),
+            "the first brief must keep its own comments, got: {first_md}"
+        );
+        assert!(
+            std::fs::read_to_string(&second)
+                .unwrap()
+                .contains("second note"),
+            "the second brief must carry the newly staged comment"
         );
     }
 

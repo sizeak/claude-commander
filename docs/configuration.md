@@ -134,10 +134,12 @@ ui_refresh_fps = 30
 # stripped, so they hit a per-run tmux server instead of your real one.
 # tmux_tmpdir = "/path/to/throwaway/tmux"
 
-# Base directory for pasted-image temp files, remote image paste (default: the
-# OS temp dir). For hermetic tests ONLY — leave unset for normal use; when set,
-# image writes and their pruning go here instead of the OS temp dir.
-# paste_images_dir = "/path/to/throwaway/paste-images"
+# Base directory for the temp files handed to the agent by path — pasted images
+# (remote image paste) and comment-apply briefs (default: the OS temp dir).
+# For hermetic tests ONLY — leave unset for normal use; when set, those writes
+# and the paste store's pruning go here instead of the OS temp dir.
+# (Accepted under its former name `paste_images_dir` too.)
+# agent_temp_dir = "/path/to/throwaway/agent-temp"
 
 # Organize worktrees into per-repository subdirectories (default: false)
 # per_repo_worktree_dirs = true

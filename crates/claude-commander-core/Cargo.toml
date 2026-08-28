@@ -23,6 +23,10 @@ path = "src/lib.rs"
 # Shared wire types (DTOs + WS protocol) — also consumed by the server and the
 # mobile/desktop clients, so the serde shape has a single source of truth.
 claude-commander-protocol = { path = "../claude-commander-protocol" }
+# Session matching/ranking. Lives in `claude-commander-viewmodel` rather than here
+# so the Flutter client's cdylib can share it — core is host-bound and the cdylib
+# cannot depend on it, which is how the Dart scorer came to diverge.
+claude-commander-viewmodel = { path = "../claude-commander-viewmodel" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -32,12 +36,31 @@ futures = "0.3"
 # reference generated from it live in `claude-commander` (and the server's own
 # `main.rs`). Embedders of this library don't inherit an argument parser.
 
-# TUI
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-ansi-to-tui = "8"
-# Text-input buffer (cursor/editing) for the review comment box.
-tui-input = "0.15"
+# `Color` for the `[theme]` config values and the tmux `status-style` string.
+# ratatui 0.30 is the modularised release and re-exports `ratatui_core::style`
+# verbatim (`pub use ratatui_core::{style, symbols, text};`), so this is the
+# SAME `Color` type the TUI renders with — not a mirror — and the hand-written
+# `ColorValue` serde impl in `config/theme.rs` is unaffected by using it here.
+# Depending on ratatui-core rather than full ratatui is what lets the headless
+# server and the mobile cdylib skip the whole terminal-UI dependency tree.
+#
+# `features = ["std"]` is REQUIRED, not decorative: ratatui-core's default
+# feature set is empty (`default = []`), and it is full ratatui that normally
+# turns `std` on. A consumer that takes core without the TUI crate (the server,
+# claude-commander-remote, client/rust) would otherwise get a no_std build.
+#
+# Keep this version in lockstep with the TUI crate's `ratatui`: if a future
+# ratatui bumps to ratatui-core 0.2 while this stays 0.1, `Color` becomes two
+# distinct types and `config/theme.rs` stops type-checking against the TUI.
+# That is a loud compile error, not silent breakage, but bump both together.
+ratatui-core = { version = "0.1", features = ["std"] }
+
+# Key events. NOT a rendering dependency: `config/keybindings.rs` persists
+# crossterm `KeyCode`/`KeyModifiers` in the keybinding map, and `tmux/attach.rs`
+# toggles raw mode, so these stay here after the frontend moved out. Crossterm is
+# pure Rust with no native libraries, and the `event-stream` feature — needed
+# only for the TUI's async `EventStream` — is deliberately NOT enabled here.
+crossterm = "0.29"
 
 # Diff view-model and layout engine: unified-diff parsing, logical rows,
 # gap expansion, role-tagged spans, soft wrapping and hit-testing. The review
@@ -45,7 +68,11 @@ tui-input = "0.15"
 #
 # Pinned to an exact revision rather than a branch so a build is reproducible
 # and an upstream push can't silently change what this compiles against. Bump
-# the `rev` deliberately when picking up diffgrid changes.
+# the `rev` deliberately when picking up diffgrid changes — and bump it in
+# `claude-commander-tui` and `client/rust` in the same commit. `Config.theme`
+# embeds a `diffgrid::style::Appearance`, so a rev that differs between core and
+# a frontend makes that two distinct types and the frontend stops compiling
+# against core (see #270, which fixed exactly that for the cdylib).
 diffgrid = { git = "https://github.com/sizeak/diffgrid", rev = "83698a53458868c7c691d89dbb21e89fbc905afa" }
 
 # Git (pure Rust)
@@ -67,25 +94,14 @@ serde_json = { workspace = true }
 toml = "1.1"
 toml_edit = "0.25"
 
-# Error handling
+# Error handling. No color-eyre: installing a panic/error reporter is a binary's
+# job, and `claude-commander` already owns that dependency.
 thiserror = { workspace = true }
 anyhow = "1.0"
-color-eyre = "0.6"
 
-# Observability
+# Observability. Emitting spans/events is the library's job; *subscribing* to
+# them is the binary's, so tracing-subscriber is not a dependency here.
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Syntax highlighting for the review diff view (fancy-regex backend — pure
-# Rust, no C/oniguruma dependency). `two-face` supplies an extended syntax set
-# (the bat language set, incl. TypeScript/TSX/TOML/…) that syntect's bundled
-# defaults lack.
-syntect = { version = "5.3", default-features = false, features = [
-    "default-fancy",
-] }
-two-face = { version = "0.5", default-features = false, features = [
-    "syntect-fancy",
-] }
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
@@ -97,13 +113,9 @@ directories = "6.0"
 url = "2.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 regex = "1.12"
-# Display-column measurement. Already in the tree via `ratatui-core`, so taking
-# it directly costs nothing — and any width math outside `diffgrid` must use it
-# rather than `chars().count()`, which is not a column count.
-unicode-width = "0.2"
-# Grapheme-safe slicing, for the same reason: `chars().take(n)` can cut a
-# combining sequence in half. Already in the tree via `diffgrid`.
-unicode-segmentation = "1.13"
+# No unicode-width / unicode-segmentation: the width and grapheme arithmetic they
+# serve is the review view's, so they live with `claude-commander-tui`. Core's own
+# diff work delegates to `diffgrid`.
 
 # Async utilities
 async-trait = "0.1"
@@ -115,18 +127,10 @@ pty-process = { version = "0.5", features = ["async"] }
 # timed-out clone's whole process group rather than just the process it spawned.
 nix = { version = "0.31", features = ["term", "poll", "fs", "user", "signal"] }
 
-# Throbber/spinner widget
-throbber-widgets-tui = "0.11"
 
-# Fuzzy matching for the quick-select palette
-fuzzy-matcher = "0.3"
-rayon = "1.12.0"
-# default features include `chafa-dyn`, which needs the chafa C lib via
-# pkg-config; we only need the built-in protocols + crossterm integration.
-ratatui-image = { version = "11.0.6", default-features = false, features = [
-    "crossterm",
-    "image-defaults",
-] }
+# RGBA→PNG encoding for pasted screenshots (`paste_image.rs`). The *rendering*
+# of those images is the frontend's job and lives with ratatui-image there;
+# encoding and the pruned temp-file store are core's.
 image = "0.25"
 
 # Conversation mode (TTS + STT): HTTP client for the OpenAI-compatible TTS/STT
@@ -181,6 +185,14 @@ arboard = { version = "3.6", optional = true }
 default = ["audio", "clipboard"]
 audio = ["dep:rodio", "dep:cpal", "dep:hound"]
 clipboard = ["dep:arboard"]
+# Exposes test scaffolding (`backend::mock::MockBackend`,
+# `api::workspace_snapshot_from_state`) to OTHER crates' tests. A `#[cfg(test)]`
+# item is invisible across a crate boundary, and `claude-commander-tui`'s tests
+# need both — so they are gated on `any(test, feature = "test-support")` instead.
+# Enable it only from a `[dev-dependencies]` entry: it is off by default, so
+# `cargo build` never compiles the double into a release binary, the headless
+# server, or the mobile cdylib.
+test-support = []
 
 [dev-dependencies]
 # Property-based testing
@@ -191,7 +203,5 @@ tokio-test = "0.4"
 tempfile = "3.27"
 # Test assertions
 pretty_assertions = "1.4"
-# Snapshot testing
-insta = "1.48"
 # Set file mtimes deterministically (paste-image prune test)
 filetime = "0.2"
