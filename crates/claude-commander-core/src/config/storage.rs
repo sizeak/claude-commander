@@ -1432,7 +1432,7 @@ mod tests {
     /// but must leave `pr_base_branch` `None` — there is nothing to mirror, and
     /// a `None` there is exactly what lets `resolve_stack_parent` honour the hint.
     #[test]
-    fn set_session_base_on_unstacked_session_sets_hint_and_base_branch() {
+    fn set_session_base_without_a_pr_sets_hint_and_base_branch_only() {
         let mut state = AppState::new();
         let project = create_test_project();
         let pid = project.id;
@@ -1490,6 +1490,59 @@ mod tests {
             Some("z"),
             "the local mirror must re-stack the tree before the next PR sync"
         );
+    }
+
+    /// The `gh pr edit` is gated on `pr_number`, not `pr_base_branch`: GitHub's
+    /// `baseRefName` is optional in the fetched JSON, so a session can carry a PR
+    /// whose base was never recorded. Gating on the base would skip it and leave
+    /// a local-only change for the next poll to revert. Nothing is mirrored in
+    /// that case, because there is no recorded GitHub value to mirror over.
+    #[test]
+    fn set_session_base_plans_the_gh_edit_when_only_the_pr_number_is_known() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b"]);
+        let target = add_root_session(&mut state, pid, "z");
+        {
+            let b = state.get_session_mut(&ids[1]).unwrap();
+            b.pr_number = Some(11);
+            b.pr_state = Some(crate::git::PrState::Open);
+            b.pr_base_branch = None;
+        }
+
+        let (_, pr) = state.set_session_base(&ids[1], Some(target)).unwrap();
+        assert_eq!(
+            pr,
+            Some(PrBaseRetarget {
+                pr_number: 11,
+                repo_path: PathBuf::from("/tmp/test"),
+                new_base_branch: "z".to_string(),
+            }),
+            "a known PR number alone must still schedule the durable edit"
+        );
+        assert!(
+            state.get_session(&ids[1]).unwrap().pr_base_branch.is_none(),
+            "nothing to mirror when GitHub never reported a base"
+        );
+    }
+
+    /// A closed PR is refused for the same reason a merged one is.
+    #[test]
+    fn set_session_base_rejects_a_closed_pr() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b"]);
+        let target = add_root_session(&mut state, pid, "z");
+        state.get_session_mut(&ids[1]).unwrap().pr_state = Some(crate::git::PrState::Closed);
+
+        assert!(matches!(
+            state.set_session_base(&ids[1], Some(target)).unwrap_err(),
+            SetBaseRejection::PrNotOpen { state: "closed" }
+        ));
     }
 
     /// `None` unstacks onto the project's main branch.

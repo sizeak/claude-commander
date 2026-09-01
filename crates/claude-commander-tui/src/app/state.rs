@@ -1884,9 +1884,10 @@ mod stack_order_tests {
     /// A session based on a branch no session owns resolves to no stack parent —
     /// but it is *not* based on main, so main must not be labelled the current
     /// base. Both routes there are covered: a PR targeting a release branch, and
-    /// a `--base-branch` / checked-out-branch fork with no PR at all. The second
-    /// is why `base_branch` is on the wire: without it the two are
-    /// indistinguishable from a plain unstacked session.
+    /// a `--base-branch` / checked-out-branch fork with no PR at all. Only the
+    /// session's `base_branch` could tell the second apart from a plain
+    /// unstacked session, and that field is *not* on the wire — which is why
+    /// the main row carries no marker at all.
     #[test]
     fn base_picker_does_not_claim_main_when_the_base_is_an_unowned_branch() {
         let pid = ProjectId::new();
