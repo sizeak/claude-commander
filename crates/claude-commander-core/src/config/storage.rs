@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, Result};
-use crate::session::{Project, ProjectId, SessionId, WorktreeSession};
+use crate::session::{Project, ProjectId, SessionId, SetBaseRejection, WorktreeSession};
 
 use super::Config;
 
@@ -45,6 +45,21 @@ struct StackRetargetPlan {
     repo_path: PathBuf,
     /// The deleted session's direct stacked children.
     child_ids: Vec<SessionId>,
+}
+
+/// The computed plan for retargeting one session's stack base, built and
+/// consumed inside a single [`AppState::set_session_base`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetBasePlan {
+    /// The session being retargeted.
+    pub session_id: SessionId,
+    /// Its new stack parent — `None` when it is being unstacked onto main.
+    pub new_parent_id: Option<SessionId>,
+    /// Branch it should now be based on: the new parent's branch, or the
+    /// project's main branch when unstacking.
+    pub new_base_branch: String,
+    /// The branch it was based on before, for reporting.
+    pub old_base_branch: Option<String>,
 }
 
 /// Persistent application state
@@ -327,6 +342,202 @@ impl AppState {
                 })
             })
             .collect()
+    }
+
+    /// Retarget one session's stack base onto `new_parent` (or onto the
+    /// project's main branch when `None`), returning the plan that was applied
+    /// and the durable `gh pr edit` the async caller must still run.
+    ///
+    /// Validation and mutation happen together, in one `&mut self` pass, for the
+    /// same reason [`AppState::remove_session_retargeting_children`] does it:
+    /// [`crate::config::StateStore::mutate`] re-reads the state from disk under
+    /// its lock, so anything planned against an earlier snapshot could be stale
+    /// by the time it is applied. Splitting the cycle check from the write would
+    /// let a concurrent retarget or PR sync slip between them and close a loop
+    /// that the check had just rejected.
+    ///
+    /// Only the named session moves. Its own descendants stack on *its branch*,
+    /// which does not change, so they follow it automatically and need no write.
+    pub fn set_session_base(
+        &mut self,
+        session_id: &SessionId,
+        new_parent: Option<SessionId>,
+    ) -> std::result::Result<(SetBasePlan, Option<PrBaseRetarget>), SetBaseRejection> {
+        let plan = self.plan_set_base(session_id, new_parent)?;
+        // Read the PR-edit plan from the pre-retarget state: `apply_set_base`
+        // rewrites `pr_base_branch`, which is what identifies the PR to edit.
+        let pr_retarget = self.pr_retarget_for_set_base(&plan);
+        self.apply_set_base(&plan);
+        Ok((plan.clone(), pr_retarget))
+    }
+
+    /// Validate a base retarget and compute where the session lands.
+    ///
+    /// Rejections are ordered cheapest-first, and each is distinct so the UI can
+    /// say *why* rather than just refusing.
+    fn plan_set_base(
+        &self,
+        session_id: &SessionId,
+        new_parent: Option<SessionId>,
+    ) -> std::result::Result<SetBasePlan, SetBaseRejection> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .ok_or(SetBaseRejection::SessionNotFound)?;
+        let project_id = session.project_id;
+
+        if new_parent == Some(*session_id) {
+            return Err(SetBaseRejection::SelfParent);
+        }
+
+        // A merged or closed PR cannot be retargeted on GitHub, and its
+        // `pr_base_branch` outranks the local hint in both `resolve_stack_parent`
+        // and `ReviewBase::of` — so the next PR sync would re-assert the old base
+        // and silently undo a local-only change. Refuse rather than appear to work.
+        if let Some(state) = session.pr_state {
+            match state {
+                crate::git::PrState::Merged => {
+                    return Err(SetBaseRejection::PrNotOpen { state: "merged" });
+                }
+                crate::git::PrState::Closed => {
+                    return Err(SetBaseRejection::PrNotOpen { state: "closed" });
+                }
+                crate::git::PrState::Open => {}
+            }
+        }
+
+        // A paused cascade is mid-flight over this stack, and `cascade_resume`
+        // re-derives its chain from current topology — a re-parented session is
+        // silently treated as "cascade complete", so merges the tail still needs
+        // never happen. Make the user resolve the cascade first.
+        if let Some(paused_at) = self.cascade_paused_at
+            && self.sessions.get(&paused_at).map(|s| s.project_id) == Some(project_id)
+        {
+            return Err(SetBaseRejection::CascadeInProgress);
+        }
+
+        let project = self
+            .projects
+            .get(&project_id)
+            .ok_or(SetBaseRejection::SessionNotFound)?;
+        let main_branch = project.main_branch.clone();
+        let project_sessions = self.sorted_project_sessions(&project_id);
+
+        let (new_parent_id, new_base_branch) = match new_parent {
+            None => (None, main_branch),
+            Some(pid) => {
+                let parent = project_sessions
+                    .iter()
+                    .find(|s| s.id == pid)
+                    .ok_or(SetBaseRejection::ParentNotFound)?;
+                if parent.project_id != project_id {
+                    return Err(SetBaseRejection::DifferentProject);
+                }
+                if crate::session::is_descendant_of(pid, *session_id, &project_sessions) {
+                    return Err(SetBaseRejection::WouldCycle {
+                        parent_title: parent.title.clone(),
+                    });
+                }
+                // `resolve_stack_parent` matches a parent by *branch name*, not
+                // id, so a candidate that merely shares a branch with one of this
+                // session's descendants would still close a loop once applied.
+                // The id check above cannot see that; this one can.
+                if project_sessions.iter().any(|s| {
+                    s.branch == parent.branch
+                        && s.id != pid
+                        && (s.id == *session_id
+                            || crate::session::is_descendant_of(
+                                s.id,
+                                *session_id,
+                                &project_sessions,
+                            ))
+                }) {
+                    return Err(SetBaseRejection::WouldCycle {
+                        parent_title: parent.title.clone(),
+                    });
+                }
+                (Some(pid), parent.branch.clone())
+            }
+        };
+
+        let current_base = self.resolved_base_branch(session_id, &project_sessions);
+        if current_base.as_deref() == Some(new_base_branch.as_str()) {
+            return Err(SetBaseRejection::AlreadyBased {
+                branch: new_base_branch,
+            });
+        }
+
+        Ok(SetBasePlan {
+            session_id: *session_id,
+            new_parent_id,
+            new_base_branch,
+            old_base_branch: current_base,
+        })
+    }
+
+    /// The branch a session is *currently* based on, preferring the same source
+    /// of truth the review diff does (`pr_base_branch`, then `base_branch`).
+    fn resolved_base_branch(
+        &self,
+        session_id: &SessionId,
+        project_sessions: &[&WorktreeSession],
+    ) -> Option<String> {
+        let session = project_sessions.iter().find(|s| s.id == *session_id)?;
+        if let Some(b) = session.pr_base_branch.clone() {
+            return Some(b);
+        }
+        if let Some(b) = session.base_branch.clone() {
+            return Some(b);
+        }
+        crate::session::resolve_stack_parent(*session, project_sessions)
+            .and_then(|pid| project_sessions.iter().find(|s| s.id == pid))
+            .map(|p| p.branch.clone())
+    }
+
+    /// Apply a validated plan: move all three stack fields together.
+    ///
+    /// `pr_base_branch` is mirrored *only* when it was already set. It is
+    /// GitHub's value, and it outranks the local hint in `resolve_stack_parent`
+    /// — so with a live PR the mirror is what re-stacks the tree immediately
+    /// (until `gh pr edit` makes it durable), while with no PR there is nothing
+    /// to mirror and leaving it `None` is exactly what lets the local hint win.
+    fn apply_set_base(&mut self, plan: &SetBasePlan) {
+        if let Some(session) = self.sessions.get_mut(&plan.session_id) {
+            session.stack_parent_session_id = plan.new_parent_id;
+            session.base_branch = Some(plan.new_base_branch.clone());
+            if session.pr_base_branch.is_some() {
+                session.pr_base_branch = Some(plan.new_base_branch.clone());
+            }
+        }
+    }
+
+    /// The durable `gh pr edit` a plan implies: present whenever the session has
+    /// a PR number at all.
+    ///
+    /// Gated on `pr_number`, not `pr_base_branch` — GitHub's `baseRefName` is
+    /// optional in the fetched JSON, so a session can have a PR whose base we
+    /// never recorded. Skipping those would leave a local-only change that the
+    /// next sync reverts.
+    fn pr_retarget_for_set_base(&self, plan: &SetBasePlan) -> Option<PrBaseRetarget> {
+        let session = self.sessions.get(&plan.session_id)?;
+        let pr_number = session.pr_number?;
+        let repo_path = self.projects.get(&session.project_id)?.repo_path.clone();
+        Some(PrBaseRetarget {
+            pr_number,
+            repo_path,
+            new_base_branch: plan.new_base_branch.clone(),
+        })
+    }
+
+    /// A project's sessions in a deterministic order.
+    ///
+    /// [`Self::get_project_sessions`] iterates a `HashMap`, so ties in any
+    /// downstream `find`/`max_by_key` resolve differently run to run. Every
+    /// stack walk that can be observed by the user goes through here instead.
+    fn sorted_project_sessions(&self, project_id: &ProjectId) -> Vec<&WorktreeSession> {
+        let mut sessions = self.get_project_sessions(project_id);
+        sessions.sort_by_key(|s| (s.created_at, s.id));
+        sessions
     }
 
     /// Preview the stack-retarget that deleting `session_id` would trigger:
@@ -1191,5 +1402,279 @@ mod tests {
         std::fs::write(&state_path, r#"{"seen_help": true, "version": "0.1.0"}"#).unwrap();
         let loaded = AppState::load_from(&state_path).unwrap();
         assert!(loaded.cascade_paused_at.is_none());
+    }
+
+    /// A standalone root session in `project_id`, for use as a retarget target
+    /// that is *not* a descendant of the session under test.
+    fn add_root_session(state: &mut AppState, project_id: ProjectId, branch: &str) -> SessionId {
+        let mut s = WorktreeSession::new(
+            project_id,
+            format!("Root {branch}"),
+            branch,
+            PathBuf::from(format!("/tmp/{branch}")),
+            "claude",
+        );
+        s.base_branch = Some("main".to_string());
+        let id = s.id;
+        state.add_session(s);
+        id
+    }
+
+    // -- set_session_base --
+
+    /// Retargeting a session with no PR moves the local hint and `base_branch`
+    /// but must leave `pr_base_branch` `None` — there is nothing to mirror, and
+    /// a `None` there is exactly what lets `resolve_stack_parent` honour the hint.
+    #[test]
+    fn set_session_base_on_unstacked_session_sets_hint_and_base_branch() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b", "c"]);
+        let target = add_root_session(&mut state, pid, "z");
+
+        let (plan, pr) = state.set_session_base(&ids[1], Some(target)).unwrap();
+        assert_eq!(plan.new_base_branch, "z");
+        assert_eq!(plan.old_base_branch.as_deref(), Some("a"));
+        assert!(pr.is_none(), "no PR number means no gh pr edit to run");
+
+        let b = state.get_session(&ids[1]).unwrap();
+        assert_eq!(b.stack_parent_session_id, Some(target));
+        assert_eq!(b.base_branch.as_deref(), Some("z"));
+        assert!(
+            b.pr_base_branch.is_none(),
+            "nothing to mirror when the session has no PR"
+        );
+    }
+
+    /// With a live PR the mirror is what re-stacks the tree immediately, and the
+    /// returned retarget must be read from the *pre*-apply state so it names the
+    /// PR to edit rather than the value we just wrote.
+    #[test]
+    fn set_session_base_mirrors_pr_base_and_plans_the_gh_edit() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b", "c"]);
+        let target = add_root_session(&mut state, pid, "z");
+        {
+            let b = state.get_session_mut(&ids[1]).unwrap();
+            b.pr_number = Some(42);
+            b.pr_state = Some(crate::git::PrState::Open);
+            b.pr_base_branch = Some("a".to_string());
+        }
+
+        let (_, pr) = state.set_session_base(&ids[1], Some(target)).unwrap();
+        assert_eq!(
+            pr,
+            Some(PrBaseRetarget {
+                pr_number: 42,
+                repo_path: PathBuf::from("/tmp/test"),
+                new_base_branch: "z".to_string(),
+            })
+        );
+        assert_eq!(
+            state
+                .get_session(&ids[1])
+                .unwrap()
+                .pr_base_branch
+                .as_deref(),
+            Some("z"),
+            "the local mirror must re-stack the tree before the next PR sync"
+        );
+    }
+
+    /// `None` unstacks onto the project's main branch.
+    #[test]
+    fn set_session_base_none_unstacks_onto_main() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b"]);
+
+        let (plan, _) = state.set_session_base(&ids[1], None).unwrap();
+        assert_eq!(plan.new_base_branch, "main");
+        let b = state.get_session(&ids[1]).unwrap();
+        assert!(b.stack_parent_session_id.is_none());
+        assert_eq!(b.base_branch.as_deref(), Some("main"));
+    }
+
+    /// A session cannot be based on one of its own descendants: that closes a
+    /// cycle, and a cycle makes every member vanish from the board entirely
+    /// (`build_session_order` treats a cycle as having no root).
+    #[test]
+    fn set_session_base_rejects_a_descendant_parent() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b", "c"]);
+
+        // C is stacked on B; basing B on C would close the loop.
+        assert!(matches!(
+            state.set_session_base(&ids[1], Some(ids[2])).unwrap_err(),
+            SetBaseRejection::WouldCycle { .. }
+        ));
+    }
+
+    /// The id-based cycle check cannot see a collision by *branch name*, but
+    /// `resolve_stack_parent` matches parents by branch — so a candidate sharing
+    /// a descendant's branch would still close a loop once applied.
+    #[test]
+    fn set_session_base_rejects_a_parent_sharing_a_descendant_branch() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b", "c"]);
+
+        // An unrelated session that happens to carry C's branch name.
+        let mut twin = WorktreeSession::new(pid, "Twin", "c", PathBuf::from("/tmp/twin"), "claude");
+        twin.base_branch = Some("main".to_string());
+        let twin_id = twin.id;
+        state.add_session(twin);
+
+        assert!(matches!(
+            state.set_session_base(&ids[1], Some(twin_id)).unwrap_err(),
+            SetBaseRejection::WouldCycle { .. }
+        ));
+    }
+
+    /// Every accepted plan must leave a topology that `build_session_order` can
+    /// still render — a cycle silently drops all of its members.
+    #[test]
+    fn accepted_set_session_base_never_hides_sessions_from_the_board() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b", "c", "d"]);
+
+        state.set_session_base(&ids[3], Some(ids[0])).unwrap();
+
+        let sessions = state.sorted_project_sessions(&pid);
+        let ordered = crate::session::board::build_session_order(&sessions);
+        assert_eq!(
+            ordered.len(),
+            ids.len(),
+            "a retarget must never drop sessions from the rendered order"
+        );
+    }
+
+    #[test]
+    fn set_session_base_rejects_self_and_unknown_targets() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b"]);
+
+        assert!(matches!(
+            state.set_session_base(&ids[1], Some(ids[1])).unwrap_err(),
+            SetBaseRejection::SelfParent
+        ));
+        assert!(matches!(
+            state
+                .set_session_base(&ids[1], Some(SessionId::new()))
+                .unwrap_err(),
+            SetBaseRejection::ParentNotFound
+        ));
+        assert!(matches!(
+            state.set_session_base(&SessionId::new(), None).unwrap_err(),
+            SetBaseRejection::SessionNotFound
+        ));
+        // And a refusal must not have written anything.
+        assert_eq!(
+            state.get_session(&ids[1]).unwrap().base_branch.as_deref(),
+            Some("a")
+        );
+    }
+
+    /// A merged or closed PR's base cannot be changed on GitHub, and its
+    /// `pr_base_branch` outranks the local hint — so a local-only change would be
+    /// re-asserted by the next PR sync. Refuse instead of appearing to work.
+    #[test]
+    fn set_session_base_rejects_a_settled_pr() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b", "c"]);
+        state.get_session_mut(&ids[1]).unwrap().pr_state = Some(crate::git::PrState::Merged);
+
+        assert!(matches!(
+            state.set_session_base(&ids[1], Some(ids[2])).unwrap_err(),
+            SetBaseRejection::PrNotOpen { state: "merged" }
+        ));
+    }
+
+    /// `cascade_resume` re-derives its chain from current topology and treats a
+    /// re-parented session as "cascade complete", skipping merges the tail still
+    /// needs. Restacking mid-pause must be refused.
+    #[test]
+    fn set_session_base_rejects_while_a_cascade_is_paused() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b", "c"]);
+        state.cascade_paused_at = Some(ids[0]);
+
+        assert!(matches!(
+            state.set_session_base(&ids[1], Some(ids[2])).unwrap_err(),
+            SetBaseRejection::CascadeInProgress
+        ));
+    }
+
+    /// Descendants stack on the retargeted session's *branch*, which does not
+    /// move — so they follow it with no write of their own.
+    #[test]
+    fn set_session_base_leaves_descendants_untouched() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b", "c"]);
+        let before = state.get_session(&ids[2]).unwrap().clone();
+
+        // Unstack B onto main; C is stacked on B and must not change.
+        state.set_session_base(&ids[1], None).unwrap();
+
+        let after = state.get_session(&ids[2]).unwrap();
+        assert_eq!(
+            after.stack_parent_session_id,
+            before.stack_parent_session_id
+        );
+        assert_eq!(after.base_branch, before.base_branch);
+        assert_eq!(after.pr_base_branch, before.pr_base_branch);
+
+        let sessions = state.sorted_project_sessions(&pid);
+        assert_eq!(
+            crate::session::resolve_stack_parent(
+                *sessions.iter().find(|s| s.id == ids[2]).unwrap(),
+                &sessions
+            ),
+            Some(ids[1]),
+            "C must still resolve to B"
+        );
+    }
+
+    /// Re-selecting the base the session already has is refused rather than
+    /// written, so the UI can say "already based on x" instead of no-oping.
+    #[test]
+    fn set_session_base_rejects_the_current_base() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b"]);
+
+        assert!(matches!(
+            state.set_session_base(&ids[1], Some(ids[0])).unwrap_err(),
+            SetBaseRejection::AlreadyBased { .. }
+        ));
     }
 }

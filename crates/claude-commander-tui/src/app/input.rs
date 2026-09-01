@@ -1384,6 +1384,26 @@ impl App {
                     &dir_name,
                 );
             }
+            Some(QuickSwitchItem::BaseChange {
+                session_id,
+                target,
+                base_branch,
+                ..
+            }) => {
+                let backend = self.backend_of_session(session_id);
+                let title = self
+                    .session(SessionRef {
+                        backend,
+                        id: session_id,
+                    })
+                    .map(|s| s.title.clone())
+                    .unwrap_or_else(|| "this session".to_string());
+                self.ui_state.modal = Modal::Confirm {
+                    title: "Set Session Base".to_string(),
+                    message: super::actions::set_session_base_confirm_message(&title, &base_branch),
+                    on_confirm: ConfirmAction::SetSessionBase { session_id, target },
+                };
+            }
             Some(QuickSwitchItem::ProgramChange {
                 session_id,
                 program,
@@ -1619,6 +1639,9 @@ impl App {
             }
             UserCommand::MoveToSection => {
                 self.handle_move_to_section().await;
+            }
+            UserCommand::SetSessionBase => {
+                self.handle_set_session_base().await;
             }
             UserCommand::ToggleViewMode => {
                 self.handle_toggle_view_mode().await;

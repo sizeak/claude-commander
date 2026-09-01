@@ -648,6 +648,14 @@ impl App {
                 self.handle_cascade_finished(BackendId(backend_id), result)
                     .await;
             }
+            StateUpdate::SetSessionBaseFinished {
+                backend_id,
+                session_id,
+                result,
+            } => {
+                self.handle_set_session_base_finished(BackendId(backend_id), session_id, result)
+                    .await;
+            }
             StateUpdate::PushStackFinished { backend_id, result } => {
                 self.handle_push_stack_finished(BackendId(backend_id), result)
                     .await;
@@ -1254,6 +1262,96 @@ pub(super) fn stack_retarget_preview_from_snapshot(
     Some((child_ids.len(), new_base_branch))
 }
 
+/// One row per legal stack base for `session_id`: the project's main branch
+/// first (the "unstack" target), then every other session in the project that
+/// is not one of this session's own descendants.
+///
+/// Derived from the cached snapshot, like
+/// [`stack_retarget_preview_from_snapshot`], so a remote backend's sessions are
+/// offered on identical terms. The host re-validates every choice inside its
+/// store lock — this filter is for a sane menu, not for safety.
+///
+/// The "current base" marker is deliberately conservative. A session whose
+/// `resolve_stack_parent` is `None` is *not* necessarily based on main: it may
+/// have been created with `--base-branch`, or carry a PR targeting a branch no
+/// session owns. In those cases nothing is marked, and the row for the base it
+/// actually has says so, rather than main being labelled a truth it isn't.
+pub(super) fn base_picker_rows_from_snapshot(
+    snapshot: &WorkspaceSnapshot,
+    session_id: SessionId,
+) -> Vec<(Option<SessionId>, String, String)> {
+    let Some(session) = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.session_id == session_id)
+    else {
+        return Vec::new();
+    };
+    let project_id = session.project_id;
+    let Some(project) = snapshot.projects.iter().find(|p| p.id == project_id) else {
+        return Vec::new();
+    };
+    let mut project_sessions: Vec<&SessionInfo> = snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.project_id == project_id)
+        .collect();
+    // Deterministic order: the snapshot's own ordering is not guaranteed, and
+    // `resolve_stack_parent` breaks branch-name ties by position.
+    project_sessions.sort_by_key(|s| (s.created_at, s.session_id));
+
+    let current_parent =
+        claude_commander_core::session::resolve_stack_parent(session, &project_sessions);
+    // Only trust "based on main" when there is no other claim on the base.
+    let currently_on_main = current_parent.is_none() && session.pr_base_branch.is_none();
+
+    let mut rows = vec![(
+        None,
+        project.main_branch.clone(),
+        format!(
+            "Project main branch ({}){}",
+            project.main_branch,
+            if currently_on_main {
+                CURRENT_SUFFIX
+            } else {
+                ""
+            }
+        ),
+    )];
+
+    for candidate in &project_sessions {
+        let cid = candidate.session_id;
+        if cid == session_id
+            || claude_commander_core::session::is_descendant_of(cid, session_id, &project_sessions)
+        {
+            continue;
+        }
+        rows.push((
+            Some(cid),
+            candidate.branch.clone(),
+            format!(
+                "{} ({}){}",
+                candidate.title,
+                candidate.branch,
+                if current_parent == Some(cid) {
+                    CURRENT_SUFFIX
+                } else {
+                    ""
+                }
+            ),
+        ));
+    }
+
+    // A base belonging to no session (a `--base-branch` fork, or a PR targeting
+    // a release branch) gets no row and no marker: every row here must be a
+    // legal, selectable target, so there is nowhere safe to put a note that is
+    // not itself an action. Leaving it unmarked is the honest option.
+    rows
+}
+
+/// Suffix marking the row a session is already based on.
+const CURRENT_SUFFIX: &str = " — current base";
+
 // ---- List-view item builders (revived from main; reuse board.rs helpers) ----
 
 pub(super) fn build_project_grouped_items(
@@ -1715,6 +1813,95 @@ mod stack_order_tests {
             state.sessions.insert(s.id, s);
         }
         workspace_snapshot_from_state(&state)
+    }
+
+    /// The picker offers main plus every non-descendant sibling, and never the
+    /// session itself — a session based on its own descendant would close a
+    /// cycle, and a cycle removes the whole stack from the rendered order.
+    #[test]
+    fn base_picker_offers_main_and_excludes_self_and_descendants() {
+        let pid = ProjectId::new();
+        let mk = |title: &str, branch: &str, age: i64, parent: Option<SessionId>| {
+            let mut s = make_session(title, branch, age);
+            s.project_id = pid;
+            s.stack_parent_session_id = parent;
+            s
+        };
+        let base = mk("base", "base-br", 0, None);
+        let mid = mk("mid", "mid-br", 5, Some(base.id));
+        let leaf = mk("leaf", "leaf-br", 10, Some(mid.id));
+        let solo = mk("solo", "solo-br", 15, None);
+        let (base_id, mid_id, leaf_id, solo_id) = (base.id, mid.id, leaf.id, solo.id);
+        let snapshot = appstate_from(vec![base, mid, leaf, solo]);
+
+        let rows = base_picker_rows_from_snapshot(&snapshot, mid_id);
+        let targets: Vec<Option<SessionId>> = rows.iter().map(|(t, _, _)| *t).collect();
+
+        assert_eq!(targets[0], None, "main branch must be the first row");
+        assert_eq!(rows[0].1, "main");
+        assert!(
+            targets.contains(&Some(base_id)),
+            "its own parent is offered"
+        );
+        assert!(targets.contains(&Some(solo_id)), "an unrelated session too");
+        assert!(
+            !targets.contains(&Some(mid_id)),
+            "a session must not be offered itself"
+        );
+        assert!(
+            !targets.contains(&Some(leaf_id)),
+            "a descendant would close a cycle"
+        );
+    }
+
+    /// The current base is marked so the user can see where they already are.
+    #[test]
+    fn base_picker_marks_the_current_base() {
+        let pid = ProjectId::new();
+        let base = {
+            let mut s = make_session("base", "base-br", 0);
+            s.project_id = pid;
+            s
+        };
+        let child = {
+            let mut s = make_session("child", "child-br", 5);
+            s.project_id = pid;
+            s.stack_parent_session_id = Some(base.id);
+            s
+        };
+        let (base_id, child_id) = (base.id, child.id);
+        let snapshot = appstate_from(vec![base, child]);
+
+        let rows = base_picker_rows_from_snapshot(&snapshot, child_id);
+        let marked: Vec<&String> = rows
+            .iter()
+            .filter(|(_, _, l)| l.contains("current base"))
+            .map(|(_, _, l)| l)
+            .collect();
+        assert_eq!(marked.len(), 1, "exactly one row is the current base");
+        assert!(marked[0].contains("base-br"));
+        // And the parent row really is the one marked.
+        let parent_row = rows.iter().find(|(t, _, _)| *t == Some(base_id)).unwrap();
+        assert!(parent_row.2.contains("current base"));
+    }
+
+    /// A session created with `--base-branch`, or whose PR targets a branch no
+    /// session owns, resolves to no stack parent — but it is *not* based on
+    /// main, so main must not be labelled the current base.
+    #[test]
+    fn base_picker_does_not_claim_main_when_the_base_is_an_unowned_branch() {
+        let pid = ProjectId::new();
+        let mut solo = make_session("solo", "solo-br", 0);
+        solo.project_id = pid;
+        solo.pr_base_branch = Some("release/1.2".to_string());
+        let solo_id = solo.id;
+        let snapshot = appstate_from(vec![solo]);
+
+        let rows = base_picker_rows_from_snapshot(&snapshot, solo_id);
+        assert!(
+            !rows.iter().any(|(_, _, l)| l.contains("current base")),
+            "nothing is marked when the real base belongs to no session, got {rows:?}"
+        );
     }
 
     #[test]

@@ -499,6 +499,79 @@ pub fn stack_top<S: SessionNode>(session_id: SessionId, project_sessions: &[&S])
     current
 }
 
+/// Why a request to retarget a session's stack base was refused.
+///
+/// Self-contained (no `#[from]` back into core's hierarchy), so the reason
+/// reaches a frontend typed rather than as a formatted string — the server maps
+/// the malformed variants to 400 and the state-conflict variants to 409.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SetBaseRejection {
+    #[error("the session no longer exists")]
+    SessionNotFound,
+
+    #[error("the chosen base session no longer exists")]
+    ParentNotFound,
+
+    #[error("a session can only be based on another session in the same project")]
+    DifferentProject,
+
+    #[error("a session cannot be based on itself")]
+    SelfParent,
+
+    #[error(
+        "'{parent_title}' is stacked on this session — basing this session on it would create a cycle"
+    )]
+    WouldCycle { parent_title: String },
+
+    #[error("'{branch}' is already the base of this session")]
+    AlreadyBased { branch: String },
+
+    #[error(
+        "this session's pull request is {state} — its base can only be changed on GitHub while the PR is open"
+    )]
+    PrNotOpen { state: &'static str },
+
+    #[error(
+        "a paused cascade is in progress for this project — resume or abandon it before restacking"
+    )]
+    CascadeInProgress,
+}
+
+/// Whether `candidate` sits anywhere *below* `ancestor` in the stack — i.e.
+/// walking `candidate`'s parents eventually reaches `ancestor`.
+///
+/// This is the cycle guard for retargeting a session's base: making `ancestor`
+/// stack onto one of its own descendants would close a loop. That is not
+/// cosmetic — [`crate::session::board::build_session_order`] has no iteration
+/// bound and treats a cycle as having no root, so every member of the cycle is
+/// dropped from the board and session list entirely.
+///
+/// Bounded by `project_sessions.len()` the same way [`stack_root`] is, so an
+/// already-corrupted cycle terminates instead of spinning. Returns `false` when
+/// `candidate == ancestor` — identity is checked separately by the caller so
+/// the two rejections can be reported distinctly.
+pub fn is_descendant_of<S: SessionNode>(
+    candidate: SessionId,
+    ancestor: SessionId,
+    project_sessions: &[&S],
+) -> bool {
+    let mut current = candidate;
+    for _ in 0..project_sessions.len() {
+        let Some(parent) = project_sessions
+            .iter()
+            .find(|s| s.node_id() == current)
+            .and_then(|s| resolve_stack_parent(*s, project_sessions))
+        else {
+            return false;
+        };
+        if parent == ancestor {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
 /// Walk up the stack chain starting from `session_id` to find the session at
 /// the bottom of its stack.
 ///
@@ -1342,6 +1415,47 @@ mod tests {
             .expect("mark_attached must set last_attached_at");
         assert!(stamp >= before);
         assert!(stamp <= after);
+    }
+
+    #[test]
+    fn is_descendant_of_walks_the_whole_chain() {
+        let a = session_with("a", None, None);
+        let b = session_with("b", None, Some(a.id));
+        let c = session_with("c", None, Some(b.id));
+        let sessions = [&a, &b, &c];
+
+        assert!(is_descendant_of(c.id, a.id, &sessions), "grandchild of A");
+        assert!(is_descendant_of(b.id, a.id, &sessions));
+        // Not symmetric, and identity is not descent.
+        assert!(!is_descendant_of(a.id, c.id, &sessions));
+        assert!(!is_descendant_of(a.id, a.id, &sessions));
+    }
+
+    #[test]
+    fn is_descendant_of_is_false_for_an_unrelated_session() {
+        let a = session_with("a", None, None);
+        let b = session_with("b", None, Some(a.id));
+        let solo = session_with("solo", None, None);
+        let sessions = [&a, &b, &solo];
+
+        assert!(!is_descendant_of(b.id, solo.id, &sessions));
+        assert!(!is_descendant_of(solo.id, a.id, &sessions));
+    }
+
+    /// An already-corrupted cycle must terminate rather than spin — the walk is
+    /// bounded by the session count, exactly like `stack_root`.
+    #[test]
+    fn is_descendant_of_terminates_on_a_corrupted_cycle() {
+        let mut a = session_with("a", None, None);
+        let mut b = session_with("b", None, None);
+        a.stack_parent_session_id = Some(b.id);
+        b.stack_parent_session_id = Some(a.id);
+        let solo = session_with("solo", None, None);
+        let sessions = [&a, &b, &solo];
+
+        // Reachable within the cycle, and the unreachable query still returns.
+        assert!(is_descendant_of(a.id, b.id, &sessions));
+        assert!(!is_descendant_of(a.id, solo.id, &sessions));
     }
 }
 

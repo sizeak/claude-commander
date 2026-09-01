@@ -15,6 +15,7 @@ use axum::{
 use claude_commander_core::Error as CoreError;
 use claude_commander_core::backend::RunLocalError;
 use claude_commander_core::error::{GitError, SessionError, TmuxError};
+use claude_commander_core::session::SetBaseRejection;
 use serde_json::json;
 
 /// An error returned from an API handler. Wraps a [`CoreError`] and maps it to
@@ -75,6 +76,24 @@ impl ApiError {
             CoreError::Session(SessionError::AlreadyExists(_))
             | CoreError::Session(SessionError::InvalidState(_))
             | CoreError::Session(SessionError::MaxSessionsReached(_)) => StatusCode::CONFLICT,
+
+            // A refused stack-base retarget splits by *kind*: a target that is
+            // simply wrong is the client's mistake (400), while one refused
+            // because of the workspace's current shape — a cycle, a settled PR,
+            // a paused cascade — is a conflict the user can act on (409).
+            CoreError::Session(SessionError::InvalidBase(r)) => match r {
+                SetBaseRejection::SelfParent
+                | SetBaseRejection::DifferentProject
+                | SetBaseRejection::ParentNotFound => StatusCode::BAD_REQUEST,
+                SetBaseRejection::WouldCycle { .. }
+                | SetBaseRejection::AlreadyBased { .. }
+                | SetBaseRejection::PrNotOpen { .. }
+                | SetBaseRejection::CascadeInProgress => StatusCode::CONFLICT,
+                // Unreachable in practice: the service maps this to `NotFound`
+                // so the 404 convention holds. Kept exhaustive rather than
+                // wildcarded so a new variant has to be classified here.
+                SetBaseRejection::SessionNotFound => StatusCode::NOT_FOUND,
+            },
 
             // Bad client input → 400.
             CoreError::Session(SessionError::InvalidName { .. })
@@ -174,6 +193,36 @@ mod tests {
     fn invalid_program_maps_to_400() {
         let err = ApiError(CoreError::Session(SessionError::InvalidProgram("p".into())));
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A refused base retarget must never be a 500. It splits by kind: a target
+    /// that is simply wrong is the client's mistake (400), while one refused
+    /// because of the workspace's current shape is a conflict (409). Both are
+    /// asserted together because the split is the point — the whole variant used
+    /// to fall through the wildcard to a 500.
+    #[test]
+    fn invalid_base_maps_to_400_or_409_never_500() {
+        use claude_commander_core::session::SetBaseRejection;
+
+        for r in [
+            SetBaseRejection::SelfParent,
+            SetBaseRejection::DifferentProject,
+            SetBaseRejection::ParentNotFound,
+        ] {
+            let err = ApiError(CoreError::Session(SessionError::InvalidBase(r)));
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        }
+        for r in [
+            SetBaseRejection::WouldCycle {
+                parent_title: "x".into(),
+            },
+            SetBaseRejection::AlreadyBased { branch: "x".into() },
+            SetBaseRejection::PrNotOpen { state: "merged" },
+            SetBaseRejection::CascadeInProgress,
+        ] {
+            let err = ApiError(CoreError::Session(SessionError::InvalidBase(r)));
+            assert_eq!(err.status(), StatusCode::CONFLICT);
+        }
     }
 
     #[test]

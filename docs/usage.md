@@ -87,6 +87,16 @@ Stacks are detected from the PR's `baseRefName` returned by the `gh` CLI, so the
 
 How a stack renders depends on the view (cycle with `v`). In the **project-grouped** and **Section Stacks** list views (the latter is the default when [Session List Sections](configuration.md#session-list-sections) is configured), children are nested under their base and the whole stack stays together under the section chosen by its base (the stack root), so a draft or early-stage session stacked on top never drags the whole stack out of the base's section. In the plain **Sections** list view, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state. On the **board** a stack occupies exactly one column and moves between columns as a unit; the column is chosen by the stack's newest leaf (its section assignment, including any manual `m` move), so a base and its children never split across columns.
 
+#### Fixing a stack: Set session base
+
+When a stack is wired up wrongly — a session stacked on the wrong parent, or stacked when it should sit on `main` — **Set session base** from the command palette re-points it. Pick another session in the same project to stack onto, or the project's main branch to unstack entirely. Sessions stacked on *this* one come along automatically: they are stacked on its branch, which does not move.
+
+The command updates the stack link and, when the session has an open PR, retargets that PR with `gh pr edit --base`. If the `gh` edit fails you are told so explicitly, because the base on GitHub is the source of truth — the next PR sync would otherwise quietly restore the old base.
+
+**It does not rewrite git history.** The branch still contains its old base's commits, so until you rebase or merge onto the new base yourself, both the PR and the review diff will show them. Retargeting onto a *sibling* rather than an ancestor is the case to watch: the merge base falls back towards `main` and the diff grows to include the old parent's work as well as your own.
+
+A retarget is refused when it would create a cycle (basing a session on one of its own descendants), when the session's PR is already merged or closed (GitHub will not let its base change, so the next sync would revert it), and while a cascade is paused for that project (resume or abandon it first — `Cascade resume` re-derives the stack from the current topology).
+
 #### Cascade merge main through a stack
 
 When `main` moves forward, use **Cascade merge main** from the command palette to propagate it up the stack in one step: the command merges `main` into the stack base, then the base into its child, and so on to the leaf. Running it from any session in a stack works — the cascade always starts from the base.

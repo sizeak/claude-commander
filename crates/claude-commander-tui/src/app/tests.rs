@@ -5700,6 +5700,91 @@ async fn change_program_confirm_spawns_against_owning_backend_and_routes_program
     );
 }
 
+/// Confirming a base retarget must route to the OWNING backend, off the event
+/// loop, and the completion must keep the session selected — it re-parents, so
+/// the tree rebuild moves it.
+#[tokio::test]
+async fn set_session_base_confirm_routes_to_owning_backend() {
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+
+    app.handle_confirm(super::ConfirmAction::SetSessionBase {
+        session_id: remote_sid,
+        target: None,
+    })
+    .await;
+
+    loop {
+        match app.event_loop.next().await.expect("a set-base event") {
+            AppEvent::StateUpdate(su @ StateUpdate::SetSessionBaseFinished { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).base_changes(),
+        vec![(remote_sid, None)],
+        "set_session_base must route to the owning backend with the chosen target"
+    );
+}
+
+/// A refused or half-successful retarget must reach the user. `set_section`
+/// discards its result because a section move cannot be rejected; this one can
+/// be (a cycle, a settled PR, a paused cascade), so the failure is reported.
+#[tokio::test]
+async fn set_session_base_failure_is_reported_not_swallowed() {
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+    remote_mock(&app, BackendId(1)).set_failing(true);
+
+    app.handle_confirm(super::ConfirmAction::SetSessionBase {
+        session_id: remote_sid,
+        target: None,
+    })
+    .await;
+
+    loop {
+        match app.event_loop.next().await.expect("a set-base event") {
+            AppEvent::StateUpdate(su @ StateUpdate::SetSessionBaseFinished { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    let msg = app
+        .ui_state
+        .status_message
+        .as_ref()
+        .map(|(m, _)| m.clone())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("Could not set base"),
+        "a refused retarget must be surfaced, got {msg:?}"
+    );
+}
+
+/// The whole point of the confirm step: this command does not rebase, so the
+/// user has to be told the PR and review diff will be wrong until they do.
+#[test]
+fn set_session_base_confirm_message_warns_that_rebasing_is_manual() {
+    let msg = super::actions::set_session_base_confirm_message("my-task", "other-br");
+    assert!(msg.contains("my-task"));
+    assert!(msg.contains("other-br"));
+    assert!(
+        msg.contains("NOT rewritten"),
+        "must say git history is not rewritten, got {msg:?}"
+    );
+    assert!(
+        msg.contains("rebase"),
+        "must tell the user to rebase, got {msg:?}"
+    );
+}
+
 #[tokio::test]
 async fn program_picker_items_flag_current_and_filter() {
     // `gather_program_picker_items` flags the row matching the session's current

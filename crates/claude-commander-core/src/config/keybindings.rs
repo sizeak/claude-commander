@@ -37,6 +37,7 @@ pub enum BindableAction {
     SelectShell,
     NewSession,
     NewStackedSession,
+    SetSessionBase,
     CascadeMergeMain,
     CascadeResume,
     CascadeAbandon,
@@ -111,6 +112,7 @@ impl BindableAction {
         Self::OpenInfo,
         // Stacked & Cascade
         Self::NewStackedSession,
+        Self::SetSessionBase,
         Self::PushStack,
         Self::CascadeMergeMain,
         Self::CascadeResume,
@@ -172,6 +174,7 @@ impl BindableAction {
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
             Self::NewStackedSession => "new_stacked_session",
+            Self::SetSessionBase => "set_session_base",
             Self::CascadeMergeMain => "cascade_merge_main",
             Self::CascadeResume => "cascade_resume",
             Self::CascadeAbandon => "cascade_abandon",
@@ -234,6 +237,7 @@ impl BindableAction {
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
             Self::NewStackedSession => "New stacked session on selected branch",
+            Self::SetSessionBase => "Set session base (restack)\u{2026}",
             Self::CascadeMergeMain => "Cascade merge main through stack",
             Self::CascadeResume => "Resume paused cascade merge",
             Self::CascadeAbandon => "Abandon paused cascade merge",
@@ -302,6 +306,7 @@ impl BindableAction {
             Self::SelectShell => "shell",
             Self::NewSession => "new session",
             Self::NewStackedSession => "stacked",
+            Self::SetSessionBase => "base",
             Self::CascadeMergeMain => "merge stack",
             Self::CascadeResume => "resume cascade",
             Self::CascadeAbandon => "abandon cascade",
@@ -375,6 +380,7 @@ impl BindableAction {
             | Self::OpenInEditor
             | Self::OpenInfo => "Sessions",
             Self::NewStackedSession
+            | Self::SetSessionBase
             | Self::PushStack
             | Self::CascadeMergeMain
             | Self::CascadeResume
@@ -425,6 +431,7 @@ impl FromStr for BindableAction {
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
             "new_stacked_session" => Ok(Self::NewStackedSession),
+            "set_session_base" => Ok(Self::SetSessionBase),
             "cascade_merge_main" => Ok(Self::CascadeMergeMain),
             "cascade_resume" => Ok(Self::CascadeResume),
             "cascade_abandon" => Ok(Self::CascadeAbandon),
@@ -1799,5 +1806,25 @@ mod tests {
         assert!(kb.keys_for(BindableAction::ToggleKeepAlive).is_empty());
         let shift_k = KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT);
         assert_eq!(kb.resolve(&shift_k), None);
+    }
+
+    /// The binding id documented in `docs/configuration.md` must actually parse
+    /// — a doc example that silently no-ops is worse than none.
+    #[test]
+    fn test_set_session_base_config_name_roundtrips() {
+        let action = BindableAction::SetSessionBase;
+        assert_eq!(action.config_name(), "set_session_base");
+        assert_eq!(
+            "set_session_base".parse::<BindableAction>().unwrap(),
+            action
+        );
+    }
+
+    #[test]
+    fn test_set_session_base_unbound_by_default() {
+        // Restacking is a deliberate, infrequent repair — palette-only, so it
+        // costs no key and can't be triggered by a slip.
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::SetSessionBase).is_empty());
     }
 }
