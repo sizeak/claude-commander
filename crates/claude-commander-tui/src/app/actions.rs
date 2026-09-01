@@ -1871,9 +1871,6 @@ impl App {
         });
     }
 
-    /// Build the program-picker rows for the change-program palette mode from
-    /// `program_picker_choices`, filtered by a label/command substring. The row
-    /// matching the session's current program is flagged.
     /// Build the stack-base picker rows for the selected session.
     ///
     /// Rows come from the owning backend's snapshot via
@@ -1961,32 +1958,55 @@ impl App {
             self.ui_state.preview_update_spawned_at = None;
             self.spawn_preview_update();
         }
-        let (msg, secs) = match result {
+        // A clean result is a toast; anything needing the user to act gets a
+        // modal. The status bar renders a single unwrapped line sharing the row
+        // with the session count, so a long message — and `gh`'s stderr is often
+        // multi-line — loses exactly the instruction that matters.
+        match result {
             Ok(outcome) => match outcome.pr {
                 claude_commander_core::api::PrRetarget::NoPr => {
-                    (format!("Base set to {}", outcome.new_base_branch), 5)
+                    self.ui_state.status_message = Some((
+                        format!("Base set to {}", outcome.new_base_branch),
+                        Instant::now() + Duration::from_secs(5),
+                    ));
                 }
-                claude_commander_core::api::PrRetarget::Retargeted { pr_number } => (
-                    format!(
-                        "Base set to {} (PR #{pr_number} retargeted)",
-                        outcome.new_base_branch
-                    ),
-                    5,
-                ),
-                claude_commander_core::api::PrRetarget::Failed { pr_number, message } => (
-                    format!(
-                        "Base set to {} locally, but retargeting PR #{pr_number} failed: {message}. \
-                         Change the PR base on GitHub or the next sync will revert this.",
-                        outcome.new_base_branch
-                    ),
-                    20,
-                ),
+                claude_commander_core::api::PrRetarget::Retargeted { pr_number } => {
+                    self.ui_state.status_message = Some((
+                        format!(
+                            "Base set to {} (PR #{pr_number} retargeted)",
+                            outcome.new_base_branch
+                        ),
+                        Instant::now() + Duration::from_secs(5),
+                    ));
+                }
+                claude_commander_core::api::PrRetarget::Failed { pr_number, message } => {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!(
+                            "The base was changed locally, but PR #{pr_number} still targets its \
+                             old branch.\n\n\
+                             Set the PR's base to \"{}\" on GitHub — the next PR sync copies \
+                             GitHub's value back over the local one, so leaving it will undo \
+                             this change.\n\n\
+                             gh said: {message}",
+                            outcome.new_base_branch
+                        ),
+                    };
+                }
             },
-            Err(e) => (format!("Could not set base: {e}"), 15),
-        };
-        self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(secs)));
+            // Nothing was written — a rejection (cycle, settled PR, paused
+            // cascade) or a transport failure. The reason is the whole content,
+            // so it gets the room to be read.
+            Err(e) => {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Could not set the session base.\n\n{e}"),
+                };
+            }
+        }
     }
 
+    /// Build the program-picker rows for the change-program palette mode from
+    /// `program_picker_choices`, filtered by a label/command substring. The row
+    /// matching the session's current program is flagged.
     pub(super) fn gather_program_picker_items(
         &self,
         session_id: SessionId,

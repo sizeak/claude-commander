@@ -1271,11 +1271,16 @@ pub(super) fn stack_retarget_preview_from_snapshot(
 /// offered on identical terms. The host re-validates every choice inside its
 /// store lock — this filter is for a sane menu, not for safety.
 ///
-/// The "current base" marker is deliberately conservative. A session whose
-/// `resolve_stack_parent` is `None` is *not* necessarily based on main: it may
-/// have been created with `--base-branch`, or carry a PR targeting a branch no
-/// session owns. In those cases nothing is marked, and the row for the base it
-/// actually has says so, rather than main being labelled a truth it isn't.
+/// The "current base" marker is only applied where it can be *proven*. A stack
+/// parent resolved from `pr_base_branch`/`stack_parent_session_id` is proof, so
+/// that row is marked. Main is not: a session with neither field set may equally
+/// be based on a branch no session owns (a `--base-branch` fork, or the
+/// checkout-branch flow, both of which leave `base_branch` pointing elsewhere),
+/// and those are indistinguishable from here — `SessionInfo` carries no
+/// `base_branch`, and adding one means regenerating the frb bindings, which
+/// currently forces a `flutter_rust_bridge` version bump. So an unstacked
+/// session shows no marker rather than a possibly-wrong one; every row is still
+/// a legal target.
 pub(super) fn base_picker_rows_from_snapshot(
     snapshot: &WorkspaceSnapshot,
     session_id: SessionId,
@@ -1302,21 +1307,12 @@ pub(super) fn base_picker_rows_from_snapshot(
 
     let current_parent =
         claude_commander_core::session::resolve_stack_parent(session, &project_sessions);
-    // Only trust "based on main" when there is no other claim on the base.
-    let currently_on_main = current_parent.is_none() && session.pr_base_branch.is_none();
-
+    // The main row carries no marker — see the note above on why it cannot be
+    // proven to be the current base from the wire DTO alone.
     let mut rows = vec![(
         None,
         project.main_branch.clone(),
-        format!(
-            "Project main branch ({}){}",
-            project.main_branch,
-            if currently_on_main {
-                CURRENT_SUFFIX
-            } else {
-                ""
-            }
-        ),
+        format!("Project main branch ({})", project.main_branch),
     )];
 
     for candidate in &project_sessions {
@@ -1885,22 +1881,54 @@ mod stack_order_tests {
         assert!(parent_row.2.contains("current base"));
     }
 
-    /// A session created with `--base-branch`, or whose PR targets a branch no
-    /// session owns, resolves to no stack parent — but it is *not* based on
-    /// main, so main must not be labelled the current base.
+    /// A session based on a branch no session owns resolves to no stack parent —
+    /// but it is *not* based on main, so main must not be labelled the current
+    /// base. Both routes there are covered: a PR targeting a release branch, and
+    /// a `--base-branch` / checked-out-branch fork with no PR at all. The second
+    /// is why `base_branch` is on the wire: without it the two are
+    /// indistinguishable from a plain unstacked session.
     #[test]
     fn base_picker_does_not_claim_main_when_the_base_is_an_unowned_branch() {
         let pid = ProjectId::new();
+
+        let mut via_pr = make_session("via-pr", "a-br", 0);
+        via_pr.project_id = pid;
+        via_pr.pr_base_branch = Some("release/1.2".to_string());
+        let via_pr_id = via_pr.id;
+
+        // No PR and no stack parent — indistinguishable on the wire from a
+        // session based on main, which is exactly why main is never marked.
+        let mut via_flag = make_session("via-flag", "b-br", 5);
+        via_flag.project_id = pid;
+        let via_flag_id = via_flag.id;
+
+        let snapshot = appstate_from(vec![via_pr, via_flag]);
+
+        for (id, what) in [(via_pr_id, "a PR base"), (via_flag_id, "--base-branch")] {
+            let rows = base_picker_rows_from_snapshot(&snapshot, id);
+            assert!(
+                !rows.iter().any(|(_, _, l)| l.contains("current base")),
+                "nothing may be marked when the base comes from {what}, got {rows:?}"
+            );
+        }
+    }
+
+    /// Main is never marked, even for a session that really is based on it: the
+    /// wire DTO cannot distinguish that from a `--base-branch` fork, and a
+    /// marker that is sometimes wrong is worse than none on a repair screen.
+    #[test]
+    fn base_picker_never_marks_the_main_row() {
+        let pid = ProjectId::new();
         let mut solo = make_session("solo", "solo-br", 0);
         solo.project_id = pid;
-        solo.pr_base_branch = Some("release/1.2".to_string());
         let solo_id = solo.id;
         let snapshot = appstate_from(vec![solo]);
 
         let rows = base_picker_rows_from_snapshot(&snapshot, solo_id);
+        assert_eq!(rows[0].0, None, "the first row is the main-branch row");
         assert!(
-            !rows.iter().any(|(_, _, l)| l.contains("current base")),
-            "nothing is marked when the real base belongs to no session, got {rows:?}"
+            !rows[0].2.contains("current base"),
+            "the main row must never claim to be the current base, got {rows:?}"
         );
     }
 

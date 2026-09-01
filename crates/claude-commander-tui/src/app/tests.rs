@@ -5756,15 +5756,18 @@ async fn set_session_base_failure_is_reported_not_swallowed() {
         }
     }
 
-    let msg = app
-        .ui_state
-        .status_message
-        .as_ref()
-        .map(|(m, _)| m.clone())
-        .unwrap_or_default();
+    // A modal, not a toast: the status bar is one unwrapped line sharing the row
+    // with the session count, so the reason a retarget was refused would be
+    // clipped exactly when the user needs to read it.
+    let Modal::Error { message } = &app.ui_state.modal else {
+        panic!(
+            "a refused retarget must raise an error modal, got {:?}",
+            app.ui_state.modal
+        );
+    };
     assert!(
-        msg.contains("Could not set base"),
-        "a refused retarget must be surfaced, got {msg:?}"
+        message.contains("Could not set the session base"),
+        "got {message:?}"
     );
 }
 

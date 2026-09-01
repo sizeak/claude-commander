@@ -95,7 +95,7 @@ The command updates the stack link and, when the session has an open PR, retarge
 
 **It does not rewrite git history.** The branch still contains its old base's commits, so until you rebase or merge onto the new base yourself, both the PR and the review diff will show them. Retargeting onto a *sibling* rather than an ancestor is the case to watch: the merge base falls back towards `main` and the diff grows to include the old parent's work as well as your own.
 
-A retarget is refused when it would create a cycle (basing a session on one of its own descendants), when the session's PR is already merged or closed (GitHub will not let its base change, so the next sync would revert it), and while a cascade is paused for that project (resume or abandon it first — `Cascade resume` re-derives the stack from the current topology).
+A retarget is refused when it would create a cycle (basing a session on one of its own descendants), when the session's PR is already merged or closed (PR status is polled with `--state all`, so a settled PR keeps re-asserting its own base and the change would be undone at the next sync), and while a cascade is paused for that project (resume or abandon it first — `Cascade resume` re-derives the stack from the current topology).
 
 #### Cascade merge main through a stack
 

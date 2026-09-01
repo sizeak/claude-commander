@@ -191,12 +191,13 @@ impl MockBackend {
         self.reconciled.lock().unwrap().clone()
     }
 
-    /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
-    /// Base retargets recorded by [`CommanderBackend::set_session_base`].
+    /// `(session, new parent)` pairs passed to [`Self::set_session_base`], in
+    /// call order. `None` is an unstack onto the project's main branch.
     pub fn base_changes(&self) -> Vec<(SessionId, Option<SessionId>)> {
         self.base_changes.lock().unwrap().clone()
     }
 
+    /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
     pub fn program_changes(&self) -> Vec<(SessionId, String)> {
         self.program_changes.lock().unwrap().clone()
     }

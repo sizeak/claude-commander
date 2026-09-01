@@ -527,7 +527,7 @@ pub enum SetBaseRejection {
     AlreadyBased { branch: String },
 
     #[error(
-        "this session's pull request is {state} — its base can only be changed on GitHub while the PR is open"
+        "this session's pull request is {state} — restacking it would be undone by the next PR sync"
     )]
     PrNotOpen { state: &'static str },
 

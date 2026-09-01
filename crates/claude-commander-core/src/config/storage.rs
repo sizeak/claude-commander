@@ -364,11 +364,13 @@ impl AppState {
         new_parent: Option<SessionId>,
     ) -> std::result::Result<(SetBasePlan, Option<PrBaseRetarget>), SetBaseRejection> {
         let plan = self.plan_set_base(session_id, new_parent)?;
-        // Read the PR-edit plan from the pre-retarget state: `apply_set_base`
-        // rewrites `pr_base_branch`, which is what identifies the PR to edit.
+        // Read the PR-edit plan before applying. `pr_retarget_for_set_base`
+        // happens to read only `pr_number`/`repo_path`, which apply leaves
+        // alone — but keeping the read first means it stays correct if it ever
+        // needs a field apply does rewrite.
         let pr_retarget = self.pr_retarget_for_set_base(&plan);
         self.apply_set_base(&plan);
-        Ok((plan.clone(), pr_retarget))
+        Ok((plan, pr_retarget))
     }
 
     /// Validate a base retarget and compute where the session lands.
@@ -390,10 +392,15 @@ impl AppState {
             return Err(SetBaseRejection::SelfParent);
         }
 
-        // A merged or closed PR cannot be retargeted on GitHub, and its
-        // `pr_base_branch` outranks the local hint in both `resolve_stack_parent`
-        // and `ReviewBase::of` — so the next PR sync would re-assert the old base
-        // and silently undo a local-only change. Refuse rather than appear to work.
+        // Refuse a settled PR. The load-bearing reason is in this repo and does
+        // not depend on GitHub's behaviour: `check_pr_for_branch` polls with
+        // `--state all`, so a merged/closed PR still returns `Found`, and
+        // `apply_pr_results` (api.rs) unconditionally re-asserts its
+        // `base_ref_name` over `pr_base_branch` — which outranks the local hint
+        // in both `resolve_stack_parent` and `ReviewBase::of`. So any change we
+        // made here would be undone at the next poll.
+        // `gh pr edit --base` is also expected to fail on a merged PR, which
+        // would leave nothing durable behind; that half is untested here.
         if let Some(state) = session.pr_state {
             match state {
                 crate::git::PrState::Merged => {
@@ -426,9 +433,12 @@ impl AppState {
         let (new_parent_id, new_base_branch) = match new_parent {
             None => (None, main_branch),
             Some(pid) => {
-                let parent = project_sessions
-                    .iter()
-                    .find(|s| s.id == pid)
+                // Looked up across *all* sessions, not just this project's, so a
+                // cross-project target reports `DifferentProject` rather than
+                // the misleading "no longer exists" a project-scoped find gives.
+                let parent = self
+                    .sessions
+                    .get(&pid)
                     .ok_or(SetBaseRejection::ParentNotFound)?;
                 if parent.project_id != project_id {
                     return Err(SetBaseRejection::DifferentProject);
@@ -460,8 +470,22 @@ impl AppState {
             }
         };
 
-        let current_base = self.resolved_base_branch(session_id, &project_sessions);
-        if current_base.as_deref() == Some(new_base_branch.as_str()) {
+        // "Already based" means *applying would change nothing* — not merely
+        // that the resolved base name matches. The three fields can disagree
+        // (a PR retargeted on GitHub moves `pr_base_branch` while the local
+        // hint and `base_branch` stay stale), and repairing exactly that
+        // disagreement is what this command is for. Comparing only the resolved
+        // name would refuse the repair and leave the session to snap back to
+        // its stale parent the moment the PR closes.
+        let old_base_branch = session
+            .pr_base_branch
+            .clone()
+            .or_else(|| session.base_branch.clone());
+        let would_change = session.stack_parent_session_id != new_parent_id
+            || session.base_branch.as_deref() != Some(new_base_branch.as_str())
+            || (session.pr_base_branch.is_some()
+                && session.pr_base_branch.as_deref() != Some(new_base_branch.as_str()));
+        if !would_change {
             return Err(SetBaseRejection::AlreadyBased {
                 branch: new_base_branch,
             });
@@ -471,27 +495,8 @@ impl AppState {
             session_id: *session_id,
             new_parent_id,
             new_base_branch,
-            old_base_branch: current_base,
+            old_base_branch,
         })
-    }
-
-    /// The branch a session is *currently* based on, preferring the same source
-    /// of truth the review diff does (`pr_base_branch`, then `base_branch`).
-    fn resolved_base_branch(
-        &self,
-        session_id: &SessionId,
-        project_sessions: &[&WorktreeSession],
-    ) -> Option<String> {
-        let session = project_sessions.iter().find(|s| s.id == *session_id)?;
-        if let Some(b) = session.pr_base_branch.clone() {
-            return Some(b);
-        }
-        if let Some(b) = session.base_branch.clone() {
-            return Some(b);
-        }
-        crate::session::resolve_stack_parent(*session, project_sessions)
-            .and_then(|pid| project_sessions.iter().find(|s| s.id == pid))
-            .map(|p| p.branch.clone())
     }
 
     /// Apply a validated plan: move all three stack fields together.
@@ -532,8 +537,9 @@ impl AppState {
     /// A project's sessions in a deterministic order.
     ///
     /// [`Self::get_project_sessions`] iterates a `HashMap`, so ties in any
-    /// downstream `find`/`max_by_key` resolve differently run to run. Every
-    /// stack walk that can be observed by the user goes through here instead.
+    /// downstream `find`/`max_by_key` resolve differently run to run. The
+    /// base-retarget walks use this instead; the older `plan_stack_retarget`
+    /// and `backfill_base_branch` still take the unordered form.
     fn sorted_project_sessions(&self, project_id: &ProjectId) -> Vec<&WorktreeSession> {
         let mut sessions = self.get_project_sessions(project_id);
         sessions.sort_by_key(|s| (s.created_at, s.id));
@@ -1660,6 +1666,65 @@ mod tests {
             Some(ids[1]),
             "C must still resolve to B"
         );
+    }
+
+    /// The repair this command exists for: a PR retargeted on GitHub moves
+    /// `pr_base_branch` while the local hint and `base_branch` stay stale.
+    /// Selecting the branch the PR already targets must still be accepted, so
+    /// the stale fields are fixed — otherwise the session snaps back to its old
+    /// parent the moment the PR closes and `pr_base_branch` clears.
+    #[test]
+    fn set_session_base_repairs_stale_local_fields_matching_the_pr_base() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b"]);
+        {
+            // The PR was retargeted onto main outside Commander; the local
+            // fields still say "stacked on a".
+            let b = state.get_session_mut(&ids[1]).unwrap();
+            b.pr_number = Some(9);
+            b.pr_state = Some(crate::git::PrState::Open);
+            b.pr_base_branch = Some("main".to_string());
+        }
+
+        let (plan, _) = state
+            .set_session_base(&ids[1], None)
+            .expect("unstacking onto main must be allowed even though the PR already targets it");
+        assert_eq!(plan.new_base_branch, "main");
+
+        let b = state.get_session(&ids[1]).unwrap();
+        assert!(
+            b.stack_parent_session_id.is_none(),
+            "the stale parent hint must be cleared"
+        );
+        assert_eq!(
+            b.base_branch.as_deref(),
+            Some("main"),
+            "and the stale base_branch repaired"
+        );
+    }
+
+    /// A target in another project names the real reason rather than claiming
+    /// the session does not exist.
+    #[test]
+    fn set_session_base_rejects_a_target_in_another_project() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let pid = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, pid, &["a", "b"]);
+
+        let other_project = Project::new("other", PathBuf::from("/tmp/other"), "main");
+        let other_pid = other_project.id;
+        state.add_project(other_project);
+        let outsider = add_root_session(&mut state, other_pid, "z");
+
+        assert!(matches!(
+            state.set_session_base(&ids[1], Some(outsider)).unwrap_err(),
+            SetBaseRejection::DifferentProject
+        ));
     }
 
     /// Re-selecting the base the session already has is refused rather than
