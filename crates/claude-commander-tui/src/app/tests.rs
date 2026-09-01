@@ -5768,6 +5768,32 @@ async fn set_session_base_failure_is_reported_not_swallowed() {
     );
 }
 
+/// The command is palette-only, so the palette listing is its ONLY entry point
+/// — if it stops appearing there it becomes unreachable with no failing test
+/// anywhere else.
+#[test]
+fn set_session_base_is_reachable_from_the_command_palette() {
+    let kb = claude_commander_core::config::KeyBindings::default();
+    let mut ui = AppUiState {
+        selected_backend_connected: true,
+        ..AppUiState::default()
+    };
+
+    // Needs a selected session, like every other session-scoped command.
+    assert!(!ui.is_command_available(BindableAction::SetSessionBase));
+    ui.selected_session_id = Some(SessionRef::new(BackendId(1), SessionId::new()));
+    assert!(ui.is_command_available(BindableAction::SetSessionBase));
+
+    let entries = ui.gather_command_entries(&kb, "set session base");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.action == BindableAction::SetSessionBase),
+        "the palette must list the command, got {:?}",
+        entries.iter().map(|e| e.label).collect::<Vec<_>>()
+    );
+}
+
 /// The whole point of the confirm step: this command does not rebase, so the
 /// user has to be told the PR and review diff will be wrong until they do.
 #[test]
