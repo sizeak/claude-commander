@@ -15,7 +15,7 @@ use std::time::Duration;
 use claude_commander_protocol::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, ProgramInfo, ReviewSnapshot, SessionDetail, SetProgramsRequest,
-    ToggleReviewed, WorkspaceSnapshot,
+    SetSessionBase, SetSessionBaseOutcome, ToggleReviewed, WorkspaceSnapshot,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
@@ -548,6 +548,22 @@ impl RemoteClient {
     pub async fn set_section(&self, id: SessionId, section: Option<String>) -> ClientResult<()> {
         let body = serde_json::json!({ "op": "set_section", "section": section });
         self.patch_json_ok(self.session_url(id, &[]), &body).await
+    }
+
+    /// Retarget a session's stack base (`POST /sessions/{id}/base`).
+    ///
+    /// A POST with a body rather than a PATCH op, because the response carries
+    /// the outcome — notably whether the `gh pr edit` landed, which the caller
+    /// cannot determine for itself.
+    pub async fn set_session_base(
+        &self,
+        id: SessionId,
+        parent: Option<SessionId>,
+    ) -> ClientResult<SetSessionBaseOutcome> {
+        let body = SetSessionBase {
+            parent_session_id: parent,
+        };
+        self.post_json(self.session_url(id, &["base"]), &body).await
     }
 
     /// Change a session's launch program (PATCH `change_program` op).

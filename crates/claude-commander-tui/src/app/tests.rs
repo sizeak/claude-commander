@@ -5700,6 +5700,120 @@ async fn change_program_confirm_spawns_against_owning_backend_and_routes_program
     );
 }
 
+/// Confirming a base retarget must route to the OWNING backend, off the event
+/// loop, and the completion must keep the session selected — it re-parents, so
+/// the tree rebuild moves it.
+#[tokio::test]
+async fn set_session_base_confirm_routes_to_owning_backend() {
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+
+    app.handle_confirm(super::ConfirmAction::SetSessionBase {
+        session_id: remote_sid,
+        target: None,
+    })
+    .await;
+
+    loop {
+        match app.event_loop.next().await.expect("a set-base event") {
+            AppEvent::StateUpdate(su @ StateUpdate::SetSessionBaseFinished { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).base_changes(),
+        vec![(remote_sid, None)],
+        "set_session_base must route to the owning backend with the chosen target"
+    );
+}
+
+/// A refused or half-successful retarget must reach the user. `set_section`
+/// discards its result because a section move cannot be rejected; this one can
+/// be (a cycle, a settled PR, a paused cascade), so the failure is reported.
+#[tokio::test]
+async fn set_session_base_failure_is_reported_not_swallowed() {
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+    remote_mock(&app, BackendId(1)).set_failing(true);
+
+    app.handle_confirm(super::ConfirmAction::SetSessionBase {
+        session_id: remote_sid,
+        target: None,
+    })
+    .await;
+
+    loop {
+        match app.event_loop.next().await.expect("a set-base event") {
+            AppEvent::StateUpdate(su @ StateUpdate::SetSessionBaseFinished { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    // A modal, not a toast: the status bar is one unwrapped line sharing the row
+    // with the session count, so the reason a retarget was refused would be
+    // clipped exactly when the user needs to read it.
+    let Modal::Error { message } = &app.ui_state.modal else {
+        panic!(
+            "a refused retarget must raise an error modal, got {:?}",
+            app.ui_state.modal
+        );
+    };
+    assert!(
+        message.contains("Could not set the session base"),
+        "got {message:?}"
+    );
+}
+
+/// The command is palette-only, so the palette listing is its ONLY entry point
+/// — if it stops appearing there it becomes unreachable with no failing test
+/// anywhere else.
+#[test]
+fn set_session_base_is_reachable_from_the_command_palette() {
+    let kb = claude_commander_core::config::KeyBindings::default();
+    let mut ui = AppUiState {
+        selected_backend_connected: true,
+        ..AppUiState::default()
+    };
+
+    // Needs a selected session, like every other session-scoped command.
+    assert!(!ui.is_command_available(BindableAction::SetSessionBase));
+    ui.selected_session_id = Some(SessionRef::new(BackendId(1), SessionId::new()));
+    assert!(ui.is_command_available(BindableAction::SetSessionBase));
+
+    let entries = ui.gather_command_entries(&kb, "set session base");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.action == BindableAction::SetSessionBase),
+        "the palette must list the command, got {:?}",
+        entries.iter().map(|e| e.label).collect::<Vec<_>>()
+    );
+}
+
+/// The whole point of the confirm step: this command does not rebase, so the
+/// user has to be told the PR and review diff will be wrong until they do.
+#[test]
+fn set_session_base_confirm_message_warns_that_rebasing_is_manual() {
+    let msg = super::actions::set_session_base_confirm_message("my-task", "other-br");
+    assert!(msg.contains("my-task"));
+    assert!(msg.contains("other-br"));
+    assert!(
+        msg.contains("NOT rewritten"),
+        "must say git history is not rewritten, got {msg:?}"
+    );
+    assert!(
+        msg.contains("rebase"),
+        "must tell the user to rebase, got {msg:?}"
+    );
+}
+
 #[tokio::test]
 async fn program_picker_items_flag_current_and_filter() {
     // `gather_program_picker_items` flags the row matching the session's current

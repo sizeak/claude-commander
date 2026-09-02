@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    WorkspaceSnapshot,
+    SetSessionBaseOutcome, WorkspaceSnapshot,
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
@@ -157,6 +157,14 @@ impl CommanderBackend for PlaceholderBackend {
     }
 
     async fn set_section(&self, _id: SessionId, _section: Option<String>) -> BResult<()> {
+        self.unavailable()
+    }
+
+    async fn set_session_base(
+        &self,
+        _id: SessionId,
+        _parent: Option<SessionId>,
+    ) -> BResult<SetSessionBaseOutcome> {
         self.unavailable()
     }
 

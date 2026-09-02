@@ -1197,6 +1197,7 @@ impl App {
             PaletteMode::SectionPicker { .. } => " Move to Section ",
             PaletteMode::RemoteServerPicker => " Remove Remote Server ",
             PaletteMode::ProgramPicker { .. } => " Change Program ",
+            PaletteMode::BasePicker { .. } => " Set Session Base ",
             // The fetch state lives in the title (as the Checkout modal
             // does with "fetching origin…") so a slow or failed `gh`
             // listing is visible rather than reading as an empty account.
@@ -1341,6 +1342,7 @@ impl App {
                 QuickSwitchItem::SectionMove { label, .. }
                 | QuickSwitchItem::RemoteServerRemove { label, .. }
                 | QuickSwitchItem::GithubRepo { label, .. }
+                | QuickSwitchItem::BaseChange { label, .. }
                 | QuickSwitchItem::ProgramChange { label, .. } => {
                     let style = if is_selected {
                         self.theme.selection()

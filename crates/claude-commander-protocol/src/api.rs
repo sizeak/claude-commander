@@ -422,6 +422,48 @@ pub struct SetSection {
     pub section: Option<String>,
 }
 
+/// Request body for retargeting a session's stack base
+/// (`POST /sessions/{id}/base`). `parent_session_id: None` unstacks the session
+/// onto the project's main branch.
+///
+/// Only the *parent* crosses the wire, never a branch name: the host derives the
+/// branch from that session (or the project's main branch), so a client can
+/// never disagree with it about where the session actually landed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSessionBase {
+    #[serde(default)]
+    pub parent_session_id: Option<SessionId>,
+}
+
+/// What happened to the session's pull request during a base retarget.
+///
+/// Three-way rather than a bool: "there was no PR" and "we tried and failed"
+/// need different words, because only the second leaves work for the user. A
+/// failed edit is not cosmetic — the next PR sync overwrites the local mirror
+/// from GitHub, so an unreported failure silently reverts the retarget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PrRetarget {
+    /// The session has no PR, so there was nothing to retarget.
+    NoPr,
+    /// `gh pr edit --base` succeeded; the new base is durable on GitHub.
+    Retargeted { pr_number: u32 },
+    /// `gh pr edit --base` failed. The local metadata moved, but the next PR
+    /// sync will revert it unless the user fixes the base on GitHub.
+    Failed { pr_number: u32, message: String },
+}
+
+/// Result of retargeting a session's stack base.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSessionBaseOutcome {
+    /// The branch the session is now based on.
+    pub new_base_branch: String,
+    /// The branch it was based on before, when one was known.
+    #[serde(default)]
+    pub old_base_branch: Option<String>,
+    pub pr: PrRetarget,
+}
+
 /// Request body for changing a session's launch program (`PATCH /sessions/{id}`).
 /// The new program is the command that will be relaunched in the pane; the
 /// owning host relaunches the agent fresh so it takes effect.
@@ -760,6 +802,48 @@ mod tests {
         let back: ReviewSnapshot =
             serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
         assert_eq!(back.raw.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn set_session_base_body_roundtrips() {
+        // An explicit null unstacks onto main, and an absent field means the
+        // same — a client that omits it must not be read as naming a parent.
+        let unstack: SetSessionBase =
+            serde_json::from_str(r#"{"parent_session_id":null}"#).unwrap();
+        assert!(unstack.parent_session_id.is_none());
+        let absent: SetSessionBase = serde_json::from_str("{}").unwrap();
+        assert!(absent.parent_session_id.is_none());
+
+        let id = SessionId::new();
+        let body = SetSessionBase {
+            parent_session_id: Some(id),
+        };
+        let back: SetSessionBase =
+            serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
+        assert_eq!(back.parent_session_id, Some(id));
+    }
+
+    #[test]
+    fn set_session_base_outcome_roundtrips_each_pr_state() {
+        for pr in [
+            PrRetarget::NoPr,
+            PrRetarget::Retargeted { pr_number: 7 },
+            PrRetarget::Failed {
+                pr_number: 7,
+                message: "not found".to_string(),
+            },
+        ] {
+            let outcome = SetSessionBaseOutcome {
+                new_base_branch: "main".to_string(),
+                old_base_branch: Some("feat".to_string()),
+                pr: pr.clone(),
+            };
+            let back: SetSessionBaseOutcome =
+                serde_json::from_str(&serde_json::to_string(&outcome).unwrap()).unwrap();
+            assert_eq!(back.pr, pr);
+            assert_eq!(back.new_base_branch, "main");
+            assert_eq!(back.old_base_branch.as_deref(), Some("feat"));
+        }
     }
 
     #[test]

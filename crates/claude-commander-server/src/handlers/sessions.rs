@@ -13,7 +13,7 @@ use axum::{
 };
 use claude_commander_core::api::{
     ChangeProgram, CreateSessionOpts, PreviewData, PreviewTarget, RenameSession, SessionInfo,
-    SetSection,
+    SetSection, SetSessionBase, SetSessionBaseOutcome,
 };
 use claude_commander_core::session::SessionLookup;
 use serde::Deserialize;
@@ -241,6 +241,26 @@ pub async fn keep_alive(
 ) -> Result<Json<bool>, ApiError> {
     let id = parse_session_id(&id)?;
     Ok(Json(state.service.toggle_keep_alive(&id).await?))
+}
+
+/// `POST /sessions/{id}/base` → retarget the session's stack base, returning
+/// what happened (including whether the PR edit landed).
+///
+/// A POST sub-resource rather than a `PatchSession` variant because it answers
+/// with a body: `PATCH /sessions/{id}` is uniformly 204, and the caller cannot
+/// compute the PR outcome for itself.
+pub async fn set_base(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SetSessionBase>,
+) -> Result<Json<SetSessionBaseOutcome>, ApiError> {
+    let id = parse_session_id(&id)?;
+    Ok(Json(
+        state
+            .service
+            .set_session_base(&id, body.parent_session_id)
+            .await?,
+    ))
 }
 
 /// Body for the batch mark-unread route: the session ids to flag.
@@ -524,6 +544,22 @@ mod tests {
             .unwrap();
         let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
         assert_eq!(status, 400);
+    }
+
+    /// A base retarget on an unknown session is a 404, not the rejection enum's
+    /// 400/409 — the service maps `SessionNotFound` back to `NotFound` precisely
+    /// so this convention holds across every session route.
+    #[tokio::test]
+    async fn post_base_unknown_session_is_404() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        let req = Request::post(format!("/sessions/{}/base", uuid::Uuid::new_v4()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"parent_session_id":null}"#))
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 404);
     }
 
     /// A `set_section` PATCH on an unknown session id is a 404 (existence check).

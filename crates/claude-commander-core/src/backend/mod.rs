@@ -50,7 +50,7 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, ServerStatus,
-    SessionDetail, WorkspaceSnapshot,
+    SessionDetail, SetSessionBaseOutcome, WorkspaceSnapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
@@ -621,6 +621,15 @@ pub trait CommanderBackend: Send + Sync {
     async fn change_program(&self, id: SessionId, program: String) -> BResult<()>;
     /// Move a session to `section`, or clear its manual override (`None`).
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()>;
+    /// Retarget a session's stack base onto `parent`, or unstack it onto the
+    /// project's main branch (`None`). Metadata and PR base only — git history
+    /// is not rewritten. Runs on the session's owning host, since the durable
+    /// half is a `gh pr edit` against that host's checkout.
+    async fn set_session_base(
+        &self,
+        id: SessionId,
+        parent: Option<SessionId>,
+    ) -> BResult<SetSessionBaseOutcome>;
     /// Clear a session's unread flag.
     async fn mark_read(&self, id: SessionId) -> BResult<()>;
     /// Flip a session's keep-alive (hibernation-exempt) flag; returns the new

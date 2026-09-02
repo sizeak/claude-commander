@@ -560,6 +560,12 @@ pub enum PaletteMode {
     /// acts on an *unmatched* query, treating it as a clone URL — that is the
     /// "clone something not in the list" path.
     GithubRepoPicker,
+    /// Stack-base picker for a specific session: one row per eligible session
+    /// in the same project, plus a row for the project's main branch.
+    /// Selecting a row opens a confirm modal that retargets the session's base.
+    BasePicker {
+        session_id: SessionId,
+    },
     /// Program (agent) picker for a specific session. The palette lists the
     /// owning backend's configured programs; selecting one opens a confirm modal
     /// that changes the session's program and relaunches it.
@@ -598,6 +604,16 @@ pub enum QuickSwitchItem {
         dir_name: String,
         /// Pre-formatted display label (slug, visibility, and an "already a
         /// project" note when this repo is registered on the target backend).
+        label: String,
+    },
+    /// Selecting this row opens a confirm modal retargeting `session_id`'s stack
+    /// base onto `target` (`None` = the project's main branch).
+    BaseChange {
+        session_id: SessionId,
+        target: Option<SessionId>,
+        /// The branch the session would end up based on, for the confirm text.
+        base_branch: String,
+        /// Pre-formatted display label.
         label: String,
     },
     /// Selecting this row opens a confirm modal to change `session_id`'s program
@@ -1398,6 +1414,11 @@ pub enum ConfirmAction {
     RemoveProject {
         project_id: ProjectId,
     },
+    /// Retarget a session's stack base (picked via the palette).
+    SetSessionBase {
+        session_id: SessionId,
+        target: Option<SessionId>,
+    },
     /// Save a remote server whose connection probe failed ("save anyway").
     AddRemoteServerAnyway {
         server: RemoteServerConfig,
@@ -1788,6 +1809,7 @@ impl AppUiState {
             | BindableAction::RestartSession
             | BindableAction::ResetSession
             | BindableAction::ChangeProgram
+            | BindableAction::SetSessionBase
             | BindableAction::ToggleKeepAlive
             | BindableAction::OpenPullRequest
             | BindableAction::OpenReviewDiff

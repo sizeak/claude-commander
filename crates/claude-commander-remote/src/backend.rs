@@ -21,7 +21,7 @@ use claude_commander_client::{
 use claude_commander_core::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    WorkspaceSnapshot,
+    SetSessionBaseOutcome, WorkspaceSnapshot,
 };
 use claude_commander_core::backend::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
@@ -255,6 +255,16 @@ impl CommanderBackend for RemoteBackend {
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()> {
         self.client
             .set_section(id, section)
+            .await
+            .map_err(into_backend_error)
+    }
+    async fn set_session_base(
+        &self,
+        id: SessionId,
+        parent: Option<SessionId>,
+    ) -> BResult<SetSessionBaseOutcome> {
+        self.client
+            .set_session_base(id, parent)
             .await
             .map_err(into_backend_error)
     }
