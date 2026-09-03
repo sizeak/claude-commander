@@ -1236,6 +1236,26 @@ impl App {
 
     /// Open the quick-switch palette in the given mode.
     pub(super) async fn open_quick_switch_with_mode(&mut self, mode: PaletteMode) {
+        self.open_palette_over_review(mode, None).await;
+    }
+
+    /// Open the session switcher over the review view, suspending `review`
+    /// inside the palette modal: it keeps rendering underneath and Esc restores
+    /// it (see [`Modal::QuickSwitch`]'s `review` field). Sessions only — see
+    /// [`PaletteMode::SessionOnly`].
+    pub(super) async fn open_review_switcher(&mut self, review: Box<DiffReviewState>) {
+        self.record_feature("review.switch_session");
+        self.open_palette_over_review(PaletteMode::SessionOnly, Some(review))
+            .await;
+    }
+
+    /// Shared palette-open path: build the mode's rows and install the modal,
+    /// optionally carrying a suspended review view.
+    async fn open_palette_over_review(
+        &mut self,
+        mode: PaletteMode,
+        review: Option<Box<DiffReviewState>>,
+    ) {
         let matches = self.build_palette_items(mode, "").await;
         self.ui_state.modal = Modal::QuickSwitch {
             mode,
@@ -1243,6 +1263,7 @@ impl App {
             matches,
             selected_idx: 0,
             scroll: 0,
+            review,
         };
     }
 
@@ -1357,13 +1378,15 @@ impl App {
         if eff_mode == PaletteMode::GithubRepoPicker {
             return self.gather_github_repo_picker_items(eff_query);
         }
-        if eff_mode == PaletteMode::Unified {
+        if matches!(eff_mode, PaletteMode::Unified | PaletteMode::SessionOnly) {
             for m in self.gather_quick_switch_matches(eff_query).await {
                 out.push(QuickSwitchItem::Session(m));
             }
         }
-        for c in self.gather_command_entries(eff_query) {
-            out.push(QuickSwitchItem::Command(c));
+        if eff_mode != PaletteMode::SessionOnly {
+            for c in self.gather_command_entries(eff_query) {
+                out.push(QuickSwitchItem::Command(c));
+            }
         }
         out
     }
@@ -1437,7 +1460,7 @@ impl App {
                 Some(self.gather_remote_server_picker_items(eff_query))
             }
             PaletteMode::GithubRepoPicker => Some(self.gather_github_repo_picker_items(eff_query)),
-            PaletteMode::Unified | PaletteMode::CommandOnly => None,
+            PaletteMode::Unified | PaletteMode::CommandOnly | PaletteMode::SessionOnly => None,
         };
         if let Some(rows) = picker_rows {
             self.replace_palette_rows(rows);
@@ -1448,7 +1471,7 @@ impl App {
         // the refilter runs without awaiting the store lock on each keystroke —
         // the same rows the open path builds, from the same helper.
         let mut scored_sessions: Vec<(i64, QuickSwitchMatch)> = Vec::new();
-        if eff_mode == PaletteMode::Unified {
+        if matches!(eff_mode, PaletteMode::Unified | PaletteMode::SessionOnly) {
             scored_sessions = self.scored_palette_sessions(eff_query);
             // Empty query ranks by recency (newest attach first), matching the
             // pinned "Recent" block and the in-session switcher; a real query
@@ -1460,11 +1483,16 @@ impl App {
             .map(|(_, m)| QuickSwitchItem::Session(m))
             .collect();
 
-        let command_items: Vec<QuickSwitchItem> = self
-            .gather_command_entries(eff_query)
-            .into_iter()
-            .map(QuickSwitchItem::Command)
-            .collect();
+        // The review switcher lists sessions only, so a query that happens to
+        // name a command must not conjure one up mid-typing either.
+        let command_items: Vec<QuickSwitchItem> = if eff_mode == PaletteMode::SessionOnly {
+            Vec::new()
+        } else {
+            self.gather_command_entries(eff_query)
+                .into_iter()
+                .map(QuickSwitchItem::Command)
+                .collect()
+        };
 
         let mut rows = session_items;
         rows.extend(command_items);
@@ -1712,6 +1740,7 @@ impl App {
             matches,
             selected_idx: 0,
             scroll: 0,
+            review: None,
         };
     }
 
@@ -1769,12 +1798,7 @@ impl App {
     /// Find the section header that a list row belongs to, scanning backwards
     /// from `idx`. Returns `None` for rows above the first section header.
     fn find_parent_section_name(&self, idx: usize) -> Option<String> {
-        (0..=idx)
-            .rev()
-            .find_map(|i| match self.ui_state.list_items.get(i) {
-                Some(SessionListItem::SectionHeader { name, .. }) => Some(name.clone()),
-                _ => None,
-            })
+        super::selection::section_header_at(&self.ui_state.list_items, idx)
     }
 
     /// Collapse or expand the section containing the selected row (`ToggleSection`).
@@ -1835,6 +1859,7 @@ impl App {
             matches,
             selected_idx: 0,
             scroll: 0,
+            review: None,
         };
         self.spawn_remote_program_choices(sref.backend, session_id);
     }
@@ -1908,6 +1933,7 @@ impl App {
             matches,
             selected_idx: 0,
             scroll: 0,
+            review: None,
         };
     }
 
@@ -2064,6 +2090,7 @@ impl App {
             matches: Vec::new(),
             selected_idx: 0,
             scroll: 0,
+            review: None,
         };
         self.refetch_github_repos();
     }
@@ -2408,6 +2435,7 @@ impl App {
             matches,
             selected_idx: 0,
             scroll: 0,
+            review: None,
         };
     }
 

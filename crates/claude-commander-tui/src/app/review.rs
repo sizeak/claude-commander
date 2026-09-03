@@ -1543,6 +1543,39 @@ impl DiffReviewState {
 }
 
 impl App {
+    /// The review view currently on screen: the one owning the modal, or the
+    /// one suspended underneath the session switcher (see
+    /// [`Modal::QuickSwitch`]'s `review`).
+    ///
+    /// Background folds go through this rather than matching `Modal::ReviewDiff`
+    /// directly, because the palette can be open over a review when they land
+    /// and dropping one is not always recoverable: the automatic refresh is
+    /// *edge*-triggered on the agent going Working→Idle, so a refresh discarded
+    /// because the switcher happened to be open never fires again and the diff
+    /// stays stale until the user presses `r`.
+    pub(super) fn open_review(&self) -> Option<&DiffReviewState> {
+        match &self.ui_state.modal {
+            Modal::ReviewDiff(state) => Some(state),
+            Modal::QuickSwitch {
+                review: Some(state),
+                ..
+            } => Some(state),
+            _ => None,
+        }
+    }
+
+    /// [`Self::open_review`], mutably — for the folds that update it in place.
+    pub(super) fn open_review_mut(&mut self) -> Option<&mut DiffReviewState> {
+        match &mut self.ui_state.modal {
+            Modal::ReviewDiff(state) => Some(state),
+            Modal::QuickSwitch {
+                review: Some(state),
+                ..
+            } => Some(state),
+            _ => None,
+        }
+    }
+
     /// Open the review view for the selected session.
     pub(super) async fn handle_open_review(&mut self) {
         let Some(sref) = self.ui_state.selected_session_id else {
@@ -1754,6 +1787,15 @@ impl App {
         // Ctrl-n / Ctrl-p mirror the arrow keys (and j/k) for navigation,
         // matching the convention used by the other list modals.
         let nav_code = review_nav_keycode(key);
+        // Ctrl+Space (or the leader key) opens the session switcher over the
+        // diff. Checked in the fallthrough arm below rather than here, so it
+        // only applies to keys this view has no meaning for in the current
+        // focus/sub-mode: with a leader rebound onto, say, `r`, `r` still
+        // refreshes the diff. Guarded arms make that per-mode by construction —
+        // a leader of `v` toggles visual select in the body and opens the
+        // switcher from the file list, where `v` is unbound.
+        let (leader_code, leader_mods) = self.config.parse_leader_key();
+        let opens_switcher = super::input::opens_palette(&key, leader_code, leader_mods);
         // Record UI-only review features (layout/fold/image/visual/refresh) that
         // don't flow through an instrumented service method. Comment create /
         // delete / apply and reviewed-toggle are recorded at the service layer.
@@ -1858,6 +1900,13 @@ impl App {
                     state.expand_gap(hunk + 1, ExpandAction::Down);
                     state.follow_cursor();
                 }
+            }
+            // A key this view doesn't bind: the switcher, or nothing at all.
+            // The palette takes the review state with it, so return rather than
+            // falling through to the restore below.
+            _ if opens_switcher => {
+                self.open_review_switcher(state).await;
+                return;
             }
             _ => {}
         }
@@ -2210,6 +2259,20 @@ impl App {
                 label: "session",
                 key: KeyEvent::new(kb.code, kb.modifiers),
             });
+        }
+
+        // The session switcher, last so it is the first thing dropped when the
+        // row is too narrow for every item. Labelled with Ctrl+Space rather
+        // than the leader key because it is the binding that holds in every
+        // mode this footer is drawn for (the leader only opens the switcher
+        // where the view has no meaning of its own for that key). Not offered
+        // while editing a comment, where the box owns every key — the same
+        // reason `close` isn't.
+        if state.comment.is_none() {
+            items.push(FooterItem::button(
+                "switch",
+                key(KeyCode::Char(' '), KeyModifiers::CONTROL),
+            ));
         }
 
         // A live status message momentarily claims the footer (this view's
