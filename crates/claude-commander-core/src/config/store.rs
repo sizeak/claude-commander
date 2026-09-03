@@ -145,6 +145,49 @@ impl StateStore {
             .and_then(|s| s.install_id.clone())
     }
 
+    /// Synchronously ensure an install id is persisted, returning the effective
+    /// id — the one already on disk if present, else `candidate`, written under
+    /// an exclusive lock.
+    ///
+    /// Unlike the background persist a spawned [`Self::mutate`] would do, this
+    /// blocks until the write is durable and requires **no** running reactor. A
+    /// fire-and-forget `tokio::spawn(mutate(...))` was unreliable for short-lived
+    /// callers: a one-shot CLI, or a GUI that builds and drops a current-thread
+    /// runtime per operation, tore the runtime down before the spawned write
+    /// flushed — so the id was used for that session's telemetry but never saved,
+    /// and every launch minted a fresh one (unique-install churn). The flock is a
+    /// blocking syscall, but this is a one-time, uncontended startup write, so
+    /// the brief block is acceptable.
+    pub fn persist_install_id_if_absent(&self, candidate: &str) -> Result<String> {
+        let lock_file = open_lock_file(&self.lock_path)?;
+        let _lock = Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_, e)| {
+            crate::error::Error::Config(ConfigError::SaveFailed(format!(
+                "Failed to acquire file lock: {}",
+                e
+            )))
+        })?;
+
+        let mut disk_state = read_state_from_disk(&self.state_path)?;
+        if disk_state.set_install_id_if_absent(candidate) {
+            disk_state.version = env!("CARGO_PKG_VERSION").to_string();
+            atomic_write(&self.state_path, &disk_state)?;
+        }
+        // `set_install_id_if_absent` guarantees a non-empty id is now present.
+        let effective = disk_state
+            .install_id
+            .clone()
+            .expect("install id present after set_install_id_if_absent");
+
+        // Best-effort in-memory sync (uncontended at startup); disk is the source
+        // of truth for the next launch regardless, so a momentarily-held lock is
+        // fine to skip.
+        if let Ok(mut guard) = self.state.try_write() {
+            guard.install_id = Some(effective.clone());
+        }
+        Ok(effective)
+        // _lock dropped here → flock released
+    }
+
     /// Apply a mutation to the persisted state.
     ///
     /// Acquires an exclusive file lock, re-reads the current state from disk
@@ -378,6 +421,54 @@ mod tests {
     fn create_test_store(temp_dir: &TempDir) -> StateStore {
         let state_path = temp_dir.path().join("state.json");
         StateStore::with_path(AppState::new(), state_path)
+    }
+
+    #[test]
+    fn persist_install_id_if_absent_writes_synchronously() {
+        // The whole point of the synchronous persist: no Tokio runtime, no await,
+        // no spawned task — the id must be durable on disk the instant the call
+        // returns. Short-lived callers (one-shot CLI, or a GUI that builds and
+        // drops a runtime per operation) lost the id when it was written by a
+        // fire-and-forget `tokio::spawn` that got dropped with the runtime, so
+        // every launch minted a new id (telemetry install-id churn). This is that
+        // regression: it runs OUTSIDE any runtime and asserts durability.
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let store = StateStore::with_path(AppState::new(), state_path.clone());
+
+        assert!(store.try_install_id().is_none());
+
+        let id = store
+            .persist_install_id_if_absent("install-xyz")
+            .expect("persist should succeed");
+        assert_eq!(id, "install-xyz");
+
+        // Durable on disk immediately — read the raw file back, no await.
+        let on_disk: AppState =
+            serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(on_disk.install_id.as_deref(), Some("install-xyz"));
+
+        // And reflected in the in-memory cache.
+        assert_eq!(store.try_install_id().as_deref(), Some("install-xyz"));
+    }
+
+    #[test]
+    fn persist_install_id_if_absent_keeps_existing_id() {
+        // Idempotent: a second call with a different candidate returns the
+        // already-persisted id and leaves disk untouched (never clobber).
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let store = StateStore::with_path(AppState::new(), state_path.clone());
+
+        let first = store.persist_install_id_if_absent("first").unwrap();
+        assert_eq!(first, "first");
+
+        let second = store.persist_install_id_if_absent("second").unwrap();
+        assert_eq!(second, "first", "must not overwrite an existing id");
+
+        let on_disk: AppState =
+            serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(on_disk.install_id.as_deref(), Some("first"));
     }
 
     #[tokio::test]

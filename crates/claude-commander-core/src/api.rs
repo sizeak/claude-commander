@@ -2836,33 +2836,26 @@ fn init_telemetry(
 
 /// Return the anonymous install id, generating one if none is stored yet.
 ///
-/// The in-memory read is uncontended at startup, so it normally reflects disk:
-/// when genuinely absent, the fresh id is persisted (via the flocked
-/// `set_install_id_if_absent`) and reused on every future launch. In the rare
-/// case the read missed because the lock was momentarily held — i.e. an id
-/// already exists — the persist leaves that existing id untouched, so this one
-/// session uses a throwaway id that won't match the persisted one. That's an
-/// acceptable edge case; we never clobber an existing id.
+/// When genuinely absent, the fresh id is persisted **synchronously** (a
+/// one-time, flocked, uncontended write via [`StateStore::persist_install_id_if_absent`])
+/// so it is durable before construction returns and reused on every future
+/// launch. A previous version spawned the persist as a fire-and-forget
+/// `tokio::spawn`, which short-lived callers (one-shot CLI, or a GUI that builds
+/// and drops a runtime per operation) tore down before it flushed — so every
+/// launch minted a new id and inflated unique-install telemetry. The persist
+/// never clobbers an existing id: if another writer won the race, its id is
+/// returned instead of ours.
 fn ensure_install_id(store: &Arc<StateStore>) -> String {
     if let Some(id) = store.try_install_id() {
         return id;
     }
-    let id = Uuid::new_v4().to_string();
-    // Persist this session's id in the background (so construction stays sync),
-    // but only when a runtime is present to host the task. The presence guard
-    // lives in `AppState::set_install_id_if_absent`, so it isn't duplicated here.
-    if tokio::runtime::Handle::try_current().is_ok() {
-        let id_for_persist = id.clone();
-        let store = store.clone();
-        tokio::spawn(async move {
-            let _ = store
-                .mutate(move |s| {
-                    s.set_install_id_if_absent(&id_for_persist);
-                })
-                .await;
-        });
-    }
-    id
+    let candidate = Uuid::new_v4().to_string();
+    store
+        .persist_install_id_if_absent(&candidate)
+        .unwrap_or_else(|e| {
+            warn!("failed to persist install id ({e}); using an ephemeral id this session");
+            candidate
+        })
 }
 
 // -- Response types --
