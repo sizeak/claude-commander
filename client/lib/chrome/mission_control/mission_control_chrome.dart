@@ -489,12 +489,26 @@ class MissionControlChrome extends Chrome {
             if (settings != null)
               SizedBox(
                 width: _barActionWidth,
-                child: IconButton(
-                  icon: Icon(settings.icon),
-                  iconSize: 20,
-                  color: t.textMuted,
-                  tooltip: settings.label,
-                  onPressed: settings.onPressed,
+                // Bar-tall, so the tap target keeps the bar's full height
+                // even though the glyph rides high in it. This replaced an
+                // `IconButton`, which brought its own centred 48-square target
+                // — and centring is what dropped the gear below the tabs.
+                height: double.infinity,
+                // Tooltip outside, button semantics in: the shape `IconButton`
+                // built for itself, kept so nothing about the control changes
+                // but where its glyph lands.
+                child: Tooltip(
+                  message: settings.label,
+                  child: Semantics(
+                    button: true,
+                    child: _footerSlot(
+                      onTap: settings.onPressed,
+                      glyph: Icon(settings.icon, size: 20, color: t.textMuted),
+                      // Labelless, but the tabs' label line is still reserved
+                      // beneath it — that is what lines the glyph rows up.
+                      labelStyle: _navLabelStyle(t, t.textMuted),
+                    ),
+                  ),
                 ),
               ),
             for (var i = 0; i < spec.items.length; i++) ...[
@@ -572,25 +586,53 @@ class MissionControlChrome extends Chrome {
   /// label, tinted with the nav accent when active and muted otherwise.
   Widget _navTab(BuildContext context, ChromeNavItem item, CommanderTokens t) {
     final color = item.selected ? t.nav : t.textFaint;
-    return InkWell(
+    return _footerSlot(
       onTap: item.onTap,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            item.glyph,
-            style: TextStyle(fontSize: 17, color: color, height: 1),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            item.label,
-            style: t.meta(size: 9, weight: FontWeight.w600, color: color),
-          ),
-        ],
+      glyph: Text(
+        item.glyph,
+        style: TextStyle(fontSize: 17, color: color, height: 1),
       ),
+      label: item.label,
+      labelStyle: _navLabelStyle(t, color),
     );
   }
+
+  /// The bar's mono uppercase nav label.
+  TextStyle _navLabelStyle(CommanderTokens t, Color color) =>
+      t.meta(size: 9, weight: FontWeight.w600, color: color);
+
+  /// One slot of the bar: [glyph] over its label, the pair centred in the bar.
+  ///
+  /// A slot with no [label] still reserves the label's line, because that line
+  /// is what decides where the glyph row sits: the pair is centred, so a glyph
+  /// with nothing under it centres on the bar instead and lands half a label
+  /// *below* its neighbours' glyphs (8.5dp at 1×). Reserving the line rather
+  /// than nudging by a constant also holds the row together under text scaling,
+  /// which changes that offset.
+  ///
+  /// The reservation is the empty [Text]: a paragraph with no characters is
+  /// still laid out as one line of its style, so the label's own metrics supply
+  /// the height and no caller has to know it. That is a claim about the
+  /// framework's text layout, and it is what the two glyph-row tests in
+  /// `phone_shell_test.dart` measure — a zero-height empty line would leave the
+  /// gear half a label low at 1×, exactly the defect they pin.
+  Widget _footerSlot({
+    required Widget glyph,
+    required TextStyle labelStyle,
+    String? label,
+    VoidCallback? onTap,
+  }) => InkWell(
+    onTap: onTap,
+    child: Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        glyph,
+        const SizedBox(height: 4),
+        Text(label ?? '', style: labelStyle),
+      ],
+    ),
+  );
 
   /// `session_list_page.dart`'s `_segmented` / `_segment` (the Recent/All toggle
   /// with its mode indicator) and `activity_page.dart`'s `_filterChips` /

@@ -176,6 +176,47 @@ void main() {
       expect(fab - fleet, moreOrLessEquals(activity - fab, epsilon: 0.5));
     });
 
+    /// The tabs are a glyph over a label, so their glyphs sit *above* the bar's
+    /// own centre line. A lone icon button centred in the bar therefore lands
+    /// half a label below them — 8.5dp at 1× — which reads as a dropped gear
+    /// rather than a third slot in the same row.
+    ///
+    /// Box centres, not ink: what is being pinned is the slot's vertical
+    /// structure, and this suite loads neither the mono face the glyph is drawn
+    /// in nor (outside `pumpGolden`) MaterialIcons, so an ink centroid here
+    /// would measure notdef boxes. `footer_nav_test.dart` carries the ink
+    /// receipt that a Material `Icon` centres its glyph in its box, which is
+    /// what makes the icon's box the right proxy for its glyph.
+    testWidgets('Mission Control sits it on the tabs\' glyph row', (
+      tester,
+    ) async {
+      await pump(tester);
+
+      expect(
+        tester.getRect(find.byIcon(Icons.settings)).center.dy,
+        moreOrLessEquals(
+          tester.getRect(find.text('▤')).center.dy,
+          epsilon: 0.5,
+        ),
+      );
+    });
+
+    /// The offset between the two rows is a label's height plus its gap, which
+    /// grows with the text scale — so an alignment written as a constant would
+    /// pass the test above and drift here. 1.3× is the same scale the LCARS
+    /// footer's wrap case uses.
+    testWidgets('Mission Control holds that row at 1.3× text', (tester) async {
+      await pump(tester, textScale: 1.3);
+
+      expect(
+        tester.getRect(find.byIcon(Icons.settings)).center.dy,
+        moreOrLessEquals(
+          tester.getRect(find.text('▤')).center.dy,
+          epsilon: 0.5,
+        ),
+      );
+    });
+
     testWidgets('LCARS makes it the leading block of the footer run', (
       tester,
     ) async {
