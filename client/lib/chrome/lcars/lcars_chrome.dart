@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/tokens.dart';
+import '../../util/viewport.dart';
 import '../chrome.dart';
 import '../chrome_forms.dart';
 import '../chrome_wide.dart';
@@ -22,6 +23,11 @@ import 'elbow.dart';
 /// and dialogs work exactly as they do in Mission Control.
 class LcarsChrome extends Chrome {
   const LcarsChrome();
+
+  /// The rail's top elbow block is the back button, and the rail is drawn for
+  /// every pushed route whether or not the content column has a title.
+  @override
+  bool get backSurvivesTitleless => true;
 
   /// A pushed route's frame. LCARS draws to the edges, so instead of the
   /// `SafeArea` this used to wrap itself in, the frame's own corner blocks grow
@@ -264,6 +270,10 @@ class LcarsChrome extends Chrome {
     EdgeInsets bleed,
   ) {
     final title = spec.title;
+    // A phone held sideways cannot afford the deck's full title block; the rail
+    // beside it is unaffected, being a horizontal cost rather than a vertical
+    // one.
+    final short = isShortViewport(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -272,14 +282,16 @@ class LcarsChrome extends Chrome {
           color: shouldShowBack(context, spec) ? t.primary : t.nav,
         ),
         if (title != null) ...[
-          const SizedBox(height: 7),
+          SizedBox(height: short ? 2 : 7),
           MediaQuery.withClampedTextScaling(
             maxScaleFactor: 1.5,
             child: Text(
               title.toUpperCase(),
-              maxLines: 2,
+              // One line sideways: a 22pt deck title wrapping to two takes a
+              // seventh of a landscape phone's height on its own.
+              maxLines: short ? 1 : 2,
               overflow: TextOverflow.ellipsis,
-              style: t.display(size: 22),
+              style: t.display(size: short ? 14 : 22),
             ),
           ),
           if (spec.subtitle != null)
@@ -289,15 +301,15 @@ class LcarsChrome extends Chrome {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontFamily: t.sans,
-                fontSize: 11,
+                fontSize: short ? 9 : 11,
                 fontWeight: FontWeight.w500,
                 letterSpacing: 1.1,
                 color: t.nav,
               ),
             ),
-          const SizedBox(height: 9),
+          SizedBox(height: short ? 3 : 9),
         ] else
-          const SizedBox(height: 12),
+          SizedBox(height: short ? 4 : 12),
         // Held, not bled: a pushed page has no footer, so without this a
         // scrollable would run under the gesture strip with nothing below it.
         Expanded(

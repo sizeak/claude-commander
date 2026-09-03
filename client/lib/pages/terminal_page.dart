@@ -17,6 +17,18 @@ import '../theme/terminal_theme.dart';
 import '../theme/tokens.dart';
 import '../util/ctrl_chord.dart';
 import '../util/error_text.dart';
+import '../util/viewport.dart';
+
+/// The terminal's own status/throughput line, so a test can measure the chrome
+/// it costs without depending on what is drawn in it.
+const terminalStatusBar = ValueKey('terminal-status-bar');
+
+/// The on-screen modifier/arrow row, likewise.
+const terminalModifierBar = ValueKey('terminal-modifier-bar');
+
+/// The back control [TerminalBody] draws when the page has no title bar to hold
+/// one — see [TerminalBody.onBack].
+const terminalBackButton = ValueKey('terminal-back');
 
 /// Live attached terminal, layout-agnostic (no Scaffold, no route). Streams raw
 /// PTY bytes from the cdylib WS bridge into an `xterm.dart` [Terminal], forwards
@@ -59,6 +71,16 @@ class TerminalBody extends StatefulWidget {
   /// on the physical keyboard, so this is false there.
   final bool showModifierBar;
 
+  /// The session name to carry in the status bar, or null when the page's own
+  /// title bar is already showing it. Set by [TerminalPage] in a short viewport,
+  /// where the page drops its title to give the pane the height.
+  final String? barTitle;
+
+  /// Pops the route, or null when the page's chrome already offers a way back.
+  /// Same origin as [barTitle]: a titleless Mission Control page has no app bar
+  /// and therefore no back button, so the status bar grows one.
+  final VoidCallback? onBack;
+
   /// Image sources for the attach-image action. Injectable because both drive
   /// platform channels a widget test cannot exercise; `null` means "use the real
   /// platform implementation".
@@ -84,6 +106,8 @@ class TerminalBody extends StatefulWidget {
     required this.session,
     this.kind = AttachKind.agent,
     this.showModifierBar = true,
+    this.barTitle,
+    this.onBack,
     this.imagePicker,
     this.clipboardImages,
     this.clock,
@@ -740,13 +764,19 @@ class _TerminalBodyState extends State<TerminalBody>
     // touch-device-only one, since a desktop has no soft keyboard.
     final obscured = MediaQuery.viewInsetsOf(context).bottom;
     final t = CommanderTokens.of(context);
+    // Sideways on a phone, the two bars this widget draws are 96dp of a 360dp
+    // screen (48 apiece); compacted they are 71. Keyed off the viewport's
+    // *size*, which a soft keyboard does not change (it moves `viewInsets`) —
+    // so the pane's row count cannot move with the keyboard, which is the one
+    // thing this whole page is built around.
+    final short = isShortViewport(context);
 
     return ColoredBox(
       color: t.terminalBg,
       child: Column(
         children: [
           // Fixed: the status line stays put while the pane pans beneath it.
-          _statusBar(context),
+          _statusBar(context, short),
           Expanded(
             // Pan, don't resize. `xterm` derives the PTY's cols/rows from the
             // view's laid-out size, so letting the keyboard shrink the view
@@ -788,6 +818,7 @@ class _TerminalBodyState extends State<TerminalBody>
                       _ModifierBar(
                         onSend: _send,
                         ctrlArmed: _ctrlArmed,
+                        compact: short,
                         onToggleCtrl: () =>
                             setState(() => _ctrlArmed = !_ctrlArmed),
                       ),
@@ -811,28 +842,56 @@ class _TerminalBodyState extends State<TerminalBody>
     return t.attention;
   }
 
-  Widget _statusBar(BuildContext context) {
+  /// The status line: link state, what the attach is doing, throughput, and the
+  /// two actions (attach image, reconnect).
+  ///
+  /// [compact] brings it from 48dp down to 35 for a short viewport, by dropping
+  /// the throughput readout and sizing the icon buttons to [_shortActionSize]
+  /// instead of Material's 40dp minimum. It also picks up the two things a
+  /// titleless page hands over — [TerminalBody.onBack] and
+  /// [TerminalBody.barTitle] — so the bar the pane already pays for carries
+  /// them rather than a second bar being drawn to.
+  Widget _statusBar(BuildContext context, bool compact) {
     final t = CommanderTokens.of(context);
+    final onBack = widget.onBack;
+    final title = widget.barTitle;
     return Container(
-      padding: const EdgeInsets.only(left: 14, right: 4, top: 4, bottom: 4),
+      key: terminalStatusBar,
+      padding: EdgeInsets.only(
+        left: onBack != null ? 0 : (compact ? 10 : 14),
+        right: compact ? 2 : 4,
+        top: compact ? 1 : 4,
+        bottom: compact ? 1 : 4,
+      ),
       decoration: BoxDecoration(
         color: t.canvasRaised,
         border: Border(bottom: BorderSide(color: t.borderSubtle)),
       ),
       child: Row(
         children: [
+          if (onBack != null)
+            _barAction(
+              context,
+              compact: compact,
+              icon: const Icon(Icons.arrow_back),
+              tooltip: 'Back',
+              onPressed: onBack,
+              key: terminalBackButton,
+            ),
           Container(
-            width: 7,
-            height: 7,
+            width: compact ? 6 : 7,
+            height: compact ? 6 : 7,
             decoration: BoxDecoration(
               color: _statusColor,
               shape: BoxShape.circle,
             ),
           ),
-          const SizedBox(width: 8),
+          SizedBox(width: compact ? 6 : 8),
           Expanded(
             child: Text(
-              _status,
+              // The name only when the page is not showing it, so the bar never
+              // says it twice.
+              title == null ? _status : '$title · $_status',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: t.meta(size: 10, color: t.textMuted),
@@ -850,17 +909,22 @@ class _TerminalBodyState extends State<TerminalBody>
             ),
             const SizedBox(width: 8),
           ],
-          Text(
-            '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
-            style: t.meta(size: 10, color: t.textFaint),
-          ),
+          // Dropped when compact: on a landscape phone the width goes to the
+          // session name, and the throughput is the one thing here that is
+          // curiosity rather than state or action.
+          if (!compact)
+            Text(
+              '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
+              style: t.meta(size: 10, color: t.textFaint),
+            ),
           // Agent attaches only: the server injects the image path into the
           // agent pane, so on a shell attach this would type somewhere the user
           // can't see. Lives here rather than in the modifier bar so desktop
           // layouts — which run without that bar — get it too.
           if (_canAttachImage)
-            IconButton(
-              visualDensity: VisualDensity.compact,
+            _barAction(
+              context,
+              compact: compact,
               onPressed: _imageBusy || _ended ? null : _attachImage,
               icon: _uploading
                   ? SizedBox.square(
@@ -870,9 +934,7 @@ class _TerminalBodyState extends State<TerminalBody>
                         color: t.textMuted,
                       ),
                     )
-                  : const Icon(Icons.image_outlined, size: 18),
-              color: t.textMuted,
-              disabledColor: t.textDim,
+                  : const Icon(Icons.image_outlined),
               tooltip: 'Attach image',
             ),
           // Never gated on [_ended]. A half-open socket — the network path gone
@@ -880,15 +942,68 @@ class _TerminalBodyState extends State<TerminalBody>
           // reading "attached" over a frozen pane, and that is precisely when the
           // user needs this button. Disabling it there turns a recoverable stall
           // into a dead end.
-          IconButton(
-            visualDensity: VisualDensity.compact,
+          _barAction(
+            context,
+            compact: compact,
             onPressed: _reconnect,
-            icon: const Icon(Icons.refresh, size: 18),
-            color: t.textMuted,
+            icon: const Icon(Icons.refresh),
             tooltip: 'Reconnect',
           ),
         ],
       ),
+    );
+  }
+
+  /// One icon action in the status bar.
+  ///
+  /// Compact drops Material's 40dp minimum tap target to [_shortActionSize],
+  /// which is what lets the whole bar come in at 35dp rather than 48. A
+  /// deliberate trade: sideways, a 48dp bar of secondary actions is 13% of the
+  /// display, and these three are recoverable one-taps rather than destructive
+  /// ones.
+  Widget _barAction(
+    BuildContext context, {
+    required bool compact,
+    required Widget icon,
+    required String tooltip,
+    required VoidCallback? onPressed,
+    Key? key,
+  }) {
+    final t = CommanderTokens.of(context);
+    return IconButton(
+      key: key,
+      // Compact drops the density adjustment rather than stacking it on the
+      // explicit style below: `VisualDensity.compact` is (-2, -2), scaled ×4
+      // into a -8dp base size adjustment (Flutter 3.47.0
+      // `material/theme_data.dart:3225,3307-3314`) applied to the button's
+      // minimum constraints (`material/button_style_button.dart:456,473-480`),
+      // so the two together would land 8dp short of the size being pinned.
+      visualDensity: compact ? VisualDensity.standard : VisualDensity.compact,
+      // A tighter `constraints` alone will not do it, and not for the reason it
+      // looks like: M3 converts that box straight into the style's
+      // `minimumSize`/`maximumSize` (Flutter 3.47.0
+      // `material/icon_button.dart:720-737`), so it *does* beat the 40dp
+      // default (`:1128`). What it cannot touch is `tapTargetSize`, which
+      // defaults to the theme's — `MaterialTapTargetSize.padded` — and pads the
+      // outer box to 48 regardless (`:1155`), nor the default padding. Hence
+      // the explicit style rather than a box.
+      //
+      // Measured: box-only came out 43dp tall (48 padded target, less 8 for the
+      // density below, plus the bar's padding and border); this comes out 35.
+      style: compact
+          ? IconButton.styleFrom(
+              minimumSize: const Size.square(_shortActionSize),
+              maximumSize: const Size.square(_shortActionSize),
+              padding: EdgeInsets.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            )
+          : null,
+      iconSize: compact ? 16 : 18,
+      onPressed: onPressed,
+      icon: icon,
+      color: t.textMuted,
+      disabledColor: t.textDim,
+      tooltip: tooltip,
     );
   }
 }
@@ -931,9 +1046,20 @@ class TerminalPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isShell = kind == AttachKind.shell;
+    final title = isShell ? '${session.title} · shell' : session.title;
+    // Sideways on a phone the page's own title bar is the largest single thing
+    // between the user and the pane, and the terminal already draws a bar with
+    // room for the name. So a short viewport gets a **titleless** page — no
+    // Mission Control app bar, no LCARS title block — and the body carries both
+    // the name and, where the chrome no longer offers one, the way back.
+    final short = isShortViewport(context);
+    final needsOwnBack =
+        short &&
+        !Chrome.of(context).backSurvivesTitleless &&
+        Navigator.of(context).canPop();
     return ChromePage(
       code: '47-T',
-      title: isShell ? '${session.title} · shell' : session.title,
+      title: short ? null : title,
       // The keyboard must not shrink the body: [TerminalBody] insets its own
       // chrome and pans the pane instead, so the remote PTY never sees a resize.
       // ChromeInsets.pan *is* main's resizeToAvoidBottomInset:false plus
@@ -945,6 +1071,8 @@ class TerminalPage extends StatelessWidget {
         handle: handle,
         session: session,
         kind: kind,
+        barTitle: short ? title : null,
+        onBack: needsOwnBack ? () => Navigator.of(context).maybePop() : null,
         imagePicker: imagePicker,
         clipboardImages: clipboardImages,
         clock: clock,
@@ -984,10 +1112,15 @@ class _ModifierBar extends StatelessWidget {
   /// where the arm is spent (on the next character the emulator sends).
   final bool ctrlArmed;
   final VoidCallback onToggleCtrl;
+
+  /// Short-viewport form: the same keys in a 36dp row rather than a 48dp one.
+  final bool compact;
+
   const _ModifierBar({
     required this.onSend,
     required this.ctrlArmed,
     required this.onToggleCtrl,
+    this.compact = false,
   });
 
   static const _esc = [0x1b];
@@ -1016,14 +1149,18 @@ class _ModifierBar extends StatelessWidget {
     // No SafeArea here: [TerminalBody] already insets the bottom chrome, and a
     // bar whose height changed with the keyboard would change the pane's rows.
     return Container(
-      height: 48,
+      key: terminalModifierBar,
+      height: compact ? 36 : 48,
       decoration: BoxDecoration(
         color: t.terminalBg,
         border: Border(top: BorderSide(color: t.borderSubtle)),
       ),
       child: ListView(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? 7 : 10,
+          vertical: compact ? 4 : 7,
+        ),
         children: [
           _key(context, 'Esc', () => onSend(_esc)),
           _key(context, 'Tab', () => onSend(_tab)),
@@ -1073,7 +1210,7 @@ class _ModifierBar extends StatelessWidget {
           borderRadius: BorderRadius.circular(7),
           child: Container(
             alignment: Alignment.center,
-            padding: const EdgeInsets.symmetric(horizontal: 12),
+            padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 12),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(7),
               border: Border.all(color: armed ? t.primary : t.border),
@@ -1092,3 +1229,8 @@ class _ModifierBar extends StatelessWidget {
     );
   }
 }
+
+/// The status bar's icon-button side in a short viewport. Below Material's 40dp
+/// minimum on purpose — see `_barAction` — and matched to the modifier bar's key
+/// pills, which are the same height and are the row a thumb actually works in.
+const _shortActionSize = 32.0;
