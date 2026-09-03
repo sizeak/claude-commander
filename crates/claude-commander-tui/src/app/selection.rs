@@ -424,6 +424,73 @@ impl App {
         }
     }
 
+    /// Move the cursor onto `session_id`, expanding whatever the current view
+    /// is hiding it behind. Returns false if it still has no row.
+    ///
+    /// The palette lists every session regardless of what the view shows, so a
+    /// jump must not assume the target already has one: a collapsed section's
+    /// sessions have *no* row at all (`build_section_grouped_items` skips the
+    /// whole group), so [`Self::select_session_in_tree`] fails, the selection
+    /// stays where it was, and the attach that follows lands on the previously
+    /// selected session — the wrong one, silently.
+    ///
+    /// Only the section the target turns out to be in is left expanded; the
+    /// others are re-collapsed, so a jump doesn't discard the rest of the
+    /// user's layout.
+    pub(super) async fn reveal_session_in_tree(&mut self, session_id: SessionId) -> bool {
+        if self.select_session_in_tree(session_id) {
+            return true;
+        }
+        // Collapsing is a list-view affordance; the board draws every column.
+        if self.ui_state.view_mode.is_board() || self.ui_state.collapsed_sections.is_empty() {
+            return false;
+        }
+        // A *list* rebuild keeps the cursor's row index, not the session it was
+        // on: `set_selectable` clears the selection when that index is now out
+        // of range or lands on a non-selectable row, and `update_selection`
+        // re-derives `selected_session_id` from whatever row it does land on.
+        // There is no list-side re-anchor by session id — `restore_selection`
+        // has one but runs once at startup, and `rebuild_board_view`'s applies
+        // to the board, which this function returned early for above. So
+        // expanding, which inserts rows above the cursor, can silently drop the
+        // selection, and the previous one has to be carried across by hand.
+        let was_selected = self.ui_state.selected_session_id;
+        let collapsed = std::mem::take(&mut self.ui_state.collapsed_sections);
+        self.refresh_list_items().await;
+        if !self.select_session_in_tree(session_id) {
+            // Something other than a collapse is hiding it; put the layout and
+            // the cursor back as they were.
+            self.ui_state.collapsed_sections = collapsed;
+            self.refresh_list_items().await;
+            if let Some(prev) = was_selected {
+                self.select_session_in_tree(prev.id);
+            }
+            return false;
+        }
+        // Which section had to open: the header above the cursor we just moved
+        // onto. `section_header_at`, not `target_section` — the latter answers
+        // `None` for the In Progress catch-all, which is an ordinary member of
+        // `collapsed_sections` and the common case here. A `None` (a view with
+        // no headers at all) can't have hidden the row in the first place, so
+        // it leaves everything expanded rather than guessing.
+        let keep = self
+            .ui_state
+            .list_state
+            .selected()
+            .and_then(|idx| section_header_at(&self.ui_state.list_items, idx));
+        if let Some(keep) = keep {
+            self.ui_state.collapsed_sections =
+                collapsed.into_iter().filter(|n| *n != keep).collect();
+            self.refresh_list_items().await;
+            // Load-bearing for the same reason: re-collapsing the other
+            // sections shifts every row below each of them, so the cursor this
+            // rebuild leaves behind is wherever the old index now points. Put
+            // it on the target explicitly.
+            self.select_session_in_tree(session_id);
+        }
+        true
+    }
+
     /// Move the board cursor to the sidebar row for `project_id` and sync
     /// selection state. No-op if the project has no sidebar entry. Used after
     /// adding a project (which has no sessions yet, so it appears only in the
@@ -518,15 +585,22 @@ pub(super) fn page_rows(visible: u16) -> usize {
 /// header (non-sectioned view modes render no headers) or under the implicit
 /// "In Progress" catch-all, where new sessions land by default anyway.
 pub(super) fn section_at(items: &[SessionListItem], idx: usize) -> Option<String> {
-    items
-        .get(..=idx)?
-        .iter()
-        .rev()
-        .find_map(|item| match item {
-            SessionListItem::SectionHeader { name, .. } => Some(name.clone()),
-            _ => None,
-        })
-        .filter(|name| name != claude_commander_core::session::IN_PROGRESS)
+    section_header_at(items, idx).filter(|name| name != claude_commander_core::session::IN_PROGRESS)
+}
+
+/// The name of the nearest section header at or above `idx`, catch-all
+/// included.
+///
+/// [`section_at`] is the *new-session* question ("which section should this row
+/// stamp a new session into"), and answers `None` for the In Progress catch-all
+/// because a session there needs no override. Anything asking "which section is
+/// this row displayed under" — collapse/expand, which treats In Progress as an
+/// ordinary member of `collapsed_sections` — must use this one instead.
+pub(super) fn section_header_at(items: &[SessionListItem], idx: usize) -> Option<String> {
+    items.get(..=idx)?.iter().rev().find_map(|item| match item {
+        SessionListItem::SectionHeader { name, .. } => Some(name.clone()),
+        _ => None,
+    })
 }
 
 #[cfg(test)]
