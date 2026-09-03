@@ -5,6 +5,8 @@ import 'package:claude_commander_client/pages/terminal_page.dart';
 import 'package:claude_commander_client/services/commander_api.dart';
 import 'package:claude_commander_client/services/image_picker_service.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
+import 'package:claude_commander_client/theme/theme_data.dart';
+import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1034,6 +1036,135 @@ void main() {
         expect(clipboard.readCount, 0);
         expect(api.lastCall('pasteImage'), isNull);
       });
+    });
+  });
+
+  group('a short viewport (a phone held sideways)', () {
+    // A 360dp-tall phone sideways: below [kShortViewportHeight], and the case
+    // where the three stacked bars — page title, status line, modifier row —
+    // took ~150 of those 360 between them.
+    const landscape = Size(800, 360);
+    const upright = Size(360, 800);
+
+    /// Pushes the terminal onto a route at [size], so it can pop the way it
+    /// does in the phone shell's stacked flow.
+    Future<void> pushTerminal(
+      WidgetTester tester,
+      Size size, {
+      CommanderTokens? tokens,
+    }) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          // Keyed by size so a second call in one test replaces the tree rather
+          // than pushing a second terminal onto the first one's Navigator.
+          key: ValueKey(size),
+          theme: tokens == null ? null : themeDataFor(tokens),
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => TerminalPage(
+                      api: api,
+                      handle: testHandle,
+                      session: sessionInfo(),
+                    ),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+    }
+
+    double heightOf(WidgetTester tester, Key key) =>
+        tester.getSize(find.byKey(key)).height;
+
+    testWidgets('the page title bar goes, and back moves into the terminal\'s '
+        'own bar', (tester) async {
+      await pushTerminal(tester, landscape);
+
+      expect(find.byType(AppBar), findsNothing);
+      // Without this the route would be unpoppable: Mission Control's back
+      // button lives in the app bar that just went away.
+      expect(find.byKey(terminalBackButton), findsOneWidget);
+
+      await tester.tap(find.byKey(terminalBackButton));
+      await tester.pumpAndSettle();
+      expect(find.byType(TerminalView), findsNothing);
+    });
+
+    testWidgets('the session name moves into the terminal\'s bar', (
+      tester,
+    ) async {
+      await pushTerminal(tester, landscape);
+
+      expect(
+        find.descendant(
+          of: find.byKey(terminalStatusBar),
+          matching: find.textContaining('Test session'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('both of the terminal\'s own bars shrink', (tester) async {
+      await pushTerminal(tester, landscape);
+      final shortStatus = heightOf(tester, terminalStatusBar);
+      final shortKeys = heightOf(tester, terminalModifierBar);
+
+      await pushTerminal(tester, upright);
+
+      expect(shortStatus, lessThan(heightOf(tester, terminalStatusBar)));
+      expect(shortKeys, lessThan(heightOf(tester, terminalModifierBar)));
+    });
+
+    testWidgets('the pane keeps the great majority of the height', (
+      tester,
+    ) async {
+      await pushTerminal(tester, landscape);
+
+      // The whole point of the exercise, stated as the number the user feels:
+      // everything on screen that is not the pane. 152 of 360 before this
+      // (56 title + 48 status + 48 keys), 71 after — so the budget is set at
+      // half the old cost.
+      final chrome =
+          landscape.height - tester.getSize(find.byType(TerminalView)).height;
+      expect(chrome, lessThanOrEqualTo(76));
+    });
+
+    /// LCARS' back affordance is the rail's top elbow block, which a pushed
+    /// route keeps whether or not the content column has a title — so the
+    /// status bar must not add a second one beside it.
+    testWidgets('LCARS leaves back to its rail', (tester) async {
+      await pushTerminal(tester, landscape, tokens: lcarsTokens);
+
+      expect(find.byKey(terminalBackButton), findsNothing);
+      expect(find.text('‹ BACK'), findsOneWidget);
+      // The title still moves into the terminal's bar: what LCARS drops in a
+      // short viewport is its title *block*, not its rail.
+      expect(
+        find.descendant(
+          of: find.byKey(terminalStatusBar),
+          matching: find.textContaining('Test session'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an upright phone keeps the page title bar', (tester) async {
+      await pushTerminal(tester, upright);
+
+      expect(find.byType(AppBar), findsOneWidget);
+      expect(find.text('Test session'), findsOneWidget);
+      expect(find.byKey(terminalBackButton), findsNothing);
     });
   });
 }

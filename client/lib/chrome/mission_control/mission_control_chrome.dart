@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../theme/tokens.dart';
+import '../../util/viewport.dart';
 import '../../widgets/brand_mark.dart';
 import '../chrome.dart';
 import '../chrome_forms.dart';
@@ -15,6 +18,11 @@ import '../chrome_wide.dart';
 /// — is preserving existing behaviour, not a fresh choice.
 class MissionControlChrome extends Chrome {
   const MissionControlChrome();
+
+  /// The back button is the app bar's leading widget, and a titleless page has
+  /// no app bar.
+  @override
+  bool get backSurvivesTitleless => false;
 
   @override
   Widget buildPage(BuildContext context, ChromePageSpec spec) {
@@ -35,10 +43,51 @@ class MissionControlChrome extends Chrome {
     CommanderTokens t,
   ) {
     final subtitle = spec.subtitle;
+    // A phone held sideways has ~360dp of height, and Material's app bar takes
+    // 56 of it — a sixth of the screen for a line of text and a back button.
+    // Compacted it is 36, with the type scaled to match; every other viewport
+    // keeps the Material default untouched.
+    final short = isShortViewport(context);
+    final titleStyle = short
+        ? Theme.of(
+            context,
+          ).textTheme.titleLarge?.copyWith(fontSize: _shortTitleSize)
+        : null;
+    // A pinned height has to be able to hold the type inside it. Measured at
+    // 800×360: unscaled, the subtitle ends 33dp down inside the 36dp bar; at
+    // 1.3× it ends 38.5 and a fixed 36 clipped it. So grow the bar by however
+    // much its type grew.
+    //
+    // Derived from the *type's* growth, and deliberately not from
+    // `scale(_shortToolbarHeight)`. `TextScaler.scale` answers "what does a
+    // font of this size become", and a non-linear scaler — which is what
+    // Android 14+ font scaling gives you — grows a large input by less than a
+    // small one (`painting/text_scaler.dart:33-45`). Passing the bar's 36 in
+    // would ask about a 36pt font and grow the bar by less than the 15pt and
+    // 9pt type inside it, putting the clipping straight back on exactly the
+    // devices that asked for bigger text. So take the largest growth any of the
+    // bar's type sees. The 3dp of slack at 1× scales with it.
+    //
+    // Bounded at 1.34 — the same clamp `AppBar` puts on its own title
+    // (`material/app_bar.dart:44`, applied `:1095-1096`), which is where the
+    // type stops growing. That bound holds for *any* scaler, linear or not,
+    // because `_ClampedTextScaler.scale` clamps its result to
+    // `maxScale * fontSize` (`painting/text_scaler.dart:130`) — per size, not by
+    // a single factor — so growth is at most 1.34 whatever the curve, and the
+    // bar at most 48.2dp.
+    final scaler = MediaQuery.textScalerOf(
+      context,
+    ).clamp(maxScaleFactor: _shortToolbarMaxScale);
+    final typeGrowth = math.max(
+      scaler.scale(_shortTitleSize) / _shortTitleSize,
+      scaler.scale(_shortSubtitleSize) / _shortSubtitleSize,
+    );
     return AppBar(
       // `automaticallyImplyLeading` already resolves to canPop, so an explicit
       // false is only needed when a page suppresses the back button itself.
       automaticallyImplyLeading: shouldShowBack(context, spec),
+      toolbarHeight: short ? _shortToolbarHeight * typeGrowth : null,
+      titleTextStyle: titleStyle,
       title: subtitle == null
           ? Text(spec.title!, overflow: TextOverflow.ellipsis)
           : Column(
@@ -49,7 +98,7 @@ class MissionControlChrome extends Chrome {
                 Text(
                   subtitle,
                   overflow: TextOverflow.ellipsis,
-                  style: t.meta(size: 10.5),
+                  style: t.meta(size: short ? _shortSubtitleSize : 10.5),
                 ),
               ],
             ),
@@ -933,3 +982,23 @@ const _windowBarHeight = 32.0;
 /// enough for a comfortable touch target without eating into the tabs either
 /// side of the notch.
 const _barActionWidth = 48.0;
+
+/// The app bar's height in a short viewport (a phone in landscape), at the
+/// default text scale. Material's 56 buys a comfortable portrait thumb target;
+/// sideways there is no such height to spare. The leading back button keeps its
+/// full 56dp-wide hit box either way — `AppBar` sizes that off `_kLeadingWidth`,
+/// which is `kToolbarHeight`, not off this (Flutter 3.47.0
+/// `material/app_bar.dart:43`) — so the cost is vertical only.
+const _shortToolbarHeight = 36.0;
+
+/// Where growing [_shortToolbarHeight] with the text scale stops, because it is
+/// where the type it has to hold stops growing too — `AppBar`'s own
+/// `_kMaxTitleTextScaleFactor` (Flutter 3.47.0 `material/app_bar.dart:44`).
+const _shortToolbarMaxScale = 1.34;
+
+/// The compact app bar's title and subtitle sizes. Named because the bar's
+/// height is derived from how much *these* grow under the text scaler — see
+/// `_appBar` — so a literal in one place and not the other would silently
+/// decouple the box from what it has to hold.
+const _shortTitleSize = 15.0;
+const _shortSubtitleSize = 9.0;
