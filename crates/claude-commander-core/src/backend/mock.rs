@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    WorkspaceSnapshot,
+    SetSessionBaseOutcome, WorkspaceSnapshot,
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
@@ -53,6 +53,7 @@ pub struct MockBackend {
     /// `(session, program)` pairs passed to [`Self::change_program`], for
     /// call-recording asserts.
     program_changes: Mutex<Vec<(SessionId, String)>>,
+    base_changes: Mutex<Vec<(SessionId, Option<SessionId>)>>,
     /// Count of [`Self::request_pr_refresh`] calls, for call-recording asserts.
     pr_refresh_calls: Mutex<usize>,
     /// Sessions passed to [`Self::mark_read`], for call-recording asserts.
@@ -128,6 +129,7 @@ impl MockBackend {
             restarted: Mutex::new(Vec::new()),
             reset: Mutex::new(Vec::new()),
             program_changes: Mutex::new(Vec::new()),
+            base_changes: Mutex::new(Vec::new()),
             pr_refresh_calls: Mutex::new(0),
             read_marked: Mutex::new(Vec::new()),
             mark_read_gate: Mutex::new(None),
@@ -187,6 +189,12 @@ impl MockBackend {
     /// Sessions passed to [`Self::reconcile_one_section`], in call order.
     pub fn reconciled_sessions(&self) -> Vec<SessionId> {
         self.reconciled.lock().unwrap().clone()
+    }
+
+    /// `(session, new parent)` pairs passed to [`Self::set_session_base`], in
+    /// call order. `None` is an unstack onto the project's main branch.
+    pub fn base_changes(&self) -> Vec<(SessionId, Option<SessionId>)> {
+        self.base_changes.lock().unwrap().clone()
     }
 
     /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
@@ -445,6 +453,20 @@ impl CommanderBackend for MockBackend {
 
     async fn set_section(&self, _id: SessionId, _section: Option<String>) -> BResult<()> {
         self.guard()
+    }
+
+    async fn set_session_base(
+        &self,
+        id: SessionId,
+        parent: Option<SessionId>,
+    ) -> BResult<SetSessionBaseOutcome> {
+        self.guard()?;
+        self.base_changes.lock().unwrap().push((id, parent));
+        Ok(SetSessionBaseOutcome {
+            new_base_branch: "main".to_string(),
+            old_base_branch: None,
+            pr: claude_commander_protocol::api::PrRetarget::NoPr,
+        })
     }
 
     async fn toggle_keep_alive(&self, _id: SessionId) -> BResult<bool> {

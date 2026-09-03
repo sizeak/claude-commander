@@ -1107,10 +1107,30 @@ impl DiffReviewState {
         self.with_grid(|_, grid| grid.row_count()).unwrap_or(0)
     }
 
+    /// The largest useful `scroll`: the one that puts the file's last row on the
+    /// pane's bottom row. Scrolling further only opens a void below the diff, so
+    /// every free-scroll path (paging, the wheel) clamps here rather than at
+    /// `rows - 1`, which let the end of the file climb to the top of an
+    /// otherwise empty viewport.
+    ///
+    /// Falls back to `rows - 1` before the first render, when the pane's height
+    /// is still unknown (zero) and there is no viewport to pin the last row to.
+    fn max_body_scroll(&self) -> u16 {
+        let rows = self.total_body_rows();
+        rows.saturating_sub(self.body_height().max(1)) as u16
+    }
+
+    /// [`Self::max_body_scroll`] for the file pane, which shares the body's
+    /// height.
+    fn max_tree_scroll(&self) -> u16 {
+        let rows = self.visible_rows().len();
+        rows.saturating_sub(self.body_height().max(1)) as u16
+    }
+
     /// Scroll the diff body by a page (lazygit-style PgUp/PgDn). Independent of
     /// focus, so paging the diff works while the file list is focused.
     fn page_body(&mut self, down: bool) {
-        let max = self.total_body_rows().saturating_sub(1) as u16;
+        let max = self.max_body_scroll();
         let page = self.body_height() as u16;
         self.scroll = if down {
             (self.scroll + page).min(max)
@@ -1139,7 +1159,7 @@ impl DiffReviewState {
 
     /// Scroll the body by one row (free of the cursor), for mouse wheel.
     pub fn wheel(&mut self, down: bool) {
-        let max = self.total_body_rows().saturating_sub(1) as u16;
+        let max = self.max_body_scroll();
         self.scroll = if down {
             (self.scroll + 1).min(max)
         } else {
@@ -1150,7 +1170,7 @@ impl DiffReviewState {
     /// Scroll the file-list pane by one row (free of the tree cursor), for a
     /// mouse wheel over the file list.
     pub fn wheel_tree(&mut self, down: bool) {
-        let max = self.visible_rows().len().saturating_sub(1) as u16;
+        let max = self.max_tree_scroll();
         self.tree_scroll = if down {
             (self.tree_scroll + 1).min(max)
         } else {
@@ -5221,11 +5241,15 @@ diff --git a/x.rs b/x.rs
     #[test]
     fn page_body_scrolls_a_page_and_clamps() {
         let mut s = state_with_two_files();
+        // a.rs body has 4 rows (1 header + 3 lines); a 2-row pane can show the
+        // last of them at the bottom from scroll 2.
+        s.body.set((80, 2));
         // Focused on the file list, paging still scrolls the diff body.
         assert_eq!(s.focus, ReviewFocus::FileList);
         s.page_body(true);
-        // a.rs body has 4 rows (1 header + 3 lines) → clamps to max scroll 3.
-        assert_eq!(s.scroll, 3);
+        assert_eq!(s.scroll, 2);
+        s.page_body(true);
+        assert_eq!(s.scroll, 2, "paging past the end must not open a void");
         s.page_body(false);
         assert_eq!(s.scroll, 0);
     }
@@ -5233,19 +5257,46 @@ diff --git a/x.rs b/x.rs
     #[test]
     fn wheel_scrolls_within_bounds() {
         let mut s = state_with_two_files();
-        // a.rs total body rows = 1 header + 3 lines = 4 → max scroll 3.
+        // a.rs total body rows = 1 header + 3 lines = 4, pane height 2 → the
+        // last row lands on the bottom row at scroll 2.
+        s.body.set((80, 2));
         for _ in 0..10 {
             s.wheel(true);
         }
-        assert_eq!(s.scroll, 3);
-        s.wheel(false);
         assert_eq!(s.scroll, 2);
+        s.wheel(false);
+        assert_eq!(s.scroll, 1);
+    }
+
+    #[test]
+    fn scroll_stops_with_the_last_row_on_the_bottom_row() {
+        let mut s = state_with_two_files();
+        // A pane taller than the file has nothing to scroll at all.
+        s.body.set((80, 20));
+        for _ in 0..10 {
+            s.wheel(true);
+        }
+        assert_eq!(s.scroll, 0, "a pane taller than the file must not scroll");
+        s.page_body(true);
+        assert_eq!(s.scroll, 0);
+
+        // And a scroll left over from a shorter pane is pulled back the next
+        // time the body is scrolled, rather than leaving the void on screen.
+        s.body.set((80, 2));
+        s.wheel(true);
+        s.wheel(true);
+        s.wheel(true);
+        assert_eq!(s.scroll, 2);
+        s.body.set((80, 20));
+        s.wheel(true);
+        assert_eq!(s.scroll, 0);
     }
 
     #[test]
     fn wheel_tree_scrolls_file_list_within_bounds() {
         let mut s = state_with_two_files();
-        // Two root files → 2 visible rows → max tree_scroll 1.
+        // Two root files → 2 visible rows, and a 1-row pane → max tree_scroll 1.
+        s.body.set((80, 1));
         assert_eq!(s.tree_scroll, 0);
         for _ in 0..10 {
             s.wheel_tree(true);
@@ -5256,6 +5307,11 @@ diff --git a/x.rs b/x.rs
         s.wheel_tree(false);
         assert_eq!(s.tree_scroll, 0);
         s.wheel_tree(false);
+        assert_eq!(s.tree_scroll, 0);
+
+        // A pane tall enough for every file never scrolls the list.
+        s.body.set((80, 20));
+        s.wheel_tree(true);
         assert_eq!(s.tree_scroll, 0);
     }
 }

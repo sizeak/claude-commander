@@ -256,6 +256,15 @@ pub enum StateUpdate {
         backend_id: usize,
         result: std::result::Result<claude_commander_core::api::OperationStatus, String>,
     },
+    /// A stack-base retarget finished. Carries `session_id` as well as the
+    /// backend because the session re-parents and moves in the tree, so the
+    /// handler must reselect it as well as refresh — and the outcome names
+    /// whether the durable PR edit landed.
+    SetSessionBaseFinished {
+        backend_id: usize,
+        session_id: claude_commander_core::session::SessionId,
+        result: std::result::Result<claude_commander_core::api::SetSessionBaseOutcome, String>,
+    },
     /// Push-stack background task finished. `Ok` carries the recorded
     /// [`OperationStatus`](claude_commander_core::api::OperationStatus) (its `detail` summarises
     /// how many branches pushed); `Err` carries a transport/backend error.
@@ -384,6 +393,9 @@ pub enum UserCommand {
     NewSession,
     /// Create a new session stacked on the selected session's branch
     NewStackedSession,
+    /// Retarget the selected session's stack base onto another session, or
+    /// unstack it onto the project's main branch
+    SetSessionBase,
     /// Cascade-merge main through the selected session's stack
     CascadeMergeMain,
     /// Resume a cascade-merge that paused on conflicts
@@ -597,6 +609,9 @@ impl UserCommand {
             // reusing `clone_project` here would double-count it.
             UserCommand::CloneRepository => Some("ui.clone_repository"),
             UserCommand::MoveToSection => Some("ui.move_to_section"),
+            // The domain half is recorded by `CommanderService::set_session_base`
+            // for every frontend; this names opening the picker.
+            UserCommand::SetSessionBase => Some("ui.set_session_base"),
             UserCommand::ToggleViewMode => Some("ui.toggle_view_mode"),
             UserCommand::ToggleSection => Some("ui.toggle_section"),
             UserCommand::TogglePane | UserCommand::TogglePaneReverse => Some("ui.toggle_pane"),
@@ -655,6 +670,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::GenerateSummary => Self::GenerateSummary,
             BindableAction::ScanDirectory => Self::ScanDirectory,
             BindableAction::MoveToSection => Self::MoveToSection,
+            BindableAction::SetSessionBase => Self::SetSessionBase,
             BindableAction::ToggleViewMode => Self::ToggleViewMode,
             BindableAction::ToggleSection => Self::ToggleSection,
             BindableAction::TogglePane => Self::TogglePane,

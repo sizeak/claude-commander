@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CommanderService, CreateOptions, CreateSessionOpts, DiffSide,
     NewComment, OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot,
-    SessionDetail, WorkspaceSnapshot,
+    SessionDetail, SetSessionBaseOutcome, WorkspaceSnapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, ScanResult, SessionId};
@@ -304,6 +304,16 @@ impl CommanderBackend for LocalBackend {
 
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()> {
         Ok(self.service.set_section(&id, section).await?)
+    }
+
+    async fn set_session_base(
+        &self,
+        id: SessionId,
+        parent: Option<SessionId>,
+    ) -> BResult<SetSessionBaseOutcome> {
+        // Store mutation plus a `gh` subprocess — both `Send`, no tmux or gix.
+        // Delegate directly rather than going through the local pool.
+        Ok(self.service.set_session_base(&id, parent).await?)
     }
 
     async fn mark_read(&self, id: SessionId) -> BResult<()> {
@@ -615,6 +625,38 @@ mod tests {
         let be = backend(&dir);
         let opts = be.create_options().await.unwrap();
         assert!(!opts.default_program.is_empty());
+    }
+
+    /// Delegated directly, not via `run_local`: the operation is a store
+    /// mutation plus a `gh` subprocess, both `Send` — no tmux and no gix. If
+    /// this ever stops compiling, something non-`Send` crept into the path.
+    #[tokio::test]
+    async fn set_session_base_delegates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let be = backend(&dir);
+        let (pid, sid) = seed(&be).await;
+        // The seeded session is already based on main (the load-time backfill
+        // fills it in), so retarget onto a sibling to get a real change.
+        let target = WorktreeSession::new(
+            pid,
+            "other",
+            "branch-other",
+            PathBuf::from("/tmp/wt2"),
+            "claude",
+        );
+        let target_id = target.id;
+        be.service()
+            .store()
+            .mutate(move |state| state.add_session(target))
+            .await
+            .unwrap();
+
+        let outcome = be.set_session_base(sid, Some(target_id)).await.unwrap();
+        assert_eq!(outcome.new_base_branch, "branch-other");
+        let state = be.service().store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert_eq!(s.base_branch.as_deref(), Some("branch-other"));
+        assert_eq!(s.stack_parent_session_id, Some(target_id));
     }
 
     #[tokio::test]

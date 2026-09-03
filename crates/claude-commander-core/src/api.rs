@@ -1852,6 +1852,71 @@ impl CommanderService {
             .await
     }
 
+    /// Retarget a session's stack base: stack it onto `parent` (another session
+    /// in the same project), or unstack it onto the project's main branch when
+    /// `parent` is `None`.
+    ///
+    /// Metadata and PR base only — git history is deliberately untouched, so the
+    /// branch still carries its old base's commits and the review diff/PR will
+    /// show them until the user rebases or merges by hand.
+    ///
+    /// Validation and mutation happen inside one `try_mutate` closure
+    /// ([`AppState::set_session_base`]) because the store re-reads state from
+    /// disk under its lock: planning against an earlier snapshot could be stale
+    /// by the time it applied, letting a concurrent change close a cycle the
+    /// check had just rejected. A refused plan writes nothing.
+    pub async fn set_session_base(
+        &self,
+        id: &SessionId,
+        parent: Option<SessionId>,
+    ) -> Result<SetSessionBaseOutcome> {
+        self.telemetry.feature("session.set_base");
+        let session_id = *id;
+        let (plan, pr_retarget) = self
+            .store
+            .try_mutate(move |state| {
+                state
+                    .set_session_base(&session_id, parent)
+                    // An unknown session id is a 404 everywhere else in the API;
+                    // don't let it fall through the rejection's 400/409 mapping.
+                    .map_err(|e| match e {
+                        crate::session::SetBaseRejection::SessionNotFound => {
+                            SessionError::NotFound(session_id).into()
+                        }
+                        other => crate::Error::from(other),
+                    })
+            })
+            .await?;
+
+        // Durable half, best-effort. The local mirror already re-stacked the
+        // tree, but only this makes it survive the next PR sync — so a failure
+        // is reported rather than logged.
+        let pr = match pr_retarget {
+            None => PrRetarget::NoPr,
+            Some(r) => match crate::git::try_retarget_pr_base(
+                &r.repo_path,
+                r.pr_number,
+                &r.new_base_branch,
+            )
+            .await
+            {
+                Ok(()) => PrRetarget::Retargeted {
+                    pr_number: r.pr_number,
+                },
+                Err(message) => PrRetarget::Failed {
+                    pr_number: r.pr_number,
+                    message,
+                },
+            },
+        };
+
+        Ok(SetSessionBaseOutcome {
+            new_base_branch: plan.new_base_branch,
+            old_base_branch: plan.old_base_branch,
+            pr,
+        })
+    }
+
     /// Stamp a session's `last_attached_at` to now, for MRU ordering in the
     /// in-session switcher. Called by the backend's `attach` so every frontend
     /// records the attach the same way (the TUI used to do this inline). No-op
@@ -2874,10 +2939,10 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
 // `session_info_from_session` below.
 pub use claude_commander_protocol::api::{
     AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions, CreateSessionOpts, DiffSide,
-    DiffStat, NewComment, OperationKind, OperationOutcome, OperationStatus, PreviewData,
-    ProgramInfo, ProjectInfo, PullBlockReason, PullStatus, RenameSession, ReviewSnapshot,
-    ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection, ToggleReviewed,
-    WorkspaceSnapshot,
+    DiffStat, NewComment, OperationKind, OperationOutcome, OperationStatus, PrRetarget,
+    PreviewData, ProgramInfo, ProjectInfo, PullBlockReason, PullStatus, RenameSession,
+    ReviewSnapshot, ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection,
+    SetSessionBase, SetSessionBaseOutcome, ToggleReviewed, WorkspaceSnapshot,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
@@ -4719,6 +4784,145 @@ mod tests {
             err,
             crate::Error::Session(SessionError::NotFound(_))
         ));
+    }
+
+    /// The happy path: a session with no PR is restacked onto a sibling, and the
+    /// outcome reports there was no PR to retarget.
+    #[tokio::test]
+    async fn set_session_base_restacks_and_reports_no_pr() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, sid) = seed_project_session(&svc).await;
+        let target = WorktreeSession::new(
+            pid,
+            "other",
+            "branch-other",
+            PathBuf::from("/tmp/wt2"),
+            "claude",
+        );
+        let target_id = target.id;
+        svc.store()
+            .mutate(move |state| state.add_session(target))
+            .await
+            .unwrap();
+
+        let outcome = svc.set_session_base(&sid, Some(target_id)).await.unwrap();
+        assert_eq!(outcome.new_base_branch, "branch-other");
+        assert_eq!(outcome.pr, PrRetarget::NoPr);
+
+        let state = svc.store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert_eq!(s.stack_parent_session_id, Some(target_id));
+        assert_eq!(s.base_branch.as_deref(), Some("branch-other"));
+    }
+
+    /// An unknown session must keep the API's 404 semantics rather than falling
+    /// through the rejection enum's 400/409 mapping.
+    #[tokio::test]
+    async fn set_session_base_on_missing_session_is_not_found() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let err = svc
+            .set_session_base(&SessionId::new(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::NotFound(_))
+        ));
+    }
+
+    /// A refused retarget surfaces as `InvalidBase` and writes nothing — the
+    /// whole validation runs inside the `try_mutate` closure, which discards the
+    /// state when the closure errors.
+    #[tokio::test]
+    async fn set_session_base_rejection_surfaces_and_writes_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+
+        let err = svc.set_session_base(&sid, Some(sid)).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidBase(
+                crate::session::SetBaseRejection::SelfParent
+            ))
+        ));
+
+        let state = svc.store().read().await;
+        assert!(state.get_session(&sid).unwrap().base_branch.is_none());
+    }
+
+    /// Characterisation: when `gh pr edit` fails, the next PR poll re-asserts
+    /// GitHub's base over the local mirror while `base_branch` keeps the new
+    /// value. This is exactly why a failed retarget is reported to the user
+    /// rather than logged — pinned here so the divergence cannot go unnoticed.
+    #[tokio::test]
+    async fn pr_poll_reverts_the_mirror_after_a_failed_retarget() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, sid) = seed_project_session(&svc).await;
+        let target = WorktreeSession::new(
+            pid,
+            "other",
+            "branch-other",
+            PathBuf::from("/tmp/wt2"),
+            "claude",
+        );
+        let target_id = target.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_session(target);
+                let s = state.get_session_mut(&sid).unwrap();
+                s.pr_number = Some(7);
+                s.pr_state = Some(crate::git::PrState::Open);
+                s.pr_base_branch = Some("main".to_string());
+            })
+            .await
+            .unwrap();
+
+        // The retarget applies locally regardless of whether `gh` is reachable.
+        svc.set_session_base(&sid, Some(target_id)).await.unwrap();
+        assert_eq!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_base_branch
+                .as_deref(),
+            Some("branch-other")
+        );
+
+        // GitHub still reports the old base (the edit never landed).
+        svc.apply_pr_results(vec![(
+            sid,
+            crate::git::PrCheckResult::Found(crate::git::PrInfo {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+                state: crate::git::PrState::Open,
+                is_draft: false,
+                labels: Vec::new(),
+                review_decision: None,
+                reviewers: Vec::new(),
+                base_ref_name: Some("main".to_string()),
+            }),
+        )])
+        .await
+        .unwrap();
+
+        let state = svc.store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert_eq!(
+            s.pr_base_branch.as_deref(),
+            Some("main"),
+            "the poll re-asserts GitHub's base over the local mirror"
+        );
+        assert_eq!(
+            s.base_branch.as_deref(),
+            Some("branch-other"),
+            "while base_branch keeps the retargeted value — the two diverge"
+        );
     }
 
     #[tokio::test]

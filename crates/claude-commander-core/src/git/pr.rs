@@ -159,6 +159,22 @@ pub async fn is_gh_available() -> bool {
 /// network) are logged and non-fatal — the local metadata retarget already keeps
 /// the UI correct.
 pub async fn retarget_pr_base(repo_path: &Path, pr_number: u32, new_base: &str) -> bool {
+    try_retarget_pr_base(repo_path, pr_number, new_base)
+        .await
+        .is_ok()
+}
+
+/// [`retarget_pr_base`], but reporting *why* it failed.
+///
+/// The delete path only needs the bool: its retarget is incidental to an action
+/// the user already committed to, and the local metadata keeps the UI right. A
+/// user-initiated restack is different — a failed edit means the next PR sync
+/// will silently revert the change, so the reason has to reach the user.
+pub async fn try_retarget_pr_base(
+    repo_path: &Path,
+    pr_number: u32,
+    new_base: &str,
+) -> std::result::Result<(), String> {
     let output = match Command::new("gh")
         .args(["pr", "edit", &pr_number.to_string(), "--base", new_base])
         .current_dir(repo_path)
@@ -168,21 +184,25 @@ pub async fn retarget_pr_base(repo_path: &Path, pr_number: u32, new_base: &str) 
         Ok(output) => output,
         Err(e) => {
             debug!("gh pr edit #{} spawn failed: {}", pr_number, e);
-            return false;
+            return Err(format!("could not run gh: {e}"));
         }
     };
     if output.status.success() {
         debug!("retargeted PR #{} base to {}", pr_number, new_base);
-        true
-    } else {
-        tracing::warn!(
-            "gh pr edit #{} --base {} failed: {}",
-            pr_number,
-            new_base,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        false
+        return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    tracing::warn!(
+        "gh pr edit #{} --base {} failed: {}",
+        pr_number,
+        new_base,
+        stderr
+    );
+    Err(if stderr.is_empty() {
+        "gh pr edit failed".to_string()
+    } else {
+        stderr
+    })
 }
 
 /// Check whether `branch` has a PR (any state) in the repo at `repo_path`.

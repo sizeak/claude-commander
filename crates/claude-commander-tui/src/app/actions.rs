@@ -127,6 +127,23 @@ pub(super) fn delete_confirm_message(
     message
 }
 
+/// The Set-Session-Base confirmation body.
+///
+/// The warning is the important half. This command moves metadata and the PR's
+/// target; it does **not** rewrite git history, so until the user rebases, the
+/// branch still carries its old base's commits and both the PR and the review
+/// diff will show them. Retargeting onto a *sibling* is the sharp case — the
+/// merge base collapses towards main and the diff swells to include the old
+/// parent's work — so the message says what to do rather than merely hedging.
+pub(super) fn set_session_base_confirm_message(title: &str, new_base: &str) -> String {
+    format!(
+        "Set the base of \"{title}\" to \"{new_base}\"?\n\n\
+         This updates the stack link, and retargets the pull request on GitHub if one exists.\n\n\
+         Git history is NOT rewritten: the branch still contains its old base's commits, so the \
+         PR and review diff will show them until you rebase or merge onto \"{new_base}\" yourself."
+    )
+}
+
 /// The Restart-confirmation body. A local session's resume behaviour is
 /// governed by this client's `resume_session` config, so the message can
 /// promise `/resume` semantics. A remote session's resume behaviour lives in
@@ -1413,6 +1430,9 @@ impl App {
             PaletteMode::ProgramPicker { session_id } => {
                 Some(self.gather_program_picker_items(session_id, eff_query))
             }
+            PaletteMode::BasePicker { session_id } => {
+                Some(self.gather_base_picker_items(session_id, eff_query))
+            }
             PaletteMode::RemoteServerPicker => {
                 Some(self.gather_remote_server_picker_items(eff_query))
             }
@@ -1849,6 +1869,139 @@ impl App {
                 }))
                 .await;
         });
+    }
+
+    /// Build the stack-base picker rows for the selected session.
+    ///
+    /// Rows come from the owning backend's snapshot via
+    /// [`super::state::base_picker_rows_from_snapshot`], so a remote session's
+    /// candidates are its own project's, not the local one's.
+    pub(super) fn gather_base_picker_items(
+        &self,
+        session_id: SessionId,
+        filter_query: &str,
+    ) -> Vec<QuickSwitchItem> {
+        let q = filter_query.to_lowercase();
+        let backend = self.backend_of_session(session_id);
+        super::state::base_picker_rows_from_snapshot(&self.view_for(backend).snapshot, session_id)
+            .into_iter()
+            .filter(|(_, _, label)| q.is_empty() || label.to_lowercase().contains(&q))
+            .map(|(target, base_branch, label)| QuickSwitchItem::BaseChange {
+                session_id,
+                target,
+                base_branch,
+                label,
+            })
+            .collect()
+    }
+
+    /// Open the stack-base picker for the selected session.
+    pub(super) async fn handle_set_session_base(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) else {
+            return;
+        };
+        let mode = PaletteMode::BasePicker { session_id };
+        let matches = self.gather_base_picker_items(session_id, "");
+        self.ui_state.modal = Modal::QuickSwitch {
+            mode,
+            query: super::Input::default(),
+            matches,
+            selected_idx: 0,
+            scroll: 0,
+        };
+    }
+
+    /// Retarget a session's stack base through its owning backend.
+    ///
+    /// Spawned so a slow or degraded remote never blocks the event loop. Unlike
+    /// [`Self::apply_section_move`], the result is *not* discarded: a retarget
+    /// can be refused (a cycle, a settled PR, a paused cascade) and can half-
+    /// succeed (metadata moved, `gh pr edit` failed), and both need saying.
+    pub(super) fn apply_set_session_base(
+        &mut self,
+        session_id: SessionId,
+        target: Option<SessionId>,
+    ) {
+        let backend_id = self.backend_of_session(session_id);
+        let backend = self.backend_arc(backend_id);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = backend
+                .set_session_base(session_id, target)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::SetSessionBaseFinished {
+                    backend_id: backend_id.0,
+                    session_id,
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    /// Report a finished base retarget: refresh the tree (the session
+    /// re-parents and moves), keep it selected, and toast what happened.
+    ///
+    /// A toast rather than an error modal, because the case that matters most
+    /// is success *with* a caveat — the metadata moved but the PR edit failed,
+    /// so the next PR sync will revert it unless the user fixes it on GitHub.
+    pub(super) async fn handle_set_session_base_finished(
+        &mut self,
+        backend_id: BackendId,
+        session_id: SessionId,
+        result: std::result::Result<claude_commander_core::api::SetSessionBaseOutcome, String>,
+    ) {
+        self.refresh_backend_view(backend_id).await;
+        self.refresh_list_items().await;
+        if self.select_session_in_tree(session_id) {
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
+        }
+        // A clean result is a toast; anything needing the user to act gets a
+        // modal. The status bar renders a single unwrapped line sharing the row
+        // with the session count, so a long message — and `gh`'s stderr is often
+        // multi-line — loses exactly the instruction that matters.
+        match result {
+            Ok(outcome) => match outcome.pr {
+                claude_commander_core::api::PrRetarget::NoPr => {
+                    self.ui_state.status_message = Some((
+                        format!("Base set to {}", outcome.new_base_branch),
+                        Instant::now() + Duration::from_secs(5),
+                    ));
+                }
+                claude_commander_core::api::PrRetarget::Retargeted { pr_number } => {
+                    self.ui_state.status_message = Some((
+                        format!(
+                            "Base set to {} (PR #{pr_number} retargeted)",
+                            outcome.new_base_branch
+                        ),
+                        Instant::now() + Duration::from_secs(5),
+                    ));
+                }
+                claude_commander_core::api::PrRetarget::Failed { pr_number, message } => {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!(
+                            "The base was changed locally, but PR #{pr_number} still targets its \
+                             old branch.\n\n\
+                             Set the PR's base to \"{}\" on GitHub — the next PR sync copies \
+                             GitHub's value back over the local one, so leaving it will undo \
+                             this change.\n\n\
+                             gh said: {message}",
+                            outcome.new_base_branch
+                        ),
+                    };
+                }
+            },
+            // Nothing was written — a rejection (cycle, settled PR, paused
+            // cascade) or a transport failure. The reason is the whole content,
+            // so it gets the room to be read.
+            Err(e) => {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Could not set the session base.\n\n{e}"),
+                };
+            }
+        }
     }
 
     /// Build the program-picker rows for the change-program palette mode from
@@ -2868,6 +3021,9 @@ impl App {
                         }))
                         .await;
                 });
+            }
+            ConfirmAction::SetSessionBase { session_id, target } => {
+                self.apply_set_session_base(session_id, target);
             }
             ConfirmAction::RemoveProject { project_id } => {
                 // `backend.remove_project` owns the teardown — kill the project

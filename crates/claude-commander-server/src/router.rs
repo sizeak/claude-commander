@@ -87,6 +87,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/{id}/branch-diff", get(sessions::branch_diff))
         .route("/sessions/{id}/read", post(sessions::read))
         .route("/sessions/{id}/keep-alive", post(sessions::keep_alive))
+        .route("/sessions/{id}/base", post(sessions::set_base))
         .route("/sessions/{id}/cascade", post(cascade::cascade))
         .route("/sessions/{id}/push-stack", post(cascade::push_stack))
         // -- review + comments --

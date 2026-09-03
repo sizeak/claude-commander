@@ -90,6 +90,11 @@ pub enum SessionError {
 
     #[error("Invalid pasted image: {0}")]
     InvalidImage(String),
+
+    /// A refused stack-base retarget. Transparent so the typed reason
+    /// ([`crate::session::SetBaseRejection`]) is what the user reads.
+    #[error(transparent)]
+    InvalidBase(#[from] crate::session::SetBaseRejection),
 }
 
 /// A pasted-image rejection from the shared wire contract
@@ -107,6 +112,16 @@ impl From<claude_commander_protocol::paste::ImageRejection> for SessionError {
 impl From<claude_commander_protocol::paste::ImageRejection> for Error {
     fn from(e: claude_commander_protocol::paste::ImageRejection) -> Self {
         Error::Session(SessionError::InvalidImage(e.to_string()))
+    }
+}
+
+/// `Error::Session(#[from] SessionError)` does not chain through a second
+/// `#[from]`, so — exactly as [`claude_commander_protocol::paste::ImageRejection`]
+/// above — a rejection needs its own hop to the top-level error to keep call
+/// sites on a plain `?`.
+impl From<crate::session::SetBaseRejection> for Error {
+    fn from(e: crate::session::SetBaseRejection) -> Self {
+        Error::Session(SessionError::InvalidBase(e))
     }
 }
 

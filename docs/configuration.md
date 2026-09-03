@@ -301,6 +301,7 @@ state_sync_interval_ms = 2000
 # shrink_left_pane = ["<"]                 # move the list/pane divider left
 # grow_left_pane = [">"]                   # move it right
 # quit = ["q", "Ctrl-c"]
+# set_session_base = ["B"]                 # palette-only by default; bind a key here
 # toggle_keep_alive = ["K"]                # palette-only by default; bind a key here
 # reset_session = ["Ctrl-r"]               # palette-only by default; bind a key here
 
