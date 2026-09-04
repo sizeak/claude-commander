@@ -54,7 +54,12 @@ class LcarsChrome extends Chrome {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _rail(context, spec, t, bleed),
-          _railGutter(bleed, shouldShowBack(context, spec) ? t.primary : t.nav),
+          // Open for the frame's whole height, the status-bar band included:
+          // this gap is what the cap's bottom-left radius curves out of, and
+          // filling it across the band is what forced that corner square. See
+          // `bleed.dart` for the trade — a notch through the band beats a 90°
+          // elbow.
+          const SizedBox(width: _railPitch),
           // No trailing margin: the frame runs flush to the right bezel at every
           // height. A 10dp gap there read as the frame stopping short of the
           // screen once the top and bottom bands met the edge — see [buildShell].
@@ -162,40 +167,6 @@ class LcarsChrome extends Chrome {
         ],
       ],
     ),
-  );
-
-  /// The seam between the rail and the content column: filled across the
-  /// status-bar inset *and* down to the bottom of the elbow cap it continues
-  /// into, open below that.
-  ///
-  /// The band behind the status bar has to be *continuous*. On a Pixel 8a the
-  /// system clock sat at a fixed offset that landed exactly on this seam, so
-  /// leaving it open painted a black column through the middle of the time.
-  /// Stopping the fill at `bleed.top` fixed that but left a second,
-  /// shorter black tab poking up into the band the moment the inset ends —
-  /// also measured on device — because the rail's top block and the cap below
-  /// the seam are two more colour patches the fill needs to bridge. Filling
-  /// down to the cap's own bled height closes that gap too, so the rail's top
-  /// block, the seam and the cap read as one solid mass with a clean bottom
-  /// edge — [elbowCapHeight] is the one function that produces that height,
-  /// called here and by [ChromeElbowCap] itself, so the fill and the cap it
-  /// continues into cannot independently drift apart.
-  ///
-  /// Below the fill, the black resumes at a plain square junction. A curved
-  /// emergence was tried and reviewed on a Pixel 8a alongside the bled cap's
-  /// 1dp height; at that height the fill overhangs the inset by only ~3px,
-  /// too little for an arc to read as anything but noise, so the curve was
-  /// removed rather than kept disabled.
-  ///
-  /// With no inset there is no band and nothing to fill, so that case returns
-  /// the frame's original plain, full-height seam untouched — every
-  /// desktop/tablet golden and the zero-inset tests depend on this being that
-  /// exact widget.
-  Widget _railGutter(EdgeInsets bleed, Color color) => lcarsBandSeam(
-    width: _railPitch,
-    height: elbowCapHeight(kElbowCapHeight, bleed),
-    color: color,
-    bleed: bleed,
   );
 
   /// A block's fill for a given emphasis. Shared by the rail, the button bar and
@@ -1028,7 +999,8 @@ class LcarsChrome extends Chrome {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _viewRail(context, spec, t, accent, bleed),
-        _railGutter(bleed, accent),
+        // Open through the band, exactly as [buildPage]'s is.
+        const SizedBox(width: _railPitch),
         // Flush right, like [buildPage] and the shell's footer — see
         // [buildShell] for why the 10dp margin all three used to carry went.
         Expanded(child: _viewContent(context, spec, t, accent, bleed)),

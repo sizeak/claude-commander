@@ -12,7 +12,7 @@ import '../support/insets.dart';
 /// elbow beside the body. The elbow bleeds; the body must not — a scrollable
 /// running under the gesture strip is a regression, not a feature.
 void main() {
-  // Keyed with [inkBoundary] so `pixelAt` (used by the seam-colour test below)
+  // Keyed with [inkBoundary] so `pixelAt` (used by the pixel tests below)
   // can rasterise the tree; a `RepaintBoundary` changes no geometry, so this
   // is a no-op for every other test in the file.
   Widget page(ChromeInsets insets, {bool showBack = false}) => RepaintBoundary(
@@ -99,48 +99,69 @@ void main() {
     expect(tester.getRect(find.text('47-B')).center.dy, flat + 24);
   });
 
-  // Regression guard: the seam's fill colour tracks the back affordance, not
-  // a flat `t.nav`. A pushed page with a back button paints its rail's top
-  // block and cap `t.primary` (the same lilac-vs-amber distinction as the
-  // '‹ BACK' block itself), so the seam bridging them must match or a lilac
-  // block would sit against an amber seam and cap.
-  testWidgets('the seam fill matches the back affordance\'s colour', (
+  // The gutter runs open for the frame's whole height, the status-bar band
+  // included. It was briefly filled across the band — the fill kept the black
+  // out of the system clock, which sat right on the seam on a Pixel 8a — but
+  // a filled gutter is what forced the cap to give up its bottom-left radius,
+  // and the resulting bare 90° junction between band and rail is worse than
+  // the notch. The notch is the accepted cost of the elbow; this pins that the
+  // fill does not come back without the trade being re-argued.
+  testWidgets('the rail/content gutter runs open through the band', (
     tester,
   ) async {
     useInsets(tester, top: 24);
     await tester.pumpWidget(page(ChromeInsets.standard, showBack: true));
     await tester.pumpAndSettle();
 
+    // Two pixels inboard of the rail is inside the 5dp gutter, and y=12 is
+    // inside the status-bar inset — the one place a fill would show.
     final rail = tester.getRect(find.widgetWithText(ChromeElbow, '‹ BACK'));
-    // Inside the top inset, well clear of where the fill ends — this only
-    // needs to land somewhere the seam is painted at all.
-    final seamColour = await pixelAt(tester, Offset(rail.right + 2, 12));
 
-    expect(seamColour, lcarsTokens.primary);
+    expect(
+      await pixelAt(tester, Offset(rail.right + 2, 12)),
+      lcarsTokens.canvas,
+    );
   });
 
-  // Both insets at once, which is what no other test in this file does and is
-  // exactly how the defect hid: `buildPage` hands `_railGutter` the frame's
-  // whole bleed, so a seam sized off `bleed.vertical` ran the bottom inset
-  // past the cap it is supposed to end level with. On a gesture-nav Pixel 8a
-  // that painted a 24dp amber tab hanging out of the band's underside.
-  testWidgets('the seam fill ends level with the cap', (tester) async {
+  // Both insets at once, which is what no other test in this file does. Note
+  // what this can and cannot see: it pins that *the frame* hands its cap a
+  // top-only bleed, not that the cap ignores a bottom one — `_content` filters
+  // the bleed before the cap ever sees it, so mutating the cap's own
+  // `bleed.top` to `bleed.vertical` leaves this green. That rule is pinned
+  // where it is visible, on the widget itself, by 'ignores a bottom inset
+  // entirely' in `elbow_bleed_test.dart`.
+  testWidgets('the frame hands its cap a top-only bleed', (tester) async {
     useInsets(tester, top: 24, bottom: 48);
     await tester.pumpWidget(page(ChromeInsets.standard));
     await tester.pumpAndSettle();
 
-    // Two pixels inboard of the rail is inside the 5px gutter the seam fills.
-    final seamX = tester.getRect(find.byType(ChromeElbow).first).right + 2;
-    final capBottom = tester.getRect(find.byType(ChromeElbowCap)).bottom;
+    expect(
+      tester.getSize(find.byType(ChromeElbowCap)).height,
+      kElbowCapBledHeight + 24,
+    );
+  });
+
+  // The elbow the whole un-merge exists for: the cap's bottom-left curves away
+  // from the rail, so the bracket turns its corner on an arc rather than a bare
+  // right angle. Sampled a pixel in from the cap's own bottom-left, which the
+  // radius has carved back to canvas, against one the same distance in from its
+  // *bottom-right*, which it has not.
+  testWidgets('a bled cap curves out of the rail', (tester) async {
+    useInsets(tester, top: 24);
+    await tester.pumpWidget(page(ChromeInsets.standard));
+    await tester.pumpAndSettle();
+
+    final cap = tester.getRect(find.byType(ChromeElbowCap));
 
     expect(
-      await pixelAt(tester, Offset(seamX, capBottom - 1)),
-      lcarsTokens.nav,
+      await pixelAt(tester, Offset(cap.left + 1, cap.bottom - 1)),
+      lcarsTokens.canvas,
+      reason: 'the bled cap squared its bottom-left corner',
     );
     expect(
-      await pixelAt(tester, Offset(seamX, capBottom + 1)),
-      lcarsTokens.canvas,
-      reason: 'the seam must not outlive the cap it continues into',
+      await pixelAt(tester, Offset(cap.right - 1, cap.bottom - 1)),
+      lcarsTokens.nav,
+      reason: 'only the bottom-left corner is rounded',
     );
   });
 

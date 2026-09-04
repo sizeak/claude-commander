@@ -229,6 +229,19 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
   final double elbowRadius;
 
   /// Width of the LCARS portrait rail. Zero in Mission Control.
+  ///
+  /// 70 rather than the deck's 62, and the 8dp is a status-bar dodge. The rail
+  /// and the content column are separated by a [_railPitch] gutter that runs
+  /// open through the safe-area band (see `lcars/bleed.dart`), so whatever sits
+  /// at `railWidth`..`railWidth + 5` in the status bar gets a black bar through
+  /// it. Measured on an emulator at 1080x2400 / 420dpi: the status-bar clock
+  /// uses tabular figures, so a five-character time is a fixed 33.9dp wide and
+  /// always ends at 66.7dp — '11:58' and '10:17' are the same width to the
+  /// pixel — while the first notification icon starts at 73.1dp. At 62 the
+  /// gutter cut the clock's last digit; at 70 it clears the clock by 3.3dp and
+  /// lands on the notification icon instead, which is the trade that was
+  /// wanted. Widening further would only move it onto the next icon: the whole
+  /// left cluster is packed, and the first genuinely clear span is 106dp.
   final double railWidth;
 
   /// Thickness of an LCARS panel's coloured top border. Zero in Mission
@@ -639,7 +652,7 @@ const lcarsTokens = CommanderTokens(
   controlRadius: 0,
   pillRadius: 11,
   elbowRadius: 32,
-  railWidth: 62,
+  railWidth: 70,
   panelTopBorder: 2,
   tones: _lcarsTones,
 );
