@@ -111,10 +111,10 @@ impl App {
         // `Clear` widget (a pure cell reset) rather than `Terminal::clear()`,
         // which since ratatui 0.30 reads the cursor from stdin — a blocking read
         // that races the background input reader and kills the loop.
-        let is_fullscreen = matches!(
-            self.ui_state.modal,
-            Modal::ReviewDiff(_) | Modal::Conversation { .. }
-        );
+        // `open_review` rather than `Modal::ReviewDiff`: a review suspended
+        // under the session switcher is still on screen, and still full-screen.
+        let is_fullscreen = self.open_review().is_some()
+            || matches!(self.ui_state.modal, Modal::Conversation { .. });
         let leaving_fullscreen = self.ui_state.prev_fullscreen && !is_fullscreen;
         self.ui_state.prev_fullscreen = is_fullscreen;
         if std::mem::take(&mut self.ui_state.force_clear) || leaving_fullscreen {
@@ -123,16 +123,29 @@ impl App {
 
         // The review-diff view is a full-screen takeover: it owns the whole
         // frame (including the bottom row, where it draws its own status bar).
-        if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
+        // It keeps that frame while the session switcher is open over it — the
+        // palette suspends the review rather than replacing it, so it is drawn
+        // underneath and the diff doesn't blink away to the board and back.
+        if self.open_review().is_some() {
             self.ui_state.review_body_rect = Some(super::review::review_body_inner_rect(size));
             self.ui_state.review_file_list_rect =
                 Some(super::review::review_file_list_inner_rect(size));
-            let review_buttons = if let Modal::ReviewDiff(state) = &self.ui_state.modal {
-                self.render_review_modal(frame, size, state)
-            } else {
-                Vec::new()
+            let review_buttons = match self.open_review() {
+                Some(state) => self.render_review_modal(frame, size, state),
+                None => Vec::new(),
             };
             self.ui_state.review_buttons = review_buttons;
+            // The suspended case: draw the palette on top of the diff.
+            // `render_modal` then publishes the palette's own `modal_list_rect`
+            // and clears `review_body_rect` (it is `None` for any non-review
+            // modal), so no mouse handler maps a click onto the covered diff.
+            // `review_file_list_rect` and `review_buttons` are left as drawn,
+            // and stay unreachable only because every handler that reads them
+            // gates on `Modal::ReviewDiff` first — check that before adding a
+            // new one.
+            if matches!(self.ui_state.modal, Modal::QuickSwitch { .. }) {
+                self.render_modal(frame, size);
+            }
             return;
         }
 

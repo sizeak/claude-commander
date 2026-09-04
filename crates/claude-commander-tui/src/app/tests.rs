@@ -1176,6 +1176,7 @@ fn test_refilter_section_picker_keeps_section_rows() {
         matches: Vec::new(),
         selected_idx: 0,
         scroll: 0,
+        review: None,
     };
 
     app.refilter_quick_switch();
@@ -1380,6 +1381,7 @@ fn make_section_picker_app(n_items: usize) -> App {
         matches,
         selected_idx: 0,
         scroll: 0,
+        review: None,
     };
     app.ui_state.modal_list_rect = Some(Rect::new(20, 12, 40, n_items as u16));
     app
@@ -5876,6 +5878,7 @@ async fn program_choices_loaded_replaces_only_for_matching_open_palette() {
         matches: Vec::new(),
         selected_idx: 0,
         scroll: 0,
+        review: None,
     };
 
     // A load for a DIFFERENT session is dropped.
@@ -5936,6 +5939,7 @@ async fn selecting_program_row_opens_change_program_confirm() {
         }],
         selected_idx: 0,
         scroll: 0,
+        review: None,
     };
 
     app.activate_quick_switch_selection().await;
@@ -8831,6 +8835,7 @@ fn palette_terminal(app: &App) -> ratatui::Terminal<ratatui::backend::TestBacken
                 matches,
                 selected_idx,
                 scroll,
+                ..
             } = &app.ui_state.modal
             else {
                 panic!("the quick-switch palette must be open");
@@ -9011,4 +9016,655 @@ async fn an_unread_palette_row_is_bold_like_its_tree_row() {
             "unread={unread} must decide whether the palette bolds the title"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The session switcher over the review view
+// ---------------------------------------------------------------------------
+
+fn key_with(
+    code: crossterm::event::KeyCode,
+    mods: crossterm::event::KeyModifiers,
+) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(code, mods)
+}
+
+/// `Ctrl+Space`, the switcher's always-available binding.
+fn ctrl_space() -> crossterm::event::KeyEvent {
+    key_with(
+        crossterm::event::KeyCode::Char(' '),
+        crossterm::event::KeyModifiers::CONTROL,
+    )
+}
+
+/// An app with one attachable remote session whose list rows are populated,
+/// ready to drive the review view.
+async fn app_for_review_switcher() -> (App, SessionId) {
+    let (mut app, sid) = app_with_remote_session().await;
+    app.refresh_list_items().await;
+    (app, sid)
+}
+
+#[tokio::test]
+async fn ctrl_space_in_review_opens_the_session_switcher() {
+    let (mut app, sid) = app_for_review_switcher().await;
+
+    app.handle_review_key(ctrl_space(), review_state_for(sid))
+        .await;
+
+    match &app.ui_state.modal {
+        Modal::QuickSwitch {
+            mode,
+            matches,
+            review,
+            ..
+        } => {
+            assert_eq!(
+                *mode,
+                PaletteMode::SessionOnly,
+                "the review switcher lists sessions only"
+            );
+            assert_eq!(
+                review.as_ref().map(|r| r.session_id),
+                Some(sid),
+                "the review view must ride along inside the palette, not be discarded"
+            );
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| matches!(m, QuickSwitchItem::Session(_))),
+                "the switcher must list the open sessions, got {matches:?}"
+            );
+            assert!(
+                !matches
+                    .iter()
+                    .any(|m| matches!(m, QuickSwitchItem::Command(_))),
+                "no command rows in the review switcher, got {matches:?}"
+            );
+        }
+        other => panic!("Ctrl+Space in the review view must open the switcher, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn leader_key_in_review_opens_the_session_switcher() {
+    // The default leader (Space) has no meaning in the review view, so it
+    // opens the switcher there just as it does in the session list.
+    let (mut app, sid) = app_for_review_switcher().await;
+    assert_eq!(
+        app.config.leader_key, " ",
+        "test assumes the default leader"
+    );
+
+    app.handle_review_key(
+        key_with(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        review_state_for(sid),
+    )
+    .await;
+
+    assert!(
+        matches!(
+            app.ui_state.modal,
+            Modal::QuickSwitch {
+                mode: PaletteMode::SessionOnly,
+                ..
+            }
+        ),
+        "the leader key must open the switcher, got {:?}",
+        app.ui_state.modal
+    );
+}
+
+#[tokio::test]
+async fn a_review_binding_wins_over_a_colliding_leader_key() {
+    // A leader rebound onto a key the review view already means something by
+    // keeps the review's meaning: `t` toggles the layout, it does not open the
+    // switcher. Ctrl+Space still does.
+    let (mut app, sid) = app_for_review_switcher().await;
+    app.config.leader_key = "t".to_string();
+    let before = review_state_for(sid).layout;
+
+    app.handle_review_key(
+        key_with(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        review_state_for(sid),
+    )
+    .await;
+
+    match &app.ui_state.modal {
+        Modal::ReviewDiff(state) => assert_ne!(
+            state.layout, before,
+            "`t` must still toggle the review layout when it is also the leader"
+        ),
+        other => panic!("the review view must stay open, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn esc_in_the_review_switcher_restores_the_review() {
+    let (mut app, sid) = app_for_review_switcher().await;
+    // Move off the defaults so a restored-vs-rebuilt view is distinguishable.
+    let mut state = review_state_for(sid);
+    state.focus = super::review::ReviewFocus::FileList;
+    let layout = state.layout;
+
+    app.handle_review_key(ctrl_space(), state).await;
+    app.handle_modal_key(key_with(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    ))
+    .await;
+
+    match &app.ui_state.modal {
+        Modal::ReviewDiff(state) => {
+            assert_eq!(state.session_id, sid);
+            assert_eq!(
+                state.focus,
+                super::review::ReviewFocus::FileList,
+                "Esc must restore the review view as it was, not a fresh one"
+            );
+            assert_eq!(state.layout, layout);
+        }
+        other => panic!("Esc must put the review view back, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn picking_a_session_in_the_review_switcher_attaches_to_it() {
+    let (mut app, sid) = app_for_review_switcher().await;
+    app.handle_review_key(ctrl_space(), review_state_for(sid))
+        .await;
+
+    app.handle_modal_key(key_with(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ))
+    .await;
+
+    assert!(
+        matches!(app.ui_state.modal, Modal::None),
+        "activating a session row closes the palette (and the review with it), got {:?}",
+        app.ui_state.modal
+    );
+    assert!(
+        matches!(
+            app.ui_state.attach_request,
+            Some(AttachTarget::Session { session, .. }) if session.id == sid
+        ),
+        "picking a session must queue the attach, got {:?}",
+        app.ui_state.attach_request
+    );
+    assert!(
+        app.ui_state.should_quit,
+        "attaching tears the TUI loop down"
+    );
+}
+
+#[tokio::test]
+async fn typing_in_the_review_switcher_never_surfaces_commands() {
+    // "new" matches the New Session command in the unified palette; in the
+    // review switcher the refilter must keep it out.
+    let (mut app, sid) = app_for_review_switcher().await;
+    app.handle_review_key(ctrl_space(), review_state_for(sid))
+        .await;
+
+    for c in "new".chars() {
+        app.handle_modal_key(key_with(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
+    }
+
+    match &app.ui_state.modal {
+        Modal::QuickSwitch { matches, .. } => assert!(
+            !matches
+                .iter()
+                .any(|m| matches!(m, QuickSwitchItem::Command(_))),
+            "the review switcher stays sessions-only while typing, got {matches:?}"
+        ),
+        other => panic!("the palette must stay open, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_review_stays_on_screen_under_the_switcher() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, sid) = app_for_review_switcher().await;
+    app.handle_review_key(ctrl_space(), review_state_for(sid))
+        .await;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+
+    assert!(
+        rendered.contains("Switch Session"),
+        "the switcher must be drawn over the review"
+    );
+    assert!(
+        rendered.contains("a.rs"),
+        "the review diff must still be drawn underneath, not replaced by the board"
+    );
+}
+
+#[tokio::test]
+async fn a_review_under_the_switcher_still_auto_refreshes_on_working_to_idle() {
+    // The auto-refresh is edge-triggered on Working→Idle, so one dropped
+    // because the session switcher happened to be open never fires again —
+    // the diff would silently stay stale until the user pressed `r`.
+    let (mut app, remote_sid) = app_for_review_switcher().await;
+    app.handle_review_key(ctrl_space(), review_state_for(remote_sid))
+        .await;
+    assert!(
+        matches!(app.ui_state.modal, Modal::QuickSwitch { .. }),
+        "precondition: the switcher is open over the review"
+    );
+
+    fold_backend_states(
+        &mut app,
+        BackendId(1),
+        BTreeMap::from([(remote_sid, AgentState::Working)]),
+        BTreeMap::from([(remote_sid, AgentState::Idle)]),
+    )
+    .await;
+
+    let mut refreshed = false;
+    for _ in 0..50 {
+        if remote_mock(&app, BackendId(1))
+            .review_refreshed_sessions()
+            .contains(&remote_sid)
+        {
+            refreshed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        refreshed,
+        "a review suspended under the switcher must still auto-refresh"
+    );
+}
+
+/// Two Running sessions in one project, pinned into sections "Alpha" and
+/// "Beta", rendered in the section-grouped list view. Returns the app plus the
+/// (Alpha, Beta) session ids.
+async fn app_with_two_sectioned_sessions() -> (App, SessionId, SessionId) {
+    app_with_sectioned_sessions(Some("Alpha")).await
+}
+
+/// As above, but `alpha_section` of `None` leaves the first session in the
+/// implicit In Progress catch-all — the section `section_at`/`target_section`
+/// deliberately report as "no section", and the one most sessions live in.
+async fn app_with_sectioned_sessions(alpha_section: Option<&str>) -> (App, SessionId, SessionId) {
+    use claude_commander_core::session::{Project, SectionConfig, SessionStatus, WorktreeSession};
+    use std::path::PathBuf;
+
+    let mut state = claude_commander_core::config::AppState::default();
+    let mut project = Project::new("proj", PathBuf::from("/tmp/rp"), "main");
+    let pid = project.id;
+    let mut mk = |title: &str| {
+        let mut s = WorktreeSession::new(pid, title, title, PathBuf::new(), "claude");
+        s.status = SessionStatus::Running;
+        let id = s.id;
+        project.add_worktree(id);
+        state.sessions.insert(id, s);
+        id
+    };
+    let alpha = mk("alpha-sess");
+    // A second session in alpha's section, so expanding it shifts the rows
+    // below by more than one: enough for a retained row index to land on the
+    // spacer between sections, which is where a cursor gets lost.
+    let alpha_two = mk("alpha-sess-two");
+    let beta = mk("beta-sess");
+    state.projects.insert(pid, project);
+
+    let mut snap = claude_commander_core::api::workspace_snapshot_from_state(&state);
+    for s in snap.sessions.iter_mut() {
+        let name = if s.session_id == alpha || s.session_id == alpha_two {
+            alpha_section.map(str::to_string)
+        } else {
+            Some("Beta".to_string())
+        };
+        s.section_override = name.clone();
+        s.current_section = name;
+    }
+
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", snap)]);
+    app.config.sections = ["Alpha", "Beta"]
+        .into_iter()
+        .map(|name| SectionConfig {
+            name: name.to_string(),
+            ..Default::default()
+        })
+        .collect();
+    app.ui_state.view_mode = ViewMode::SectionGrouped;
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.refresh_list_items().await;
+    (app, alpha, beta)
+}
+
+#[tokio::test]
+async fn palette_jump_into_a_collapsed_section_attaches_to_the_picked_session() {
+    // A collapsed section's sessions have no list row at all, so a palette jump
+    // into one used to leave the previous selection in place — and attach to
+    // *that* session instead of the one picked. The palette lists every session
+    // regardless of what the view is hiding, so the jump has to reveal it.
+    let (mut app, alpha, beta) = app_with_two_sectioned_sessions().await;
+    assert!(
+        app.select_session_in_tree(beta),
+        "precondition: both sessions have rows before the collapse"
+    );
+    assert!(
+        app.select_session_in_tree(alpha),
+        "precondition: alpha has a row before the collapse"
+    );
+    // Collapse Alpha's section and park the selection on Beta.
+    app.ui_state.collapsed_sections.insert("Alpha".to_string());
+    app.refresh_list_items().await;
+    assert!(app.select_session_in_tree(beta));
+    assert!(
+        !app.select_session_in_tree(alpha),
+        "precondition: the collapse really does hide alpha's row"
+    );
+
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: PaletteMode::Unified,
+        query: super::Input::default(),
+        matches: vec![QuickSwitchItem::Session(QuickSwitchMatch {
+            session_id: alpha,
+            title: "alpha-sess".to_string(),
+            branch: "alpha-sess".to_string(),
+            project_name: "proj".to_string(),
+            status: claude_commander_core::session::SessionStatus::Running,
+            agent_state: None,
+            unread: false,
+            last_attached_at: None,
+        })],
+        selected_idx: 0,
+        scroll: 0,
+        review: None,
+    };
+    app.activate_quick_switch_selection().await;
+
+    assert!(
+        matches!(
+            app.ui_state.attach_request,
+            Some(AttachTarget::Session { session, .. }) if session.id == alpha
+        ),
+        "must attach to the picked session, not the one that was selected before; got {:?}",
+        app.ui_state.attach_request
+    );
+}
+
+#[tokio::test]
+async fn revealing_a_session_keeps_the_other_sections_collapsed() {
+    // Expanding to land a jump must not throw away the rest of the layout:
+    // only the section the target sits in opens.
+    let (mut app, alpha, _beta) = app_with_two_sectioned_sessions().await;
+    app.ui_state.collapsed_sections.insert("Alpha".to_string());
+    app.ui_state.collapsed_sections.insert("Beta".to_string());
+    app.refresh_list_items().await;
+
+    assert!(app.reveal_session_in_tree(alpha).await);
+
+    assert!(
+        !app.ui_state.collapsed_sections.contains("Alpha"),
+        "the target's section must be expanded"
+    );
+    assert!(
+        app.ui_state.collapsed_sections.contains("Beta"),
+        "unrelated collapsed sections must stay collapsed, got {:?}",
+        app.ui_state.collapsed_sections
+    );
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(alpha),
+        "the cursor must end up on the revealed session"
+    );
+}
+
+#[tokio::test]
+async fn a_leader_bound_to_a_guarded_review_key_follows_the_focus() {
+    // The "the review's own binding wins" rule is per-mode by construction: the
+    // switcher is offered from the fallthrough of the review key match, so a
+    // leader on `v` — bound in the diff body only — toggles visual select
+    // there and opens the switcher from the file list. Documented as such in
+    // docs/usage.md; pinned here so the two can't drift.
+    let (mut app, sid) = app_for_review_switcher().await;
+    app.config.leader_key = "v".to_string();
+    let v = key_with(
+        crossterm::event::KeyCode::Char('v'),
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    let mut body = review_state_for(sid);
+    body.focus = super::review::ReviewFocus::Body;
+    app.handle_review_key(v, body).await;
+    match &app.ui_state.modal {
+        Modal::ReviewDiff(state) => assert!(
+            state.visual_anchor.is_some(),
+            "`v` in the body must still start a selection"
+        ),
+        other => panic!("expected the review view, got {other:?}"),
+    }
+
+    let mut files = review_state_for(sid);
+    files.focus = super::review::ReviewFocus::FileList;
+    app.handle_review_key(v, files).await;
+    assert!(
+        matches!(
+            app.ui_state.modal,
+            Modal::QuickSwitch {
+                mode: PaletteMode::SessionOnly,
+                ..
+            }
+        ),
+        "`v` is unbound in the file list, so the leader opens the switcher there; got {:?}",
+        app.ui_state.modal
+    );
+}
+
+#[tokio::test]
+async fn the_comment_box_swallows_ctrl_space_rather_than_switching() {
+    // While the comment draft is open every key is text (the box is checked
+    // before anything else in `handle_review_key`), so the switcher is not
+    // reachable — which is why the footer hides its button there too.
+    let (mut app, sid) = app_for_review_switcher().await;
+    let mut state = review_state_for(sid);
+    state.comment = Some(super::review::CommentDraft {
+        input: Input::from("half-written"),
+        range: (0, 0),
+    });
+
+    app.handle_review_key(ctrl_space(), state).await;
+
+    match &app.ui_state.modal {
+        Modal::ReviewDiff(state) => assert!(
+            state.comment.is_some(),
+            "the comment draft must survive Ctrl+Space"
+        ),
+        other => panic!("the comment box must keep the review open, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_refresh_folds_into_the_suspended_review_and_survives_esc() {
+    // The auto-refresh spawns while the switcher is open (pinned separately);
+    // this pins the other half — that its result lands *in* the suspended
+    // review, so Esc returns to the refreshed diff rather than the stale one.
+    let (mut app, sid) = app_for_review_switcher().await;
+    app.handle_review_key(ctrl_space(), review_state_for(sid))
+        .await;
+
+    let diff = claude_commander_core::git::parse_unified_diff(
+        "\
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1,2 +1,3 @@
+ fn other() {
++    let z = 9;
+ }
+",
+    );
+    app.handle_state_update(StateUpdate::ReviewRefreshed {
+        refreshed: Some(Box::new(super::ReviewPrepared {
+            session_id: sid,
+            title: "t".to_string(),
+            base: "main".to_string(),
+            diff,
+            comments: Vec::new(),
+            reviewed: Vec::new(),
+            models: Vec::new(),
+            content_hash: 42,
+            dropped_comments: Vec::new(),
+        })),
+        manual: false,
+    })
+    .await;
+
+    app.handle_modal_key(key_with(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
+    ))
+    .await;
+
+    match &app.ui_state.modal {
+        Modal::ReviewDiff(state) => {
+            assert_eq!(
+                state.content_hash, 42,
+                "the fold must reach the suspended review"
+            );
+            assert_eq!(
+                state.diff.files[0].display_path(),
+                "b.rs",
+                "Esc must return to the refreshed diff, not the stale one"
+            );
+        }
+        other => panic!("Esc must restore the review, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_review_footer_offers_the_switcher_outside_the_comment_box() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.modal = Modal::ReviewDiff(review_state_for(sid));
+    // Wide on purpose: the switcher sits last in the footer, so it is the
+    // first item dropped when the row can't fit them all (~140 columns in file
+    // -list focus). The button is a bonus affordance, not the binding's only
+    // advertisement — that is the help modal and the docs.
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    assert!(
+        buffer_text(&terminal).contains("switch"),
+        "the footer must advertise the switcher when there is room"
+    );
+    // The button replays Ctrl+Space through the ordinary review key path.
+    let switch = app
+        .ui_state
+        .review_buttons
+        .iter()
+        .find(|b| b.key == ctrl_space())
+        .expect("a footer button bound to Ctrl+Space");
+    assert_eq!(
+        super::review::review_button_at(&app.ui_state.review_buttons, switch.rect.x, switch.rect.y),
+        Some(ctrl_space()),
+        "clicking it must map back to the switcher key"
+    );
+
+    // In the comment box the footer hosts the editor, so it is not offered.
+    let mut state = review_state_for(sid);
+    state.comment = Some(super::review::CommentDraft {
+        input: Input::from(""),
+        range: (0, 0),
+    });
+    app.ui_state.modal = Modal::ReviewDiff(state);
+    terminal.draw(|f| app.render(f)).unwrap();
+    assert!(
+        !app.ui_state
+            .review_buttons
+            .iter()
+            .any(|b| b.key == ctrl_space()),
+        "no switcher button while editing a comment"
+    );
+}
+
+#[tokio::test]
+async fn revealing_a_session_in_the_catch_all_keeps_the_other_sections_collapsed() {
+    // "In Progress" is an ordinary member of `collapsed_sections` (that is what
+    // ToggleSection records) but `target_section` reports it as `None` — so
+    // reading the section to keep open with that function left *every* section
+    // expanded for the commonest case of all.
+    let in_progress = claude_commander_core::session::IN_PROGRESS.to_string();
+    let (mut app, alpha, _beta) = app_with_sectioned_sessions(None).await;
+    app.ui_state.collapsed_sections.insert(in_progress.clone());
+    app.ui_state.collapsed_sections.insert("Beta".to_string());
+    app.refresh_list_items().await;
+    assert!(
+        !app.select_session_in_tree(alpha),
+        "precondition: the collapsed catch-all really does hide the row"
+    );
+
+    assert!(app.reveal_session_in_tree(alpha).await);
+
+    assert!(
+        !app.ui_state.collapsed_sections.contains(&in_progress),
+        "the catch-all had to open to land the jump"
+    );
+    assert!(
+        app.ui_state.collapsed_sections.contains("Beta"),
+        "unrelated collapsed sections must stay collapsed, got {:?}",
+        app.ui_state.collapsed_sections
+    );
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(alpha),
+        "the cursor must end up on the revealed session"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_reveal_restores_the_layout_and_the_cursor() {
+    // The expand is speculative: when it doesn't turn the row up, both the
+    // collapse set and the cursor have to come back — a rebuild keeps the row
+    // index, not the session, so the cursor does not survive on its own.
+    let (mut app, _alpha, beta) = app_with_two_sectioned_sessions().await;
+    app.ui_state.collapsed_sections.insert("Alpha".to_string());
+    app.refresh_list_items().await;
+    assert!(app.select_session_in_tree(beta));
+
+    assert!(
+        !app.reveal_session_in_tree(SessionId::new()).await,
+        "a session with no row anywhere cannot be revealed"
+    );
+
+    assert!(
+        app.ui_state.collapsed_sections.contains("Alpha"),
+        "a failed reveal must not leave sections expanded, got {:?}",
+        app.ui_state.collapsed_sections
+    );
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(beta),
+        "a failed reveal must leave the cursor where it was"
+    );
 }

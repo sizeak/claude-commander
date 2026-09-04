@@ -288,6 +288,9 @@ impl App {
             matches,
             selected_idx,
             scroll,
+            // The overlay palette is never opened over a review view — the
+            // review is a TUI screen, not something an attached pane shows.
+            review: _,
         } = &self.ui_state.modal
         else {
             return;

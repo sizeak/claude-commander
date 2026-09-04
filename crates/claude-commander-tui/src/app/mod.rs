@@ -483,6 +483,16 @@ pub enum Modal {
         /// Index of the first visible row — keeps `selected_idx` inside
         /// the visible window when the list is longer than can fit.
         scroll: usize,
+        /// The review view this palette was opened *over* (`SessionOnly` mode,
+        /// from `handle_review_key`), suspended rather than closed: Esc puts it
+        /// back exactly as it was, and it keeps rendering underneath meanwhile.
+        ///
+        /// It rides inside the modal rather than sitting in [`AppUiState`] so
+        /// its lifetime is the palette's by construction — any other path that
+        /// replaces the modal (activating a row, a state update swapping it)
+        /// drops the review with it, and no invariant has to be maintained to
+        /// stop a suspended view outliving the palette that suspended it.
+        review: Option<Box<DiffReviewState>>,
     },
     /// Checkout-existing-branch modal. Shows an input field plus a
     /// filterable/scrollable list of branches (local + remote) and
@@ -545,6 +555,12 @@ pub struct QuickSwitchMatch {
 pub enum PaletteMode {
     Unified,
     CommandOnly,
+    /// Sessions only, no command rows — the switcher opened from inside the
+    /// full-screen review view (`Ctrl+Space`, or the leader key when the review
+    /// doesn't bind it). Commands are left out because every one of them would
+    /// have to tear the review down to run; a `>` prefix does *not* upgrade this
+    /// mode to `CommandOnly` for the same reason.
+    SessionOnly,
     /// Section picker for a specific session. The palette is populated with
     /// one entry per configured `[[sections]]` plus an "Auto" entry; selecting
     /// an entry sets (or clears) the session's `section_override`.

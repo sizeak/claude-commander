@@ -11,6 +11,7 @@ import '../state/workspace_store.dart';
 import '../theme/agent_glyphs.dart';
 import '../theme/tokens.dart';
 import '../util/session_filter.dart';
+import '../util/viewport.dart';
 import '../widgets/brand_mark.dart';
 import '../widgets/session_chips.dart';
 import 'activity_page.dart';
@@ -21,17 +22,53 @@ import 'session_list_page.dart';
 import 'terminal_page.dart';
 
 /// Logical width at or above which the app switches from the stacked phone
-/// layout to the desktop/tablet rail + workspace layout.
+/// layout to the desktop/tablet rail + workspace layout — provided the viewport
+/// is also tall enough. See [useWideLayout].
 const double kWideBreakpoint = 900;
+
+/// Whether [constraints] should get the rail + workspace layout rather than the
+/// stacked [PhoneShell].
+///
+/// Width alone is not the question, and taking it as such put a phone on the
+/// wrong shell: a Pixel 8a is 914 × 411dp held sideways, clearing
+/// [kWideBreakpoint] by 14dp with barely 400dp of height. Measured on that
+/// device, the wide layout spends 71dp on the workspace header and 40 on the
+/// tab strip before the pane gets a row; it resizes for the soft keyboard
+/// instead of panning, so the pane disappears entirely when the keyboard opens
+/// (and the fleet column overflowed its box by 126px); and it suppresses the
+/// on-screen modifier bar on the reasoning that a wide layout implies a
+/// physical keyboard, leaving a phone with no Esc, Ctrl or arrows. The stacked
+/// shell has none of those problems and gives the pane the full 914dp width.
+///
+/// The height comes from [isShortViewport] — `MediaQuery.sizeOf` — rather than
+/// from [constraints], for two reasons, and *not* the tempting third one. It is
+/// the same predicate the two chromes compact themselves on, so the shell and
+/// the chrome inside it cannot disagree about whether the viewport is short. And
+/// it is keyboard-invariant at any position in the tree, whereas [constraints]
+/// are only keyboard-invariant *here*: nothing above this `LayoutBuilder`
+/// consumes `viewInsets` today (`MaterialApp.builder` wraps the navigator in
+/// [WindowFrame], a plain `Column`, and every `Scaffold` is built by a chrome
+/// below the shells), so `constraints.maxHeight` measures 900 at a 900dp window
+/// with a 600dp keyboard up — verified. Reading it would therefore work now and
+/// silently start swapping the whole shell mid-keystroke the day an ancestor
+/// that rewrites the height appears.
+///
+/// Crossing this threshold does swap shells, which tears down the routes and
+/// the live attach beneath them — the same cost the 900dp width crossing has
+/// always had. It is reachable by rotating a tablet or dragging a desktop
+/// window's height past 500; the attach re-opens on the other side.
+bool useWideLayout(BuildContext context, BoxConstraints constraints) =>
+    constraints.maxWidth >= kWideBreakpoint && !isShortViewport(context);
 
 /// Which surface the shell's FLEET/ACTIVITY toggle is driving the workspace to:
 /// the selected session's [_DetailPane] (fleet), or the cross-server
 /// [ActivityBody] feed (activity). The fleet list stays visible in both.
 enum _RailMode { fleet, activity }
 
-/// The responsive home. Below [kWideBreakpoint] it is the [PhoneShell] (a
-/// bottom-nav Fleet + Activity shell over a stacked `Navigator.push` flow). At
-/// or above it, [ChromeWide]: the fleet list, a **workspace** whose Overview /
+/// The responsive home. Where [useWideLayout] says no — a narrow viewport, or a
+/// wide but short one such as a phone held sideways — it is the [PhoneShell] (a
+/// bottom-nav Fleet + Activity shell over a stacked `Navigator.push` flow).
+/// Otherwise [ChromeWide]: the fleet list, a **workspace** whose Overview /
 /// Agent / Shell / Changes tabs switch in place, and the shell's navigation —
 /// the FLEET/ACTIVITY toggle, the needs-input count, new-session and settings.
 ///
@@ -82,12 +119,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
-      builder: (context, constraints) {
-        if (constraints.maxWidth < kWideBreakpoint) {
-          return const PhoneShell();
-        }
-        return _wide(context);
-      },
+      builder: (context, constraints) => useWideLayout(context, constraints)
+          ? _wide(context)
+          : const PhoneShell(),
     );
   }
 

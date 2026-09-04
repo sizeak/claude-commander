@@ -23,11 +23,15 @@ Flutter UI  ──frb──►  Rust cdylib  ──claude-commander-client──
 
 **Flutter UI** (`client/lib/`) — Material 3, dark theme. An [`AdaptiveShell`](lib/pages/adaptive_shell.dart)
 renders a stacked phone flow (list → detail → terminal/review, via `Navigator.push`)
-below `kWideBreakpoint` (900 logical px), and a desktop master-detail layout above
-it: a server sidebar + grouped session list on the left, a persistent detail pane
-on the right whose Detail/Terminal/Review tabs switch in place. The same page
-*bodies* (`SessionListBody`, `SessionDetailBody`, `TerminalBody`, `ReviewBody`)
-back both layouts; only the surrounding shell differs.
+or a desktop master-detail layout — a server sidebar + grouped session list on the
+left, a persistent detail pane on the right whose Detail/Terminal/Review tabs
+switch in place. `useWideLayout` picks between them on **both** dimensions: the
+master-detail layout needs `kWideBreakpoint` (900 logical px) of width *and* more
+than `kShortViewportHeight` (500) of height, because a phone held sideways clears
+the width on its own — a Pixel 8a is 914 × 411dp — while having no height to spend
+on a workspace header and tab strip. The same page *bodies* (`SessionListBody`,
+`SessionDetailBody`, `TerminalBody`, `ReviewBody`) back both layouts; only the
+surrounding shell differs.
 
 A [`CommanderStore`](lib/state/commander_store.dart) (`ChangeNotifier`) is the
 single reactive source of truth for a connected server. It owns the opaque

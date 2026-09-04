@@ -207,7 +207,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `1`–`99` | Jump to session by number |
 | palette only | Toggle section — collapse/expand the section under the cursor in the section list views (unbound by default) |
 | `Space` | Quick-switch palette (sessions and commands) |
-| `Ctrl-Space` | Quick-switch palette (the same shortcut, and the same palette, as the in-session switcher) |
+| `Ctrl-Space` | Quick-switch palette (the same shortcut, and the same palette, as the in-session switcher — and as the session switcher inside the review diff) |
 | `Shift+Space` | Command palette (commands only) |
 | `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |

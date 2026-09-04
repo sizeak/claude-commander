@@ -158,6 +158,17 @@ abstract class Chrome implements ChromeForms {
 
   /// Frames a page.
   Widget buildPage(BuildContext context, ChromePageSpec spec);
+
+  /// Whether a **titleless** page still gets a back affordance from the chrome.
+  ///
+  /// Mission Control's back button lives in the `AppBar`, and a null title means
+  /// no app bar — so it does not survive. LCARS' is the rail's top elbow block,
+  /// which any poppable route gets regardless of title — so it does.
+  ///
+  /// Asked by a page that drops its title to reclaim height (the terminal, in a
+  /// short viewport) so it draws a back control of its own only where one would
+  /// otherwise be missing, rather than a second one beside the rail's.
+  bool get backSurvivesTitleless;
 }
 
 /// A page frame, rendered by whichever [Chrome] the active theme selects.

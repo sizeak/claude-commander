@@ -572,7 +572,7 @@ impl App {
                         // The fetch succeeded — clear the in-flight marker so a
                         // later refresh can re-fetch.
                         self.review_file_loads.borrow_mut().remove(&path);
-                        if let Modal::ReviewDiff(state) = &mut self.ui_state.modal
+                        if let Some(state) = self.open_review_mut()
                             && state.session_id == session_id
                         {
                             state.set_file_lines(path, lines);
@@ -584,8 +584,9 @@ impl App {
                         // keypress; it clears on the next open/refresh, which is
                         // when a deleted/renamed file could reappear. Only toast
                         // if this session's review is still open.
-                        if let Modal::ReviewDiff(state) = &self.ui_state.modal
-                            && state.session_id == session_id
+                        if self
+                            .open_review()
+                            .is_some_and(|state| state.session_id == session_id)
                         {
                             self.set_review_status(&format!("Expand failed: {e}"));
                         }
@@ -599,7 +600,7 @@ impl App {
                         // Fold the fresh diff in only if the same review is still
                         // open and the user isn't mid-comment (a rebuild would
                         // drop the draft); otherwise discard it.
-                        if let Modal::ReviewDiff(state) = &mut self.ui_state.modal
+                        if let Some(state) = self.open_review_mut()
                             && state.session_id == prepared.session_id
                             && state.comment.is_none()
                         {
@@ -640,7 +641,7 @@ impl App {
                 // shown file so expand controls reappear without waiting for the
                 // next navigation key.
                 self.invalidate_review_file_lines();
-                if let Modal::ReviewDiff(state) = &self.ui_state.modal {
+                if let Some(state) = self.open_review() {
                     self.ensure_review_file_lines(state).await;
                 }
             }
@@ -709,9 +710,7 @@ impl App {
         old_states: &BTreeMap<SessionId, AgentState>,
         new_states: &BTreeMap<SessionId, AgentState>,
     ) -> Option<(SessionId, String, u64)> {
-        let Modal::ReviewDiff(state) = &self.ui_state.modal else {
-            return None;
-        };
+        let state = self.open_review()?;
         if state.comment.is_some() {
             return None;
         }

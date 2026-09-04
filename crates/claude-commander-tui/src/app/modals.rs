@@ -611,6 +611,8 @@ impl App {
                 matches,
                 selected_idx,
                 scroll,
+                // Rendered by `render`, underneath this palette.
+                review: _,
             } => {
                 let (modal_area, rows_area) = quick_switch_areas(area, matches.len());
                 frame.render_widget(Clear, modal_area);
@@ -796,7 +798,7 @@ impl App {
             width = key_col_width,
         )));
         lines.push(Line::from(format!(
-            "  {:<width$}Quick switch (same palette as the in-session switcher)",
+            "  {:<width$}Quick switch (same palette as the in-session switcher; in the review diff, sessions only)",
             "Ctrl+Space",
             width = key_col_width,
         )));
@@ -1194,6 +1196,7 @@ impl App {
         let title = match effective_mode {
             PaletteMode::Unified => " Quick Switch ",
             PaletteMode::CommandOnly => " Commands ",
+            PaletteMode::SessionOnly => " Switch Session ",
             PaletteMode::SectionPicker { .. } => " Move to Section ",
             PaletteMode::RemoteServerPicker => " Remove Remote Server ",
             PaletteMode::ProgramPicker { .. } => " Change Program ",

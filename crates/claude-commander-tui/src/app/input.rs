@@ -206,6 +206,26 @@ fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> 
     }
 }
 
+/// Whether `key` should open the quick-switch palette: the configured leader
+/// key, or `Ctrl+Space` — which works everywhere the palette can be reached
+/// (the tree, an attached pane, the review view) whatever the leader is bound
+/// to. Shared by the main dispatch and the review view so the two can't drift.
+///
+/// The review view calls this from the fallthrough of its own key match — so
+/// only for keys it has no meaning for *in the current focus and sub-mode*, and
+/// a leader rebound onto one of its letters keeps the review's meaning there.
+/// That is per-mode, not absolute: `v` is bound in the diff body only, so a
+/// leader of `v` opens the switcher from the file list, where `v` does nothing.
+pub(super) fn opens_palette(
+    key: &crossterm::event::KeyEvent,
+    leader_code: crossterm::event::KeyCode,
+    leader_mods: crossterm::event::KeyModifiers,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    (key.code == leader_code && key.modifiers == leader_mods)
+        || (key.code == KeyCode::Char(' ') && key.modifiers == KeyModifiers::CONTROL)
+}
+
 /// Plain printable characters (no modifier, or Shift only) belong in a
 /// fuzzy-search query box and must not be intercepted by global j/k →
 /// NavigateUp/Down bindings. Other key combos (Ctrl/Alt, arrows, Tab, …)
@@ -504,17 +524,11 @@ impl App {
                         .await;
                     return;
                 }
-                if key.code == leader_code && key.modifiers == leader_mods {
-                    self.open_quick_switch_with_mode(PaletteMode::Unified).await;
-                    return;
-                }
-
-                // Ctrl+Space always opens the quick-switch palette, mirroring
-                // the in-session switcher (see `tmux/attach.rs`) so the same
-                // physical shortcut works whether attached or in the tree.
-                if key.code == crossterm::event::KeyCode::Char(' ')
-                    && key.modifiers == crossterm::event::KeyModifiers::CONTROL
-                {
+                // The leader itself, or Ctrl+Space — which always opens the
+                // palette, mirroring the in-session switcher (see
+                // `tmux/attach.rs`) so the same physical shortcut works whether
+                // attached, in the tree, or in the review view.
+                if opens_palette(&key, leader_code, leader_mods) {
                     self.open_quick_switch_with_mode(PaletteMode::Unified).await;
                     return;
                 }
@@ -920,6 +934,7 @@ impl App {
                 matches,
                 selected_idx,
                 scroll,
+                review,
             } => {
                 use claude_commander_core::config::keybindings::BindableAction;
 
@@ -973,7 +988,13 @@ impl App {
                     }
                     _ => match key.code {
                         KeyCode::Esc => {
-                            self.ui_state.modal = Modal::None;
+                            // Put back the review view this palette was opened
+                            // over, if any: the switcher is a transient overlay
+                            // on it, not a replacement (see `Modal::QuickSwitch`).
+                            self.ui_state.modal = match review.take() {
+                                Some(state) => Modal::ReviewDiff(state),
+                                None => Modal::None,
+                            };
                         }
                         KeyCode::Enter => {
                             self.activate_quick_switch_selection().await;
@@ -1347,7 +1368,17 @@ impl App {
                     self.ui_state.board_filter = None;
                     self.refresh_list_items().await;
                 }
-                self.select_session_in_tree(session_id);
+                // `reveal_…`, not `select_…`: a collapsed section hides its
+                // sessions' rows entirely, and a failed select would leave the
+                // attach pointed at whatever was selected before.
+                if !self.reveal_session_in_tree(session_id).await {
+                    // No row anywhere. Point the selection at the pick directly
+                    // — the same move the review view's re-attach toggle makes
+                    // (`review.rs`) — so what gets attached is decided by the
+                    // pick rather than by whatever the list happens to show.
+                    let backend = self.backend_of_session(session_id);
+                    self.ui_state.selected_session_id = Some(SessionRef::new(backend, session_id));
+                }
                 self.handle_select().await;
             }
             Some(QuickSwitchItem::Command(entry)) => {
@@ -2152,6 +2183,7 @@ mod tests {
             matches: Vec::new(),
             selected_idx: 0,
             scroll: 0,
+            review: None,
         }
     }
 
@@ -2681,5 +2713,37 @@ diff --git a/a.rs b/a.rs
             } => assert_eq!(p.selected_backend(), Some(LOCAL_BACKEND_ID)),
             _ => panic!("not an Input modal with a server picker"),
         }
+    }
+
+    #[test]
+    fn opens_palette_accepts_the_leader_and_ctrl_space() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let leader = (KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(opens_palette(&key(KeyCode::Char(' ')), leader.0, leader.1));
+        assert!(opens_palette(
+            &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+            leader.0,
+            leader.1
+        ));
+        // A different key, and the leader with an extra modifier (Shift+leader
+        // is the command palette, handled before this), are not it.
+        assert!(!opens_palette(&key(KeyCode::Char('j')), leader.0, leader.1));
+        assert!(!opens_palette(
+            &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::SHIFT),
+            leader.0,
+            leader.1
+        ));
+    }
+
+    #[test]
+    fn ctrl_space_opens_the_palette_whatever_the_leader_is() {
+        // Ctrl+Space is the one binding every surface honours, so it must not
+        // depend on how `leader_key` is configured.
+        use crossterm::event::{KeyCode, KeyModifiers};
+        assert!(opens_palette(
+            &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+            KeyCode::F(1),
+            KeyModifiers::NONE
+        ));
     }
 }

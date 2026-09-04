@@ -215,6 +215,17 @@ foreground-only colouring on 256- and 16-colour terminals.
   i.e. finishes a turn — folding its changes in while keeping your place (same
   file, clamped cursor/scroll). Press `r` to re-compose on demand at any time;
   it reports "Review refreshed" or "Review already up to date".
+- **Switch session**: press `Ctrl-Space` (or the leader key, `Space` by
+  default) to open the session switcher over the diff — the same palette as
+  everywhere else, filtered to sessions, since every command in it would have
+  to close the review to run. Picking a session attaches to it, exactly as
+  picking one from the board does; `Esc` closes the switcher and puts the diff
+  back where you left it. The leader key opens the switcher only where the
+  review has no meaning of its own for that key, so rebinding it to (say) `r`
+  leaves `r` refreshing the diff. That is per-mode: a leader on a key the
+  review binds in one place only — `v`, which selects in the diff body — still
+  opens the switcher from the file list, where `v` does nothing. `Ctrl-Space`
+  works anywhere in the view except the comment box, where every key is text.
 - **Open in editor**: press `.` (the same open-in-editor binding as the session
   list) to open the session's worktree in your configured editor without leaving
   the review — a GUI editor launches alongside the TUI, a terminal editor takes

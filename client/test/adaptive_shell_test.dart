@@ -70,6 +70,54 @@ void main() {
     expect(find.byType(SessionDetailBody), findsNothing);
   });
 
+  /// A phone held sideways clears [kWideBreakpoint] on width alone — a Pixel 8a
+  /// is 914 × 411dp — and the wide layout is the wrong home for it. See
+  /// [useWideLayout].
+  group('a wide but short viewport', () {
+    const landscapePhone = Size(914, 411);
+
+    testWidgets('a landscape phone gets the stacked shell', (tester) async {
+      useSize(tester, landscapePhone);
+      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PhoneShell), findsOneWidget);
+      expect(find.text('Select a session'), findsNothing);
+    });
+
+    /// The one thing the height gate must not do: swap the whole shell — every
+    /// route, every live attach — out from under the user as they start typing.
+    ///
+    /// Note what this does and does not catch. Nothing above [AdaptiveShell]'s
+    /// `LayoutBuilder` consumes `viewInsets` today, so a constraints-height
+    /// implementation would pass this too; what it genuinely pins is that the
+    /// predicate never reads a *keyboard-derived* height (`viewInsets`,
+    /// `MediaQuery.of(context).size` after an ancestor that *rewrites* it — no
+    /// standard widget does; a `Scaffold` rewrites `viewInsets` for its body,
+    /// not `size` — or a `Scaffold` body's own box). See [useWideLayout] for
+    /// why the distinction matters.
+    testWidgets('the soft keyboard cannot change which shell is used', (
+      tester,
+    ) async {
+      useSize(tester, const Size(1400, 900));
+      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+      expect(find.byType(PhoneShell), findsNothing);
+
+      // A keyboard covering most of a 900dp-tall window.
+      tester.view.viewInsets = const FakeViewPadding(bottom: 600);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PhoneShell), findsNothing);
+    });
+  });
+
   testWidgets(
     'wide layout is rail + workspace; the empty-state shows until a session '
     'is selected',
