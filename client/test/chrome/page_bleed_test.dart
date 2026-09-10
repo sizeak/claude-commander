@@ -32,6 +32,79 @@ void main() {
     ),
   );
 
+  /// The terminal's page — the only [ChromeInsets.pan] caller — used to opt out
+  /// of the bleed entirely: LCARS wrapped the whole frame in the `SafeArea`
+  /// that `applyChromeInsets` provides and zeroed the bleed, so an agent
+  /// session was the one LCARS route with a black band above its rail.
+  ///
+  /// It bleeds like any other page now. What `pan` still has to buy is the
+  /// thing it exists for — the remote PTY must never see a resize — so the
+  /// bottom is reserved off `viewPadding`, which a keyboard does not collapse,
+  /// rather than off `padding`, which it does.
+  group('a panning page bleeds too', () {
+    testWidgets('the rail and cap reach the physical top edge', (tester) async {
+      useInsets(tester, top: 24);
+      await tester.pumpWidget(page(ChromeInsets.pan));
+      await tester.pumpAndSettle();
+
+      expect(tester.getRect(find.byType(ChromeElbow).first).top, 0);
+      expect(tester.getRect(find.byType(ChromeElbowCap)).top, 0);
+      expect(
+        tester.getSize(find.byType(ChromeElbowCap)).height,
+        kElbowCapBledHeight + 24,
+      );
+    });
+
+    testWidgets('the closing elbow reaches the physical bottom edge', (
+      tester,
+    ) async {
+      useInsets(tester, bottom: 48);
+      await tester.pumpWidget(page(ChromeInsets.pan));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getRect(find.byType(ChromeElbow).last).bottom,
+        surfaceHeight(tester),
+      );
+    });
+
+    // The PTY guard, and the reason this page is not simply `standard`. With
+    // the keyboard up `padding.bottom` collapses to zero while
+    // `viewPadding.bottom` keeps the inset; a body reserved off the former
+    // would grow by 48 the moment the keyboard opened, moving the pane's row
+    // count. Both pumps must put the body's bottom in the same place.
+    testWidgets('the body holds the gesture strip with the keyboard up', (
+      tester,
+    ) async {
+      useInsets(tester, bottom: 48);
+      await tester.pumpWidget(page(ChromeInsets.pan));
+      await tester.pumpAndSettle();
+      final down = tester.getRect(find.byKey(const Key('page-body'))).bottom;
+
+      // Keyboard up: the platform collapses `padding.bottom` to 0 and keeps
+      // `viewPadding.bottom` at the inset. See `useInsets`'s doc.
+      useInsets(tester, viewBottom: 48);
+      await tester.pumpWidget(page(ChromeInsets.pan));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getRect(find.byKey(const Key('page-body'))).bottom,
+        down,
+        reason:
+            'the reserved strip collapsed when the keyboard opened, which '
+            'resizes the remote PTY',
+      );
+    });
+
+    testWidgets('a horizontal inset is still held, not bled', (tester) async {
+      useInsets(tester, left: 30);
+      await tester.pumpWidget(page(ChromeInsets.pan));
+      await tester.pumpAndSettle();
+
+      expect(tester.getRect(find.byType(ChromeElbow).first).left, 30);
+    });
+  });
+
   testWidgets('the rail closes on the physical bottom edge', (tester) async {
     useInsets(tester, bottom: 48);
     await tester.pumpWidget(page(ChromeInsets.standard));
@@ -210,22 +283,19 @@ void main() {
     expect(rail.width, lcarsTokens.railWidth);
   });
 
-  // The terminal's exemption. `pan` already wraps the whole row in a SafeArea
-  // (`chrome.dart:224`), so a block that also bled would be offset twice. Both
-  // expectations hold before the bleed exists as well as after — they are the
-  // guard on the exemption, not a red-green pair.
-  testWidgets('a pan page does not bleed', (tester) async {
+  // What is left of the terminal's old exemption, and the half still worth
+  // pinning. `pan` used to hand the whole frame to `applyChromeInsets`, whose
+  // `SafeArea` held every inset; the frame now bleeds into them itself. The
+  // hazard that swap creates is doing *both* — a body inside a `SafeArea` that
+  // then holds the inset a second time ends 96 short of the surface, not 48 —
+  // so this measures the body rather than the rail. The rail's own bleed is
+  // pinned in 'a panning page bleeds too' above; between them the page is held
+  // to exactly one offset.
+  testWidgets('a pan page holds its bottom inset exactly once', (tester) async {
     useInsets(tester, bottom: 48);
     await tester.pumpWidget(page(ChromeInsets.pan));
     await tester.pumpAndSettle();
 
-    expect(
-      tester.getRect(find.byType(ChromeElbow).last).bottom,
-      surfaceHeight(tester) - 48,
-    );
-    // The elbow above cannot see a double offset on its own — it would simply
-    // grow into the slack the filler gives up — but the body can: a page that
-    // both sat inside the `SafeArea` and held the inset again would end 96 short.
     expect(
       tester.getRect(find.byKey(const Key('page-body'))).bottom,
       surfaceHeight(tester) - 48,
