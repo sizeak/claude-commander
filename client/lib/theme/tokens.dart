@@ -230,7 +230,7 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
 
   /// Width of the LCARS portrait rail. Zero in Mission Control.
   ///
-  /// 74 rather than the deck's 62, and the 12dp is a status-bar dodge. The rail
+  /// 73 rather than the deck's 62, and the 11dp is a status-bar dodge. The rail
   /// and the content column are separated by a [_railPitch] gutter that runs
   /// open through the safe-area band (see `lcars/bleed.dart`), so whatever sits
   /// at `railWidth`..`railWidth + 5` in the status bar gets a black bar through
@@ -246,16 +246,20 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
   /// width on each, and which digits the time contains matters: '10:41' ends at
   /// 68.2dp on the device but '14:20' ends at 70.9dp.
   ///
-  /// 74 is set against the device numbers, and the margin is thin — chosen to
-  /// keep the rail closer to the deck's proportion rather than to maximise
-  /// clearance. It puts the gutter at 74-79dp, which clears a '14:20'-shaped
-  /// clock (ends 70.9dp) by 3.1dp. An all-wide-digit time ('00:00', '08:00',
-  /// '20:08') extrapolates from the widths above to about 77.7dp, which is
-  /// ~3.7dp *into* the gutter: at those times the last digit is nicked, though
-  /// not bisected the way the deck's 62 bisected every 5-character time. That
-  /// extrapolation has not been confirmed against a real clock reading 00:00;
-  /// treat it as the known limit of this value rather than a measured fact.
-  /// 76 was tried first and buys ~2dp more clearance for 2dp more rail.
+  /// 73 is set against the device numbers, and the margin is deliberately thin
+  /// — chosen to keep the rail near the deck's proportion rather than to
+  /// maximise clearance. It puts the gutter at 73-78dp, which clears a
+  /// '14:20'-shaped clock (ends 70.9dp) by 2.1dp, and a narrower time (ends
+  /// 66.7dp) by 6.3dp. An all-wide-digit time ('00:00', '08:00', '20:08')
+  /// extrapolates from the widths above to about 77.7dp — inside the gutter,
+  /// so at those times the last digit is clipped. That extrapolation has not
+  /// been confirmed against a real clock reading 00:00; treat it as the known
+  /// limit of this value rather than a measured fact.
+  ///
+  /// 72, 74 and 76 were all tried on the device. Each dp of rail buys a dp of
+  /// clock clearance and costs a dp of content width, and the choice between
+  /// them was proportion, not measurement — so do not "correct" this to a
+  /// wider value on the strength of the arithmetic alone.
   ///
   /// The deeper point for anyone tempted to re-tune this: the notch has to sit
   /// in an ~8dp gap whose position moves with the clock string, so no fixed
@@ -676,7 +680,7 @@ const lcarsTokens = CommanderTokens(
   controlRadius: 0,
   pillRadius: 11,
   elbowRadius: 32,
-  railWidth: 74,
+  railWidth: 73,
   panelTopBorder: 2,
   tones: _lcarsTones,
 );
