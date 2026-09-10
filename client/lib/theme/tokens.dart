@@ -230,23 +230,37 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
 
   /// Width of the LCARS portrait rail. Zero in Mission Control.
   ///
-  /// 76 rather than the deck's 62, and the 14dp is a status-bar dodge. The rail
+  /// 74 rather than the deck's 62, and the 12dp is a status-bar dodge. The rail
   /// and the content column are separated by a [_railPitch] gutter that runs
   /// open through the safe-area band (see `lcars/bleed.dart`), so whatever sits
   /// at `railWidth`..`railWidth + 5` in the status bar gets a black bar through
   /// it. At the deck's 62 that was the clock's last digit, sliced vertically in
   /// half.
   ///
-  /// Two measurements, and the second is why this is 76 and not 70. On an
-  /// emulator at 1080x2400 / 420dpi the clock ends at 66.7dp; on a real Pixel
-  /// 8a at the same density it ends at 68.2dp, with the first notification icon
-  /// at 78.9dp. The clock uses tabular figures — '11:58' and '10:17' measure
-  /// identical to the pixel — so a five-character time is a fixed width and
-  /// that 68.2dp is the worst case, not an average. 70 cleared the real device
-  /// by only 1.8dp, which a larger font scale or an AM/PM locale would eat; 76
-  /// clears it by 7.8dp and lands on the notification icon instead, which is
-  /// the accepted trade. It is a calibrated dodge rather than a guarantee: it
-  /// assumes an HH:MM clock at default font scale.
+  /// Where the clock ends is **device-specific, and not a fixed width**. Do not
+  /// calibrate this on an emulator: an emulator at 1080x2400 / 420dpi draws the
+  /// clock with tabular figures — '00:00', '20:48' and '08:08' all measure
+  /// 32.0-65.5dp, every digit exactly 6.1dp — while a real Pixel 8a at the same
+  /// density draws it proportionally, measured at 1 = 4.2-4.6dp, 2 = 6.8dp,
+  /// 4 = 7.6-8.0dp, 0 = 8.4dp. So the same 5-character time is a different
+  /// width on each, and which digits the time contains matters: '10:41' ends at
+  /// 68.2dp on the device but '14:20' ends at 70.9dp.
+  ///
+  /// 74 is set against the device numbers, and the margin is thin — chosen to
+  /// keep the rail closer to the deck's proportion rather than to maximise
+  /// clearance. It puts the gutter at 74-79dp, which clears a '14:20'-shaped
+  /// clock (ends 70.9dp) by 3.1dp. An all-wide-digit time ('00:00', '08:00',
+  /// '20:08') extrapolates from the widths above to about 77.7dp, which is
+  /// ~3.7dp *into* the gutter: at those times the last digit is nicked, though
+  /// not bisected the way the deck's 62 bisected every 5-character time. That
+  /// extrapolation has not been confirmed against a real clock reading 00:00;
+  /// treat it as the known limit of this value rather than a measured fact.
+  /// 76 was tried first and buys ~2dp more clearance for 2dp more rail.
+  ///
+  /// The deeper point for anyone tempted to re-tune this: the notch has to sit
+  /// in an ~8dp gap whose position moves with the clock string, so no fixed
+  /// width is ever a guarantee — only a calibration, and only for an HH:MM
+  /// clock at default font scale.
   ///
   /// Do not widen further hoping for more room. The left cluster is packed —
   /// clock, then icons at ~9dp spacing — so past the first icon the gutter only
@@ -662,7 +676,7 @@ const lcarsTokens = CommanderTokens(
   controlRadius: 0,
   pillRadius: 11,
   elbowRadius: 32,
-  railWidth: 76,
+  railWidth: 74,
   panelTopBorder: 2,
   tones: _lcarsTones,
 );
