@@ -41,26 +41,43 @@ class LcarsChrome extends Chrome {
     // [buildShell] does: whether a `Scaffold` republishes its body's padding
     // never has to be assumed.
     final insets = MediaQuery.paddingOf(context);
-    // Zero while panning: the terminal already wraps its whole row in a
-    // `SafeArea` (`chrome.dart:224`, PR #259 — the PTY must never see a
-    // resize), so a page cannot be inset *and* bled — a block that was both
-    // would be offset twice.
+    // A panning page bleeds like any other. It did not used to: LCARS handed
+    // the whole frame to `applyChromeInsets`, whose `SafeArea` held every inset
+    // off it, and zeroed the bleed so nothing was offset twice. The terminal is
+    // the only `pan` caller, so the one LCARS route an agent session actually
+    // lives in was also the only one with a black band above its rail.
+    //
+    // What `pan` still has to buy is the thing it exists for — the remote PTY
+    // must never see a resize (PR #259) — and that survives the change because
+    // the bottom is reserved off `viewPadding` rather than `padding`. A soft
+    // keyboard collapses `padding.bottom` to zero while leaving `viewPadding`
+    // alone, so reserving off the latter keeps the strip the pane sits above
+    // exactly where it was; this is the same distinction
+    // `SafeArea(maintainBottomViewPadding: true)` draws, applied to the bleed
+    // instead of over it. `resizeToAvoidBottomInset: false` below is the other
+    // half, unchanged.
     final panning = spec.insets == ChromeInsets.pan;
-    final bleed = panning
-        ? EdgeInsets.zero
-        : EdgeInsets.only(top: insets.top, bottom: insets.bottom);
+    final bleed = EdgeInsets.only(
+      top: insets.top,
+      bottom: panning
+          ? MediaQuery.viewPaddingOf(context).bottom
+          : insets.bottom,
+    );
     final frame = Padding(
       // Held, not bled — same reason as the shell's: a cutout is an occlusion,
       // not a bezel to decorate. Skipped only when the `SafeArea` below is
       // already holding them.
-      padding: panning
-          ? EdgeInsets.zero
-          : EdgeInsets.only(left: insets.left, right: insets.right),
+      padding: EdgeInsets.only(left: insets.left, right: insets.right),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _rail(context, spec, t, bleed),
-          _railGutter(bleed, shouldShowBack(context, spec) ? t.primary : t.nav),
+          // Open for the frame's whole height, the status-bar band included:
+          // this gap is what the cap's bottom-left radius curves out of, and
+          // filling it across the band is what forced that corner square. See
+          // `bleed.dart` for the trade — a notch through the band beats a 90°
+          // elbow.
+          const SizedBox(width: _railPitch),
           // No trailing margin: the frame runs flush to the right bezel at every
           // height. A 10dp gap there read as the frame stopping short of the
           // screen once the top and bottom bands met the edge — see [buildShell].
@@ -73,9 +90,14 @@ class LcarsChrome extends Chrome {
       child: Scaffold(
         backgroundColor: t.canvas,
         resizeToAvoidBottomInset: !panning,
-        // Only `pan` still wraps: with a bleed the frame holds its own insets,
-        // and a `SafeArea` over it would hold them twice.
-        body: panning ? applyChromeInsets(ChromeInsets.pan, frame) : frame,
+        // No `applyChromeInsets` here for any inset mode: the frame holds the
+        // horizontal insets itself and bleeds into the vertical ones, so the
+        // `SafeArea` it would add is at best redundant and at worst holds them
+        // twice. The keyboard behaviour that helper centralises is reproduced
+        // by the `viewPadding` bottom above — see the bleed's comment, and
+        // `page_bleed_test.dart`'s 'the body holds the gesture strip with the
+        // keyboard up', which is what actually pins it.
+        body: frame,
       ),
     );
   }
@@ -168,40 +190,6 @@ class LcarsChrome extends Chrome {
         ],
       ],
     ),
-  );
-
-  /// The seam between the rail and the content column: filled across the
-  /// status-bar inset *and* down to the bottom of the elbow cap it continues
-  /// into, open below that.
-  ///
-  /// The band behind the status bar has to be *continuous*. On a Pixel 8a the
-  /// system clock sat at a fixed offset that landed exactly on this seam, so
-  /// leaving it open painted a black column through the middle of the time.
-  /// Stopping the fill at `bleed.top` fixed that but left a second,
-  /// shorter black tab poking up into the band the moment the inset ends —
-  /// also measured on device — because the rail's top block and the cap below
-  /// the seam are two more colour patches the fill needs to bridge. Filling
-  /// down to the cap's own bled height closes that gap too, so the rail's top
-  /// block, the seam and the cap read as one solid mass with a clean bottom
-  /// edge — [elbowCapHeight] is the one function that produces that height,
-  /// called here and by [ChromeElbowCap] itself, so the fill and the cap it
-  /// continues into cannot independently drift apart.
-  ///
-  /// Below the fill, the black resumes at a plain square junction. A curved
-  /// emergence was tried and reviewed on a Pixel 8a alongside the bled cap's
-  /// 1dp height; at that height the fill overhangs the inset by only ~3px,
-  /// too little for an arc to read as anything but noise, so the curve was
-  /// removed rather than kept disabled.
-  ///
-  /// With no inset there is no band and nothing to fill, so that case returns
-  /// the frame's original plain, full-height seam untouched — every
-  /// desktop/tablet golden and the zero-inset tests depend on this being that
-  /// exact widget.
-  Widget _railGutter(EdgeInsets bleed, Color color) => lcarsBandSeam(
-    width: _railPitch,
-    height: elbowCapHeight(kElbowCapHeight, bleed),
-    color: color,
-    bleed: bleed,
   );
 
   /// A block's fill for a given emphasis. Shared by the rail, the button bar and
@@ -1040,7 +1028,8 @@ class LcarsChrome extends Chrome {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _viewRail(context, spec, t, accent, bleed),
-        _railGutter(bleed, accent),
+        // Open through the band, exactly as [buildPage]'s is.
+        const SizedBox(width: _railPitch),
         // Flush right, like [buildPage] and the shell's footer — see
         // [buildShell] for why the 10dp margin all three used to carry went.
         Expanded(child: _viewContent(context, spec, t, accent, bleed)),

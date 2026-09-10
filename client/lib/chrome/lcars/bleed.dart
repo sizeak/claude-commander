@@ -1,8 +1,19 @@
-/// The LCARS edge-to-edge kit: the ambient bleed a frame publishes, the fill
-/// that keeps a bled band continuous, and the system-bar style a bled frame
-/// declares. Shared because both LCARS frames — the phone shell/page and the
-/// wide shell — bleed identically, and a second copy of any of it would be a
-/// second thing to keep in step.
+/// The LCARS edge-to-edge kit: the ambient bleed a frame publishes, the
+/// system-bar style a bled frame declares, and which end of the bracket has
+/// already turned its corner. Shared because both LCARS frames — the phone
+/// shell/page and the wide shell — bleed identically, and a second copy of any
+/// of it would be a second thing to keep in step.
+///
+/// Note what is deliberately *not* here any more: a fill that closed the gaps
+/// between bled columns so the band behind the status bar read as one solid
+/// mass. It kept the black out of the system clock, which on a Pixel 8a sat
+/// right on the phone frame's rail/content seam — but a closed gap leaves an
+/// elbow cap's bottom-left radius nothing to curve out of, so the caps squared
+/// and the frame turned its corners at a bare 90°. Asked to choose between a
+/// notch through the band and a square corner, the user took the notch, and
+/// the fill went. The rail then moved 62 -> 70dp so that notch clears the
+/// status-bar clock rather than cutting a digit in half — the measurement is
+/// on [CommanderTokens.railWidth].
 library;
 
 import 'package:flutter/services.dart';
@@ -56,40 +67,6 @@ const lcarsSystemBars = SystemUiOverlayStyle(
   systemNavigationBarIconBrightness: Brightness.dark,
   systemNavigationBarContrastEnforced: false,
 );
-
-/// The gap between two columns, filled across the band when both of them bleed
-/// into it and left open below.
-///
-/// A band behind the status bar has to be *continuous*. Measured on a Pixel 8a,
-/// leaving the phone frame's rail/content gap open painted a black column
-/// straight through the system clock; the wide frame has the same gap between
-/// its nav and fleet columns. [height] is how far down the fill runs — the
-/// bottom of whichever bled block it continues into, so the two cannot end at
-/// different places.
-///
-/// With no top inset there is no band and nothing to fill, and this is exactly
-/// the plain [SizedBox] the frame has always put there — which is what every
-/// desktop and tablet golden depends on.
-Widget lcarsBandSeam({
-  required double width,
-  required double height,
-  required Color color,
-  required EdgeInsets bleed,
-}) {
-  if (bleed.top == 0) return SizedBox(width: width);
-  return SizedBox(
-    width: width,
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        SizedBox(
-          height: height,
-          child: ColoredBox(color: color),
-        ),
-      ],
-    ),
-  );
-}
 
 /// Whether the frame's top-left corner is already drawn *above* the shell.
 ///

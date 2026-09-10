@@ -229,6 +229,47 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
   final double elbowRadius;
 
   /// Width of the LCARS portrait rail. Zero in Mission Control.
+  ///
+  /// 73 rather than the deck's 62, and the 11dp is a status-bar dodge. The rail
+  /// and the content column are separated by a [_railPitch] gutter that runs
+  /// open through the safe-area band (see `lcars/bleed.dart`), so whatever sits
+  /// at `railWidth`..`railWidth + 5` in the status bar gets a black bar through
+  /// it. At the deck's 62 that was the clock's last digit, sliced vertically in
+  /// half.
+  ///
+  /// Where the clock ends is **device-specific, and not a fixed width**. Do not
+  /// calibrate this on an emulator: an emulator at 1080x2400 / 420dpi draws the
+  /// clock with tabular figures — '00:00', '20:48' and '08:08' all measure
+  /// 32.0-65.5dp, every digit exactly 6.1dp — while a real Pixel 8a at the same
+  /// density draws it proportionally, measured at 1 = 4.2-4.6dp, 2 = 6.8dp,
+  /// 4 = 7.6-8.0dp, 0 = 8.4dp. So the same 5-character time is a different
+  /// width on each, and which digits the time contains matters: '10:41' ends at
+  /// 68.2dp on the device but '14:20' ends at 70.9dp.
+  ///
+  /// 73 is set against the device numbers, and the margin is deliberately thin
+  /// — chosen to keep the rail near the deck's proportion rather than to
+  /// maximise clearance. It puts the gutter at 73-78dp, which clears a
+  /// '14:20'-shaped clock (ends 70.9dp) by 2.1dp, and a narrower time (ends
+  /// 66.7dp) by 6.3dp. An all-wide-digit time ('00:00', '08:00', '20:08')
+  /// extrapolates from the widths above to about 77.7dp — inside the gutter,
+  /// so at those times the last digit is clipped. That extrapolation has not
+  /// been confirmed against a real clock reading 00:00; treat it as the known
+  /// limit of this value rather than a measured fact.
+  ///
+  /// 72, 74 and 76 were all tried on the device. Each dp of rail buys a dp of
+  /// clock clearance and costs a dp of content width, and the choice between
+  /// them was proportion, not measurement — so do not "correct" this to a
+  /// wider value on the strength of the arithmetic alone.
+  ///
+  /// The deeper point for anyone tempted to re-tune this: the notch has to sit
+  /// in an ~8dp gap whose position moves with the clock string, so no fixed
+  /// width is ever a guarantee — only a calibration, and only for an HH:MM
+  /// clock at default font scale.
+  ///
+  /// Do not widen further hoping for more room. The left cluster is packed —
+  /// clock, then icons at ~9dp spacing — so past the first icon the gutter only
+  /// moves onto the next one; the first genuinely clear span is 106dp, which
+  /// would need a rail nearly twice the deck's.
   final double railWidth;
 
   /// Thickness of an LCARS panel's coloured top border. Zero in Mission
@@ -639,7 +680,7 @@ const lcarsTokens = CommanderTokens(
   controlRadius: 0,
   pillRadius: 11,
   elbowRadius: 32,
-  railWidth: 62,
+  railWidth: 73,
   panelTopBorder: 2,
   tones: _lcarsTones,
 );
