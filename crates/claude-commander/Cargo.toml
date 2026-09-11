@@ -23,6 +23,10 @@ claude-commander-tui = { path = "../claude-commander-tui" }
 # does not) and injects a factory closure into the TUI, so the dependency
 # direction stays bin → {core, tui, remote}.
 claude-commander-remote = { path = "../claude-commander-remote" }
+# The HTTP server, run in-process by `--serve` / `[server] auto_start`. Only this
+# binary depends on both it and the TUI: the terminal frontend must not compile
+# axum, and the server must not compile ratatui. See `src/serve.rs`.
+claude-commander-server = { path = "../claude-commander-server" }
 
 # Async runtime (the `#[tokio::main]` entry point)
 tokio = { workspace = true }
@@ -43,3 +47,7 @@ color-eyre = "0.6"
 # Observability
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Hermetic temp dirs for the `serve` module tests (they write a config.toml).
+tempfile = "3.27"

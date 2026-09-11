@@ -63,6 +63,7 @@ pub enum BindableAction {
     OpenReviewDiff,
     ShowHelp,
     ShowSettings,
+    CopyServerToken,
     Quit,
     ScrollUp,
     ScrollDown,
@@ -154,6 +155,7 @@ impl BindableAction {
         // Application
         Self::ShowHelp,
         Self::ShowSettings,
+        Self::CopyServerToken,
         Self::Quit,
     ];
 
@@ -200,6 +202,7 @@ impl BindableAction {
             Self::OpenReviewDiff => "open_review_diff",
             Self::ShowHelp => "show_help",
             Self::ShowSettings => "show_settings",
+            Self::CopyServerToken => "copy_server_token",
             Self::Quit => "quit",
             Self::ScrollUp => "scroll_up",
             Self::ScrollDown => "scroll_down",
@@ -263,6 +266,7 @@ impl BindableAction {
             Self::OpenReviewDiff => "Review diff & comment",
             Self::ShowHelp => "Show help",
             Self::ShowSettings => "Settings",
+            Self::CopyServerToken => "Copy server token (pair a client)",
             Self::Quit => "Quit",
             Self::ScrollUp => "Scroll up",
             Self::ScrollDown => "Scroll down",
@@ -332,6 +336,7 @@ impl BindableAction {
             Self::OpenReviewDiff => "review",
             Self::ShowHelp => "help",
             Self::ShowSettings => "settings",
+            Self::CopyServerToken => "copy token",
             Self::Quit => "quit",
             Self::ScrollUp => "scroll up",
             Self::ScrollDown => "scroll down",
@@ -407,7 +412,9 @@ impl BindableAction {
             | Self::ToggleConversationOverlay
             | Self::ToggleVoiceInput => "Review & AI",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
-            Self::ShowHelp | Self::ShowSettings | Self::Quit => "Application",
+            Self::ShowHelp | Self::ShowSettings | Self::CopyServerToken | Self::Quit => {
+                "Application"
+            }
         }
     }
 }
@@ -457,6 +464,7 @@ impl FromStr for BindableAction {
             "open_review_diff" => Ok(Self::OpenReviewDiff),
             "show_help" => Ok(Self::ShowHelp),
             "show_settings" => Ok(Self::ShowSettings),
+            "copy_server_token" => Ok(Self::CopyServerToken),
             "quit" => Ok(Self::Quit),
             "scroll_up" => Ok(Self::ScrollUp),
             "scroll_down" => Ok(Self::ScrollDown),
@@ -1446,6 +1454,26 @@ mod tests {
             assert_eq!(name.parse::<BindableAction>().unwrap(), action);
             assert_eq!(action.config_name(), name);
         }
+    }
+
+    #[test]
+    fn test_copy_server_token_palette_only() {
+        // Palette-only: pairing a client is a once-per-device action, and the
+        // palette is this project's canonical command surface. It still has to
+        // round-trip through TOML so a user who binds it doesn't hit "unknown
+        // action".
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::CopyServerToken).is_empty());
+        assert_eq!(
+            "copy_server_token".parse::<BindableAction>().unwrap(),
+            BindableAction::CopyServerToken
+        );
+        assert_eq!(
+            BindableAction::CopyServerToken.config_name(),
+            "copy_server_token"
+        );
+        assert_eq!(BindableAction::CopyServerToken.section(), "Application");
+        assert!(BindableAction::ALL.contains(&BindableAction::CopyServerToken));
     }
 
     #[test]

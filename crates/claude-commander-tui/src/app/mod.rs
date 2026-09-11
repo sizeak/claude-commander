@@ -732,16 +732,18 @@ pub enum SettingsTab {
     Theme,
     Sections,
     Programs,
+    Server,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 6] = [
+    const ALL: [SettingsTab; 7] = [
         Self::General,
         Self::Conversation,
         Self::Keybindings,
         Self::Theme,
         Self::Sections,
         Self::Programs,
+        Self::Server,
     ];
 
     fn label(self) -> &'static str {
@@ -752,6 +754,7 @@ impl SettingsTab {
             Self::Theme => "Theme",
             Self::Sections => "Sections",
             Self::Programs => "Programs",
+            Self::Server => "Server",
         }
     }
 
@@ -762,18 +765,20 @@ impl SettingsTab {
             Self::Keybindings => Self::Theme,
             Self::Theme => Self::Sections,
             Self::Sections => Self::Programs,
-            Self::Programs => Self::General,
+            Self::Programs => Self::Server,
+            Self::Server => Self::General,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::General => Self::Programs,
+            Self::General => Self::Server,
             Self::Conversation => Self::General,
             Self::Keybindings => Self::Conversation,
             Self::Theme => Self::Keybindings,
             Self::Sections => Self::Theme,
             Self::Programs => Self::Sections,
+            Self::Server => Self::Programs,
         }
     }
 }
@@ -1610,6 +1615,10 @@ pub struct AppUiState {
     /// the background agent-state poll so the (sync) renderers — the footer chip
     /// — can read it without awaiting tmux.
     pub commander_running: bool,
+    /// The in-process HTTP server's outcome, or `None` when this run was never
+    /// asked to serve. Set once at startup by the binary (which owns the server
+    /// dependency) and read by the status-bar chip and the copy-token command.
+    pub embedded_server: Option<crate::EmbeddedServerStatus>,
     /// What to attach to after the TUI tears down (set by select/shell/commander).
     pub attach_request: Option<AttachTarget>,
     /// Session whose review diff should be opened on returning to the TUI —
@@ -1756,6 +1765,7 @@ impl Default for AppUiState {
             selected_backend_connected: true,
             selected_backend_capabilities: BackendCapabilities::LOCAL,
             commander_running: false,
+            embedded_server: None,
             attach_request: None,
             pending_open_review: None,
             pending_switcher_target: None,
@@ -1867,6 +1877,14 @@ impl AppUiState {
             | BindableAction::TogglePaneReverse
             | BindableAction::ShrinkLeftPane
             | BindableAction::GrowLeftPane => !self.view_mode.is_board(),
+            // Pairing a client only makes sense when something is actually
+            // being served. Without this gate the wildcard below would list it
+            // permanently, including in the overwhelmingly common run that
+            // serves nothing at all.
+            BindableAction::CopyServerToken => self
+                .embedded_server
+                .as_ref()
+                .is_some_and(|s| s.token().is_some()),
             // All other actions are always available
             _ => true,
         }
@@ -2153,6 +2171,36 @@ impl App {
             review_file_loads: RefCell::new(HashSet::new()),
             review_file_gen: Cell::new(0),
         }
+    }
+
+    /// A handle on the service backing this app, for the binary to serve over
+    /// HTTP in-process.
+    ///
+    /// `CommanderService` is a bundle of `Arc`s, so this is a shared handle
+    /// rather than a copy — which is the point. An embedded server built on a
+    /// *second* service would re-run telemetry init, rebuild the derived comment
+    /// and review stores, and give `state.json` a second writer inside one
+    /// process; sharing this one means the TUI and its clients see the same
+    /// state and the same background loops.
+    pub fn service_handle(&self) -> CommanderService {
+        self.service.clone()
+    }
+
+    /// Record how the in-process HTTP server fared, for the status-bar chip and
+    /// the copy-token command. Called by the binary before [`Self::run`], since
+    /// only the binary depends on the server crate.
+    ///
+    /// A failure also raises a toast, because the chip has to stay short enough
+    /// not to evict the action buttons — so the chip says *that* it failed and
+    /// the toast says why.
+    pub fn set_embedded_server(&mut self, status: crate::EmbeddedServerStatus) {
+        if let crate::EmbeddedServerStatus::Failed { reason } = &status {
+            self.ui_state.status_message = Some((
+                format!("Server not started: {reason}"),
+                Instant::now() + Duration::from_secs(10),
+            ));
+        }
+        self.ui_state.embedded_server = Some(status);
     }
 
     /// Construct the [`BackendHandle`] for one configured remote server: the

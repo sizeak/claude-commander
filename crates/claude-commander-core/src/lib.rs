@@ -30,6 +30,7 @@ pub mod agent;
 pub mod api;
 pub mod backend;
 pub mod cli;
+pub mod clipboard;
 pub mod commander;
 pub mod comment;
 pub mod config;

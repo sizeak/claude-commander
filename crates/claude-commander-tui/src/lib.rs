@@ -18,6 +18,7 @@
 //! what lets the headless `claude-commander-server`, `claude-commander-remote`
 //! and the Flutter client's cdylib take core without compiling ratatui at all.
 
+pub mod embedded_server;
 pub mod error;
 pub mod hotkey;
 pub mod theme;
@@ -38,6 +39,7 @@ mod widgets;
 mod render_tests;
 
 pub use app::*;
+pub use embedded_server::EmbeddedServerStatus;
 pub use error::{Result, TuiError};
 pub use event::*;
 pub use theme::Theme;

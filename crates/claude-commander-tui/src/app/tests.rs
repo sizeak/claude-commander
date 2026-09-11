@@ -1,6 +1,6 @@
-use super::actions::{adjust_list_scroll, delete_confirm_message};
+use super::actions::{CopyTokenReport, adjust_list_scroll, delete_confirm_message};
 use super::modals::centered_rect;
-use super::render::commander_chip_label;
+use super::render::{commander_chip_label, server_chip_label};
 use super::review::ReviewFocus;
 use super::selection::{session_number_to_list_index, worktree_list_index};
 use super::*;
@@ -143,6 +143,134 @@ fn commander_chip_label_running_without_state() {
         commander_chip_label(true, Some(AgentState::Unknown)),
         Some("\u{25cf} Commander".to_string())
     );
+}
+
+// --- embedded-server status-bar chip label ---------------------------------
+
+#[test]
+fn server_chip_hidden_when_not_serving() {
+    // This run was never asked to serve → no chip at all.
+    assert_eq!(server_chip_label(None), None);
+}
+
+#[test]
+fn server_chip_shows_the_port_when_listening() {
+    let status = crate::EmbeddedServerStatus::Listening {
+        url: "http://127.0.0.1:7878".into(),
+        token: Some("sekret".into()),
+    };
+    assert_eq!(
+        server_chip_label(Some(&status)),
+        Some("\u{21c5} 7878".to_string())
+    );
+}
+
+/// The chip must never carry the token: the status bar is on screen while
+/// screen-sharing and in every screenshot.
+#[test]
+fn server_chip_never_shows_the_token() {
+    let status = crate::EmbeddedServerStatus::Listening {
+        url: "http://127.0.0.1:7878".into(),
+        token: Some("sekret".into()),
+    };
+    let label = server_chip_label(Some(&status)).unwrap();
+    assert!(
+        !label.contains("sekret"),
+        "token leaked into the chip: {label}"
+    );
+}
+
+/// The failure chip is short by design — the status bar's left zone takes its
+/// width from the action buttons, so a full bind error would evict them on an
+/// 80-column terminal. The reason is surfaced as a toast instead.
+#[test]
+fn server_chip_reports_a_failed_bind_without_the_reason() {
+    let status = crate::EmbeddedServerStatus::Failed {
+        reason: "could not bind 127.0.0.1:7878: Address already in use".into(),
+    };
+    let label = server_chip_label(Some(&status)).unwrap();
+    assert!(label.contains("unavailable"), "{label}");
+    assert!(
+        label.chars().count() <= 24,
+        "the chip must stay narrow, got {} chars: {label}",
+        label.chars().count()
+    );
+}
+
+#[test]
+fn a_failed_bind_reports_its_reason_in_the_status_bar() {
+    let mut app = make_test_app();
+    app.set_embedded_server(crate::EmbeddedServerStatus::Failed {
+        reason: "could not bind 127.0.0.1:7878: Address already in use".into(),
+    });
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .as_ref()
+        .expect("a failed bind must say why somewhere");
+    assert!(msg.contains("Address already in use"), "{msg}");
+}
+
+/// The chip must actually reach the screen — a label helper that nothing splices
+/// in would pass every test above. Also checks it does not cost the action
+/// buttons their place on an 80-column terminal, since the bar's left zone takes
+/// its width out of theirs.
+#[tokio::test]
+async fn the_server_chip_is_drawn_on_the_status_bar() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let bar_without = status_bar_row(terminal.backend().buffer());
+    assert!(
+        !bar_without.contains('\u{21c5}'),
+        "no chip before anything is served: {bar_without}"
+    );
+    let buttons_without = bar_without.matches('[').count();
+
+    app.set_embedded_server(crate::EmbeddedServerStatus::Listening {
+        url: "http://127.0.0.1:7878".into(),
+        token: Some("sekret".into()),
+    });
+    terminal.draw(|f| app.render(f)).unwrap();
+    let bar_with = status_bar_row(terminal.backend().buffer());
+
+    assert!(
+        bar_with.contains("\u{21c5} 7878"),
+        "chip missing: {bar_with}"
+    );
+    assert!(
+        !bar_with.contains("sekret"),
+        "the token must never be drawn: {bar_with}"
+    );
+    assert_eq!(
+        bar_with.matches('[').count(),
+        buttons_without,
+        "the chip must not evict an action button at 80 columns:\n  {bar_without}\n  {bar_with}"
+    );
+}
+
+/// The bottom row of a rendered frame, as a string.
+fn status_bar_row(buffer: &ratatui::buffer::Buffer) -> String {
+    let y = buffer.area.height - 1;
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol())
+        .collect()
+}
+
+/// A server that came up is not news, so it must not spend a toast on it.
+#[test]
+fn a_successful_bind_raises_no_toast() {
+    let mut app = make_test_app();
+    app.set_embedded_server(crate::EmbeddedServerStatus::Listening {
+        url: "http://127.0.0.1:7878".into(),
+        token: Some("sekret".into()),
+    });
+    assert!(app.ui_state.status_message.is_none());
 }
 
 fn make_project() -> SessionListItem {
@@ -772,6 +900,232 @@ fn test_worktrees_dir_row_shows_custom_path() {
         .find(|r| r.field_key == "worktrees_dir")
         .unwrap();
     assert_eq!(row.text_value(), "/custom/path");
+}
+
+// --- Settings: Server tab -------------------------------------------------
+
+#[test]
+fn server_tab_rows_cover_the_editable_settings() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::Server);
+    let keys: Vec<&str> = rows
+        .iter()
+        .map(|r| r.field_key.as_str())
+        .filter(|k| !k.is_empty())
+        .collect();
+    assert!(keys.contains(&"server_auto_start"), "{keys:?}");
+    assert!(keys.contains(&"server_bind"), "{keys:?}");
+    assert!(keys.contains(&"server_port"), "{keys:?}");
+    assert!(keys.contains(&"server_token"), "{keys:?}");
+    assert!(keys.contains(&"server_cors_allowed_origins"), "{keys:?}");
+}
+
+/// The token is operator-equivalent and the settings modal is on screen during
+/// screen-shares and in every screenshot, so the row reports only whether one is
+/// set. (`stt.api_key` sets the precedent by being absent from this UI at all.)
+#[test]
+fn server_tab_never_renders_the_token() {
+    let mut app = make_test_app();
+    app.config.server.token = Some("sekret".into());
+    let rows = app.build_settings_rows(SettingsTab::Server);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "server_token")
+        .expect("token row");
+    assert_eq!(row.text_value(), "(set)");
+    for r in &rows {
+        assert!(
+            !r.text_value().contains("sekret"),
+            "token leaked into the {} row",
+            r.field_key
+        );
+    }
+}
+
+#[test]
+fn server_tab_edits_round_trip_into_config() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::Server, "server_bind", "0.0.0.0");
+    app.apply_settings_edit(SettingsTab::Server, "server_port", "9999");
+    app.apply_bool_setting("server_auto_start", true);
+    app.apply_settings_edit(
+        SettingsTab::Server,
+        "server_cors_allowed_origins",
+        "http://localhost:3000, http://localhost:5173",
+    );
+
+    assert_eq!(app.config.server.bind.to_string(), "0.0.0.0");
+    assert_eq!(app.config.server.port, 9999);
+    assert!(app.config.server.auto_start);
+    assert_eq!(
+        app.config.server.cors_allowed_origins,
+        ["http://localhost:3000", "http://localhost:5173"]
+    );
+}
+
+#[test]
+fn server_tab_rejects_a_bad_bind_or_port_without_changing_config() {
+    let mut app = make_test_app();
+    let before = app.config.server.clone();
+
+    app.apply_settings_edit(SettingsTab::Server, "server_bind", "not-an-ip");
+    assert_eq!(app.config.server.bind, before.bind);
+    assert!(
+        app.ui_state
+            .status_message
+            .as_ref()
+            .is_some_and(|(m, _)| m.contains("Not an IP address")),
+        "{:?}",
+        app.ui_state.status_message
+    );
+
+    // Port 0 binds an ephemeral port no client could be pointed at.
+    for bad in ["0", "70000", "eight"] {
+        app.apply_settings_edit(SettingsTab::Server, "server_port", bad);
+        assert_eq!(app.config.server.port, before.port, "accepted port {bad}");
+    }
+}
+
+/// Submitting the `(set)` placeholder unchanged must leave the token alone
+/// rather than setting it to the literal placeholder text.
+#[test]
+fn submitting_the_token_placeholder_leaves_the_token_alone() {
+    let mut app = make_test_app();
+    app.config.server.token = Some("sekret".into());
+    app.apply_settings_edit(SettingsTab::Server, "server_token", "(set)");
+    assert_eq!(app.config.server.token.as_deref(), Some("sekret"));
+
+    // The not-set placeholder is equally inert. Read it off the row rather than
+    // hardcoding it, so this stays true if the wording changes.
+    app.config.server.token = None;
+    let rows = app.build_settings_rows(SettingsTab::Server);
+    let unset_placeholder = rows
+        .iter()
+        .find(|r| r.field_key == "server_token")
+        .map(|r| r.text_value().to_string())
+        .expect("token row");
+    app.config.server.token = Some("sekret".into());
+    app.apply_settings_edit(SettingsTab::Server, "server_token", &unset_placeholder);
+    assert_eq!(
+        app.config.server.token.as_deref(),
+        Some("sekret"),
+        "submitting the not-set placeholder must not clear a real token"
+    );
+
+    // An explicit empty value does clear it.
+    app.config.server.token = Some("sekret".into());
+    app.apply_settings_edit(SettingsTab::Server, "server_token", "");
+    assert!(app.config.server.token.is_none());
+
+    // A token that happens to start with '(' is still settable — the
+    // placeholders are matched exactly, not by their leading paren.
+    app.apply_settings_edit(SettingsTab::Server, "server_token", "(unusual-but-legal");
+    assert_eq!(
+        app.config.server.token.as_deref(),
+        Some("(unusual-but-legal")
+    );
+}
+
+// --- Palette: copy server token -------------------------------------------
+
+#[test]
+fn copy_server_token_is_hidden_when_nothing_is_served() {
+    let app = make_test_app();
+    assert!(app.ui_state.embedded_server.is_none());
+    assert!(
+        !app.ui_state
+            .is_command_available(BindableAction::CopyServerToken)
+    );
+}
+
+#[test]
+fn copy_server_token_is_offered_once_a_server_is_listening() {
+    let mut app = make_test_app();
+    app.set_embedded_server(crate::EmbeddedServerStatus::Listening {
+        url: "http://127.0.0.1:7878".into(),
+        token: Some("sekret".into()),
+    });
+    assert!(
+        app.ui_state
+            .is_command_available(BindableAction::CopyServerToken)
+    );
+}
+
+/// The token must not end up on screen whatever the clipboard does: the toast
+/// and the fallback modal are both in the scrollback and in every screenshot.
+///
+/// Tests the pure reporters rather than `copy_server_token`, which would write to
+/// the developer's own clipboard — `arboard` offers no seam to fake — and then
+/// pass vacuously on a headless runner, hiding exactly that.
+#[test]
+fn the_copy_token_report_never_contains_the_token() {
+    let url = "http://127.0.0.1:7878";
+    let hint = "/home/someone/.config/claude-commander/config.toml";
+
+    let copied = super::actions::copy_token_report(url, Ok(()), hint);
+    let CopyTokenReport::Toast(toast) = copied else {
+        panic!("a successful copy belongs in the status bar, not a modal");
+    };
+    assert!(toast.contains(url), "{toast}");
+    assert!(!toast.contains("super-secret-token"), "{toast}");
+
+    let failed = super::actions::copy_token_report(url, Err("no display".to_string()), hint);
+    let CopyTokenReport::Modal(modal) = failed else {
+        panic!("a clipboard failure needs a modal, not a toast that expires");
+    };
+    assert!(modal.contains("no display"), "{modal}");
+    assert!(modal.contains(url), "{modal}");
+    assert!(
+        modal.contains(hint),
+        "the operator needs somewhere to look: {modal}"
+    );
+    assert!(!modal.contains("super-secret-token"), "{modal}");
+    // Hedged rather than asserted: the key is absent if the token came from the
+    // environment or could not be saved.
+    assert!(modal.contains("normally"), "{modal}");
+}
+
+#[test]
+fn pairing_details_needs_a_listening_server_with_a_token() {
+    use super::actions::pairing_details;
+
+    assert!(pairing_details(None).is_err(), "nothing served");
+
+    let failed = crate::EmbeddedServerStatus::Failed {
+        reason: "Address already in use".into(),
+    };
+    assert!(pairing_details(Some(&failed)).is_err());
+
+    // Serving with auth disabled: reachable only via the standalone binary's
+    // --allow-no-auth, and there is no token to hand out.
+    let no_auth = crate::EmbeddedServerStatus::Listening {
+        url: "http://127.0.0.1:7878".into(),
+        token: None,
+    };
+    let err = pairing_details(Some(&no_auth)).expect_err("no token to copy");
+    assert!(err.contains("no token"), "{err}");
+
+    let listening = crate::EmbeddedServerStatus::Listening {
+        url: "http://127.0.0.1:7878".into(),
+        token: Some("super-secret-token".into()),
+    };
+    let (url, token) = pairing_details(Some(&listening)).expect("pairable");
+    assert_eq!(url, "http://127.0.0.1:7878");
+    assert_eq!(token, "super-secret-token");
+}
+
+/// A failed bind leaves nothing to pair with, so the command stays hidden even
+/// though the run *was* asked to serve.
+#[test]
+fn copy_server_token_is_hidden_after_a_failed_bind() {
+    let mut app = make_test_app();
+    app.set_embedded_server(crate::EmbeddedServerStatus::Failed {
+        reason: "Address already in use".into(),
+    });
+    assert!(
+        !app.ui_state
+            .is_command_available(BindableAction::CopyServerToken)
+    );
 }
 
 #[test]
@@ -1966,10 +2320,10 @@ async fn programs_tab_tab_key_switches_tabs() {
     let mut app = make_test_app();
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
-    // Tab advances to the wrapped-around General tab.
+    // Tab advances to the Server tab, which now sits after Programs.
     feed_programs_key(&mut app, KeyCode::Tab).await;
     match &app.ui_state.modal {
-        Modal::Settings(s) => assert_eq!(s.tab, SettingsTab::General),
+        Modal::Settings(s) => assert_eq!(s.tab, SettingsTab::Server),
         _ => panic!("expected a settings modal"),
     }
 

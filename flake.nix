@@ -72,10 +72,13 @@
           pname = "claude-commander";
           version =
             (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
-          # Build only the TUI/CLI binary crate; the server crate
-          # (claude-commander-server, publish = false, axum/tower/hyper) is
-          # excluded from the Nix package the same way it is from
-          # default-members.
+          # Build only the TUI/CLI binary crate. That still ships the server:
+          # `claude-commander` depends on the claude-commander-server *library*
+          # so `--serve` / `[server] auto_start` can serve the HTTP API from the
+          # TUI's own process, so the packaged binary can do it without a second
+          # executable. What is excluded is only the standalone
+          # claude-commander-server binary (publish = false), which a
+          # single-machine user does not need.
           cargoExtraArgs = "-p claude-commander";
           strictDeps = true;
 

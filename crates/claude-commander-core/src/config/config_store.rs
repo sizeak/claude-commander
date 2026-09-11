@@ -25,6 +25,9 @@ struct InitSnapshot {
     commander_enabled: bool,
     hibernate_enabled: bool,
     hibernate_check_interval_secs: u64,
+    /// The whole `[server]` table: the embedded/standalone server binds once at
+    /// startup, so every one of these is an init-time value.
+    server: crate::config::ServerConfig,
 }
 
 impl InitSnapshot {
@@ -38,6 +41,7 @@ impl InitSnapshot {
             commander_enabled: config.commander_enabled,
             hibernate_enabled: config.hibernate_enabled,
             hibernate_check_interval_secs: config.hibernate_check_interval_secs,
+            server: config.server.clone(),
         }
     }
 
@@ -50,6 +54,7 @@ impl InitSnapshot {
             && self.commander_enabled == config.commander_enabled
             && self.hibernate_enabled == config.hibernate_enabled
             && self.hibernate_check_interval_secs == config.hibernate_check_interval_secs
+            && self.server == config.server
     }
 }
 
@@ -70,6 +75,7 @@ impl InitSnapshot {
 /// - `hibernate_enabled` / `hibernate_check_interval_secs` (the hibernation
 ///   loop is spawned once, with a fixed interval, at construction; the idle
 ///   *threshold* is read live each tick and is not restart-required)
+/// - the whole `[server]` table (the HTTP listener is bound once at startup)
 ///
 /// Call [`restart_required`](Self::restart_required) to check whether any of
 /// those init-time values have diverged from the running config. The flag
@@ -487,5 +493,57 @@ mod tests {
         assert!(!migrated.contains("default_program"));
         assert!(migrated.contains("command = \"codex\""));
         assert!(!store.reload_if_changed().unwrap());
+    }
+
+    /// A `[server]` table must survive an unrelated settings edit.
+    ///
+    /// Regression test. `mutate` persists by re-serialising the whole `Config`,
+    /// so any table core does not model is dropped on the next write: before
+    /// `[server]` moved into `Config`, one toggle in the settings modal silently
+    /// deleted the operator's bind address and bearer token, and the next launch
+    /// generated a fresh token that every paired client would reject.
+    #[test]
+    fn mutate_preserves_the_server_table() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[server]\nauto_start = true\nbind = \"0.0.0.0\"\nport = 9999\ntoken = \"sekret\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        let store = ConfigStore::with_path(config, config_path.clone());
+
+        // Exactly what the settings modal does: mutate one unrelated field.
+        store.mutate(|c| c.ui_refresh_fps = 30).unwrap();
+
+        let reloaded = Config::load_from_path(&config_path).unwrap();
+        assert!(reloaded.server.auto_start);
+        assert_eq!(reloaded.server.bind.to_string(), "0.0.0.0");
+        assert_eq!(reloaded.server.port, 9999);
+        assert_eq!(reloaded.server.token.as_deref(), Some("sekret"));
+        assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
+    }
+
+    /// Changing anything under `[server]` needs a restart: the listener is bound
+    /// once at startup, so the settings tab has to say so rather than implying a
+    /// live rebind.
+    #[test]
+    fn changing_the_server_port_requires_a_restart() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = Config::default();
+        write_config(&config_path, &config);
+
+        let store = ConfigStore::with_path(config, config_path);
+        assert!(!store.restart_required());
+
+        store.mutate(|c| c.server.port = 9999).unwrap();
+        assert!(store.restart_required());
+
+        // Self-heals when put back, like every other init-time value.
+        store.mutate(|c| c.server.port = 7878).unwrap();
+        assert!(!store.restart_required());
     }
 }

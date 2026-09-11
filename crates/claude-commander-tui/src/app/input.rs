@@ -1768,6 +1768,9 @@ impl App {
             UserCommand::EditServerPrograms => {
                 self.open_settings_on_programs(self.selected_backend_id());
             }
+            UserCommand::CopyServerToken => {
+                self.copy_server_token().await;
+            }
             UserCommand::Quit => {
                 self.ui_state.should_quit = true;
             }

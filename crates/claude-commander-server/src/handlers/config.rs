@@ -4,8 +4,12 @@
 //! partial `update`, `reload_config`, and `check_tmux` (the `/health/tmux`
 //! 200/503 probe).
 //!
-//! Note: the server's own bind/token config is deliberately NOT exposed here —
-//! it lives only in the server crate, so this endpoint can't leak or clobber it.
+//! Note: the server's own `[server]` settings ARE part of core's `Config` (so
+//! that `ConfigStore` stops deleting them on every write), which means this
+//! endpoint has to keep them safe explicitly rather than by their absence:
+//! `read` redacts `server.token` via [`Config::with_secrets_redacted`], and
+//! `ConfigPatch` is `deny_unknown_fields` with no `server` field, so a body that
+//! so much as mentions it is rejected. Both are pinned by tests below.
 //!
 //! `update` is a **partial** update over an explicit allow-list (see
 //! [`ConfigPatch`]). A full-replace `PUT` would let a remote client rewrite
@@ -280,6 +284,52 @@ mod tests {
         assert_eq!(after.ui_refresh_fps, 45);
         // An untouched field keeps its prior value.
         assert_eq!(after.worktrees_dir, before.worktrees_dir);
+    }
+
+    /// The `[server]` table is part of core's `Config` now, so `GET /config`
+    /// would serialise this server's own bearer token to every client holding it
+    /// unless redaction covers it.
+    #[tokio::test]
+    async fn get_config_redacts_the_servers_own_token() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        state
+            .service
+            .update_config({
+                let mut c = state.service.read_config();
+                c.server.port = 9999;
+                c.server.token = Some("own-secret".into());
+                c
+            })
+            .unwrap();
+
+        let (status, body) = do_get(router(state), "/config").await;
+        assert_eq!(status, 200);
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("own-secret"), "token leaked: {text}");
+        // The non-secret part of the table still comes through.
+        assert!(text.contains("9999"), "{text}");
+    }
+
+    /// A remote client must not be able to move this server's own bind address,
+    /// port or token. `ConfigPatch` has no `server` field and is
+    /// `deny_unknown_fields`, so naming it is a 4xx rather than a silent drop.
+    #[tokio::test]
+    async fn patch_rejects_the_server_table() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let before = state.service.read_config();
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({ "server": { "bind": "0.0.0.0" } }),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "patching [server] must be a 4xx, got {status}"
+        );
+        assert_eq!(state.service.read_config().server, before.server);
     }
 
     /// A sensitive path field cannot be changed: `deny_unknown_fields` rejects a

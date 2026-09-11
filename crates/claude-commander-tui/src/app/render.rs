@@ -1,6 +1,7 @@
 //! Rendering: top bar, full-screen kanban board, status bar.
 
 use super::*;
+use crate::EmbeddedServerStatus;
 use crate::hotkey::ActionButton;
 
 /// Split a list view's content area into (session list, right pane).
@@ -50,6 +51,32 @@ pub(super) fn commander_chip_label(
         Some(AgentState::Unknown) | None => "",
     };
     Some(format!("\u{25cf} Commander{suffix}"))
+}
+
+/// Build the footer chip for the in-process HTTP server, or `None` when this run
+/// was never asked to serve (the chip is hidden then).
+///
+/// Two shapes, because the two outcomes need different reactions: `⇅ 7878` says
+/// clients can reach this machine, while `⇅ server unavailable` says they cannot.
+/// The bind failure is worth a chip rather than only a startup toast — a toast is
+/// invisible from inside an attached pane, and the operator may not look at the
+/// terminal until long after launch.
+///
+/// The label is deliberately short in both cases. The status bar's left zone is
+/// laid out as `Length(left_width)`, so it takes its width out of the action
+/// buttons' `Fill(1)`: putting the bind error (`could not bind 127.0.0.1:7878:
+/// Address already in use`) in here would evict every button on an 80-column
+/// terminal. The reason goes to the log and to a startup toast instead.
+pub(super) fn server_chip_label(status: Option<&EmbeddedServerStatus>) -> Option<String> {
+    match status? {
+        EmbeddedServerStatus::Listening { url, .. } => {
+            // The port is the part that varies and the part a client needs; the
+            // scheme and host would just cost columns the buttons want.
+            let port = url.rsplit(':').next().unwrap_or(url);
+            Some(format!("\u{21c5} {port}"))
+        }
+        EmbeddedServerStatus::Failed { .. } => Some("\u{21c5} server unavailable".to_string()),
+    }
 }
 
 impl App {
@@ -691,14 +718,36 @@ impl App {
             .agent_states
             .get(&claude_commander_core::commander::commander_sentinel_id())
             .copied();
-        if let Some(label) =
-            commander_chip_label(self.ui_state.commander_running, commander_agent_state)
-        {
+        let commander_chip_shown =
+            match commander_chip_label(self.ui_state.commander_running, commander_agent_state) {
+                Some(label) => {
+                    left_spans.splice(
+                        1..1,
+                        [
+                            Span::styled(" \u{2502} ", base_style),
+                            Span::styled(label, base_style.fg(self.theme.status_running)),
+                        ],
+                    );
+                    true
+                }
+                None => false,
+            };
+
+        // Same reasoning as the commander chip, and spliced after it so the two
+        // keep a stable order regardless of which is present.
+        if let Some(label) = server_chip_label(self.ui_state.embedded_server.as_ref()) {
+            let colour = match self.ui_state.embedded_server {
+                Some(EmbeddedServerStatus::Failed { .. }) => self.theme.modal_error,
+                _ => self.theme.status_running,
+            };
+            let at = left_spans
+                .len()
+                .min(1 + usize::from(commander_chip_shown) * 2);
             left_spans.splice(
-                1..1,
+                at..at,
                 [
                     Span::styled(" \u{2502} ", base_style),
-                    Span::styled(label, base_style.fg(self.theme.status_running)),
+                    Span::styled(label, base_style.fg(colour)),
                 ],
             );
         }

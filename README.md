@@ -238,6 +238,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `Tab` / `Shift-Tab` | Cycle the right pane forward / back through Preview, Info and Shell (list views only; the board is full-screen). A project row has no agent pane, so it cycles Shell ↔ Info |
 | `<` / `>` | Narrow / widen the session list, moving the divider between it and the right pane (list views only) |
 | `,` | Open settings |
+| palette only | Copy server token — puts the embedded server's bearer token on your clipboard for pairing a client. The URL is reported in the status bar rather than copied, so the secret never enters your scrollback. Only offered while a server is actually being served from this process |
 | `?` | Show help |
 | `q` or `Ctrl-c` | Quit |
 
@@ -253,6 +254,23 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 | `Ctrl-Space` | Open the quick-switch palette over the session, to jump to another claude-commander session without detaching. It is the same palette as `Ctrl-Space` in the board, so it lists remote sessions and commands too; `Esc` returns you to the pane. Switching between two local sessions never detaches |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
 | `Ctrl-v` | **Remote sessions only:** paste an image from your local clipboard into the Claude prompt. The image is uploaded to the server, saved to a temp file, and its path is typed into the prompt. On a local session `Ctrl-v` is forwarded to Claude, which reads your clipboard directly. If the clipboard holds no image, `Ctrl-v` is forwarded unchanged |
+
+### Serving Your Own Machine
+
+The other direction: `claude-commander --serve` runs the HTTP API inside the TUI's
+own process, so a client (the [Flutter app](client/README.md), a phone, another
+desktop) can reach your sessions without you remembering to start a second
+process. Set `auto_start = true` under `[server]` to make it the default, and it
+comes up with the TUI and goes down when the TUI exits. A `⇅ 7878` chip in the
+status bar confirms it, and the palette's **Copy server token** puts the bearer
+token on your clipboard to pair a client with.
+
+It binds loopback unless you say otherwise, and always requires a bearer token —
+generated and saved on first serve. Bind address, port and token are editable in
+**Settings → Server**; see [Configuration](docs/configuration.md#serving-this-machine-server).
+
+`claude-commander-server` still exists as a standalone binary for headless hosts
+where there is no TUI to attach it to.
 
 ### Remote Servers
 

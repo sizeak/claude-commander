@@ -29,6 +29,12 @@ use crate::auth::AuthConfig;
 use crate::state::AppState;
 
 /// Build a hermetic [`AppState`] backed by empty core state under `dir`.
+///
+/// Authentication is disabled, which is what every handler test wants: they
+/// drive the router directly via `oneshot`. A test that needs the token actually
+/// enforced goes through `embed::start`, which builds its own `AppState` from
+/// this one's service and the `AuthConfig` it is handed — so there is nothing for
+/// an `auth` parameter here to do.
 pub fn test_state(dir: &TempDir) -> AppState {
     // Telemetry is opt-out by default with a baked ingest token, so a plain
     // `CommanderService::new` would post events to the production OpenObserve

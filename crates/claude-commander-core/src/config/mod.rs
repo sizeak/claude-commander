@@ -13,6 +13,7 @@ mod config;
 mod config_store;
 pub mod keybindings;
 mod migrations;
+mod server;
 pub mod storage;
 pub(crate) mod store;
 pub mod theme;
@@ -20,6 +21,7 @@ mod view_mode;
 
 pub use config::*;
 pub use config_store::ConfigStore;
+pub use server::{ServerConfig, persist_token as persist_server_token};
 /// The locked atomic-write plumbing `StateStore` uses, re-exported because the
 /// TUI crate persists `tui.json` beside `state.json` and must take the same lock
 /// discipline rather than duplicating it. `store` itself stays private so
