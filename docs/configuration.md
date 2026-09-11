@@ -318,7 +318,45 @@ state_sync_interval_ms = 2000
 # url = "http://buildbox:7878"   # base URL of claude-commander-server
 # token = "..."                  # bearer token; omit only for servers
 #                                # started with --allow-no-auth (loopback)
+
+# Serving THIS machine's sessions over HTTP. The same table is read by the
+# standalone `claude-commander-server` binary and by the TUI, which runs the
+# server inside its own process when `auto_start` is on (or `--serve` is
+# passed) and takes it down when it exits. Editable from the in-app settings
+# modal: Settings > Server.
+# [server]
+# auto_start = true              # serve for as long as the TUI is open
+# bind = "127.0.0.1"             # "0.0.0.0" to accept clients from the LAN
+# port = 7878
+# token = "..."                  # generated and written here on first serve
+# cors_allowed_origins = []      # origins a browser may call /api from
 ```
+
+### Serving this machine (`[server]`)
+
+Wanting the server on the same machine as the TUI is the common case, and having to
+remember to start it separately is friction — so `auto_start = true` brings it up
+with the TUI. It runs *inside* the TUI process and shares its session manager, so
+there is one set of background pollers, one writer to `state.json` and one
+telemetry stream, and the listener goes away exactly when the TUI does. A `⇅ 7878`
+chip in the status bar confirms it came up.
+
+Everything under `[server]` is read once at startup, so changing it needs a
+restart — the status bar says so after an edit. If the port is already taken (most
+often because a standalone `claude-commander-server` is already running) the TUI
+carries on without serving: the chip reads `⇅ server unavailable`, and the reason
+appears once in the status bar and in the log.
+
+The bind address defaults to loopback, so out of the box nothing off this machine
+can reach it; set `bind = "0.0.0.0"` for a phone or another desktop on the LAN.
+Authentication is never optional here: if `token` is unset, the first serve
+generates one and writes it back to this file so a paired client keeps working
+across restarts. Use the palette's **Copy server token** to hand it to a client —
+the settings modal deliberately shows only whether a token is set, never its
+value, and the copy reports the URL in the status bar rather than putting the
+secret in your scrollback. (The standalone binary differs: it logs a one-time
+token instead of persisting one, since a managed deployment's config file may be
+read-only.)
 
 A remote server's `token` is **operator-equivalent**: anyone holding it can create
 sessions (which run arbitrary programs on that machine) and address projects by

@@ -18,6 +18,7 @@ use claude_commander_tui::App;
 use crate::cli_args::{Cli, Commands, cli_reference};
 
 mod cli_args;
+mod serve;
 
 /// This binary's name and version. Everything user-facing (`--version`, the
 /// startup log line, the telemetry frontend) comes from this package's
@@ -93,8 +94,11 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
     let filter = if debug {
         EnvFilter::new("debug")
     } else {
-        // Use info level for our crate, warn for dependencies
+        // Use info level for our crate, warn for dependencies. The embedded
+        // server shares this subscriber — installing its own would panic on the
+        // second global init — so its target is named explicitly here.
         EnvFilter::new("info")
+            .add_directive("claude_commander_server=info".parse()?)
             .add_directive("gix=warn".parse()?)
             .add_directive("tokio=warn".parse()?)
     };
@@ -266,6 +270,16 @@ async fn main() -> Result<()> {
             setup_logging(cli.debug, true)?;
             info!("Starting Claude Commander TUI v{}", VERSION);
 
+            // Settle the server plan (and persist any generated token) before
+            // the config store exists — see `serve::prepare`.
+            let mut config = config;
+            let plan = serve::prepare(
+                &mut config,
+                &Config::config_file_path()?,
+                cli.serve,
+                cli.no_serve,
+            );
+
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
             let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
@@ -276,6 +290,27 @@ async fn main() -> Result<()> {
                 remote_backend_factory(),
                 cli_reference(),
             );
+
+            // Held for the rest of `main`: dropping the guard stops the server,
+            // so the listener goes away exactly when the TUI does.
+            //
+            // This binds before `app.run()`, which means a client can be served
+            // during the TUI's startup reconciliation (dropping stale `Creating`
+            // sessions, syncing status against live tmux) and briefly see
+            // pre-reconcile state. Accepted deliberately: the window is a few
+            // milliseconds, it self-corrects on the client's next poll, and
+            // closing it would mean either delaying the listener behind the TUI's
+            // startup or plumbing the server into `App::run` — which would make
+            // the terminal frontend depend on axum.
+            let _server = match plan {
+                Some(plan) => {
+                    let (guard, status) = serve::start(app.service_handle(), plan).await;
+                    app.set_embedded_server(status);
+                    guard
+                }
+                None => None,
+            };
+
             app.run().await?;
         }
 

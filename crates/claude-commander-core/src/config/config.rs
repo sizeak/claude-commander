@@ -382,6 +382,16 @@ pub struct Config {
     /// default. Validated on load (see [`Config::validate_remote_servers`]).
     #[serde(default)]
     pub remote_servers: Vec<RemoteServerConfig>,
+
+    /// How *this* machine exposes its own sessions over HTTP: the `[server]`
+    /// table read by the standalone `claude-commander-server` binary and by the
+    /// TUI's embedded server. See [`ServerConfig`].
+    ///
+    /// It lives on core's `Config` (rather than in the server crate) because
+    /// `ConfigStore` persists by re-serialising this struct, so a table core did
+    /// not model was deleted by the next settings edit.
+    #[serde(default)]
+    pub server: super::ServerConfig,
 }
 
 /// Conversation-mode (text-to-speech) settings.
@@ -601,6 +611,7 @@ impl Default for Config {
             stt: SttConfig::default(),
             telemetry: TelemetryConfig::default(),
             remote_servers: Vec::new(),
+            server: super::ServerConfig::default(),
         }
     }
 }
@@ -657,6 +668,11 @@ impl Config {
         }
         self.stt.api_key = None;
         self.telemetry.token = None;
+        // This server's OWN bearer token. `GET /config` is authenticated with
+        // that very token, but the response also reaches clients that merely
+        // hold it for one server and must not learn the others' — and it is
+        // written to logs and support dumps by the same call sites.
+        self.server.token = None;
         self
     }
 
@@ -1069,6 +1085,7 @@ fn parse_key_code(s: &str) -> KeyCode {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::ServerConfig;
     #[test]
     fn with_secrets_redacted_clears_every_credential_field() {
         let c = Config {
@@ -1085,6 +1102,11 @@ mod tests {
                 token: Some("telemetry-secret".into()),
                 ..Default::default()
             },
+            server: ServerConfig {
+                port: 9999,
+                token: Some("own-secret".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1092,15 +1114,72 @@ mod tests {
         assert!(redacted.remote_servers[0].token.is_none());
         assert!(redacted.stt.api_key.is_none());
         assert!(redacted.telemetry.token.is_none());
+        assert!(redacted.server.token.is_none());
         // Non-secret fields survive.
         assert_eq!(redacted.remote_servers[0].url, "http://b:7878");
+        assert_eq!(redacted.server.port, 9999);
         let json = serde_json::to_string(&redacted).unwrap();
-        for secret in ["server-secret", "stt-secret", "telemetry-secret"] {
+        for secret in [
+            "server-secret",
+            "stt-secret",
+            "telemetry-secret",
+            "own-secret",
+        ] {
             assert!(!json.contains(secret), "{secret} survived redaction");
         }
     }
 
     use super::*;
+
+    /// The `[server]` table round-trips through core's loader with the key
+    /// names the server crate has always used, so an existing `config.toml`
+    /// keeps working unchanged. Replaces the server crate's
+    /// `server_table_overrides_defaults`, which owned this contract while
+    /// `ServerConfig` lived there.
+    #[test]
+    fn server_table_round_trips_with_its_original_key_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[programs]]
+label = "Claude"
+command = "claude"
+
+[server]
+auto_start = true
+bind = "0.0.0.0"
+port = 9999
+token = "sekret"
+cors_allowed_origins = ["http://localhost:3000"]
+"#,
+        )
+        .unwrap();
+
+        let c = Config::load_from_path(&path).unwrap();
+        assert!(c.server.auto_start);
+        assert_eq!(c.server.bind.to_string(), "0.0.0.0");
+        assert_eq!(c.server.port, 9999);
+        assert_eq!(c.server.token.as_deref(), Some("sekret"));
+        assert_eq!(c.server.cors_allowed_origins, ["http://localhost:3000"]);
+        // Core's own keys still parse from the same file.
+        assert_eq!(c.default_session_program(), "claude");
+    }
+
+    /// A `config.toml` with no `[server]` table loads with the table's defaults,
+    /// which must leave the server switched off.
+    #[test]
+    fn missing_server_table_defaults_to_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "branch_prefix = \"wt/\"\n").unwrap();
+
+        let c = Config::load_from_path(&path).unwrap();
+        assert!(!c.server.auto_start);
+        assert_eq!(c.server.port, 7878);
+        assert!(c.server.token.is_none());
+    }
 
     #[test]
     fn test_max_sessions_and_in_progress_limit_round_trip() {

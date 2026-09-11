@@ -5,7 +5,9 @@
 # (boot -> wait for boot_completed -> build -> install -> clear logcat ->
 # launch) and every step has its own failure mode and exit code.
 #
-#   dev-run.sh tui [--debug] [-- ARGS…]       the terminal UI
+#   dev-run.sh tui [--debug] [--serve] [-- ARGS…]
+#                                             the terminal UI (--serve also runs
+#                                             the HTTP API in its process)
 #   dev-run.sh server [--port N] [--token T] [--isolated] [-- ARGS…]
 #   dev-run.sh linux [--log FILE]             the Flutter Linux desktop app
 #   dev-run.sh android [--device SERIAL] [--release] [--no-launch] [--window]
@@ -47,6 +49,12 @@ target_tui() {
       --debug)
         # Logs to /tmp/claude-commander.log, per CLAUDE.md.
         extra+=(--debug)
+        shift
+        ;;
+      --serve | --no-serve)
+        # Run (or refuse to run) the HTTP API inside the TUI process, overriding
+        # `[server] auto_start` for this run.
+        extra+=("$1")
         shift
         ;;
       --)

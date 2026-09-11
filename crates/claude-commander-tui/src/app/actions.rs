@@ -104,6 +104,74 @@ pub(super) fn sort_palette_matches(scored: &mut [(i64, QuickSwitchMatch)], query
     }
 }
 
+/// What the copy-token command should report back to the operator.
+pub(super) enum CopyTokenReport {
+    /// Transient status-bar message.
+    Toast(String),
+    /// A modal, for something the operator has to act on.
+    Modal(String),
+}
+
+/// The URL and token needed to pair a client, or the message explaining why
+/// there are none.
+///
+/// Pure, so the "never render the token" invariant can be tested without a
+/// clipboard.
+pub(super) fn pairing_details(
+    status: Option<&crate::EmbeddedServerStatus>,
+) -> std::result::Result<(String, String), String> {
+    let Some(status) = status else {
+        return Err("No server is running in this session".to_string());
+    };
+    match (status.url(), status.token()) {
+        (Some(url), Some(token)) => Ok((url.to_string(), token.to_string())),
+        // Serving, but with authentication disabled — only reachable by passing
+        // `--allow-no-auth` to the standalone binary, so not a state `--serve`
+        // can produce. There is no token to hand out.
+        (Some(url), None) => Err(format!(
+            "Server at {url} needs no token (authentication disabled)"
+        )),
+        // The bind failed; the chip already says so.
+        (None, _) => Err("No server is running in this session".to_string()),
+    }
+}
+
+/// Decide what to show after attempting the copy.
+///
+/// The token is deliberately absent from both arms: the status bar and any modal
+/// are in the scrollback and in every screenshot, and this UI does not render
+/// credentials (the settings row shows only `(set)`; the STT API key isn't in
+/// the settings modal at all). The URL is not a secret and is shown, so the
+/// operator can confirm *what* was copied.
+pub(super) fn copy_token_report(
+    url: &str,
+    clipboard: std::result::Result<(), String>,
+    token_location: &str,
+) -> CopyTokenReport {
+    match clipboard {
+        Ok(()) => CopyTokenReport::Toast(format!("Server token copied \u{00b7} {url}")),
+        // Ordinary rather than exceptional: no display over plain SSH, no
+        // compositor, or the `clipboard` feature compiled out. Point at the
+        // value instead of printing it.
+        Err(e) => CopyTokenReport::Modal(format!(
+            "Could not reach the clipboard ({e}).\n\n\
+             The server is at {url}.\n\n\
+             Its token is normally the `token` key under [server] in:\n\n  \
+             {token_location}\n\n\
+             (If it came from CC_SERVER_TOKEN, or could not be saved, the log says so.)"
+        )),
+    }
+}
+
+/// Where the operator can expect to find the server token on disk. Best-effort:
+/// the path is only the *usual* home for it, which is why `copy_token_report`
+/// hedges rather than asserting.
+pub(super) fn token_location_hint() -> String {
+    claude_commander_core::Config::config_file_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "your config.toml".to_string())
+}
+
 /// Confirmation prompt for deleting a session. Names the session by its
 /// title when known so the user can tell what they're about to destroy;
 /// falls back to a generic phrasing if the title can't be resolved.
@@ -2554,6 +2622,36 @@ impl App {
                 }))
                 .await;
         });
+    }
+
+    /// Put the embedded server's bearer token on the OS clipboard so a client
+    /// can be paired.
+    ///
+    /// Only the I/O lives here; what to *show* is decided by the pure
+    /// [`pairing_details`] and [`copy_token_report`] below, which is what the
+    /// tests exercise. Driving this method from a test would write to the
+    /// developer's own clipboard — `arboard` has no seam to fake — and pass
+    /// vacuously on a headless runner, which is the worst of both.
+    pub(super) async fn copy_server_token(&mut self) {
+        let (url, token) = match pairing_details(self.ui_state.embedded_server.as_ref()) {
+            Ok(details) => details,
+            Err(message) => {
+                self.ui_state.status_message =
+                    Some((message, Instant::now() + Duration::from_secs(4)));
+                return;
+            }
+        };
+
+        let outcome = claude_commander_core::clipboard::set_text(token).await;
+        match copy_token_report(&url, outcome, &token_location_hint()) {
+            CopyTokenReport::Toast(message) => {
+                self.ui_state.status_message =
+                    Some((message, Instant::now() + Duration::from_secs(6)));
+            }
+            CopyTokenReport::Modal(message) => {
+                self.ui_state.modal = Modal::Error { message };
+            }
+        }
     }
 
     /// Handle rename session - show input modal pre-filled with current title.

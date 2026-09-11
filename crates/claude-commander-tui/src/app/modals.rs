@@ -872,6 +872,36 @@ impl App {
             width = key_col_width,
         )));
 
+        // Embedded server (ambient fact, not a keybinding — same category as
+        // the global voice hotkey above).
+        lines.push(Line::from(""));
+        lines.push(Line::from("Embedded Server:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Run the HTTP API in this process so clients can reach",
+            "--serve",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}this machine; set `[server] auto_start` to make it the",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}default. Settings > Server edits bind/port/token.",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Use the palette's \"Copy server token\" to pair a",
+            "palette",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}client; the URL is shown in the status bar.",
+            "",
+            width = key_col_width,
+        )));
+
         // Mouse (the status/review bars surface primary actions as buttons).
         lines.push(Line::from(""));
         lines.push(Line::from("Mouse:"));
@@ -928,6 +958,11 @@ impl App {
             Span::raw("  "),
             Span::styled("○", Style::default().fg(self.theme.status_stopped)),
             Span::raw("  Stopped"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("\u{21c5}", Style::default().fg(self.theme.status_running)),
+            Span::raw("  HTTP API served from this process, on that port"),
         ]));
 
         // PR badges legend

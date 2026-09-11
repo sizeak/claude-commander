@@ -28,6 +28,18 @@ pub struct Cli {
     #[arg(short, long)]
     pub config: Option<std::path::PathBuf>,
 
+    /// Run the HTTP server in this process for as long as the TUI is open, so
+    /// clients on this machine (or the LAN, with `[server] bind`) can reach it
+    /// without starting `claude-commander-server` separately. Overrides
+    /// `[server] auto_start` for one run. TUI only.
+    #[arg(long, conflicts_with = "no_serve")]
+    pub serve: bool,
+
+    /// Do not run the HTTP server, even if `[server] auto_start` is on.
+    /// TUI only.
+    #[arg(long)]
+    pub no_serve: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

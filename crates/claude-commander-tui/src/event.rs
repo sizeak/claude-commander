@@ -452,6 +452,9 @@ pub enum UserCommand {
     ShowHelp,
     /// Show settings modal
     ShowSettings,
+    /// Copy the embedded server's URL and bearer token to the OS clipboard, for
+    /// pairing a client. Palette-only; unavailable when nothing is being served.
+    CopyServerToken,
     /// Open the settings modal on the Programs tab, targeting the currently
     /// selected backend's program list (a server header, or the selected
     /// session/project's server). Also the action bound to the server-header cog.
@@ -601,6 +604,7 @@ impl UserCommand {
             UserCommand::GenerateSummary => Some("ai_summary.generate"),
             UserCommand::ShowHelp => Some("ui.help"),
             UserCommand::ShowSettings => Some("ui.settings"),
+            UserCommand::CopyServerToken => Some("server.copy_token"),
             UserCommand::EditServerPrograms => Some("ui.edit_server_programs"),
             UserCommand::QuickSwitch => Some("ui.quick_switch"),
             // The *domain* feature (`clone_project`) is recorded inside
@@ -661,6 +665,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
             BindableAction::ShowHelp => Self::ShowHelp,
             BindableAction::ShowSettings => Self::ShowSettings,
+            BindableAction::CopyServerToken => Self::CopyServerToken,
             BindableAction::EditServerPrograms => Self::EditServerPrograms,
             BindableAction::Quit => Self::Quit,
             BindableAction::ScrollUp => Self::ScrollUp,

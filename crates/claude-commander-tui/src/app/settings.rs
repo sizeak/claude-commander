@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Shown in the Server tab's Bearer Token row in place of the token itself, which
+/// is operator-equivalent and must not be on screen during a screen-share. Also
+/// what `apply_settings_edit` recognises as "submitted unchanged", so the two
+/// cannot drift apart.
+const TOKEN_SET_PLACEHOLDER: &str = "(set)";
+const TOKEN_UNSET_PLACEHOLDER: &str = "(not set \u{2014} generated on first serve)";
+
 impl App {
     /// Refresh the cached input-device list (id + friendly label) backing the
     /// STT Microphone setting. Called when the settings modal or the mic picker
@@ -285,6 +292,36 @@ impl App {
                         "stt_pause_media",
                     ),
                 ]
+            }
+            SettingsTab::Server => {
+                let s = &self.config.server;
+                let token_display = match &s.token {
+                    Some(_) => TOKEN_SET_PLACEHOLDER,
+                    None => TOKEN_UNSET_PLACEHOLDER,
+                };
+                with_section_spacers(vec![
+                    SettingsRow::header("Embedded Server"),
+                    SettingsRow::toggle("Auto Start With TUI", s.auto_start, "server_auto_start"),
+                    SettingsRow::text("Bind Address", s.bind.to_string(), "server_bind"),
+                    SettingsRow::text("Port", s.port.to_string(), "server_port"),
+                    // The token is deliberately not shown. It is operator-
+                    // equivalent (see docs/configuration.md), the settings modal
+                    // is on screen while screen-sharing, and the STT API key sets
+                    // the same precedent by being absent from this UI entirely.
+                    // Use the palette's "Copy server token" to hand it to a
+                    // client; typing over this row replaces it.
+                    SettingsRow::text("Bearer Token", token_display.to_string(), "server_token"),
+                    SettingsRow::header("Browser Access"),
+                    SettingsRow::text(
+                        "CORS Allowed Origins",
+                        if s.cors_allowed_origins.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            s.cors_allowed_origins.join(", ")
+                        },
+                        "server_cors_allowed_origins",
+                    ),
+                ])
             }
             SettingsTab::Sections => {
                 vec![]
@@ -1339,6 +1376,64 @@ impl App {
 
                 self.config.keybindings.set_keys_for(action, parsed);
             }
+            SettingsTab::Server => match field_key {
+                "server_bind" => match value.trim().parse::<std::net::IpAddr>() {
+                    Ok(ip) => self.config.server.bind = ip,
+                    Err(_) => {
+                        self.ui_state.status_message = Some((
+                            format!("Not an IP address: {value} (try 127.0.0.1 or 0.0.0.0)"),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                        return;
+                    }
+                },
+                // Port 0 is a legal port that binds an ephemeral one the
+                // operator cannot predict — useless for a client that has to be
+                // pointed at it — so it is refused here.
+                "server_port" => match value.trim().parse::<u16>() {
+                    Ok(p) if p > 0 => self.config.server.port = p,
+                    _ => {
+                        self.ui_state.status_message = Some((
+                            format!("Not a port: {value} (1-65535)"),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                        return;
+                    }
+                },
+                "server_token" => {
+                    let trimmed = value.trim();
+                    // The row renders a placeholder instead of the secret, so
+                    // submitting it unchanged has to mean "leave it alone" rather
+                    // than "set the token to the literal text `(set)`". Matched
+                    // exactly, not by a leading `(`, so a token that happens to
+                    // start with one is still settable.
+                    if trimmed == TOKEN_SET_PLACEHOLDER || trimmed == TOKEN_UNSET_PLACEHOLDER {
+                        return;
+                    }
+                    self.config.server.token = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                }
+                "server_cors_allowed_origins" => {
+                    let trimmed = value.trim();
+                    self.config.server.cors_allowed_origins =
+                        if trimmed.is_empty() || trimmed == "(none)" {
+                            Vec::new()
+                        } else {
+                            trimmed
+                                .split(',')
+                                .map(|o| o.trim().to_string())
+                                .filter(|o| !o.is_empty())
+                                .collect()
+                        };
+                }
+                _ => {
+                    warn!("Unknown server setting: {}", field_key);
+                    return;
+                }
+            },
             SettingsTab::Sections => {
                 // Sections tab handles its own persistence via save_sections_config
                 return;
@@ -1377,6 +1472,7 @@ impl App {
             "stt_enabled" => self.config.stt.enabled = value,
             "stt_pause_media" => self.config.stt.pause_media = value,
             "telemetry_enabled" => self.config.telemetry.enabled = value,
+            "server_auto_start" => self.config.server.auto_start = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;
@@ -3341,15 +3437,18 @@ mod tests {
 
     #[test]
     fn settings_tab_cycle_includes_conversation() {
-        assert_eq!(SettingsTab::ALL.len(), 6);
+        assert_eq!(SettingsTab::ALL.len(), 7);
         assert!(SettingsTab::ALL.contains(&SettingsTab::Conversation));
         assert!(SettingsTab::ALL.contains(&SettingsTab::Programs));
+        assert!(SettingsTab::ALL.contains(&SettingsTab::Server));
         assert_eq!(SettingsTab::General.next(), SettingsTab::Conversation);
         assert_eq!(SettingsTab::Conversation.prev(), SettingsTab::General);
-        // Programs sits after Sections and wraps back to General.
+        // Server sits last, after Programs, and wraps back to General.
         assert_eq!(SettingsTab::Sections.next(), SettingsTab::Programs);
-        assert_eq!(SettingsTab::Programs.next(), SettingsTab::General);
-        assert_eq!(SettingsTab::General.prev(), SettingsTab::Programs);
+        assert_eq!(SettingsTab::Programs.next(), SettingsTab::Server);
+        assert_eq!(SettingsTab::Server.next(), SettingsTab::General);
+        assert_eq!(SettingsTab::General.prev(), SettingsTab::Server);
+        assert_eq!(SettingsTab::Server.prev(), SettingsTab::Programs);
         // A full forward cycle returns to the start.
         let mut t = SettingsTab::General;
         for _ in 0..SettingsTab::ALL.len() {
