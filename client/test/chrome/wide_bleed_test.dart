@@ -13,9 +13,11 @@ import '../support/insets.dart';
 /// The wide LCARS frame's safe-area treatment.
 ///
 /// It is a *different* frame from the phone shell — three columns rather than
-/// two, and its right-hand workspace opens with a plain text header instead of
-/// an elbow cap. So the band runs across the nav and fleet columns only, and
-/// the workspace holds its insets like a pushed page's body does.
+/// two, each opening with a block that bleeds into the status bar: the nav
+/// rail's identifier and an elbow cap over each of the fleet and workspace
+/// columns. The workspace's cap is easy to forget, because the implementation
+/// once lacked it and this doc described that state; 'the workspace column
+/// carries a cap of its own' below is what pins it now.
 ///
 /// The three-column layout needs a surface past `kLcarsThreeColumnWidth`
 /// (1180dp), which no phone reaches — it is the desktop shape, where the insets
@@ -115,11 +117,13 @@ void main() {
       expect(tester.getSize(find.byType(ChromeElbow).last).height, 44 + 48);
     });
 
-    // The band has to be *continuous*. The nav and fleet columns both bleed into
-    // it with a 5dp gap between them, and leaving that gap open cuts a black
-    // slit through the status bar — the same defect the phone frame's rail seam
-    // had, measured there on a Pixel 8a as a black column through the clock.
-    testWidgets('the band is continuous across the gap between the columns', (
+    // The gaps between the columns run open through the band, the same rule the
+    // phone frame's rail/content gutter follows. Both were filled for a while,
+    // to keep a black slit out of the status bar — but a filled gap leaves each
+    // cap's bottom-left radius nothing to curve out of, and squaring them made
+    // the frame turn its corners at a bare 90°. The slit is the accepted cost;
+    // see `elbow_bleed_test.dart` for the corner it buys back.
+    testWidgets('the gaps between the columns run open through the band', (
       tester,
     ) async {
       await pump(tester, width: 1400, top: 24);
@@ -127,8 +131,8 @@ void main() {
       final navRight = tester.getRect(find.byType(ChromeElbow).first).right;
       expect(
         await pixelAt(tester, Offset(navRight + 2, 12)),
-        lcarsTokens.primary,
-        reason: 'the gap between the nav and fleet columns is open',
+        lcarsTokens.canvas,
+        reason: 'the gap between the nav and fleet columns is filled',
       );
     });
 

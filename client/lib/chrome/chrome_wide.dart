@@ -494,16 +494,11 @@ class LcarsWide extends StatelessWidget {
                       width: kLcarsNavWidth,
                       child: _nav(context, t, accent, bleed),
                     ),
-                    // Both columns beside this gap bleed into the band, so it
-                    // is filled across it — see [lcarsBandSeam]. Its fill ends
-                    // level with the fleet cap, the shorter of the two blocks
-                    // it bridges.
-                    lcarsBandSeam(
-                      width: _lcarsGap,
-                      height: _bandHeight(bleed),
-                      color: accent,
-                      bleed: bleed,
-                    ),
+                    // Open through the status-bar band, not filled across it.
+                    // Filling it kept a black slit out of the system icons, but
+                    // left the fleet cap's bottom-left radius nothing to curve
+                    // out of — see `lcars/bleed.dart` for why the slit won.
+                    const SizedBox(width: _lcarsGap),
                   ],
                   // Keyed so crossing kLcarsThreeColumnWidth — which inserts two
                   // children ahead of these — moves their elements rather than
@@ -514,12 +509,8 @@ class LcarsWide extends StatelessWidget {
                     width: _lcarsFleetWidth,
                     child: _fleet(t, accent, bleed, folded: !three),
                   ),
-                  lcarsBandSeam(
-                    width: _lcarsGap,
-                    height: _bandHeight(bleed),
-                    color: accent,
-                    bleed: bleed,
-                  ),
+                  // Open through the band, as above.
+                  const SizedBox(width: _lcarsGap),
                   Expanded(
                     key: const ValueKey('wide-workspace'),
                     child: Column(
@@ -562,8 +553,9 @@ class LcarsWide extends StatelessWidget {
     );
   }
 
-  /// The colour the frame's top run takes: the nav column's identifier block,
-  /// both column caps, and the fills that bridge them.
+  /// The colour the frame's top run takes: the nav column's identifier block
+  /// and both column caps. (It once also coloured fills bridging the gaps
+  /// between them; those are gone — see `lcars/bleed.dart`.)
   ///
   /// Per view rather than per theme, which is how the deck paints it — amber on
   /// Fleet (4b's L1, L2 and L3 all open with an `#f7a01d` elbow and an
@@ -573,17 +565,6 @@ class LcarsWide extends StatelessWidget {
   /// could come to disagree.
   static Color _accent(ChromeViewRailStyle style, CommanderTokens t) =>
       style == ChromeViewRailStyle.branded ? t.primary : t.nav;
-
-  /// How far down the status-bar band runs: the fleet column's elbow cap sets
-  /// it, and every other part of the band — the gap fills either side of that
-  /// column, and the plain strip over the workspace — is drawn to the same
-  /// number so the bar has one flat bottom edge.
-  ///
-  /// Takes only the *top* of [bleed], because that is all a top band can be
-  /// made of; [elbowCapHeight] would otherwise be handed a bottom inset it has
-  /// no use for.
-  static double _bandHeight(EdgeInsets bleed) =>
-      elbowCapHeight(kElbowCapHeight, EdgeInsets.only(top: bleed.top));
 
   /// Deck frame L1's nav rail, read top to bottom: the `CMDR` identity block,
   /// the mode destinations, the live needs-input count, inert filler that

@@ -409,51 +409,32 @@ void main() {
       expect(tester.getSize(id).height, 74 + 24);
     });
 
-    // Regression for a device-only defect: the rail/content gutter used to run
-    // the full height of the frame including the status-bar inset, cutting a
-    // black column through it. On a Pixel 8a the system clock's last digit
-    // sat exactly on that seam.
-    testWidgets(
-      'the rail/content gutter is filled across the top inset, and open below it',
-      (tester) async {
-        seed();
-        useInsets(tester, top: 24);
-        await pumpLcars(tester);
+    // The gutter is one uninterrupted gap from the physical top edge down, and
+    // that is a deliberate trade rather than an oversight. It was filled across
+    // the status-bar inset for a while, because on a Pixel 8a the system
+    // clock's last digit sat exactly on the seam and the black column ran
+    // through it — but a filled gutter leaves the cap's bottom-left corner
+    // nothing to curve out of, so the band met the rail at a bare 90° angle.
+    // The elbow is worth more than the notch; see `page_bleed_test.dart` for
+    // the corner this buys.
+    testWidgets('the rail/content gutter runs open through the top inset', (
+      tester,
+    ) async {
+      seed();
+      useInsets(tester, top: 24);
+      await pumpLcars(tester);
 
-        final rail = tester.getRect(find.widgetWithText(ChromeElbow, '47-A'));
-        final gutterX = rail.right + 2;
-        const insetTop = 24.0;
+      final rail = tester.getRect(find.widgetWithText(ChromeElbow, '47-A'));
+      final gutterX = rail.right + 2;
 
+      for (final y in [4.0, 12.0, 30.0]) {
         expect(
-          await pixelAt(tester, Offset(gutterX, 12)),
-          lcarsTokens.primary,
-          reason:
-              'inside the inset the seam must be filled with the same colour '
-              'as the blocks it joins, or a black column shows through',
-        );
-        // A pixel inside the bled cap's own 1dp extension past the inset
-        // (the fill runs to `insetTop + kElbowCapBledHeight`, 25 here) — clear
-        // of the inset's own top edge, so nothing here is a mutation's
-        // unpinned shrink of the fill back down to `bleed.top` alone.
-        expect(
-          await pixelAt(tester, Offset(gutterX, insetTop)),
-          lcarsTokens.primary,
-          reason:
-              'the fill must extend past the inset to the bottom of the '
-              'elbow cap, not stop at the inset alone',
-        );
-        expect(
-          // Comfortably past the fill's own bottom edge (25): the seam
-          // resumes as plain black at a hard corner now, with no curve
-          // needing room to render.
-          await pixelAt(tester, Offset(gutterX, 30)),
+          await pixelAt(tester, Offset(gutterX, y)),
           lcarsTokens.canvas,
-          reason:
-              'below the inset the gutter is the ordinary frame gap, not a '
-              'stripe painted down the whole page',
+          reason: 'the gutter is filled at y=$y',
         );
-      },
-    );
+      }
+    });
 
     testWidgets('a horizontal inset is held, not bled', (tester) async {
       seed();
