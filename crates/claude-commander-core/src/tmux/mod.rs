@@ -14,6 +14,7 @@ mod headless_attach;
 mod input;
 mod isolation;
 mod state;
+mod term_input;
 
 pub use attach::*;
 pub use capture::*;
@@ -21,3 +22,4 @@ pub use executor::*;
 pub use headless_attach::*;
 pub use input::*;
 pub use state::*;
+pub use term_input::*;

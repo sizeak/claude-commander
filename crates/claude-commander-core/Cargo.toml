@@ -58,8 +58,9 @@ ratatui-core = { version = "0.1", features = ["std"] }
 # Key events. NOT a rendering dependency: `config/keybindings.rs` persists
 # crossterm `KeyCode`/`KeyModifiers` in the keybinding map, and `tmux/attach.rs`
 # toggles raw mode, so these stay here after the frontend moved out. Crossterm is
-# pure Rust with no native libraries, and the `event-stream` feature — needed
-# only for the TUI's async `EventStream` — is deliberately NOT enabled here.
+# pure Rust with no native libraries. The `event-stream` feature is enabled
+# nowhere in the workspace: the TUI reads the terminal with the synchronous
+# `poll`/`read` pair on a thread it owns (`claude-commander-tui/src/event.rs`).
 crossterm = "0.29"
 
 # Diff view-model and layout engine: unified-diff parsing, logical rows,

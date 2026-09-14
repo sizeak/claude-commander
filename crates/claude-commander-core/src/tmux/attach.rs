@@ -500,12 +500,17 @@ pub async fn run_attach(streams: AttachStreams, cfg: AttachConfig) -> Result<Att
 /// So [`run`](Self::run) returns [`AttachResult::OpenSwitcher`] with everything
 /// still alive and the I/O pumps parked. While parked:
 ///
-/// - the **stdin pump stops reading** — it is the whole point, because crossterm
-///   reads the terminal through a *separate* fd from the pump's `stdin`: its Unix
-///   event source polls `tty_fd()`, which opens `/dev/tty`
-///   (`crossterm-0.29.0/src/terminal/sys/file_descriptor.rs:123-150`, used by
-///   `event/source/unix/mio.rs:37`). Two readers on one terminal would race for
-///   keystrokes;
+/// - the **stdin pump stops reading** — it is the whole point. The pump and
+///   crossterm hold different descriptors (the pump reopens the terminal by
+///   name, see [`super::TtyReader`]; crossterm's `tty_fd()` is **fd 0** whenever
+///   stdin is a tty — both of its branches prefer stdin and open `/dev/tty` only
+///   otherwise, `crossterm-0.29.0/src/terminal/sys/file_descriptor.rs:124-127`
+///   under the `libc` feature and `:141-152` under rustix, which is what this
+///   workspace compiles) but they are one line discipline, and two readers on one terminal race for
+///   keystrokes: each burst goes to whichever `read()` the kernel wakes first,
+///   so an escape sequence can be split between them. Exactly one reader may
+///   be live at a time, and the frontend awaits `stop_input` before starting
+///   an attach for the same reason;
 /// - the **stdout pump keeps draining the transport but discards** what it
 ///   reads, so the pane looks frozen under the palette rather than painting over
 ///   it. It must not stop draining, or a blocked pipe would wedge the tmux
@@ -560,7 +565,10 @@ impl AttachSession {
             paused.clone(),
             resume.clone(),
             current_session.clone(),
-            tokio::io::stdin(),
+            // Not `tokio::io::stdin()`: its blocking read survives `abort()`
+            // ("impossible to cancel that read", `tokio-1.52.3/src/io/stdin.rs:16-19`)
+            // and eats the first burst after the attach ends. See `term_input.rs`.
+            super::term_input::terminal_input(),
             tokio::io::stdout(),
         );
 
@@ -627,8 +635,13 @@ impl AttachSession {
     /// End the attach: stop the pumps, leave raw mode, and detach the transport.
     pub async fn finish(mut self, result: AttachResult) -> AttachOutcome {
         info!("Attach ending with result: {:?}", result);
+        // `abort` only *requests* cancellation ("will return before the
+        // cancellation has completed", tokio-1.52.3 `src/task/mod.rs:146-149`);
+        // awaiting the handle is what guarantees the pump has let go of the
+        // terminal before raw mode is dropped and the frontend reads it again.
         for task in self.tasks.drain(..) {
             task.abort();
+            let _ = task.await;
         }
 
         info!("Disabling raw mode");
@@ -840,8 +853,9 @@ where
         }
     });
 
-    // Task 2: stdin -> PTY (raw byte forwarding, no crossterm EventStream)
-    // We use raw stdin to avoid conflicting with TUI's EventStream
+    // Task 2: terminal -> PTY (raw byte forwarding, no crossterm EventStream).
+    // Raw bytes, because crossterm's parser would re-encode what it recognises
+    // and drop what it doesn't; the pane wants the terminal's bytes verbatim.
     let stdin_shutdown = shutdown_tx.clone();
     let stdin_task = tokio::spawn(async move {
         let mut buf = [0u8; 1024];
@@ -895,9 +909,10 @@ where
                             }
 
                             // Suspend: stop reading the terminal so the frontend's
-                            // own reader (crossterm, on /dev/tty) has it to itself,
-                            // and tell the stdout pump to start discarding. Both
-                            // must be in place before the frontend draws.
+                            // own reader (crossterm, on fd 0 — the same tty) has it
+                            // to itself, and tell the stdout pump to start
+                            // discarding. Both must be in place before the
+                            // frontend draws.
                             debug!("Ctrl+Space detected, suspending attach for the switcher");
                             paused.store(true, Ordering::Release);
                             if stdin_shutdown

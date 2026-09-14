@@ -6,19 +6,16 @@
 //! - Render ticks
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use claude_commander_core::config::keybindings::{BindableAction, KeyBindings};
 use claude_commander_core::git::{DiffInfo, EnrichedPrInfo};
 use claude_commander_core::session::{ProjectId, SessionId};
 
-use crossterm::event::{
-    Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-};
-use futures::{FutureExt, StreamExt};
-use tokio::sync::mpsc;
-use tracing::debug;
+use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, warn};
 
 /// Application events
 #[derive(Debug, Clone)]
@@ -688,14 +685,113 @@ impl From<BindableAction> for UserCommand {
     }
 }
 
+/// How long the input reader sleeps in `poll` between checks of its stop flag —
+/// and so the usual latency of [`EventLoop::stop_input`].
+const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How long [`EventLoop::stop_input`] waits for the reader thread to exit before
+/// giving up. Well past a poll interval. Only a *wedged* thread takes longer: a
+/// terminal that delivers `ESC [` in one write and the rest of the sequence
+/// later makes crossterm's `poll` loop a blocking `read()` on fd 0 until the
+/// sequence completes (`crossterm-0.29.0/src/event/source/unix/mio.rs:94-121` —
+/// it reads until the parser yields an event, and fd 0 is never `O_NONBLOCK`).
+/// Nothing can interrupt that; the next burst releases it.
+const INPUT_STOP_GRACE: Duration = Duration::from_millis(500);
+
+/// Where the input reader thread gets terminal events.
+///
+/// Production is crossterm's synchronous `poll`/`read` pair ([`CrosstermSource`]).
+/// Tests script one, so the reader's lifecycle — the part that races the attach
+/// pump for the terminal — can be pinned with no tty.
+pub(crate) trait InputSource: Send + 'static {
+    /// Wait up to `timeout` for an event to become readable.
+    fn poll(&mut self, timeout: Duration) -> std::io::Result<bool>;
+    /// Read the event `poll` reported. Must not be called unless it did.
+    fn read(&mut self) -> std::io::Result<CrosstermEvent>;
+    /// Throw away events already parsed but not yet read. Called once when a
+    /// reader starts, so what was typed at a previous owner of the terminal
+    /// does not replay into this one.
+    fn discard_pending(&mut self) {}
+}
+
+/// The real terminal, via crossterm's blocking API.
+///
+/// Deliberately *not* `crossterm::event::EventStream`. The stream parks an OS
+/// thread of its own inside `poll_internal(None)` holding crossterm's global
+/// reader lock (`crossterm-0.29.0/src/event/stream.rs:44-60`), and dropping the
+/// stream only *signals* that thread — nothing tells the caller when it has
+/// actually let go of the terminal. `poll`/`read` take and release the lock per
+/// call on a thread we own, so [`EventLoop::stop_input`] can await its exit and
+/// know the terminal is free.
+struct CrosstermSource;
+
+impl InputSource for CrosstermSource {
+    fn poll(&mut self, timeout: Duration) -> std::io::Result<bool> {
+        crossterm::event::poll(timeout)
+    }
+
+    fn read(&mut self) -> std::io::Result<CrosstermEvent> {
+        crossterm::event::read()
+    }
+
+    /// crossterm parses a whole tty burst at once but hands events out one per
+    /// `read` (`event/source/unix/mio.rs:68-70`, `read.rs:100-123`), in a
+    /// process-global reader (`event.rs:149`). Events left there when a reader
+    /// stopped — the tail of a burst typed as an attach began, say — would
+    /// otherwise be the first thing the next reader delivers, minutes later.
+    /// `tcflush` on detach cannot reach them; they are already in user space.
+    fn discard_pending(&mut self) {
+        while matches!(crossterm::event::poll(Duration::ZERO), Ok(true)) {
+            if crossterm::event::read().is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// The input reader thread, as seen from the event loop.
+///
+/// Held from spawn until the thread is known to have exited — including after a
+/// [`EventLoop::stop_input`] that timed out, so the wedged thread it left behind
+/// is still accounted for and the next reader waits for it (see
+/// [`EventLoop::start_input_reader_with`]).
+struct InputReader {
+    /// Set to ask the thread to exit at its next poll.
+    stop: Arc<AtomicBool>,
+    /// Resolves (with `Err`, the sender having dropped) when the thread exits.
+    done: oneshot::Receiver<()>,
+}
+
+impl InputReader {
+    fn stop_requested(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+}
+
+/// Map a terminal event to the app event it becomes, or `None` to drop it.
+fn input_event(event: CrosstermEvent) -> Option<AppEvent> {
+    let input = match event {
+        CrosstermEvent::Key(key) => InputEvent::Key(key),
+        CrosstermEvent::Mouse(mouse) => InputEvent::Mouse(mouse),
+        CrosstermEvent::Resize(w, h) => InputEvent::Resize(w, h),
+        CrosstermEvent::Paste(text) => InputEvent::Paste(text),
+        _ => return None,
+    };
+    Some(AppEvent::Input(input))
+}
+
 /// Event loop handle
 pub struct EventLoop {
     /// Sender for events
     tx: mpsc::Sender<AppEvent>,
     /// Receiver for events
     rx: mpsc::Receiver<AppEvent>,
-    /// Generation counter for input reader (used to stop old readers)
-    input_generation: Arc<AtomicU64>,
+    /// The terminal reader while one exists: running, or asked to stop but not
+    /// yet gone. `None` while an attach (or the editor) owns the terminal.
+    input_reader: Option<InputReader>,
+    /// How long [`Self::stop_input`] waits for the thread; see
+    /// [`INPUT_STOP_GRACE`]. A field so tests don't pay the real grace.
+    pub(crate) stop_grace: Duration,
     /// Current tick rate
     tick_rate: Option<Duration>,
 }
@@ -707,7 +803,8 @@ impl EventLoop {
         Self {
             tx,
             rx,
-            input_generation: Arc::new(AtomicU64::new(0)),
+            input_reader: None,
+            stop_grace: INPUT_STOP_GRACE,
             tick_rate: None,
         }
     }
@@ -740,77 +837,124 @@ impl EventLoop {
         });
     }
 
-    /// Start the input reader task
-    fn start_input_reader(&self) {
-        let tx = self.tx.clone();
-        let generation = self.input_generation.load(Ordering::SeqCst);
-        let generation_ref = self.input_generation.clone();
-
-        tokio::spawn(async move {
-            let mut reader = EventStream::new();
-
-            loop {
-                // Check if we should stop (generation changed = stop signal)
-                if generation_ref.load(Ordering::SeqCst) != generation {
-                    debug!("Input reader stopping (generation changed)");
-                    break;
-                }
-
-                // Use short timeout to check generation frequently
-                let event =
-                    tokio::time::timeout(Duration::from_millis(50), reader.next().fuse()).await;
-
-                match event {
-                    Ok(Some(Ok(event))) => {
-                        // Re-check generation before sending (might have changed during read)
-                        if generation_ref.load(Ordering::SeqCst) != generation {
-                            debug!("Input reader stopping (generation changed during read)");
-                            break;
-                        }
-
-                        let app_event = match event {
-                            CrosstermEvent::Key(key) => AppEvent::Input(InputEvent::Key(key)),
-                            CrosstermEvent::Mouse(mouse) => {
-                                AppEvent::Input(InputEvent::Mouse(mouse))
-                            }
-                            CrosstermEvent::Resize(w, h) => {
-                                AppEvent::Input(InputEvent::Resize(w, h))
-                            }
-                            CrosstermEvent::Paste(text) => AppEvent::Input(InputEvent::Paste(text)),
-                            _ => continue,
-                        };
-
-                        if tx.send(app_event).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Some(Err(e))) => {
-                        debug!("Error reading terminal event: {}", e);
-                        continue;
-                    }
-                    Ok(None) => break,
-                    Err(_) => continue, // Timeout, loop back to check generation
-                }
-            }
-            debug!("Input reader task exited");
-        });
+    /// Start the terminal reader on the real terminal.
+    fn start_input_reader(&mut self) {
+        self.start_input_reader_with(CrosstermSource);
     }
 
-    /// Stop the input reader before tmux attach
+    /// Start the terminal reader over `source`.
     ///
-    /// Increments generation to signal current reader to stop, then waits briefly
-    /// for it to actually stop so it won't compete for stdin during attach.
-    pub fn stop_input(&mut self) {
-        self.input_generation.fetch_add(1, Ordering::SeqCst);
-        debug!("Input reader stop signaled");
+    /// A no-op while one is running: two readers would split every burst
+    /// between them. If the previous reader was asked to stop but is still
+    /// wedged in the terminal (see [`INPUT_STOP_GRACE`]), the new thread is
+    /// started but does not touch the terminal until that one has exited — so
+    /// the invariant holds even on the path where `stop_input` gave up.
+    pub(crate) fn start_input_reader_with(&mut self, mut source: impl InputSource) {
+        let predecessor = match self.input_reader.take() {
+            Some(reader) if !reader.stop_requested() => {
+                debug!("Input reader already running; not starting another");
+                self.input_reader = Some(reader);
+                return;
+            }
+            Some(wedged) => Some(wedged.done),
+            None => None,
+        };
+
+        let tx = self.tx.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (done_tx, done) = oneshot::channel::<()>();
+        let stop_flag = stop.clone();
+
+        let spawned = std::thread::Builder::new()
+            .name("cc-term-input".into())
+            .spawn(move || {
+                // Dropped on every exit path, which is what resolves `done`.
+                let _done = done_tx;
+                if let Some(previous) = predecessor {
+                    debug!("Input reader waiting for its wedged predecessor to exit");
+                    let _ = previous.blocking_recv();
+                }
+                source.discard_pending();
+                while !stop_flag.load(Ordering::Acquire) {
+                    match source.poll(INPUT_POLL_INTERVAL) {
+                        Ok(true) => match source.read() {
+                            Ok(event) => {
+                                // An event read after the stop was asked for was
+                                // typed at whoever takes the terminal next; we
+                                // can't hand it back, so drop it rather than send
+                                // it to a TUI that is about to hide. (Any events
+                                // behind it in crossterm's queue are cleared by
+                                // the next reader's `discard_pending`.)
+                                if stop_flag.load(Ordering::Acquire) {
+                                    debug!("Input reader dropping an event read after stop");
+                                    break;
+                                }
+                                let Some(app_event) = input_event(event) else {
+                                    continue;
+                                };
+                                if tx.blocking_send(app_event).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => debug!("Error reading terminal event: {e}"),
+                        },
+                        Ok(false) => {}
+                        Err(e) => {
+                            // No tty, most likely. Keep honouring `stop`, but don't
+                            // spin on the error.
+                            debug!("Error polling terminal events: {e}");
+                            std::thread::sleep(INPUT_POLL_INTERVAL);
+                        }
+                    }
+                }
+                debug!("Input reader thread exited");
+            });
+
+        match spawned {
+            Ok(_) => self.input_reader = Some(InputReader { stop, done }),
+            Err(e) => {
+                // A TUI with no input reader is a TUI the operator cannot leave;
+                // exiting is the lesser harm. Practically unreachable (thread
+                // creation failing means the process is out of pids).
+                warn!("failed to spawn the terminal input reader ({e}); quitting");
+                let _ = self.tx.try_send(AppEvent::Quit);
+            }
+        }
     }
 
-    /// Restart the input reader after returning from tmux attach
+    /// Stop the terminal reader and wait until it has let go of the terminal.
+    ///
+    /// Anything that reads the terminal itself — the attach pump, the editor —
+    /// must not start until this resolves: two live readers split each burst
+    /// between them, and a split escape sequence is how a mouse report arrives
+    /// as the keystrokes `<`, `3`, `5`, … Resolves within about a poll interval
+    /// normally. A thread wedged in the terminal (see [`INPUT_STOP_GRACE`])
+    /// cannot be interrupted: after the grace this warns and returns, that
+    /// thread will swallow the next burst before exiting, and it stays on the
+    /// books so the next reader waits for it rather than overlapping it.
+    pub async fn stop_input(&mut self) {
+        let Some(reader) = self.input_reader.as_mut() else {
+            return;
+        };
+        reader.stop.store(true, Ordering::Release);
+        match tokio::time::timeout(self.stop_grace, &mut reader.done).await {
+            Ok(_) => {
+                debug!("Input reader stopped");
+                self.input_reader = None;
+            }
+            Err(_) => warn!(
+                "input reader did not release the terminal within {:?}; it is blocked in a \
+                 terminal read and will swallow the next burst",
+                self.stop_grace
+            ),
+        }
+    }
+
+    /// Restart the terminal reader after an attach (or the editor) returns.
     pub fn restart_input(&mut self) {
         // Drain any stale events from the channel
         while self.rx.try_recv().is_ok() {}
 
-        // Start a fresh input reader (generation was already incremented by stop_input)
         self.start_input_reader();
         debug!("Input reader restarted");
     }
@@ -1345,5 +1489,324 @@ mod tests {
             RestartKind::Restart.success_toast()
         );
         assert_eq!(RestartKind::Reset.error_prefix(), "Failed to reset");
+    }
+}
+
+/// The input reader's lifecycle: the part of the event loop that shares the
+/// terminal with the attach pump, pinned without a tty via a scripted
+/// [`InputSource`].
+#[cfg(test)]
+mod input_reader_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Condvar, Mutex};
+
+    use tokio::sync::Notify;
+
+    /// Counts live readers so a test can assert two never overlap. `live` goes
+    /// up when a thread first polls and down when its source is dropped, i.e.
+    /// when the thread has exited; `peak` remembers the highest `live`, and
+    /// `entered` wakes a test waiting for the thread to reach the terminal —
+    /// a signal, not a sleep, so a slow scheduler can't fail the test.
+    #[derive(Default)]
+    struct Overlap {
+        live: AtomicUsize,
+        peak: AtomicUsize,
+        entered: Notify,
+    }
+
+    impl Overlap {
+        fn enter(&self) {
+            let now = self.live.fetch_add(1, Ordering::AcqRel) + 1;
+            self.peak.fetch_max(now, Ordering::AcqRel);
+            self.entered.notify_one();
+        }
+        fn leave(&self) {
+            self.live.fetch_sub(1, Ordering::AcqRel);
+        }
+        async fn wait_entered(&self) {
+            tokio::time::timeout(Duration::from_secs(5), self.entered.notified())
+                .await
+                .expect("the reader thread should reach its first poll");
+        }
+    }
+
+    /// Polls report "nothing" after a short sleep; `read` is never reached.
+    struct IdleSource {
+        overlap: Arc<Overlap>,
+        entered: bool,
+    }
+
+    impl IdleSource {
+        fn new(overlap: &Arc<Overlap>) -> Self {
+            Self {
+                overlap: overlap.clone(),
+                entered: false,
+            }
+        }
+    }
+
+    impl InputSource for IdleSource {
+        fn poll(&mut self, timeout: Duration) -> std::io::Result<bool> {
+            if !self.entered {
+                self.entered = true;
+                self.overlap.enter();
+            }
+            std::thread::sleep(timeout / 5);
+            Ok(false)
+        }
+        fn read(&mut self) -> std::io::Result<CrosstermEvent> {
+            unreachable!("poll never reports an event")
+        }
+    }
+
+    impl Drop for IdleSource {
+        fn drop(&mut self) {
+            if self.entered {
+                self.overlap.leave();
+            }
+        }
+    }
+
+    /// A gate a thread blocks on until the test opens it.
+    #[derive(Default)]
+    struct Gate(Mutex<bool>, Condvar);
+
+    impl Gate {
+        fn wait(&self) {
+            let mut open = self.0.lock().unwrap();
+            while !*open {
+                open = self.1.wait(open).unwrap();
+            }
+        }
+        fn open(&self) {
+            *self.0.lock().unwrap() = true;
+            self.1.notify_all();
+        }
+    }
+
+    /// Blocks inside `poll` until released — the production wedge: crossterm's
+    /// `poll` loops a blocking `read()` on fd 0 after a partial escape sequence
+    /// until the rest arrives. Counts as a live reader like `IdleSource`.
+    struct WedgedSource {
+        gate: Arc<Gate>,
+        overlap: Arc<Overlap>,
+        entered: bool,
+    }
+
+    impl InputSource for WedgedSource {
+        fn poll(&mut self, _timeout: Duration) -> std::io::Result<bool> {
+            if !self.entered {
+                self.entered = true;
+                self.overlap.enter();
+            }
+            self.gate.wait();
+            Ok(false)
+        }
+        fn read(&mut self) -> std::io::Result<CrosstermEvent> {
+            unreachable!("poll never reports an event")
+        }
+    }
+
+    impl Drop for WedgedSource {
+        fn drop(&mut self) {
+            if self.entered {
+                self.overlap.leave();
+            }
+        }
+    }
+
+    fn key(c: char) -> CrosstermEvent {
+        CrosstermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    /// Hands out scripted events one per poll, then idles. `pending` is what a
+    /// previous owner left parsed-but-unread; a reader must discard it first.
+    struct ScriptedSource {
+        pending: std::collections::VecDeque<CrosstermEvent>,
+        events: std::collections::VecDeque<CrosstermEvent>,
+    }
+
+    impl InputSource for ScriptedSource {
+        fn poll(&mut self, timeout: Duration) -> std::io::Result<bool> {
+            if self.pending.is_empty() && self.events.is_empty() {
+                std::thread::sleep(timeout / 5);
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        fn read(&mut self) -> std::io::Result<CrosstermEvent> {
+            Ok(self
+                .pending
+                .pop_front()
+                .or_else(|| self.events.pop_front())
+                .expect("poll reported an event"))
+        }
+        fn discard_pending(&mut self) {
+            self.pending.clear();
+        }
+    }
+
+    async fn next_key(ev: &mut EventLoop) -> KeyCode {
+        match tokio::time::timeout(Duration::from_secs(2), ev.next()).await {
+            Ok(Some(AppEvent::Input(InputEvent::Key(k)))) => k.code,
+            other => panic!("expected a key event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_input_resolves_only_after_the_reader_has_left_the_terminal() {
+        let overlap = Arc::new(Overlap::default());
+        let mut ev = EventLoop::new();
+        ev.start_input_reader_with(IdleSource::new(&overlap));
+        overlap.wait_entered().await;
+        assert_eq!(overlap.live.load(Ordering::Acquire), 1);
+
+        ev.stop_input().await;
+
+        // No sleep: the guarantee is that *resolution* means the thread is gone.
+        assert_eq!(
+            overlap.live.load(Ordering::Acquire),
+            0,
+            "stop_input returned while the reader thread still held the terminal"
+        );
+    }
+
+    /// The regression: stopping used to only *signal* the reader, and callers
+    /// slept 100ms hoping it had noticed. Restarting straight after an awaited
+    /// stop must never put two readers on the terminal at once.
+    #[tokio::test]
+    async fn readers_never_overlap_across_repeated_stop_and_restart() {
+        let overlap = Arc::new(Overlap::default());
+        let mut ev = EventLoop::new();
+
+        for _ in 0..5 {
+            ev.start_input_reader_with(IdleSource::new(&overlap));
+            overlap.wait_entered().await;
+            ev.stop_input().await;
+        }
+
+        assert_eq!(overlap.peak.load(Ordering::Acquire), 1);
+        assert_eq!(overlap.live.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn a_second_start_while_one_is_running_is_ignored() {
+        let overlap = Arc::new(Overlap::default());
+        let mut ev = EventLoop::new();
+        ev.start_input_reader_with(IdleSource::new(&overlap));
+        overlap.wait_entered().await;
+        ev.start_input_reader_with(IdleSource::new(&overlap));
+
+        ev.stop_input().await;
+        assert_eq!(overlap.peak.load(Ordering::Acquire), 1);
+        assert_eq!(overlap.live.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn events_read_before_stop_are_delivered() {
+        let mut ev = EventLoop::new();
+        ev.start_input_reader_with(ScriptedSource {
+            pending: Default::default(),
+            events: [key('j'), key('k')].into(),
+        });
+
+        assert_eq!(next_key(&mut ev).await, KeyCode::Char('j'));
+        assert_eq!(next_key(&mut ev).await, KeyCode::Char('k'));
+        ev.stop_input().await;
+    }
+
+    /// What a previous owner of the terminal left parsed in the source must not
+    /// be the first thing a new reader delivers.
+    #[tokio::test]
+    async fn a_new_reader_discards_events_left_by_the_previous_owner() {
+        let mut ev = EventLoop::new();
+        ev.start_input_reader_with(ScriptedSource {
+            pending: [key('q'), key('q')].into(),
+            events: [key('j')].into(),
+        });
+
+        assert_eq!(next_key(&mut ev).await, KeyCode::Char('j'));
+        ev.stop_input().await;
+    }
+
+    /// A thread wedged in the terminal can't be interrupted; `stop_input` must
+    /// bound its wait rather than hang the frontend behind it — and must keep
+    /// the wedged reader on the books rather than forget it.
+    #[tokio::test]
+    async fn stop_input_gives_up_on_a_wedged_reader_but_keeps_track_of_it() {
+        let gate = Arc::new(Gate::default());
+        let overlap = Arc::new(Overlap::default());
+        let mut ev = EventLoop::new();
+        ev.stop_grace = Duration::from_millis(50);
+        ev.start_input_reader_with(WedgedSource {
+            gate: gate.clone(),
+            overlap: overlap.clone(),
+            entered: false,
+        });
+        overlap.wait_entered().await;
+
+        let started = Instant::now();
+        ev.stop_input().await;
+        assert!(
+            started.elapsed() >= ev.stop_grace,
+            "expected to wait out the grace period"
+        );
+        assert_eq!(overlap.live.load(Ordering::Acquire), 1, "still wedged");
+        assert!(
+            ev.input_reader.as_ref().is_some_and(|r| r.stop_requested()),
+            "the wedged reader must stay accounted for"
+        );
+
+        gate.open();
+        // A second stop now observes the exit and forgets the reader.
+        ev.stop_input().await;
+        assert_eq!(overlap.live.load(Ordering::Acquire), 0);
+        assert!(ev.input_reader.is_none());
+    }
+
+    /// The path `stop_input`'s timeout leaves behind: a restart after a wedged
+    /// stop must not put a second reader on the terminal while the first is
+    /// still there. The new thread starts, but waits for the old one to exit.
+    #[tokio::test]
+    async fn a_reader_started_after_a_wedged_stop_waits_for_the_wedged_one() {
+        let gate = Arc::new(Gate::default());
+        let overlap = Arc::new(Overlap::default());
+        let mut ev = EventLoop::new();
+        ev.stop_grace = Duration::from_millis(50);
+        ev.start_input_reader_with(WedgedSource {
+            gate: gate.clone(),
+            overlap: overlap.clone(),
+            entered: false,
+        });
+        overlap.wait_entered().await;
+        ev.stop_input().await; // times out; the wedge holds
+
+        let idle = Arc::new(Overlap::default());
+        ev.start_input_reader_with(IdleSource::new(&idle));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            idle.live.load(Ordering::Acquire),
+            0,
+            "the new reader must not touch the terminal while the wedged one holds it"
+        );
+
+        gate.open();
+        idle.wait_entered().await;
+        assert_eq!(overlap.live.load(Ordering::Acquire), 0, "wedged one gone");
+        assert_eq!(idle.live.load(Ordering::Acquire), 1);
+
+        ev.stop_input().await;
+        assert_eq!(idle.live.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn focus_and_unknown_events_are_dropped() {
+        assert!(input_event(CrosstermEvent::FocusGained).is_none());
+        assert!(input_event(CrosstermEvent::FocusLost).is_none());
+        assert!(matches!(
+            input_event(CrosstermEvent::Resize(80, 24)),
+            Some(AppEvent::Input(InputEvent::Resize(80, 24)))
+        ));
     }
 }
