@@ -4,10 +4,10 @@
 //! All failures are silently swallowed — missing `gh`, auth errors, network
 //! issues, or repos without a GitHub remote simply result in `None`.
 
+use crate::git::gh_command;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use tokio::process::Command;
 use tracing::debug;
 
 // PR state + review decision are network wire enums; they live in the shared
@@ -138,7 +138,7 @@ impl std::fmt::Display for ChecksStatus {
 ///
 /// Called once at startup to avoid repeated fork/exec on every tick.
 pub async fn is_gh_available() -> bool {
-    match Command::new("gh").arg("--version").output().await {
+    match gh_command().arg("--version").output().await {
         Ok(output) => {
             let ok = output.status.success();
             debug!("gh --version: available={}", ok);
@@ -175,7 +175,7 @@ pub async fn try_retarget_pr_base(
     pr_number: u32,
     new_base: &str,
 ) -> std::result::Result<(), String> {
-    let output = match Command::new("gh")
+    let output = match gh_command()
         .args(["pr", "edit", &pr_number.to_string(), "--base", new_base])
         .current_dir(repo_path)
         .output()
@@ -222,7 +222,7 @@ pub async fn check_pr_for_branch(
     branch: &str,
     branch_owned_since: DateTime<Utc>,
 ) -> PrCheckResult {
-    let output = match Command::new("gh")
+    let output = match gh_command()
         .args([
             "pr",
             "list",
@@ -420,7 +420,7 @@ fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
 ///
 /// Returns `None` on any failure (gh missing, not authed, network error, etc.).
 pub async fn fetch_enriched_pr(repo_path: &Path, pr_number: u32) -> Option<EnrichedPrInfo> {
-    let output = Command::new("gh")
+    let output = gh_command()
         .args([
             "pr",
             "view",

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::agent::AgentKind;
+use crate::git::git_command;
 
 impl SessionManager {
     /// Prepare a placeholder session in `Creating` state.
@@ -153,7 +154,7 @@ impl SessionManager {
                 repo_path.display()
             );
             let fetch_start = std::time::Instant::now();
-            let output = tokio::process::Command::new("git")
+            let output = git_command()
                 .current_dir(&repo_path)
                 .args(["fetch", "origin"])
                 .stdin(std::process::Stdio::null())

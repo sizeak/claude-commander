@@ -24,6 +24,7 @@
 //! [`GitError::RepoListTimedOut`] rather than a `GhUnavailable` — telling a user
 //! to install a `gh` they already have is worse than saying nothing.
 
+use crate::git::gh_command;
 use std::time::Duration;
 
 use claude_commander_protocol::github::GithubRepo;
@@ -83,7 +84,7 @@ pub async fn list_repos(timeout: Duration) -> Result<Vec<GithubRepo>> {
 
 /// The `gh api --paginate` invocation that produces the listing.
 fn gh_api_command() -> Command {
-    let mut cmd = Command::new("gh");
+    let mut cmd = gh_command();
     cmd.args(["api", "--paginate", "--jq", REPO_PROJECTION, REPOS_ENDPOINT]);
     cmd
 }

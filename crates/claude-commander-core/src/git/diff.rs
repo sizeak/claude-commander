@@ -5,6 +5,7 @@
 //! - Background refresh for active sessions
 //! - Incremental updates when possible
 
+use crate::git::git_command;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
@@ -12,7 +13,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use tokio::process::Command;
 use tokio::sync::RwLock;
 use tracing::{debug, instrument};
 
@@ -178,14 +178,14 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
     // by the shared `untracked_patch_and_count` helper (also used by the
     // review-diff composition) to avoid duplicating the per-file diff loop.
     let (diff_output, stat_output) = tokio::join!(
-        Command::new("git")
+        git_command()
             .current_dir(path)
             .args(["diff", "HEAD"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output(),
-        Command::new("git")
+        git_command()
             .current_dir(path)
             .args(["diff", "--stat", "HEAD"])
             .stdin(Stdio::null())
@@ -276,7 +276,7 @@ impl UntrackedPatch {
 /// caller still gets the tracked half. Shared by [`compute_diff_for_path`] and
 /// the review-diff composition in [`super::review_diff`].
 pub(crate) async fn untracked_patch_and_count(path: &Path) -> UntrackedPatch {
-    let ls = match Command::new("git")
+    let ls = match git_command()
         .current_dir(path)
         .args(["ls-files", "--others", "--exclude-standard"])
         .stdin(Stdio::null())
@@ -301,7 +301,7 @@ pub(crate) async fn untracked_patch_and_count(path: &Path) -> UntrackedPatch {
     let mut diff_futures = Vec::with_capacity(count);
     for file in &files {
         diff_futures.push(
-            Command::new("git")
+            git_command()
                 .current_dir(path)
                 .args([
                     "diff",
@@ -434,14 +434,14 @@ fn format_diff_stat_summary(files: usize, added: usize, removed: usize) -> Strin
 /// there are no changes, or when git cannot be run.
 pub async fn diff_stat_summary(path: &Path, base: &str) -> Option<String> {
     let (stat_output, untracked_output) = tokio::join!(
-        Command::new("git")
+        git_command()
             .current_dir(path)
             .args(["diff", "--stat", base])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output(),
-        Command::new("git")
+        git_command()
             .current_dir(path)
             .args(["ls-files", "--others", "--exclude-standard"])
             .stdin(Stdio::null())
@@ -508,7 +508,7 @@ mod tests {
         use tempfile::TempDir;
 
         async fn git(dir: &Path, args: &[&str]) {
-            let status = Command::new("git")
+            let status = git_command()
                 .current_dir(dir)
                 .args(args)
                 .stdin(Stdio::null())
@@ -554,7 +554,7 @@ mod tests {
         use tempfile::TempDir;
 
         async fn git(dir: &Path, args: &[&str]) {
-            Command::new("git")
+            git_command()
                 .current_dir(dir)
                 .args(args)
                 .stdin(Stdio::null())

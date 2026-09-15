@@ -1,5 +1,6 @@
 //! Commander API — unified service layer for CLI and TUI consumers.
 
+use crate::git::git_command;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1670,7 +1671,7 @@ impl CommanderService {
         if fetch {
             // Best-effort — a failed fetch (offline, no remote) just means we
             // list whatever refs already exist.
-            let _ = tokio::process::Command::new("git")
+            let _ = git_command()
                 .current_dir(&repo_path)
                 .args(["fetch", "origin"])
                 .output()
@@ -3215,7 +3216,7 @@ mod tests {
     use claude_commander_protocol::github::CloneStatus;
 
     use crate::comment::CommentSide;
-    use crate::git::PrState;
+    use crate::git::{PrState, git_command_std};
     use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
     use std::path::PathBuf;
 
@@ -3729,7 +3730,7 @@ mod tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = async |args: &[&str]| {
-            tokio::process::Command::new("git")
+            git_command()
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -3872,7 +3873,7 @@ mod tests {
         // working-tree-vs-HEAD, in which `changed.txt` no longer appears at all —
         // exactly the false-orphan trap the guard exists for.
         let git = async |args: &[&str]| {
-            tokio::process::Command::new("git")
+            git_command()
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -3944,7 +3945,7 @@ mod tests {
 
         // Now degrade: commit the work and point at an unresolvable base, so the
         // composed diff no longer contains `changed.txt` at all.
-        tokio::process::Command::new("git")
+        git_command()
             .current_dir(&repo)
             .args(["commit", "-qam", "work"])
             .output()
@@ -4410,7 +4411,7 @@ mod tests {
     /// Run `git` in `dir`, panicking on failure. GPG signing is forced off so
     /// the repo's `commit.gpgsign` policy can't break isolated tests.
     fn run_git(dir: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
+        let status = git_command_std()
             .current_dir(dir)
             .args(["-c", "commit.gpgsign=false", "-c", "gc.auto=0"])
             .args(args)

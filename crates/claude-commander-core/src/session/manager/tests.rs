@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::{AppState, Config, ConfigStore, StateStore};
+use crate::git::git_command_std;
 use claude_commander_protocol::github::canonical_repo_slug;
 use tempfile::TempDir;
 
@@ -392,7 +393,7 @@ async fn delete_session_mutates_state_once_removal_first() {
 
 /// Run a git command in `dir`, panicking with its output on failure.
 fn git(dir: &std::path::Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
+    let out = git_command_std()
         .current_dir(dir)
         .args(args)
         .output()

@@ -11,11 +11,11 @@
 //! not been pulled, smudging fails and we fall back to the original pointer
 //! bytes (the same degraded render as before LFS resolution existed).
 
+use crate::git::git_command;
 use std::path::Path;
 use std::process::Stdio;
 
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use tracing::warn;
 
 use crate::error::{GitError, Result};
@@ -77,7 +77,7 @@ pub fn is_lfs_pointer(bytes: &[u8]) -> bool {
 /// block on a full pipe before the child starts reading. A future caller that
 /// fed a large payload here would deadlock; keep the `is_lfs_pointer` gate.
 async fn smudge(worktree: &Path, path: &str, pointer: &[u8]) -> Result<Vec<u8>> {
-    let mut child = Command::new("git")
+    let mut child = git_command()
         .current_dir(worktree)
         .args(["lfs", "smudge", "--", path])
         .stdin(Stdio::piped())
@@ -119,7 +119,7 @@ async fn smudge(worktree: &Path, path: &str, pointer: &[u8]) -> Result<Vec<u8>> 
 /// not using LFS) is returned as an error for the caller to log; it is not
 /// fatal to the session. On a non-LFS repo this is a near no-op.
 pub async fn pull(worktree: &Path) -> Result<()> {
-    let output = Command::new("git")
+    let output = git_command()
         .current_dir(worktree)
         .args(["lfs", "pull"])
         .stdin(Stdio::null())

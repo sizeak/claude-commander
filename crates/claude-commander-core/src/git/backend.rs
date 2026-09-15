@@ -300,6 +300,7 @@ impl GitBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::git_command_std;
     use tempfile::TempDir;
 
     fn init_test_repo() -> (TempDir, GitBackend) {
@@ -350,12 +351,12 @@ mod tests {
         let repo_path = temp_dir.path();
 
         // Initialize repo with an initial commit (required for worktree add)
-        std::process::Command::new("git")
+        git_command_std()
             .args(["init"])
             .current_dir(repo_path)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        git_command_std()
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(repo_path)
             .output()
@@ -363,7 +364,7 @@ mod tests {
 
         // Create a linked worktree
         let wt_path = temp_dir.path().join("my-worktree");
-        std::process::Command::new("git")
+        git_command_std()
             .args([
                 "worktree",
                 "add",
@@ -389,7 +390,7 @@ mod tests {
     #[test]
     fn test_detect_main_branch_detached_head_does_not_leak_placeholder() {
         fn git(dir: &Path, args: &[&str]) {
-            let status = std::process::Command::new("git")
+            let status = git_command_std()
                 .args(args)
                 .current_dir(dir)
                 .status()
