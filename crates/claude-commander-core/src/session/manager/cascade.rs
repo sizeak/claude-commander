@@ -7,9 +7,9 @@
 //! in place (typically asking the attached Claude), commits, then runs the
 //! resume command to continue propagating up the chain.
 
+use crate::git::{git_command, git_command_std};
 use std::path::{Path, PathBuf};
 
-use tokio::process::Command;
 use tracing::{info, instrument, warn};
 
 use super::*;
@@ -501,7 +501,7 @@ async fn merge_in_progress(worktree_path: &Path) -> bool {
 /// treated as soft errors — the cascade still runs against whatever main
 /// happens to be at locally.
 async fn fetch_origin(repo_path: &Path) {
-    match Command::new("git")
+    match git_command()
         .current_dir(repo_path)
         .args(["fetch", "origin"])
         .stdin(std::process::Stdio::null())
@@ -556,7 +556,7 @@ fn preflight_session(
         }
     }
 
-    let status_output = std::process::Command::new("git")
+    let status_output = git_command_std()
         .current_dir(worktree_path)
         .args(["status", "--porcelain"])
         .stdin(std::process::Stdio::null())
@@ -603,7 +603,7 @@ fn preflight_session(
 /// - exit 1 with "CONFLICT" in stdout or the worktree ends up with `MERGE_HEAD` → `Conflict`
 /// - any other non-zero exit → error
 pub async fn run_git_merge(worktree_path: &Path, upstream: &str) -> Result<MergeOutcome> {
-    let output = Command::new("git")
+    let output = git_command()
         .current_dir(worktree_path)
         .args(["merge", upstream, "--no-edit", "--no-ff"])
         .stdin(std::process::Stdio::null())
@@ -652,7 +652,7 @@ pub async fn run_git_merge(worktree_path: &Path, upstream: &str) -> Result<Merge
 /// `-u` sets the upstream tracking ref on first push and is a no-op on
 /// subsequent pushes, so repeated invocations of push-stack are idempotent.
 pub async fn run_git_push(worktree_path: &Path, branch: &str) -> std::result::Result<(), String> {
-    let output = Command::new("git")
+    let output = git_command()
         .current_dir(worktree_path)
         .args(["push", "-u", "origin", branch])
         .stdin(std::process::Stdio::null())
@@ -692,7 +692,7 @@ mod tests {
     }
 
     fn run(cwd: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = git_command_std()
             .current_dir(cwd)
             .args(args)
             .output()

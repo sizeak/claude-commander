@@ -9,10 +9,10 @@
 //! resolution, the untracked-file half), reading blobs, git-LFS pointer
 //! reclassification, and image MIME sniffing.
 
+use crate::git::git_command;
 use std::path::Path;
 use std::process::Stdio;
 
-use tokio::process::Command;
 use tracing::warn;
 use xxhash_rust::xxh3::Xxh3;
 
@@ -73,7 +73,7 @@ pub async fn compose_review_diff(worktree: &Path, base: &str) -> Result<Composed
     // Force standard `a/`/`b/` prefixes so the parser is independent of the
     // user's `diff.mnemonicPrefix` config (which would emit `i/`/`w/`/`c/`).
     let git_diff = async |rev: &str| {
-        Command::new("git")
+        git_command()
             .current_dir(worktree)
             .args(["diff", "--src-prefix=a/", "--dst-prefix=b/", rev])
             .stdin(Stdio::null())
@@ -191,7 +191,7 @@ pub(crate) async fn ref_resolves(worktree: &Path, refname: &str) -> bool {
 
 /// Whether `refname` resolves to a commit in `worktree`.
 async fn ref_exists(worktree: &Path, refname: &str) -> bool {
-    Command::new("git")
+    git_command()
         .current_dir(worktree)
         .args(["rev-parse", "--verify", "--quiet", refname])
         .stdin(Stdio::null())
@@ -224,7 +224,7 @@ pub(crate) async fn diff_target(worktree: &Path, base: &str) -> String {
 pub async fn read_base_blob(worktree: &Path, base: &str, path: &str) -> Result<Vec<u8>> {
     let target = diff_target(worktree, base).await;
     let spec = format!("{target}:{path}");
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(worktree)
         .args(["show", &spec])
         .stdin(Stdio::null())
@@ -259,7 +259,7 @@ pub async fn read_worktree_file(worktree: &Path, path: &str) -> Result<Vec<u8>> 
 /// `git cat-file -s <oid>` — the byte size of a blob without reading its
 /// contents. `None` if the lookup fails (e.g. an absent/abbreviated oid).
 async fn blob_size(worktree: &Path, oid: &str) -> Option<u64> {
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(worktree)
         .args(["cat-file", "-s", oid])
         .stdin(Stdio::null())
@@ -304,7 +304,7 @@ pub async fn enrich_binary_sizes(diff: &mut ParsedDiff, worktree: &Path) {
 /// Resolve `git merge-base <base> HEAD`, returning `None` if it cannot be
 /// computed (so the caller can fall back).
 async fn merge_base(worktree: &Path, base: &str) -> Option<String> {
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(worktree)
         .args(["merge-base", base, "HEAD"])
         .stdin(Stdio::null())
@@ -1035,7 +1035,7 @@ index 0000000..2222222
     use tempfile::TempDir;
 
     async fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let status = git_command()
             .current_dir(dir)
             .args(args)
             .stdin(Stdio::null())
@@ -1048,7 +1048,7 @@ index 0000000..2222222
     }
 
     async fn git_capture(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = git_command()
             .current_dir(dir)
             .args(args)
             .stdin(Stdio::null())
@@ -1136,7 +1136,7 @@ index 0000000..2222222
     /// Whether `git lfs` is installed, so LFS-dependent tests can skip cleanly
     /// (mirrors the tmux-guarded integration tests).
     async fn git_lfs_available() -> bool {
-        Command::new("git")
+        git_command()
             .args(["lfs", "version"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

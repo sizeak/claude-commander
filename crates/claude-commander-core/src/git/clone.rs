@@ -15,8 +15,8 @@
 //!
 //! Nearly every statement above is a claim about code outside this repo. The
 //! receipts are inline, and the ones that could be turned into tests were:
-//! `the_noninteractive_recipe_stops_git_prompting` pins the env recipe against
-//! a real `git`, and `a_timed_out_run_kills_the_child_and_its_descendants` pins
+//! `spawn::the_noninteractive_recipe_stops_git_prompting` pins the env recipe
+//! against a real `git`, and `a_timed_out_run_kills_the_child_and_its_descendants` pins
 //! the kill.
 //!
 //! # Known limitation: `core.sshCommand` is not honoured
@@ -34,7 +34,9 @@
 //! to read. Preserving the value would cost a `git config --get core.sshCommand`
 //! subprocess on every clone, to buy back a case where the alternative is a fast,
 //! legible auth error rather than the indefinite hang this module exists to
-//! prevent. An inherited `GIT_SSH_COMMAND` *is* preserved — see [`ssh_command`].
+//! prevent. An inherited `GIT_SSH_COMMAND` *is* preserved — see
+//! [`super::spawn::ssh_command`]. The recipe itself lives in `spawn.rs` now,
+//! because it turned out every git the TUI spawns needs it, not only a clone.
 
 use std::path::Path;
 use std::time::Duration;
@@ -43,6 +45,8 @@ use claude_commander_protocol::github::{
     CloneSource, redact_credentials, validate_clone_url, validate_repo_slug,
 };
 use tokio::process::Command;
+
+use super::spawn::{gh_command, git_command};
 use tracing::{debug, warn};
 
 use crate::error::{GitError, Result};
@@ -147,79 +151,17 @@ pub(crate) fn clone_source_rejected(rejection: impl std::fmt::Display) -> GitErr
 ///   `unknown shorthand flag: 'v' in -version`. Pinned by
 ///   `both_arms_terminate_options_before_the_source` for the argv shape.
 fn clone_command(source: &CloneSource, dest: &Path) -> Command {
-    let mut cmd = match source {
+    match source {
         CloneSource::Github { full_name } => {
-            let mut cmd = Command::new("gh");
+            let mut cmd = gh_command();
             cmd.args(["repo", "clone", "--"]).arg(full_name).arg(dest);
             cmd
         }
         CloneSource::Url { url } => {
-            let mut cmd = Command::new("git");
+            let mut cmd = git_command();
             cmd.args(["clone", "--"]).arg(url).arg(dest);
             cmd
         }
-    };
-    apply_noninteractive_env(&mut cmd);
-    cmd
-}
-
-/// Close every route by which git (or the ssh it spawns) could stop and ask a
-/// question. Applied to the `gh` arm too: `gh repo clone` shells out to
-/// `git clone` (its help: "Pass additional `git clone` flags by listing them
-/// after `--`"), and a child process inherits this environment.
-///
-/// * `GIT_TERMINAL_PROMPT=0` — "If this Boolean environment variable is set to
-///   false, git will not prompt on the terminal" (`git help environment`,
-///   git 2.53.0).
-/// * `GIT_ASKPASS=""` — **empty, not unset, and this is the whole point.**
-///   `GIT_TERMINAL_PROMPT=0` alone does not stop an askpass *helper* from
-///   running, and a desktop machine routinely has one configured, which pops a
-///   dialog nobody will ever see. Git consults `GIT_ASKPASS`, then
-///   `core.askPass`, then `SSH_ASKPASS`; setting `GIT_ASKPASS` to the empty
-///   string short-circuits that chain without nominating a program, leaving the
-///   terminal fallback that the line above refuses. Verified with git 2.53.0 by
-///   `printf 'protocol=https\nhost=example.invalid\n\n' | git credential fill`
-///   under each combination, and pinned by the pair of tests
-///   `without_the_recipe_git_runs_an_askpass_helper` /
-///   `the_noninteractive_recipe_stops_git_prompting`.
-/// * `GIT_SSH_COMMAND` — see [`ssh_command`].
-fn apply_noninteractive_env(cmd: &mut Command) {
-    cmd.env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "")
-        .env(
-            "GIT_SSH_COMMAND",
-            ssh_command(std::env::var("GIT_SSH_COMMAND").ok().as_deref()),
-        );
-}
-
-/// The ssh command git should use, carrying `BatchMode=yes`.
-///
-/// `BatchMode=yes`: "If set to yes, user interaction such as password prompts
-/// and host key confirmation requests will be disabled." (`ssh_config(5)`,
-/// OpenSSH 10.4p1) — the two ways an ssh clone hangs unattended.
-///
-/// `GIT_SSH_COMMAND` is documented for "git fetch and git push"
-/// (`git help environment`), which is what a clone runs underneath; verified
-/// with git 2.53.0 by pointing it at a logging stub and observing
-/// `git clone ssh://…` invoke it with `-o BatchMode=yes -o
-/// SendEnv=GIT_PROTOCOL git@host git-upload-pack '/o/r.git'`.
-///
-/// An inherited `GIT_SSH_COMMAND` is preserved and appended to rather than
-/// replaced, so a wrapper or `-i <key>` the operator configured still applies.
-/// Our option lands first, and ssh takes "the first obtained value" for each
-/// parameter (`ssh_config(5)`) — so an inherited command that explicitly sets
-/// `BatchMode=no` would win. That is a deliberate escape hatch, not an
-/// oversight.
-///
-/// **Known limitation:** git's `core.sshCommand` config is *not* preserved,
-/// because `GIT_SSH_COMMAND` "takes precedence over" it (`git-config(1)`,
-/// `core.sshCommand`: "is overridden when the environment variable is set").
-/// A user whose identity setup lives there rather than in `~/.ssh/config` gets
-/// a fast, legible auth failure instead of a clone that hangs.
-fn ssh_command(inherited: Option<&str>) -> String {
-    match inherited {
-        Some(cmd) if !cmd.trim().is_empty() => format!("{} -o BatchMode=yes", cmd.trim()),
-        _ => "ssh -o BatchMode=yes".to_string(),
     }
 }
 
@@ -271,16 +213,13 @@ async fn run_bounded(cmd: Command, program: &str, timeout: Duration) -> Result<(
 mod tests {
     use super::*;
 
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     use claude_commander_protocol::github::CloneSource;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     use tempfile::TempDir;
-    use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
 
     /// Run a git command to completion, asserting it succeeded.
@@ -452,91 +391,6 @@ mod tests {
         }
     }
 
-    /// Write an executable script that records the fact it ran.
-    fn write_canary(path: &Path, log: &Path) {
-        std::fs::write(
-            path,
-            format!("#!/bin/sh\necho called >> {}\necho dummy\n", log.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    /// Ask git for a credential it has no way to obtain, and report whether the
-    /// askpass canary ran and what git said.
-    ///
-    /// `git credential fill` reaches git's *entire* prompting chain (askpass
-    /// helper, then terminal) without touching the network, which is what makes
-    /// this property testable at all. The user's own config is neutralised via
-    /// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` so a real credential helper on
-    /// the developer's machine can neither answer the request nor pop a dialog.
-    async fn probe_prompting(tmp: &TempDir, noninteractive: bool) -> (bool, String) {
-        let canary = tmp.path().join("askpass.sh");
-        let log = tmp.path().join("askpass.log");
-        let _ = std::fs::remove_file(&log);
-        write_canary(&canary, &log);
-        let empty_config = tmp.path().join("empty.gitconfig");
-        std::fs::write(&empty_config, "").unwrap();
-
-        let mut cmd = Command::new("git");
-        cmd.args(["credential", "fill"])
-            .current_dir(tmp.path())
-            .env("GIT_CONFIG_GLOBAL", &empty_config)
-            .env("GIT_CONFIG_SYSTEM", &empty_config)
-            // The canary stands in for whatever askpass helper the machine has:
-            // git falls back to SSH_ASKPASS when GIT_ASKPASS is unset.
-            .env("SSH_ASKPASS", &canary)
-            .env_remove("GIT_ASKPASS")
-            .env_remove("GIT_TERMINAL_PROMPT")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if noninteractive {
-            apply_noninteractive_env(&mut cmd);
-        }
-
-        let mut child = cmd.spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"protocol=https\nhost=example.invalid\n\n")
-            .await
-            .unwrap();
-        let out = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
-            .await
-            .expect("git blocked on a prompt")
-            .unwrap();
-
-        (
-            log.exists(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    }
-
-    /// The control arm: without the env recipe, git happily runs an askpass
-    /// helper. Without this half, the test below would pass against a git that
-    /// never prompts for unrelated reasons.
-    #[tokio::test]
-    async fn without_the_recipe_git_runs_an_askpass_helper() {
-        let tmp = TempDir::new().unwrap();
-        let (called, _stderr) = probe_prompting(&tmp, false).await;
-        assert!(called, "askpass helper was not consulted at all");
-    }
-
-    /// The env recipe closes *both* prompting routes: the askpass helper is
-    /// never consulted, and the terminal fallback is refused.
-    #[tokio::test]
-    async fn the_noninteractive_recipe_stops_git_prompting() {
-        let tmp = TempDir::new().unwrap();
-        let (called, stderr) = probe_prompting(&tmp, true).await;
-        assert!(!called, "an askpass helper still ran: {stderr}");
-        assert!(
-            stderr.contains("terminal prompts disabled"),
-            "git did not refuse the terminal prompt: {stderr}"
-        );
-    }
-
     /// A failing git echoes the source back, and a hand-typed source may carry
     /// `user:token@`. That string becomes `CloneStatus::Failed { message }`,
     /// crosses the wire and is rendered in a UI, so the secret must not survive
@@ -567,16 +421,6 @@ mod tests {
         assert!(err.contains("https://***@github.com/o/r.git/"), "{err}");
         // Still a usable diagnosis.
         assert!(err.contains("Authentication failed"), "{err}");
-    }
-
-    #[test]
-    fn ssh_command_carries_batch_mode_and_preserves_an_inherited_one() {
-        assert_eq!(ssh_command(None), "ssh -o BatchMode=yes");
-        assert_eq!(ssh_command(Some("   ")), "ssh -o BatchMode=yes");
-        assert_eq!(
-            ssh_command(Some("ssh -i /keys/work")),
-            "ssh -i /keys/work -o BatchMode=yes"
-        );
     }
 
     /// The `--` is load-bearing on both arms and lives right before the source.

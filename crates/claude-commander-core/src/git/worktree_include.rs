@@ -10,10 +10,10 @@
 //! forked from) still triggers the copy as long as the ref itself contains
 //! `.worktreeinclude`.
 
+use crate::git::git_command;
 use std::path::Path;
 use std::process::Stdio;
 
-use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use crate::error::{GitError, Result};
@@ -36,7 +36,7 @@ pub(super) async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Pat
         }
     };
 
-    let gitignored_output = Command::new("git")
+    let gitignored_output = git_command()
         .current_dir(repo_path)
         .args([
             "ls-files",
@@ -214,8 +214,6 @@ mod tests {
     use std::path::Path;
     use std::process::Stdio;
 
-    use tokio::process::Command;
-
     use super::*;
 
     #[test]
@@ -236,7 +234,7 @@ mod tests {
 
     /// Helper to run a git command in a directory
     async fn git(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = git_command()
             .current_dir(dir)
             .args(args)
             .stdin(Stdio::null())

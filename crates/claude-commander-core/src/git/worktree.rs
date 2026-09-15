@@ -5,6 +5,7 @@
 //! - Remove worktree
 //! - List worktrees
 
+use crate::git::{git_command, git_command_std};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -182,7 +183,7 @@ impl WorktreeManager {
     /// Remove a worktree
     #[instrument(skip(self))]
     pub async fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<()> {
-        let mut cmd = Command::new("git");
+        let mut cmd = git_command();
         cmd.current_dir(self.backend.path())
             .arg("worktree")
             .arg("remove");
@@ -215,7 +216,7 @@ impl WorktreeManager {
     /// List all worktrees
     #[instrument(skip(self))]
     pub async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
-        let output = Command::new("git")
+        let output = git_command()
             .current_dir(self.backend.path())
             .args(["worktree", "list", "--porcelain"])
             .stdin(Stdio::null())
@@ -240,7 +241,7 @@ impl WorktreeManager {
 
     /// Get HEAD commit of a worktree
     async fn get_worktree_head_static(worktree_path: &Path) -> Result<String> {
-        let output = Command::new("git")
+        let output = git_command()
             .current_dir(worktree_path)
             .args(["rev-parse", "HEAD"])
             .stdin(Stdio::null())
@@ -259,7 +260,7 @@ impl WorktreeManager {
 
     /// Prune stale worktree references
     pub async fn prune(&self) -> Result<()> {
-        let output = Command::new("git")
+        let output = git_command()
             .current_dir(self.backend.path())
             .args(["worktree", "prune"])
             .stdin(Stdio::null())
@@ -295,7 +296,7 @@ fn build_worktree_add_command(
     start_point: Option<&str>,
     skip_lfs_smudge: bool,
 ) -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = git_command_std();
     cmd.current_dir(repo_path).arg("worktree").arg("add");
 
     if branch_exists {
@@ -335,7 +336,7 @@ fn build_worktree_add_command(
 /// a `!Send` gix repository across an `.await`. Detached worktrees carry the
 /// synthetic branch `"HEAD"` (matching [`parse_worktree_list`]).
 pub async fn list_worktrees_at(repo_path: &Path) -> Result<Vec<WorktreeInfo>> {
-    let output = Command::new("git")
+    let output = git_command()
         .current_dir(repo_path)
         .args(["worktree", "list", "--porcelain"])
         .stdin(Stdio::null())
@@ -365,7 +366,7 @@ pub async fn list_worktrees_at(repo_path: &Path) -> Result<Vec<WorktreeInfo>> {
 /// `true`, erring toward leaving the stored branch untouched. See
 /// [`show_ref_indicates_exists`] for the exit-code mapping.
 pub async fn ref_exists_cli(repo_path: &Path, ref_name: &str) -> bool {
-    match Command::new("git")
+    match git_command()
         .current_dir(repo_path)
         .args(["show-ref", "--verify", "--quiet", ref_name])
         .stdin(Stdio::null())
