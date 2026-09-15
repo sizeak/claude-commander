@@ -783,6 +783,41 @@ pub fn flush_stdin() {
 // termination is observed by the owning [`AttachSession`] via its
 // [`AttachTerminator`] rather than a concrete child handle.
 //
+/// Upper bound on keystrokes queued for a pane that is not taking input. Past
+/// it the newest bytes are dropped, with a warning, rather than growing the
+/// queue without bound while the operator's Ctrl+Q still gets through.
+const MAX_PENDING_PANE_INPUT: usize = 64 * 1024;
+
+/// Queue `bytes` for the pane, subject to [`MAX_PENDING_PANE_INPUT`].
+fn enqueue_pane_input(outbound: &mut Vec<u8>, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    if outbound.len() + bytes.len() > MAX_PENDING_PANE_INPUT {
+        warn!(
+            "pane is not taking input ({} bytes queued); dropping {} bytes",
+            outbound.len(),
+            bytes.len()
+        );
+        return;
+    }
+    outbound.extend_from_slice(bytes);
+}
+
+/// Write everything queued for the pane and flush. Awaits to completion, so
+/// only for paths that must not leave bytes behind (parking for the switcher).
+async fn drain_pane_input<W: tokio::io::AsyncWrite + Unpin + ?Sized>(
+    writer: &mut W,
+    outbound: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    if outbound.is_empty() {
+        return Ok(());
+    }
+    writer.write_all(outbound).await?;
+    outbound.clear();
+    writer.flush().await
+}
+
 // Returns the spawned pump tasks; the session aborts them on teardown.
 //
 // `term_in`/`term_out` are the *local* terminal's halves — process stdin/stdout
@@ -856,15 +891,37 @@ where
     // Task 2: terminal -> PTY (raw byte forwarding, no crossterm EventStream).
     // Raw bytes, because crossterm's parser would re-encode what it recognises
     // and drop what it doesn't; the pane wants the terminal's bytes verbatim.
+    //
+    // Reading and forwarding are decoupled. Bytes for the pane queue in
+    // `outbound`, and the loop `select!`s between the next terminal read and the
+    // next pane write, so a pane that has stopped taking input — a tmux client
+    // blocked behind a terminal nobody is draining — cannot stop us reading,
+    // and the hotkeys (Ctrl+Q above all) keep working. The previous shape
+    // awaited each `write_all` before reading again, which wedged the escape
+    // hatch along with the pane; `ctrl_q_detaches_even_when_the_pane_is_not_draining`
+    // pins this one.
     let stdin_shutdown = shutdown_tx.clone();
     let stdin_task = tokio::spawn(async move {
         let mut buf = [0u8; 1024];
+        let mut outbound: Vec<u8> = Vec::new();
 
         loop {
-            match term_in.read(&mut buf).await {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    let data = &buf[..n];
+            tokio::select! {
+                // Reads first: a hotkey must never wait behind a stalled write.
+                biased;
+
+                read = term_in.read(&mut buf) => {
+                    let data = match read {
+                        Ok(0) => {
+                            info!("terminal input closed; stdin pump exiting");
+                            break;
+                        }
+                        Ok(n) => &buf[..n],
+                        Err(e) => {
+                            warn!("terminal read error: {e}; stdin pump exiting");
+                            break;
+                        }
+                    };
 
                     // Classify the burst with the pure interception state
                     // machine; perform the matching side effect here. The order
@@ -881,31 +938,20 @@ where
                         image_paste.is_some(),
                     ) {
                         InputAction::Break(result) => {
-                            match &result {
-                                AttachResult::Detached => debug!("Ctrl+Q detected, detaching"),
-                                AttachResult::SwitchToShell => {
-                                    debug!("Ctrl+\\ detected, switching to shell")
-                                }
-                                AttachResult::SwitchToReview => {
-                                    debug!("Review trigger detected, switching to review")
-                                }
-                                AttachResult::OpenEditor => {
-                                    debug!("Editor trigger detected, opening editor")
-                                }
-                                _ => {}
-                            }
+                            info!("attach hotkey seen: {result:?}");
                             let _ = stdin_shutdown.send(result).await;
                             break;
                         }
                         InputAction::OpenSwitcher(filtered) => {
                             // Forward whatever else was in the burst *before*
                             // parking, so those keystrokes reach the pane rather
-                            // than being stranded behind the suspension.
-                            if !filtered.is_empty() {
-                                if writer.write_all(&filtered).await.is_err() {
-                                    break;
-                                }
-                                let _ = writer.flush().await;
+                            // than being stranded behind the suspension. This is
+                            // the one place a write is awaited to completion: the
+                            // pane is about to be covered, and the queue is small.
+                            enqueue_pane_input(&mut outbound, &filtered);
+                            if let Err(e) = drain_pane_input(&mut writer, &mut outbound).await {
+                                warn!("pane write error: {e}; stdin pump exiting");
+                                break;
                             }
 
                             // Suspend: stop reading the terminal so the frontend's
@@ -948,13 +994,7 @@ where
                                         .await;
                                 });
                             }
-                            if filtered.is_empty() {
-                                continue;
-                            }
-                            if writer.write_all(&filtered).await.is_err() {
-                                break;
-                            }
-                            let _ = writer.flush().await;
+                            enqueue_pane_input(&mut outbound, &filtered);
                         }
                         InputAction::PasteImage(orig) => {
                             // Capture the local clipboard image and upload it.
@@ -962,31 +1002,34 @@ where
                             // (Ctrl+V swallowed), or the original burst as a
                             // fallback when there's no image or the upload fails.
                             let to_forward = handle_image_paste(&orig, image_paste.as_ref()).await;
-                            if to_forward.is_empty() {
-                                continue;
-                            }
-                            if writer.write_all(&to_forward).await.is_err() {
-                                break;
-                            }
-                            let _ = writer.flush().await;
+                            enqueue_pane_input(&mut outbound, &to_forward);
                         }
                         InputAction::Forward(out) => {
                             if intercept_ctrl_z && out.len() != data.len() {
                                 debug!("Ctrl+Z stripped from input");
                             }
-                            if out.is_empty() {
-                                continue;
-                            }
-                            if writer.write_all(&out).await.is_err() {
-                                break;
-                            }
-                            let _ = writer.flush().await;
+                            enqueue_pane_input(&mut outbound, &out);
                         }
                     }
                 }
-                Err(e) => {
-                    warn!("stdin read error: {}", e);
-                    break;
+
+                written = writer.write(&outbound), if !outbound.is_empty() => {
+                    match written {
+                        Ok(0) => {
+                            warn!("pane stopped accepting input; stdin pump exiting");
+                            break;
+                        }
+                        Ok(n) => {
+                            outbound.drain(..n);
+                            if outbound.is_empty() {
+                                let _ = writer.flush().await;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("pane write error: {e}; stdin pump exiting");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1185,6 +1228,39 @@ mod tests {
         .map(|r| r.unwrap_or(0))
         .unwrap_or(0);
         assert_eq!(n, 0, "the parked pump must not consume terminal input");
+    }
+
+    /// Ctrl+Q is the escape hatch, so it has to work when the pane has stopped
+    /// taking input — a tmux client blocked behind a terminal nobody is
+    /// draining, say. A loop that awaits each forward before reading again
+    /// wedges its hotkeys along with the pane.
+    #[tokio::test]
+    async fn ctrl_q_detaches_even_when_the_pane_is_not_draining() {
+        use std::time::Duration;
+        let mut h = start_pumps();
+
+        // Never read `h.transport_out`: its 4 KiB duplex fills and the pane
+        // writer stalls. Push past that in bursts the pump reads whole. Each
+        // write is bounded because the failure mode is exactly that the pump
+        // stops reading and this pipe fills too.
+        for _ in 0..6 {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(500),
+                h.term_in.write_all(&[b'x'; 1024]),
+            )
+            .await;
+        }
+        tokio::time::timeout(Duration::from_millis(500), h.term_in.write_all(b"\x11"))
+            .await
+            .expect("the pump must keep reading the terminal while the pane is wedged")
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), h.shutdown_rx.recv()).await;
+        assert_eq!(
+            result.ok().flatten(),
+            Some(AttachResult::Detached),
+            "Ctrl+Q must detach while the pane is wedged"
+        );
     }
 
     #[tokio::test]
