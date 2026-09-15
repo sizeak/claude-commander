@@ -768,6 +768,54 @@ impl InputReader {
     }
 }
 
+/// The reader thread's body: wait out a wedged predecessor, then poll `source`
+/// until `stop` is set, forwarding events on `tx`. Takes `source` by value so it
+/// is dropped — the terminal released — before the caller signals completion.
+fn run_input_reader(
+    mut source: impl InputSource,
+    predecessor: Option<oneshot::Receiver<()>>,
+    stop: &AtomicBool,
+    tx: &mpsc::Sender<AppEvent>,
+) {
+    if let Some(previous) = predecessor {
+        debug!("Input reader waiting for its wedged predecessor to exit");
+        let _ = previous.blocking_recv();
+    }
+    source.discard_pending();
+    while !stop.load(Ordering::Acquire) {
+        match source.poll(INPUT_POLL_INTERVAL) {
+            Ok(true) => match source.read() {
+                Ok(event) => {
+                    // An event read after the stop was asked for was typed at
+                    // whoever takes the terminal next; we can't hand it back, so
+                    // drop it rather than send it to a TUI that is about to hide.
+                    // (Any events behind it in crossterm's queue are cleared by
+                    // the next reader's `discard_pending`.)
+                    if stop.load(Ordering::Acquire) {
+                        debug!("Input reader dropping an event read after stop");
+                        break;
+                    }
+                    let Some(app_event) = input_event(event) else {
+                        continue;
+                    };
+                    if tx.blocking_send(app_event).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => debug!("Error reading terminal event: {e}"),
+            },
+            Ok(false) => {}
+            Err(e) => {
+                // No tty, most likely. Keep honouring `stop`, but don't spin on
+                // the error.
+                debug!("Error polling terminal events: {e}");
+                std::thread::sleep(INPUT_POLL_INTERVAL);
+            }
+        }
+    }
+    debug!("Input reader thread exited");
+}
+
 /// Map a terminal event to the app event it becomes, or `None` to drop it.
 fn input_event(event: CrosstermEvent) -> Option<AppEvent> {
     let input = match event {
@@ -849,7 +897,7 @@ impl EventLoop {
     /// wedged in the terminal (see [`INPUT_STOP_GRACE`]), the new thread is
     /// started but does not touch the terminal until that one has exited — so
     /// the invariant holds even on the path where `stop_input` gave up.
-    pub(crate) fn start_input_reader_with(&mut self, mut source: impl InputSource) {
+    pub(crate) fn start_input_reader_with(&mut self, source: impl InputSource) {
         let predecessor = match self.input_reader.take() {
             Some(reader) if !reader.stop_requested() => {
                 debug!("Input reader already running; not starting another");
@@ -868,46 +916,13 @@ impl EventLoop {
         let spawned = std::thread::Builder::new()
             .name("cc-term-input".into())
             .spawn(move || {
-                // Dropped on every exit path, which is what resolves `done`.
-                let _done = done_tx;
-                if let Some(previous) = predecessor {
-                    debug!("Input reader waiting for its wedged predecessor to exit");
-                    let _ = previous.blocking_recv();
-                }
-                source.discard_pending();
-                while !stop_flag.load(Ordering::Acquire) {
-                    match source.poll(INPUT_POLL_INTERVAL) {
-                        Ok(true) => match source.read() {
-                            Ok(event) => {
-                                // An event read after the stop was asked for was
-                                // typed at whoever takes the terminal next; we
-                                // can't hand it back, so drop it rather than send
-                                // it to a TUI that is about to hide. (Any events
-                                // behind it in crossterm's queue are cleared by
-                                // the next reader's `discard_pending`.)
-                                if stop_flag.load(Ordering::Acquire) {
-                                    debug!("Input reader dropping an event read after stop");
-                                    break;
-                                }
-                                let Some(app_event) = input_event(event) else {
-                                    continue;
-                                };
-                                if tx.blocking_send(app_event).is_err() {
-                                    break;
-                                }
-                            }
-                            Err(e) => debug!("Error reading terminal event: {e}"),
-                        },
-                        Ok(false) => {}
-                        Err(e) => {
-                            // No tty, most likely. Keep honouring `stop`, but don't
-                            // spin on the error.
-                            debug!("Error polling terminal events: {e}");
-                            std::thread::sleep(INPUT_POLL_INTERVAL);
-                        }
-                    }
-                }
-                debug!("Input reader thread exited");
+                // `source` is moved into the loop and dropped when it returns, so
+                // by the time `done_tx` drops — resolving `done` — the source has
+                // let go of the terminal. A local `_done` guard would get that
+                // backwards: locals drop before the closure's captures do.
+                // On a panic the unwind drops `done_tx` too.
+                run_input_reader(source, predecessor, &stop_flag, &tx);
+                drop(done_tx);
             });
 
         match spawned {
