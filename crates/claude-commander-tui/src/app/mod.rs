@@ -2866,9 +2866,10 @@ impl App {
             self.ui_state.should_quit = false;
 
             if let Some((editor, path)) = self.ui_state.editor_command.take() {
-                // Run editor as a foreground process, then return to TUI
-                self.event_loop.stop_input();
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // Run editor as a foreground process, then return to TUI. The
+                // editor reads the terminal itself, so wait for our reader to
+                // let go of it first.
+                self.event_loop.stop_input().await;
 
                 info!("Launching editor: {} {}", editor, path.display());
                 let status = std::process::Command::new(&editor).arg(&path).status();
@@ -2884,10 +2885,10 @@ impl App {
                 match self.ui_state.attach_request.take() {
                     Some(request) => {
                         // Stop the input reader BEFORE attaching so it doesn't
-                        // compete for stdin, then flush the key that triggered
-                        // this attach.
-                        self.event_loop.stop_input();
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        // compete for the terminal — `stop_input` resolves only
+                        // once the reader thread has exited — then flush the key
+                        // that triggered this attach.
+                        self.event_loop.stop_input().await;
                         claude_commander_core::tmux::flush_stdin();
 
                         // Pre-warm the conversation runtime so voice input
