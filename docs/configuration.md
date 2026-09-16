@@ -518,12 +518,13 @@ the result into whatever the attached tmux client is showing — an agent's prom
 line, local session or remote. It's the same toggle shape as `Alt-v` (press to start, press to
 stop), and either key stops a recording the other started, because there is only one microphone.
 
-The destination is fixed **when recording starts**, not when the transcript comes back. That is
-what makes it predictable: you can keep working while the audio uploads, and the text still lands
-where you were when you started talking. The text is delivered through the attach stream itself
-rather than a server route, so it follows the client — if `Ctrl-Space` moves you to another session
-mid-recording it goes to the pane you started in, and dictating into a remote session needs nothing
-installed on the server.
+What is fixed **when recording starts** is the *destination kind*: a recording begun with `Alt-t`
+is typed into a pane even if `Alt-v` is the key that stops it, and vice versa. *Which* pane is
+decided when the text is typed, because it is delivered through the attach stream itself — the same
+channel your keystrokes travel — rather than a server route. So it follows the client: if
+`Ctrl-Space` moves you to another session mid-recording, the transcript lands in the pane you are
+looking at when it arrives, and dictating into a remote session needs nothing installed on the
+server.
 
 It is **attach-only**. Pressed in the session list there is no pane to type into, so it says
 *"Attach to a session to dictate into it"* and records nothing. A transcript that arrives after
