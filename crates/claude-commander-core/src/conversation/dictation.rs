@@ -95,19 +95,18 @@ pub struct DictationPlan {
 
 /// Flatten a raw transcript into one line of typeable text.
 ///
-/// Every `\r\n`, `\r` and `\n` becomes a single space, because a line break
-/// typed into a pane is not whitespace — it is Enter, and it would submit a
-/// half-finished sentence in the middle of dictation. Transcription engines
-/// routinely return a trailing newline, so this runs on every transcript rather
-/// than only on suspect ones. The result is trimmed at both ends, so it can
-/// still be empty (silence, or a transcript that was nothing but whitespace) —
-/// [`plan_dictation`] treats that as nothing to do.
+/// Every run of whitespace — including `\r\n`, `\r`, `\n` and tabs — becomes a
+/// single space, because a line break typed into a pane is not whitespace: it is
+/// Enter, and it would submit a half-finished sentence in the middle of
+/// dictation. Transcription engines routinely return a trailing newline, and a
+/// paragraph break comes back as two, so this runs on every transcript rather
+/// than only on suspect ones. Collapsing runs (rather than mapping each break
+/// to a space) is what keeps a blank line from landing as a double space. The
+/// result is trimmed at both ends, so it can still be empty (silence, or a
+/// transcript that was nothing but whitespace) — [`plan_dictation`] treats that
+/// as nothing to do.
 pub fn normalise_dictation(raw: &str) -> String {
-    raw.trim()
-        .replace("\r\n", " ")
-        .replace(['\r', '\n'], " ")
-        .trim()
-        .to_string()
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Decide what a transcript does to the pane described by `pane`, under
@@ -157,6 +156,14 @@ mod tests {
         assert_eq!(normalise_dictation("  hello\nworld  "), "hello world");
         assert_eq!(normalise_dictation("a\r\nb"), "a b");
         assert_eq!(normalise_dictation("a\rb"), "a b");
+    }
+
+    #[test]
+    fn normalise_collapses_blank_lines_and_tabs() {
+        // A paragraph break is two newlines; typed as two spaces it would read
+        // as a stray gap in the prompt. Tabs are keystrokes too (completion!).
+        assert_eq!(normalise_dictation("first\n\nsecond"), "first second");
+        assert_eq!(normalise_dictation("a\tb  c"), "a b c");
     }
 
     #[test]
