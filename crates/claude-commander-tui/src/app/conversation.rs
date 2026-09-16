@@ -16,8 +16,8 @@ use std::time::Instant;
 use super::*;
 use claude_commander_core::conversation::{
     ConversationEvent, ConversationSession, ListenAction, ListenerHandle, MediaSignal,
-    SpeakerCommand, SpeakerHandle, apply_listen_action, media_signal, spawn_listener,
-    spawn_media_gate, spawn_speaker,
+    SpeakerCommand, SpeakerHandle, Transcript, VoiceMode, apply_listen_action, media_signal,
+    spawn_listener, spawn_media_gate, spawn_speaker,
 };
 
 /// Canonical project spinner frames (advanced every 3 render ticks).
@@ -276,7 +276,12 @@ impl ConversationRuntime {
         if !self.listener.is_present() {
             return None;
         }
-        Some(apply_listen_action(&self.listener, &self.recording, action))
+        Some(apply_listen_action(
+            &self.listener,
+            &self.recording,
+            action,
+            VoiceMode::Conversation,
+        ))
     }
 
     /// Whether the microphone is currently capturing.
@@ -517,7 +522,7 @@ impl App {
     fn build_and_store_listener(&mut self) {
         let gate = self.conversation.gate.clone();
         let speaker = self.conversation.speaker.clone();
-        let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<Transcript>();
         let tx = spawn_listener(
             self.config.stt.clone(),
             tx_text,
@@ -532,8 +537,10 @@ impl App {
         // off-loop task needs its own copy of the injected CLI reference.
         let cli_reference = self.cli_reference.clone();
         tokio::spawn(async move {
-            while let Some(text) = rx_text.recv().await {
-                let text = text.trim().to_string();
+            while let Some(transcript) = rx_text.recv().await {
+                // Every recording this frontend starts is a conversation one for
+                // now; the dictation route is wired up separately.
+                let text = transcript.text.trim().to_string();
                 if text.is_empty() {
                     continue;
                 }

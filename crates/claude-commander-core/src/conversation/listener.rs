@@ -4,9 +4,11 @@
 //! but in the opposite direction — instead of turning text into audio, it turns
 //! a finished recording into text. The app toggles capture with
 //! [`ListenerCommand`]s; when a recording stops, the captured WAV is transcribed
-//! and the resulting transcript is sent on `transcript_tx` for the app to feed
-//! to the conversation session.
+//! and the resulting [`Transcript`] is sent on `transcript_tx` for the app to
+//! route to whichever destination the recording was started for — see
+//! [`VoiceMode`].
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -20,13 +22,78 @@ use crate::conversation::recorder::Recorder;
 use crate::conversation::speaker::{SpeakerCommand, SpeakerHandle};
 use crate::conversation::stt::SttClient;
 
+/// Where a recording's transcript is headed. Fixed when the recording *starts*
+/// (the hotkey that opened the mic picks it) and carried on that recording's
+/// [`ListenerCommand::Start`], so a transcript can never be delivered to the
+/// destination the user didn't ask for — including when the *other* voice hotkey
+/// is the one that stops the capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceMode {
+    /// The transcript is submitted to the headless conversation agent, which
+    /// replies in the overlay and speaks it back.
+    Conversation,
+    /// The transcript is typed into the pane the attached tmux client is
+    /// showing, as if the operator had typed it themselves.
+    Dictation,
+}
+
 /// Commands to the listener task.
 #[derive(Debug, Clone)]
 pub enum ListenerCommand {
-    /// Begin recording the microphone.
-    Start,
-    /// Stop recording and transcribe what was captured.
+    /// Begin recording the microphone, for the given destination.
+    Start(VoiceMode),
+    /// Stop recording and transcribe what was captured. The destination is not
+    /// repeated here: it was decided at `Start` and the listener remembers it
+    /// (see `PendingModes`).
     Stop,
+}
+
+/// A finished transcription, tagged with the destination its recording was
+/// started for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transcript {
+    pub mode: VoiceMode,
+    pub text: String,
+}
+
+/// The modes of the recordings the listener has started but not yet paired with
+/// a WAV, oldest first.
+///
+/// Recordings are strictly sequential — the flag in [`apply_listen_action`]
+/// makes a second `Start` a no-op while one is live — and the recorder emits
+/// their WAVs in that same order, so a plain FIFO pairs each WAV with the mode
+/// its `Start` carried. The pop happens per **WAV**, not per transcript: a
+/// silent or failed recording yields no transcript at all, and popping on the
+/// transcript would leave that recording's mode queued to mis-tag the next one.
+///
+/// One known desync path remains: [`Recorder`] logs and emits *nothing* when its
+/// in-memory `encode_wav` fails (`recorder.rs`, the `Command::Stop` arm), which
+/// would strand a mode here and shift every later pairing by one. Practically
+/// unreachable — the encode writes to a `Cursor<Vec<u8>>` with a fixed, valid
+/// spec — so it is accepted rather than defended against with an id threaded
+/// through the recorder.
+#[derive(Debug, Default)]
+struct PendingModes(VecDeque<VoiceMode>);
+
+impl PendingModes {
+    /// Remember the mode of a recording that has just been started.
+    fn push(&mut self, mode: VoiceMode) {
+        self.0.push_back(mode);
+    }
+
+    /// Claim the mode belonging to the WAV that just arrived. An empty queue
+    /// means the pairing has desynced (see the type docs), so this falls back to
+    /// [`VoiceMode::Conversation`] — the destination that existed before
+    /// dictation, and the one that cannot type stray text into a live pane.
+    fn pop_for_wav(&mut self) -> VoiceMode {
+        self.0.pop_front().unwrap_or_else(|| {
+            warn!(
+                target: "conversation",
+                "no pending voice mode for a finished recording; treating it as conversation"
+            );
+            VoiceMode::Conversation
+        })
+    }
 }
 
 /// What an external trigger wants the microphone to do. `Toggle` flips the
@@ -91,10 +158,17 @@ impl From<mpsc::UnboundedSender<ListenerCommand>> for ListenerHandle {
 /// toggle originates. Returns the new recording state. Sends a
 /// [`ListenerCommand`] only when the state actually changes (so a redundant
 /// `Start`/`Stop` doesn't restart capture or transcribe silence).
+///
+/// `mode` is consulted **only** when the transition is *to* recording, because
+/// that is the only transition that sends a `Start` to carry it. A trigger that
+/// stops an in-progress recording passes whatever mode its own hotkey implies
+/// and it is ignored — which is what lets either voice hotkey stop a recording
+/// the other one started without redirecting its transcript.
 pub fn apply_listen_action(
     listener: &ListenerHandle,
     recording: &AtomicBool,
     action: ListenAction,
+    mode: VoiceMode,
 ) -> bool {
     let now = match action {
         // Atomic flip so concurrent triggers can't both observe the old value.
@@ -108,7 +182,7 @@ pub fn apply_listen_action(
         }
     };
     let _ = listener.send(if now {
-        ListenerCommand::Start
+        ListenerCommand::Start(mode)
     } else {
         ListenerCommand::Stop
     });
@@ -121,10 +195,11 @@ pub fn apply_listen_action(
 /// sent before the device finishes opening queue on the channel and run once it
 /// is ready. If no input device is available the task logs and exits, leaving
 /// the returned sender inert. Recognized transcripts are sent on
-/// `transcript_tx`; dropping the sender ends the task and releases the mic.
+/// `transcript_tx`, each tagged with the [`VoiceMode`] its recording was started
+/// for; dropping the sender ends the task and releases the mic.
 pub fn spawn_listener(
     cfg: SttConfig,
-    transcript_tx: mpsc::UnboundedSender<String>,
+    transcript_tx: mpsc::UnboundedSender<Transcript>,
     gate: Option<mpsc::UnboundedSender<MediaSignal>>,
     speaker: SpeakerHandle,
 ) -> mpsc::UnboundedSender<ListenerCommand> {
@@ -141,14 +216,32 @@ pub fn spawn_listener(
             }
         };
         let client = SttClient::new(&cfg);
+        let mut pending = PendingModes::default();
         loop {
             tokio::select! {
                 // A finished recording arrived from the recorder thread.
                 Some(wav) = wav_rx.recv() => {
+                    // Claim this recording's destination before anything else can
+                    // go wrong: the pairing is per WAV, and the branches below do
+                    // not all produce a transcript. See `PendingModes`.
+                    let mode = pending.pop_for_wav();
                     // Stage 1 timing: WAV bytes in → transcript out.
                     let wav_bytes = wav.len();
                     let t0 = Instant::now();
-                    match client.transcribe(wav).await {
+                    let outcome = client.transcribe(wav).await;
+                    if matches!(mode, VoiceMode::Dictation) {
+                        // Dictation never reaches the conversation session, so no
+                        // `TurnComplete` will ever arrive to release the media gate
+                        // — and the gate resumes only on Silence, on TurnComplete
+                        // plus a speech end, or on the safety timeout (`media.rs`).
+                        // So signal Silence in *every* outcome, or paused players
+                        // stay paused until the safety timer rescues them. No
+                        // `SpeakerCommand` either way: start sent no Interrupt, so
+                        // there is no mute to lift, and a Resume here would un-mute
+                        // a reply the user deliberately let keep playing.
+                        media_signal(&gate, MediaSignal::Silence);
+                    }
+                    match outcome {
                         Ok(text) if !text.is_empty() => {
                             debug!(
                                 target: "conversation",
@@ -156,7 +249,7 @@ pub fn spawn_listener(
                                 t0.elapsed().as_millis(),
                                 text.len()
                             );
-                            if transcript_tx.send(text).is_err() {
+                            if transcript_tx.send(Transcript { mode, text }).is_err() {
                                 break; // app gone
                             }
                         }
@@ -169,26 +262,37 @@ pub fn spawn_listener(
                                 "timing [stt] transcribed {wav_bytes} byte WAV in {} ms (empty — silence)",
                                 t0.elapsed().as_millis()
                             );
-                            media_signal(&gate, MediaSignal::Silence);
-                            // Nothing was said, so no new message will be submitted
-                            // to lift the mute set on record-start — clear it here.
-                            speaker.send(SpeakerCommand::Resume);
+                            if matches!(mode, VoiceMode::Conversation) {
+                                media_signal(&gate, MediaSignal::Silence);
+                                // Nothing was said, so no new message will be submitted
+                                // to lift the mute set on record-start — clear it here.
+                                speaker.send(SpeakerCommand::Resume);
+                            }
                         }
                         Err(e) => {
                             warn!("STT transcription failed: {e}");
-                            // Failed round-trip → no reply either; don't strand media.
-                            media_signal(&gate, MediaSignal::Silence);
-                            // No submit will follow to unmute the speaker — do it here.
-                            speaker.send(SpeakerCommand::Resume);
+                            if matches!(mode, VoiceMode::Conversation) {
+                                // Failed round-trip → no reply either; don't strand media.
+                                media_signal(&gate, MediaSignal::Silence);
+                                // No submit will follow to unmute the speaker — do it here.
+                                speaker.send(SpeakerCommand::Resume);
+                            }
                         }
                     }
                 },
                 cmd = rx.recv() => match cmd {
-                    Some(ListenerCommand::Start) => {
-                        // The user is starting a new message — stop speaking the
-                        // current reply at once and stay muted until the new query
-                        // is submitted (a no-op when nothing is speaking).
-                        speaker.send(SpeakerCommand::Interrupt);
+                    Some(ListenerCommand::Start(mode)) => {
+                        pending.push(mode);
+                        if matches!(mode, VoiceMode::Conversation) {
+                            // The user is starting a new message — stop speaking the
+                            // current reply at once and stay muted until the new query
+                            // is submitted (a no-op when nothing is speaking).
+                            //
+                            // Dictation is not part of the conversation, so it must
+                            // not cut the reply off: someone typing a shell command
+                            // by voice is still listening to what is being said.
+                            speaker.send(SpeakerCommand::Interrupt);
+                        }
                         // Signal *before* opening the mic: the gate snapshots the
                         // playing players concurrently, and on Bluetooth the mic
                         // opening only pauses playback ~300ms later — so the
@@ -232,19 +336,21 @@ mod tests {
         assert!(apply_listen_action(
             &handle,
             &recording,
-            ListenAction::Toggle
+            ListenAction::Toggle,
+            VoiceMode::Conversation
         ));
         assert!(recording.load(Ordering::Acquire));
         assert!(matches!(
             drain(&mut rx).as_slice(),
-            [ListenerCommand::Start]
+            [ListenerCommand::Start(VoiceMode::Conversation)]
         ));
 
         // Second toggle stops it.
         assert!(!apply_listen_action(
             &handle,
             &recording,
-            ListenAction::Toggle
+            ListenAction::Toggle,
+            VoiceMode::Conversation
         ));
         assert!(!recording.load(Ordering::Acquire));
         assert!(matches!(drain(&mut rx).as_slice(), [ListenerCommand::Stop]));
@@ -260,18 +366,20 @@ mod tests {
         assert!(apply_listen_action(
             &handle,
             &recording,
-            ListenAction::Start
+            ListenAction::Start,
+            VoiceMode::Conversation
         ));
         assert!(matches!(
             drain(&mut rx).as_slice(),
-            [ListenerCommand::Start]
+            [ListenerCommand::Start(VoiceMode::Conversation)]
         ));
 
         // A second Start is a no-op — no command, no restart.
         assert!(apply_listen_action(
             &handle,
             &recording,
-            ListenAction::Start
+            ListenAction::Start,
+            VoiceMode::Conversation
         ));
         assert!(drain(&mut rx).is_empty());
 
@@ -279,13 +387,15 @@ mod tests {
         assert!(!apply_listen_action(
             &handle,
             &recording,
-            ListenAction::Stop
+            ListenAction::Stop,
+            VoiceMode::Conversation
         ));
         assert!(matches!(drain(&mut rx).as_slice(), [ListenerCommand::Stop]));
         assert!(!apply_listen_action(
             &handle,
             &recording,
-            ListenAction::Stop
+            ListenAction::Stop,
+            VoiceMode::Conversation
         ));
         assert!(drain(&mut rx).is_empty());
     }
@@ -308,12 +418,77 @@ mod tests {
         assert!(apply_listen_action(
             &shared,
             &recording,
-            ListenAction::Start
+            ListenAction::Start,
+            VoiceMode::Conversation
         ));
         assert!(drain(&mut rx1).is_empty());
         assert!(matches!(
             drain(&mut rx2).as_slice(),
-            [ListenerCommand::Start]
+            [ListenerCommand::Start(VoiceMode::Conversation)]
         ));
+    }
+
+    #[test]
+    fn toggle_start_carries_the_requested_mode() {
+        // The mode is fixed when the recording *starts*, so the `Start` the
+        // toggle sends is what carries it to the listener.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = ListenerHandle::from(tx);
+        let recording = AtomicBool::new(false);
+
+        assert!(apply_listen_action(
+            &handle,
+            &recording,
+            ListenAction::Toggle,
+            VoiceMode::Dictation
+        ));
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [ListenerCommand::Start(VoiceMode::Dictation)]
+        ));
+    }
+
+    #[test]
+    fn stop_ignores_the_requested_mode() {
+        // Either hotkey stops an in-progress recording, so the mode passed on
+        // the stopping toggle is irrelevant — the WAV is already claimed by the
+        // mode its `Start` carried.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = ListenerHandle::from(tx);
+        let recording = AtomicBool::new(false);
+
+        apply_listen_action(
+            &handle,
+            &recording,
+            ListenAction::Toggle,
+            VoiceMode::Dictation,
+        );
+        let _ = drain(&mut rx);
+
+        assert!(!apply_listen_action(
+            &handle,
+            &recording,
+            ListenAction::Toggle,
+            VoiceMode::Conversation
+        ));
+        assert!(matches!(drain(&mut rx).as_slice(), [ListenerCommand::Stop]));
+    }
+
+    #[test]
+    fn pending_modes_pair_fifo_across_recordings() {
+        // Recordings finish in the order they started, so the queue is FIFO: a
+        // dictation started first claims the first WAV even if a conversation
+        // recording was queued behind it.
+        let mut modes = PendingModes::default();
+        modes.push(VoiceMode::Dictation);
+        modes.push(VoiceMode::Conversation);
+        assert_eq!(modes.pop_for_wav(), VoiceMode::Dictation);
+        assert_eq!(modes.pop_for_wav(), VoiceMode::Conversation);
+    }
+
+    #[test]
+    fn pending_modes_empty_pop_falls_back_to_conversation() {
+        let mut modes = PendingModes::default();
+        assert_eq!(modes.pop_for_wav(), VoiceMode::Conversation);
     }
 }

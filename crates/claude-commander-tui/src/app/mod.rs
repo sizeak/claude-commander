@@ -2991,6 +2991,10 @@ impl App {
                                 editor_triggers,
                                 review_triggers,
                                 voice_triggers,
+                                // Not wired up yet — the dictation hotkey and the
+                                // frontend's long-lived injector land with the
+                                // TUI side of the feature.
+                                dictation_triggers: Vec::new(),
                                 voice_listener,
                                 recording: self.conversation.recording.clone(),
                                 intercept_ctrl_z,
@@ -3002,6 +3006,7 @@ impl App {
                                 switcher_enabled: true,
                                 session_name: name.clone(),
                                 image_paste,
+                                injector: None,
                             };
 
                             let outcome = match self.drive_attach(streams, cfg).await {
