@@ -724,11 +724,16 @@ pub struct BranchEntry {
 }
 
 /// Which tab is active in the settings modal
+///
+/// Purely in-memory UI state — the modal opens on `General` every time and the
+/// active tab is never written to `config.toml` or `tui.json`, so the variants
+/// can be renamed freely. [`Voice`](Self::Voice) was called `Conversation` until
+/// it grew speech-to-text and dictation alongside the spoken replies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
     #[default]
     General,
-    Conversation,
+    Voice,
     Keybindings,
     Theme,
     Sections,
@@ -739,7 +744,7 @@ pub enum SettingsTab {
 impl SettingsTab {
     const ALL: [SettingsTab; 7] = [
         Self::General,
-        Self::Conversation,
+        Self::Voice,
         Self::Keybindings,
         Self::Theme,
         Self::Sections,
@@ -750,7 +755,7 @@ impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
-            Self::Conversation => "Conversation",
+            Self::Voice => "Voice",
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
             Self::Sections => "Sections",
@@ -761,8 +766,8 @@ impl SettingsTab {
 
     fn next(self) -> Self {
         match self {
-            Self::General => Self::Conversation,
-            Self::Conversation => Self::Keybindings,
+            Self::General => Self::Voice,
+            Self::Voice => Self::Keybindings,
             Self::Keybindings => Self::Theme,
             Self::Theme => Self::Sections,
             Self::Sections => Self::Programs,
@@ -774,8 +779,8 @@ impl SettingsTab {
     fn prev(self) -> Self {
         match self {
             Self::General => Self::Server,
-            Self::Conversation => Self::General,
-            Self::Keybindings => Self::Conversation,
+            Self::Voice => Self::General,
+            Self::Keybindings => Self::Voice,
             Self::Theme => Self::Keybindings,
             Self::Sections => Self::Theme,
             Self::Programs => Self::Sections,

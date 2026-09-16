@@ -238,17 +238,53 @@ impl App {
                     ),
                 ])
             }
-            SettingsTab::Conversation => {
+            SettingsTab::Voice => {
+                // Three headed groups, in the order a reader goes looking:
+                // speech coming in, speech going out, and the conversation agent
+                // that joins the two. The grouping is PRESENTATION ONLY — the
+                // `[stt]` and `[conversation]` TOML tables and every `field_key`
+                // below are persisted shapes and stay exactly where they are, so
+                // a config file written before this split still loads and a
+                // settings edit still lands in the same table. What changed is
+                // which heading a row is drawn under, nothing more. (Note the
+                // split crosses the tables: "Text-to-Speech" and "Conversation
+                // Mode" are both `[conversation]` fields, because "is this about
+                // the voice or about the agent?" is the question a reader has,
+                // and "which table is it in?" is not.)
+                //
+                // The STT labels drop their "STT " prefix: the group heading now
+                // carries that, and "Base URL" under Transcription cannot be
+                // confused with "Base URL" under Text-to-Speech.
                 let c = &self.config.conversation;
                 let s = &self.config.stt;
-                vec![
-                    SettingsRow::toggle(
-                        "Enable Conversation Mode",
-                        c.enabled,
-                        "conversation_enabled",
+                with_section_spacers(vec![
+                    SettingsRow::header("Transcription"),
+                    SettingsRow::toggle("Enable Voice Input (STT)", s.enabled, "stt_enabled"),
+                    SettingsRow::text("Base URL", s.base_url.clone(), "stt_base_url"),
+                    SettingsRow::text("Model", s.model.clone(), "stt_model"),
+                    SettingsRow::text(
+                        "Language",
+                        s.language.clone().unwrap_or_else(|| "(auto)".into()),
+                        "stt_language",
                     ),
-                    SettingsRow::text("Assistant Name", c.name.clone(), "conversation_name"),
-                    SettingsRow::text("TTS Base URL", c.base_url.clone(), "conversation_base_url"),
+                    SettingsRow::text(
+                        "Prompt",
+                        s.prompt.clone().unwrap_or_else(|| "(none)".into()),
+                        "stt_prompt",
+                    ),
+                    SettingsRow::text("Microphone", self.input_device_label(), "stt_input_device"),
+                    SettingsRow::toggle(
+                        "Pause Media While Recording",
+                        s.pause_media,
+                        "stt_pause_media",
+                    ),
+                    SettingsRow::text(
+                        "Dictation Submit",
+                        s.dictation_submit.label().to_string(),
+                        "stt_dictation_submit",
+                    ),
+                    SettingsRow::header("Text-to-Speech"),
+                    SettingsRow::text("Base URL", c.base_url.clone(), "conversation_base_url"),
                     SettingsRow::text("Model", c.model.clone(), "conversation_model"),
                     SettingsRow::text(
                         "Voice",
@@ -267,31 +303,14 @@ impl App {
                         c.speak_scope.label().to_string(),
                         "conversation_speak_scope",
                     ),
-                    // Speech-to-text (voice input, Alt-V).
-                    SettingsRow::toggle("Enable Voice Input (STT)", s.enabled, "stt_enabled"),
-                    SettingsRow::text("STT Base URL", s.base_url.clone(), "stt_base_url"),
-                    SettingsRow::text("STT Model", s.model.clone(), "stt_model"),
-                    SettingsRow::text(
-                        "STT Language",
-                        s.language.clone().unwrap_or_else(|| "(auto)".into()),
-                        "stt_language",
-                    ),
-                    SettingsRow::text(
-                        "STT Prompt",
-                        s.prompt.clone().unwrap_or_else(|| "(none)".into()),
-                        "stt_prompt",
-                    ),
-                    SettingsRow::text(
-                        "STT Microphone",
-                        self.input_device_label(),
-                        "stt_input_device",
-                    ),
+                    SettingsRow::header("Conversation Mode"),
                     SettingsRow::toggle(
-                        "Pause Media While Recording",
-                        s.pause_media,
-                        "stt_pause_media",
+                        "Enable Conversation Mode",
+                        c.enabled,
+                        "conversation_enabled",
                     ),
-                ]
+                    SettingsRow::text("Assistant Name", c.name.clone(), "conversation_name"),
+                ])
             }
             SettingsTab::Server => {
                 let s = &self.config.server;
@@ -1181,7 +1200,7 @@ impl App {
                 }
                 _ => {}
             },
-            SettingsTab::Conversation => match field_key {
+            SettingsTab::Voice => match field_key {
                 "conversation_name" => {
                     let v = value.trim();
                     self.config.conversation.name = if v.is_empty() {
@@ -1246,6 +1265,27 @@ impl App {
                         } else {
                             Some(v.to_string())
                         };
+                }
+                "stt_dictation_submit" => {
+                    // The picker passes the human label; config/tests use tokens.
+                    // An unrecognised value is ignored rather than reset to the
+                    // default, so a typo can't quietly disable a submit policy.
+                    if let Some(policy) =
+                        claude_commander_core::conversation::DictationSubmit::from_token(value)
+                            .or_else(|| {
+                                claude_commander_core::conversation::DictationSubmit::from_label(
+                                    value,
+                                )
+                            })
+                    {
+                        self.config.stt.dictation_submit = policy;
+                        // The dictation consumer captures the policy when the
+                        // listener is built, so a running listener would keep
+                        // applying the old one until the next restart. Rebuild
+                        // it now — the same mechanism the microphone picker
+                        // uses, and a no-op when no listener is running.
+                        self.respawn_listener();
+                    }
                 }
                 _ => {}
             },
@@ -1716,6 +1756,23 @@ impl App {
                                 // Inline option picker for the speak-scope enum.
                                 use claude_commander_core::conversation::SpeakScope;
                                 let options: Vec<PickerOption> = SpeakScope::ALL
+                                    .iter()
+                                    .map(|s| PickerOption::plain(s.label()))
+                                    .collect();
+                                let current_value = state.rows[state.selected_row].text_value();
+                                let selected = options
+                                    .iter()
+                                    .position(|o| o.value == current_value)
+                                    .unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "stt_dictation_submit" {
+                                // Inline option picker for the dictation submit
+                                // policy — three named values, so a picker
+                                // rather than free text (same shape as the
+                                // speak-scope row above).
+                                use claude_commander_core::conversation::DictationSubmit;
+                                let options: Vec<PickerOption> = DictationSubmit::ALL
                                     .iter()
                                     .map(|s| PickerOption::plain(s.label()))
                                     .collect();
@@ -3436,13 +3493,14 @@ mod tests {
     }
 
     #[test]
-    fn settings_tab_cycle_includes_conversation() {
+    fn settings_tab_cycle_includes_voice() {
         assert_eq!(SettingsTab::ALL.len(), 7);
-        assert!(SettingsTab::ALL.contains(&SettingsTab::Conversation));
+        assert!(SettingsTab::ALL.contains(&SettingsTab::Voice));
         assert!(SettingsTab::ALL.contains(&SettingsTab::Programs));
         assert!(SettingsTab::ALL.contains(&SettingsTab::Server));
-        assert_eq!(SettingsTab::General.next(), SettingsTab::Conversation);
-        assert_eq!(SettingsTab::Conversation.prev(), SettingsTab::General);
+        assert_eq!(SettingsTab::General.next(), SettingsTab::Voice);
+        assert_eq!(SettingsTab::Voice.prev(), SettingsTab::General);
+        assert_eq!(SettingsTab::Voice.next(), SettingsTab::Keybindings);
         // Server sits last, after Programs, and wraps back to General.
         assert_eq!(SettingsTab::Sections.next(), SettingsTab::Programs);
         assert_eq!(SettingsTab::Programs.next(), SettingsTab::Server);
@@ -3455,7 +3513,9 @@ mod tests {
             t = t.next();
         }
         assert_eq!(t, SettingsTab::General);
-        assert_eq!(SettingsTab::Conversation.label(), "Conversation");
+        // The tab is named for the feature, not for the `[conversation]` TOML
+        // table it grew out of: it holds speech in as well as speech out.
+        assert_eq!(SettingsTab::Voice.label(), "Voice");
         assert_eq!(SettingsTab::Programs.label(), "Programs");
     }
 }

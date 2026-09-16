@@ -1314,7 +1314,7 @@ fn test_hide_empty_sections_toggle_and_apply() {
 #[test]
 fn test_stt_rows_present_with_defaults() {
     let app = make_test_app();
-    let rows = app.build_settings_rows(SettingsTab::Conversation);
+    let rows = app.build_settings_rows(SettingsTab::Voice);
 
     let kind_of = |key: &str| {
         rows.iter()
@@ -1340,6 +1340,12 @@ fn test_stt_rows_present_with_defaults() {
     );
     // Media pausing is on by default.
     assert_eq!(kind_of("stt_pause_media"), SettingsRowKind::Toggle(true));
+    // Dictation is insert-only until the user opts into a submit policy; the
+    // row shows the enum's human label, not its config token.
+    assert_eq!(
+        kind_of("stt_dictation_submit"),
+        SettingsRowKind::Text("Never".to_string())
+    );
 }
 
 #[test]
@@ -1354,20 +1360,20 @@ fn test_apply_stt_pause_media_toggle() {
 fn test_apply_stt_text_fields() {
     let mut app = make_test_app();
     app.apply_settings_edit(
-        SettingsTab::Conversation,
+        SettingsTab::Voice,
         "stt_base_url",
         "http://192.168.1.10:8080/v1",
     );
-    app.apply_settings_edit(SettingsTab::Conversation, "stt_model", "large-v3-turbo");
-    app.apply_settings_edit(SettingsTab::Conversation, "stt_language", "en");
+    app.apply_settings_edit(SettingsTab::Voice, "stt_model", "large-v3-turbo");
+    app.apply_settings_edit(SettingsTab::Voice, "stt_language", "en");
     assert_eq!(app.config.stt.base_url, "http://192.168.1.10:8080/v1");
     assert_eq!(app.config.stt.model, "large-v3-turbo");
     assert_eq!(app.config.stt.language.as_deref(), Some("en"));
 
     // Sentinel / empty clears the optional fields back to None.
-    app.apply_settings_edit(SettingsTab::Conversation, "stt_language", "(auto)");
+    app.apply_settings_edit(SettingsTab::Voice, "stt_language", "(auto)");
     assert_eq!(app.config.stt.language, None);
-    app.apply_settings_edit(SettingsTab::Conversation, "stt_prompt", "");
+    app.apply_settings_edit(SettingsTab::Voice, "stt_prompt", "");
     assert_eq!(app.config.stt.prompt, None);
 }
 
@@ -1381,6 +1387,104 @@ fn test_toggle_stt_enabled_via_bool_path() {
     assert!(app.config.stt.enabled);
     app.apply_bool_setting("stt_enabled", false);
     assert!(!app.config.stt.enabled);
+}
+
+#[test]
+fn test_voice_tab_rows_are_grouped_under_three_headers() {
+    // The Voice tab shows one feature's worth of settings split by what the
+    // reader is looking for — transcription in, speech out, and the
+    // conversation agent that joins them — rather than by which TOML table the
+    // field is persisted in. This pins that grouping: the headers, their order,
+    // and which fields sit under each.
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::Voice);
+
+    // Section headers in order, ignoring the blank spacer rows
+    // `with_section_spacers` inserts between groups.
+    let headers: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.kind == SettingsRowKind::Header && !r.label.is_empty())
+        .map(|r| r.label.as_str())
+        .collect();
+    assert_eq!(
+        headers,
+        vec!["Transcription", "Text-to-Speech", "Conversation Mode"]
+    );
+
+    // Walk the list, remembering the most recent non-blank header, so every
+    // field is checked against the group it actually renders under.
+    let mut section = "";
+    let mut under: Vec<(&str, &str)> = Vec::new();
+    for row in &rows {
+        if row.kind == SettingsRowKind::Header {
+            if !row.label.is_empty() {
+                section = row.label.as_str();
+            }
+            continue;
+        }
+        under.push((section, row.field_key.as_str()));
+    }
+
+    assert_eq!(
+        under,
+        vec![
+            ("Transcription", "stt_enabled"),
+            ("Transcription", "stt_base_url"),
+            ("Transcription", "stt_model"),
+            ("Transcription", "stt_language"),
+            ("Transcription", "stt_prompt"),
+            ("Transcription", "stt_input_device"),
+            ("Transcription", "stt_pause_media"),
+            ("Transcription", "stt_dictation_submit"),
+            ("Text-to-Speech", "conversation_base_url"),
+            ("Text-to-Speech", "conversation_model"),
+            ("Text-to-Speech", "conversation_voice"),
+            ("Text-to-Speech", "conversation_format"),
+            ("Text-to-Speech", "conversation_speed"),
+            ("Text-to-Speech", "conversation_volume"),
+            ("Text-to-Speech", "conversation_speak_scope"),
+            ("Conversation Mode", "conversation_enabled"),
+            ("Conversation Mode", "conversation_name"),
+        ]
+    );
+
+    // Every field stays reachable: headers and spacers are skipped by
+    // navigation, so the selectable count is the whole settable surface.
+    assert_eq!(rows.iter().filter(|r| r.is_selectable()).count(), 17);
+
+    // A leading header must not swallow the opening selection.
+    assert!(rows[super::settings::first_selectable_from(&rows, 0)].is_selectable());
+}
+
+#[test]
+fn test_apply_stt_dictation_submit_accepts_token_and_label() {
+    // Config files carry the snake_case token; the option picker hands over the
+    // human label. Both reach `apply_settings_edit`, so both must parse.
+    let mut app = make_test_app();
+    assert_eq!(
+        app.config.stt.dictation_submit,
+        claude_commander_core::conversation::DictationSubmit::Never
+    );
+
+    app.apply_settings_edit(SettingsTab::Voice, "stt_dictation_submit", "agent");
+    assert_eq!(
+        app.config.stt.dictation_submit,
+        claude_commander_core::conversation::DictationSubmit::Agent
+    );
+
+    app.apply_settings_edit(SettingsTab::Voice, "stt_dictation_submit", "Always");
+    assert_eq!(
+        app.config.stt.dictation_submit,
+        claude_commander_core::conversation::DictationSubmit::Always
+    );
+
+    // Anything else leaves the setting alone rather than silently resetting it
+    // to the default — a typo must not quietly turn a submit policy off.
+    app.apply_settings_edit(SettingsTab::Voice, "stt_dictation_submit", "sometimes");
+    assert_eq!(
+        app.config.stt.dictation_submit,
+        claude_commander_core::conversation::DictationSubmit::Always
+    );
 }
 
 #[test]
