@@ -268,11 +268,12 @@ state_sync_interval_ms = 2000
 # speak_scope = "prose_only"               # prose_only | verbatim (per-sentence, streamed)
 # volume = 1.0                             # 0.0–2.0
 
-# Voice input (speech-to-text): hold a conversation by talking. Toggle recording
-# with `Alt-v`, then it's transcribed via an OpenAI-compatible STT engine and sent
-# to the conversation agent. See "Voice input (STT)" below.
+# Voice input (speech-to-text): talk instead of typing. Toggle recording with
+# `Alt-v` to send the transcript to the conversation agent, or with `Alt-t` to
+# type it into the pane you're attached to. Either way it's transcribed via an
+# OpenAI-compatible STT engine. See "Voice input (STT)" and "Dictation (Alt-t)".
 # [stt]
-# enabled = true                          # master switch for Alt-v voice input (off by default)
+# enabled = true                          # master switch for Alt-v / Alt-t voice input (off by default)
 # base_url = "http://127.0.0.1:8000/v1"   # OpenAI-compatible transcription endpoint (include /v1)
 # model = "Systran/faster-whisper-base"    # transcription model name
 # language = "en"                          # ISO-639-1 hint; omit to auto-detect
@@ -425,7 +426,7 @@ whole reply. A new message interrupts in-flight speech. If the TTS server is unr
 still works (text-only) and never blocks the UI.
 
 `enabled` is the master switch for the whole feature and is **off by default** — set it (in
-Settings ▸ Conversation or config) before `Alt-c` will open the overlay. We develop against a
+Settings ▸ Voice or config) before `Alt-c` will open the overlay. We develop against a
 local [Kokoro](https://github.com/sizeak/kokoro-tts-rocm) container (default
 `http://127.0.0.1:8002/v1`), but any OpenAI-compatible endpoint works.
 
@@ -468,15 +469,17 @@ and sends the resulting text to the conversation session — exactly as if you'd
 then streams back and is spoken aloud (if TTS is enabled). Voice input works **whether the overlay
 is open or not**, mirroring spoken replies.
 
-`stt.enabled` is a separate switch from `conversation.enabled` and is **off by default**. Voice
-input feeds the conversation session, so it's only useful alongside conversation mode. Microphone
+`stt.enabled` is a separate switch from `conversation.enabled` and is **off by default**. It is the
+master switch for *both* uses of the microphone: `Alt-v` (this section, which does need conversation
+mode, since that's where the transcript goes) and `Alt-t` ([dictation](#dictation-alt-t), which types
+the transcript into the attached pane and needs no conversation session at all). Microphone
 capture uses `cpal` (PipeWire/ALSA on Linux — see the build note above). If no microphone is available
 or the STT server is unreachable, voice input degrades gracefully (a status message) and never
 blocks the UI.
 
 ```toml
 [stt]
-enabled = true                          # master switch for Alt-v voice input (off = no voice input)
+enabled = true                          # master switch for Alt-v / Alt-t voice input (off = no mic)
 base_url = "http://127.0.0.1:8000/v1"   # OpenAI-compatible transcription endpoint (include /v1)
 model = "Systran/faster-whisper-base"    # transcription model name
 language = "en"                          # ISO-639-1 hint; omit to auto-detect
@@ -484,12 +487,13 @@ language = "en"                          # ISO-639-1 hint; omit to auto-detect
 # api_key = "..."                        # sent as a Bearer header; omit for local servers
 # input_device = "alsa_input.pci-0000_c1_00.6.analog-stereo"  # device id; omit for the system default
 pause_media = true                       # pause other players while recording, resume after the reply
+dictation_submit = "never"               # never | agent | always — press Enter after a dictated transcript?
 ```
 
 `input_device` picks which microphone to capture from — omit it (or leave it as **(default)**
-in Settings ▸ Conversation) to use the system default. Set it from the **STT Microphone** picker
-in the settings modal, which lists each device by a friendly name; monitor/loopback sources (e.g.
-recording your speakers) are tagged **(loopback)**. The value stored is cpal's stable device *id*
+in Settings ▸ Voice) to use the system default. Set it from the **Microphone** picker under
+**Transcription** in the settings modal, which lists each device by a friendly name;
+monitor/loopback sources (e.g. recording your speakers) are tagged **(loopback)**. The value stored is cpal's stable device *id*
 (the PipeWire `node.name`, e.g. `alsa_input.pci-…`), not the friendly name — because a mic and its
 speaker's loopback can share a name, so ids are what uniquely identify a device. If the configured
 device isn't present when recording starts, capture falls back to the default (with a warning)
@@ -505,6 +509,71 @@ On by default; set to `false` to leave your media alone.
 Audio is captured at the microphone's native rate, downmixed to mono, and encoded as 16-bit PCM
 WAV; the server resamples as needed. Recording isn't chunked yet — the whole utterance is uploaded
 when you stop — so very long dictations wait until the end to transcribe.
+
+### Dictation (Alt-t)
+
+`Alt-v` sends what you said to the *conversation agent*. **`Alt-t`** sends it to the *pane you're
+looking at*: it records the microphone, transcribes it through the same `[stt]` engine, and types
+the result into whatever the attached tmux client is showing — an agent's prompt, a shell command
+line, local session or remote. It's the same toggle shape as `Alt-v` (press to start, press to
+stop), and either key stops a recording the other started, because there is only one microphone.
+
+The destination is fixed **when recording starts**, not when the transcript comes back. That is
+what makes it predictable: you can keep working while the audio uploads, and the text still lands
+where you were when you started talking. The text is delivered through the attach stream itself
+rather than a server route, so it follows the client — if `Ctrl-Space` moves you to another session
+mid-recording it goes to the pane you started in, and dictating into a remote session needs nothing
+installed on the server.
+
+It is **attach-only**. Pressed in the session list there is no pane to type into, so it says
+*"Attach to a session to dictate into it"* and records nothing. A transcript that arrives after
+you've detached is dropped with the same message rather than typed into whatever you attached to
+next.
+
+#### What gets typed
+
+The transcript is normalised to a single line before it is typed: every newline becomes a space.
+A pane is a terminal, so a literal newline is not whitespace — it is Enter, and it would submit a
+half-finished sentence in the middle of dictation. Transcription engines return trailing newlines
+routinely, so this runs on every transcript. An empty result (silence) types nothing at all.
+
+By default nothing is submitted — the text sits in the composer and you press Enter yourself, after
+reading it. Transcription mishears, and one keystroke is a cheap price for never running a command
+nobody said. `dictation_submit` under `[stt]` trades that review step for hands-free operation:
+
+| Value | Behaviour |
+|-------|-----------|
+| `never` (default) | Type the text and stop. You press Enter |
+| `agent` | Also press Enter on an **agent** pane, where a wrong submit costs a turn. A shell pane stays insert-only |
+| `always` | Press Enter on **any** pane, shell included — so a misheard sentence is a command that runs. Choose it deliberately |
+
+When it does submit, the Enter follows the text after whatever per-harness delay that agent needs
+to read the typed text as its own keystrokes first (Codex needs one; the others don't). Change the
+policy from **Settings ▸ Voice ▸ Transcription ▸ Dictation Submit** and it applies to the next
+recording, live — no restart.
+
+#### The keys it shadows
+
+Unlike `Alt-v`, which is only intercepted on agent panes, `Alt-t` is intercepted on **shell panes
+too** — dictating a command line is half the point. The cost is that the pane never sees the key:
+
+- In a shell, it shadows readline's `transpose-words` (`Alt-t` swaps the two words around the
+  cursor). If you use that, rebind dictation.
+- In a Claude Code pane, it shadows Claude Code's own `Alt+T`, *toggle extended thinking*
+  (its [keyboard-shortcuts table](https://code.claude.com/docs/en/interactive-mode.md#keyboard-shortcuts);
+  those docs note the shortcut has no effect on Fable models).
+
+Rebind it like any other action — it's `toggle_dictation`, in the **Review & AI** group of the
+keybindings tab:
+
+```toml
+[keybindings]
+toggle_dictation = ["Alt-x"]
+```
+
+> **Not yet:** the `listen-toggle` desktop hotkey below still drives `Alt-v`'s recording only —
+> there is no `listen-toggle --dictate` for starting a dictation from outside the terminal. Nor is
+> the submit policy settable per session; it's one config value for the whole app.
 
 ### Global voice hotkey
 

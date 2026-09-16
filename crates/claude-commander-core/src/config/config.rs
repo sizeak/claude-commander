@@ -496,7 +496,7 @@ pub struct SttConfig {
     /// Microphone to capture from, as cpal's stable device id (the PipeWire
     /// `node.name`, e.g. `alsa_input.pci-0000_c1_00.6.analog-stereo`). `None`
     /// uses the system default input device. Set it via the picker in
-    /// Settings ▸ Conversation rather than by hand. Ids — not friendly names —
+    /// Settings ▸ Voice rather than by hand. Ids — not friendly names —
     /// are stored because a mic and its speaker's loopback share a name; if the
     /// device is absent at record time, capture falls back to the default (with
     /// a warning) rather than failing.
@@ -517,7 +517,7 @@ pub struct SttConfig {
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
-            // Off by default — enable it in Settings ▸ Conversation.
+            // Off by default — enable it in Settings ▸ Voice.
             enabled: false,
             // Localhost placeholder, like the TTS default; override in config to
             // point at your transcription server.

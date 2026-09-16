@@ -520,7 +520,7 @@ impl App {
         }
         if !self.config.conversation.enabled {
             self.set_status_message(
-                "Conversation mode is disabled — enable it in Settings ▸ Conversation",
+                "Conversation mode is disabled — enable it in Settings ▸ Voice",
                 4,
             );
             return;
@@ -717,7 +717,7 @@ impl App {
     pub(super) async fn toggle_voice_input(&mut self) {
         if !self.config.stt.enabled {
             self.set_status_message(
-                "Voice input is disabled — enable STT in Settings ▸ Conversation",
+                "Voice input is disabled — enable STT in Settings ▸ Voice",
                 4,
             );
             return;
