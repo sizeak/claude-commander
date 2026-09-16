@@ -478,6 +478,12 @@ impl App {
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
             }
+            StateUpdate::DictationUndeliverable => {
+                // The user detached (or the pane died) between speaking and the
+                // transcript coming back. Say where dictation does work rather
+                // than reporting a failure they can't act on.
+                self.set_status_message("Attach to a session to dictate into it", 4);
+            }
             StateUpdate::ReviewPrepared { prepared } => {
                 // Only swap in the view if the loading spinner is still up. The
                 // user can't navigate while it's shown, but another background

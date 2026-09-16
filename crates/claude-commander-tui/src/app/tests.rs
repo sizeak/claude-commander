@@ -10022,3 +10022,125 @@ async fn a_failed_reveal_restores_the_layout_and_the_cursor() {
         "a failed reveal must leave the cursor where it was"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Dictation: describing the attached pane, and the Alt-T handler's gates
+// ---------------------------------------------------------------------------
+
+/// Seed one project and one session running `program`, and return the app plus
+/// a ref to that session. The pane descriptor is read out of the *cached
+/// snapshot* rather than the store, so the view has to be synced for
+/// `pane_info_for` to see anything — which is the path the attach loop takes.
+async fn app_with_session_running(program: &str) -> (App, SessionRef) {
+    let mut app = make_test_app();
+    let project = claude_commander_core::session::Project::new(
+        "proj",
+        std::path::PathBuf::from("/tmp/proj"),
+        "main",
+    );
+    let project_id = project.id;
+    let session = claude_commander_core::session::WorktreeSession::new(
+        project_id,
+        "one",
+        "br-one",
+        std::path::PathBuf::from("/tmp/w1"),
+        program,
+    );
+    let session_id = session.id;
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.add_project(project);
+            state.add_session(session);
+        })
+        .await
+        .unwrap();
+    app.sync_local_view_from_store_for_test().await;
+    (app, SessionRef::local(session_id))
+}
+
+#[tokio::test]
+async fn pane_info_for_agent_target_derives_agent_kind_from_program() {
+    // The submit policy's per-harness delay comes from the *agent*, so the pane
+    // descriptor has to carry which harness runs there — read from the session's
+    // configured program, not assumed to be Claude.
+    let (app, session) = app_with_session_running("codex --full-auto").await;
+    let pane = app.pane_info_for(&AttachTarget::Session {
+        session,
+        kind: AttachKind::Agent,
+    });
+    assert_eq!(pane.kind, AttachKind::Agent);
+    assert_eq!(pane.agent, claude_commander_core::agent::AgentKind::Codex);
+}
+
+#[tokio::test]
+async fn pane_info_for_shell_target_is_shell() {
+    // A session's shell pane is a shell even though the session itself runs an
+    // agent: under the `agent` submit policy that is the difference between
+    // typing a command and running it.
+    let (app, session) = app_with_session_running("claude").await;
+    let pane = app.pane_info_for(&AttachTarget::Session {
+        session,
+        kind: AttachKind::Shell,
+    });
+    assert_eq!(pane.kind, AttachKind::Shell);
+}
+
+#[test]
+fn pane_info_for_local_name_is_shell_unknown() {
+    // The commander / a project shell has no session behind it, so there is no
+    // harness to name and nothing that should ever be auto-submitted.
+    let app = make_test_app();
+    let pane = app.pane_info_for(&AttachTarget::LocalName("claude-commander".to_string()));
+    assert_eq!(pane.kind, AttachKind::Shell);
+    assert_eq!(pane.agent, claude_commander_core::agent::AgentKind::Unknown);
+}
+
+#[tokio::test]
+async fn dictation_undeliverable_update_sets_status_toast() {
+    // The transcript consumer runs off the UI loop and cannot touch `&mut App`,
+    // so "there was nothing to type into" comes back as a state update. It has
+    // to land as a toast rather than an error modal — a missed dictation is not
+    // a failure the user must dismiss.
+    let mut app = make_test_app();
+    app.handle_state_update(StateUpdate::DictationUndeliverable)
+        .await;
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("an undeliverable transcript must toast");
+    assert!(
+        msg.contains("Attach to a session to dictate into it"),
+        "unexpected toast: {msg}"
+    );
+    assert!(
+        !matches!(app.ui_state.modal, Modal::Error { .. }),
+        "a missed dictation must not raise an error modal"
+    );
+}
+
+#[tokio::test]
+async fn toggle_dictation_when_idle_in_list_toasts_and_does_not_record() {
+    // Dictation is attach-only: from the session list there is no pane to type
+    // into, so Alt-T must say so rather than open the microphone and collect a
+    // transcript with nowhere to go.
+    let mut app = make_test_app();
+    app.config.stt.enabled = true;
+
+    app.toggle_dictation().await;
+
+    assert!(
+        !app.conversation.is_recording(),
+        "Alt-T must not start recording when nothing is attached"
+    );
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("Alt-T must explain why it did nothing");
+    assert!(
+        msg.contains("Attach to a session to dictate into it"),
+        "unexpected toast: {msg}"
+    );
+}

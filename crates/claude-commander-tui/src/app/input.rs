@@ -496,13 +496,21 @@ impl App {
                     return;
                 }
 
-                // Voice input (Alt-V) is intercepted before modal routing so it
-                // works whether the conversation overlay (or any modal) is open
-                // or not — mirroring how spoken replies play regardless of UI
-                // state. Its Alt modifier means it never shadows text entry.
-                if self.config.keybindings.resolve(&key) == Some(BindableAction::ToggleVoiceInput) {
-                    self.toggle_voice_input().await;
-                    return;
+                // The two voice toggles (Alt-V, Alt-T) are intercepted before
+                // modal routing so they work whether the conversation overlay
+                // (or any modal) is open or not — mirroring how spoken replies
+                // play regardless of UI state. Their Alt modifier means they
+                // never shadow text entry, including a modal's input field.
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::ToggleVoiceInput) => {
+                        self.toggle_voice_input().await;
+                        return;
+                    }
+                    Some(BindableAction::ToggleDictation) => {
+                        self.toggle_dictation().await;
+                        return;
+                    }
+                    _ => {}
                 }
 
                 // Check for modal-specific handling first
@@ -1741,6 +1749,9 @@ impl App {
             }
             UserCommand::ToggleVoiceInput => {
                 self.toggle_voice_input().await;
+            }
+            UserCommand::ToggleDictation => {
+                self.toggle_dictation().await;
             }
             UserCommand::OpenReviewDiff => {
                 self.handle_open_review().await;

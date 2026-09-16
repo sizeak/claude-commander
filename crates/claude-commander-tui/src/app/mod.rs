@@ -64,6 +64,7 @@ use claude_commander_core::git::{
 use claude_commander_core::session::{
     AgentState, Board, BoardPos, ProjectId, SessionId, SessionListItem, SessionStatus,
 };
+use claude_commander_core::tmux::PaneInfo;
 
 mod actions;
 mod background;
@@ -2506,6 +2507,39 @@ impl App {
         }
     }
 
+    /// Describe the pane an [`AttachTarget`] puts on screen, for the dictation
+    /// submit policy: which half of the session it is, and which harness runs
+    /// there.
+    ///
+    /// The harness comes from the session's configured `program` in the owning
+    /// backend's cached snapshot, so it is right for a remote session too. A ref
+    /// that isn't in the snapshot yields
+    /// [`AgentKind::Unknown`](claude_commander_core::agent::AgentKind::Unknown),
+    /// which costs only the per-harness submit delay — the `kind` the policy
+    /// actually gates on is carried by the target itself.
+    ///
+    /// A name-only target is the commander or a project shell: a shell with no
+    /// session behind it and so no harness to name. Under the `agent` policy
+    /// that is correctly never submitted into; under `always` it is submitted
+    /// into, which is what that setting asks for. (The commander pane is
+    /// arguably an agent — a follow-up, since it has no `SessionInfo` to read a
+    /// program from.)
+    pub(super) fn pane_info_for(&self, target: &AttachTarget) -> PaneInfo {
+        match target {
+            AttachTarget::Session { session, kind } => PaneInfo {
+                kind: *kind,
+                agent: self
+                    .session(*session)
+                    .map(|s| claude_commander_core::agent::AgentKind::from_program(&s.program))
+                    .unwrap_or(claude_commander_core::agent::AgentKind::Unknown),
+            },
+            AttachTarget::LocalName(_) => PaneInfo {
+                kind: AttachKind::Shell,
+                agent: claude_commander_core::agent::AgentKind::Unknown,
+            },
+        }
+    }
+
     /// The session id a tmux session name belongs to (agent or `-sh` shell),
     /// preferring `backend`'s cached snapshot before scanning the rest. The
     /// attached backend takes precedence because tmux session names can collide
@@ -2954,8 +2988,17 @@ impl App {
 
                             // Only intercept Ctrl+Z / Alt-r / Alt-V for Claude
                             // (non-shell) panes: SIGTSTP would freeze a shell-
-                            // less pane, and a shell's Ctrl-r must not be
-                            // shadowed. Voice is meaningful only with STT on.
+                            // less pane, a shell's Ctrl-r must not be shadowed,
+                            // and talking *to* the assistant is a thing you do
+                            // from an agent pane.
+                            //
+                            // Dictation is the exception, and deliberately: it
+                            // types into whatever is on screen, so a shell pane
+                            // is a first-class destination for it. Alt-T and the
+                            // listener behind it are therefore gated on `stt`
+                            // alone, not on `is_shell` — otherwise the one place
+                            // dictation is most obviously useful (typing a long
+                            // command) would be the one place it didn't work.
                             let is_shell = matches!(
                                 current,
                                 AttachTarget::Session {
@@ -2975,26 +3018,35 @@ impl App {
                             } else {
                                 Vec::new()
                             };
-                            let (voice_triggers, voice_listener) =
-                                if intercept_ctrl_z && self.config.stt.enabled {
-                                    (
-                                    claude_commander_core::config::keybindings::voice_trigger_bytes(
-                                        &self.config.keybindings,
-                                    ),
-                                    Some(self.conversation.listener.clone()),
+                            let voice_triggers = if intercept_ctrl_z && self.config.stt.enabled {
+                                claude_commander_core::config::keybindings::voice_trigger_bytes(
+                                    &self.config.keybindings,
                                 )
-                                } else {
-                                    (Vec::new(), None)
-                                };
+                            } else {
+                                Vec::new()
+                            };
+                            let dictation_triggers = if self.config.stt.enabled {
+                                claude_commander_core::config::keybindings::dictation_trigger_bytes(
+                                    &self.config.keybindings,
+                                )
+                            } else {
+                                Vec::new()
+                            };
+                            // One listener serves both triggers, so it comes up
+                            // whenever either of them can fire — which, since
+                            // dictation works on a shell pane, means whenever
+                            // STT is on at all.
+                            let voice_listener = self
+                                .config
+                                .stt
+                                .enabled
+                                .then(|| self.conversation.listener.clone());
 
                             let cfg = claude_commander_core::tmux::AttachConfig {
                                 editor_triggers,
                                 review_triggers,
                                 voice_triggers,
-                                // Not wired up yet — the dictation hotkey and the
-                                // frontend's long-lived injector land with the
-                                // TUI side of the feature.
-                                dictation_triggers: Vec::new(),
+                                dictation_triggers,
                                 voice_listener,
                                 recording: self.conversation.recording.clone(),
                                 intercept_ctrl_z,
@@ -3006,8 +3058,22 @@ impl App {
                                 switcher_enabled: true,
                                 session_name: name.clone(),
                                 image_paste,
-                                injector: None,
+                                // The frontend's one long-lived injector: this
+                                // attach installs its own channel into it and
+                                // drops it on the way out, so the transcript
+                                // consumer never has to be told an attach began
+                                // or ended.
+                                injector: Some(self.conversation.injector.clone()),
                             };
+
+                            // Record what the client is about to show, so a
+                            // transcript that arrives during this attach is
+                            // planned against the right pane. The switcher
+                            // updates it again whenever it moves the client in
+                            // place.
+                            self.conversation
+                                .injector
+                                .set_pane(self.pane_info_for(&current));
 
                             let outcome = match self.drive_attach(streams, cfg).await {
                                 Ok(o) => o,
