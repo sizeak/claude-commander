@@ -501,6 +501,17 @@ pub struct SttConfig {
     /// device is absent at record time, capture falls back to the default (with
     /// a warning) rather than failing.
     pub input_device: Option<String>,
+
+    /// Whether dictation (Alt-T) presses Enter after typing a transcript into
+    /// the attached pane. `"never"` types the text and stops, `"agent"` also
+    /// submits on an agent pane but leaves a shell pane alone, `"always"`
+    /// submits on any pane.
+    ///
+    /// Insert-only is the default because transcription mishears, and the pane
+    /// is a terminal: the user reads what was typed and presses Enter
+    /// themselves, which costs one keystroke and cannot run a command nobody
+    /// said. See [`DictationSubmit`](crate::conversation::DictationSubmit).
+    pub dictation_submit: crate::conversation::DictationSubmit,
 }
 
 impl Default for SttConfig {
@@ -517,6 +528,8 @@ impl Default for SttConfig {
             api_key: None,
             pause_media: true,
             input_device: None,
+            // Insert-only: the user reviews the transcript and presses Enter.
+            dictation_submit: crate::conversation::DictationSubmit::Never,
         }
     }
 }
@@ -1268,6 +1281,11 @@ has_label = ["blocked", "waiting-on-author"]
         assert_eq!(c.prompt, None);
         assert_eq!(c.api_key, None);
         assert_eq!(c.input_device, None);
+        // Insert-only: a dictated transcript waits for the user's own Enter.
+        assert_eq!(
+            c.dictation_submit,
+            crate::conversation::DictationSubmit::Never
+        );
     }
 
     #[test]
@@ -1275,6 +1293,25 @@ has_label = ["blocked", "waiting-on-author"]
         let config: Config = toml::from_str("").expect("empty toml");
         assert!(!config.stt.enabled);
         assert_eq!(config.stt.base_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(
+            config.stt.dictation_submit,
+            crate::conversation::DictationSubmit::Never
+        );
+    }
+
+    #[test]
+    fn test_stt_dictation_submit_toml_roundtrip() {
+        let toml_src = r#"
+[stt]
+dictation_submit = "agent"
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert_eq!(
+            config.stt.dictation_submit,
+            crate::conversation::DictationSubmit::Agent
+        );
+        // Unspecified fields keep their defaults.
+        assert!(!config.stt.enabled);
     }
 
     #[test]

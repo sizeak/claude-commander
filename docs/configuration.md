@@ -281,6 +281,7 @@ state_sync_interval_ms = 2000
 # input_device = "..."                     # microphone to capture from; omit for the system default
 # pause_media = true                       # pause other players while recording, resume after the
 #                                          # reply (best-effort via playerctl/osascript; on by default)
+# dictation_submit = "never"               # never | agent | always — press Enter after a dictated transcript?
 
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]

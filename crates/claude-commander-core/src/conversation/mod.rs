@@ -33,6 +33,7 @@
 //! fragile pane-scraping). See [`session`] for the actual protocol handling.
 
 pub mod audio;
+pub mod dictation;
 pub mod extract;
 pub mod ipc;
 pub mod listener;
@@ -43,6 +44,9 @@ pub mod speaker;
 pub mod stt;
 pub mod tts;
 
+pub use dictation::{
+    DictationPlan, DictationSubmit, SubmitPlan, normalise_dictation, plan_dictation,
+};
 pub use extract::{SpeakScope, split_sentences, spoken_text};
 pub use listener::{
     ListenAction, ListenerCommand, ListenerHandle, Transcript, VoiceMode, apply_listen_action,
