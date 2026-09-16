@@ -443,6 +443,9 @@ pub enum UserCommand {
     ToggleConversationOverlay,
     /// Toggle voice input: start/stop recording the mic for transcription (STT)
     ToggleVoiceInput,
+    /// Toggle dictation: record the mic and type the transcript into the
+    /// attached session pane (STT)
+    ToggleDictation,
     /// Open the full-screen review-diff-and-comment view for the session
     OpenReviewDiff,
     /// Show help
@@ -598,6 +601,7 @@ impl UserCommand {
             UserCommand::OpenCommander => Some("commander.open"),
             UserCommand::ToggleConversationOverlay => Some("conversation.toggle"),
             UserCommand::ToggleVoiceInput => Some("stt.toggle_voice"),
+            UserCommand::ToggleDictation => Some("stt.toggle_dictation"),
             UserCommand::GenerateSummary => Some("ai_summary.generate"),
             UserCommand::ShowHelp => Some("ui.help"),
             UserCommand::ShowSettings => Some("ui.settings"),
@@ -659,6 +663,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::OpenCommander => Self::OpenCommander,
             BindableAction::ToggleConversationOverlay => Self::ToggleConversationOverlay,
             BindableAction::ToggleVoiceInput => Self::ToggleVoiceInput,
+            BindableAction::ToggleDictation => Self::ToggleDictation,
             BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
             BindableAction::ShowHelp => Self::ShowHelp,
             BindableAction::ShowSettings => Self::ShowSettings,
