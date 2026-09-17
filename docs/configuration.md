@@ -526,11 +526,11 @@ channel your keystrokes travel — rather than a server route. So it follows the
 looking at when it arrives, and dictating into a remote session needs nothing installed on the
 server.
 
-While you dictate, the attached client's tmux status line shows **🎙 Dictating… (Alt-t to type)**
+While you dictate, the attached client's tmux status line shows **● Dictating… (Alt-t to type)**
 and keeps showing it until you press a key (the `Alt-t` that stops recording counts); it is then
-replaced by **🎙 Transcribing…**, which in turn is replaced by a brief **🎙 Typed** as the text
-lands — or **🎙 Nothing heard** / **🎙 Transcription failed: …** if it doesn't. `Alt-v` gets the
-same held **🎙 Recording…** notice, retired by *Sent to <assistant>*. For a remote session these
+replaced by **● Transcribing…**, which in turn is replaced by a brief **✓ Typed** as the text
+lands — or **✗ Nothing heard** / **✗ Transcription failed: …** if it doesn't. `Alt-v` gets the
+same held **● Recording…** notice, retired by *✓ Sent to <assistant>*. For a remote session these
 notices are best-effort: they target your local tmux by the session's name.
 
 It is **attach-only**. Pressed in the session list there is no pane to type into, so it says

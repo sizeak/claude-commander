@@ -1083,10 +1083,14 @@ where
                                     crate::conversation::ListenAction::Toggle,
                                     mode,
                                 );
+                                // `●`/`✓`/`✗` rather than the 🎙 emoji: U+1F399 has
+                                // no glyph in many terminal fonts and renders as a
+                                // placeholder box in the tmux status line, where
+                                // there is no fallback font to rescue it.
                                 let msg = match (now_recording, mode) {
-                                    (true, VoiceMode::Conversation) => "🎙 Recording… (Alt-V to send)",
-                                    (true, VoiceMode::Dictation) => "🎙 Dictating… (Alt-t to type)",
-                                    (false, _) => "🎙 Transcribing…",
+                                    (true, VoiceMode::Conversation) => "● Recording… (Alt-V to send)",
+                                    (true, VoiceMode::Dictation) => "● Dictating… (Alt-t to type)",
+                                    (false, _) => "● Transcribing…",
                                 };
                                 // Both are states the user is *in*, so the notice
                                 // holds until the next keypress rather than
@@ -1972,8 +1976,8 @@ mod tests {
         // Held notices (recording, transcribing) pass `-d 0`; momentary ones
         // leave the delay to tmux's `display-time`.
         assert_eq!(
-            display_message_args("cc-1", "🎙 Dictating…", true),
-            ["display-message", "-t", "cc-1", "-d", "0", "🎙 Dictating…"]
+            display_message_args("cc-1", "● Dictating…", true),
+            ["display-message", "-t", "cc-1", "-d", "0", "● Dictating…"]
         );
         assert_eq!(
             display_message_args("cc-1", "Typed", false),

@@ -459,12 +459,12 @@ async fn dictate(
     events: &tokio::sync::mpsc::Sender<AppEvent>,
     transcript: &Transcript,
 ) {
-    // The attach loop is holding a "🎙 Transcribing…" notice in the pane's
+    // The attach loop is holding a "● Transcribing…" notice in the pane's
     // status line (see `PaneInput::Notice`); every branch below replaces it, so
     // the operator is never left looking at a state that has already ended.
     if let Some(err) = &transcript.error {
         warn!(target: "conversation", "dictation transcription failed: {err}");
-        injector.notice(format!("🎙 Transcription failed: {err}"), false);
+        injector.notice(format!("✗ Transcription failed: {err}"), false);
         return;
     }
     // With no pane ever recorded, fall back to the most restrictive descriptor
@@ -480,7 +480,7 @@ async fn dictate(
     });
     let Some(plan) = plan_dictation(&transcript.text, policy, pane) else {
         debug!(target: "conversation", "dictated transcript was empty; nothing to type");
-        injector.notice("🎙 Nothing heard", false);
+        injector.notice("✗ Nothing heard", false);
         return;
     };
     // The transcript is the user's speech, so its length is logged and its text
@@ -519,7 +519,7 @@ async fn dictate(
     }
     // The text on screen is the real confirmation; this only retires the held
     // "Transcribing…" so it does not outlive the work it described.
-    injector.notice("🎙 Typed", false);
+    injector.notice("✓ Typed", false);
 }
 
 impl App {
@@ -663,10 +663,10 @@ impl App {
                             submit_to_session(&session, &view, &speaker, text).await;
                         }
                         // If the user spoke from inside an attach, the pane's
-                        // status line is holding "🎙 Transcribing…"; retire it.
+                        // status line is holding "● Transcribing…"; retire it.
                         // Best-effort — false (no attach) just means the TUI's
                         // own status bar was visible all along.
-                        injector.notice(format!("🎙 Sent to {}", conv.name), false);
+                        injector.notice(format!("✓ Sent to {}", conv.name), false);
                     }
                 }
             }
@@ -746,8 +746,8 @@ impl App {
             .conversation
             .apply_listen(ListenAction::Toggle, VoiceMode::Conversation)
         {
-            Some(true) => self.set_status_message("🎙 Listening… (Alt-V to send)", 60),
-            Some(false) => self.set_status_message("🎙 Transcribing…", 4),
+            Some(true) => self.set_status_message("● Listening… (Alt-V to send)", 60),
+            Some(false) => self.set_status_message("● Transcribing…", 4),
             None => self.set_status_message("Voice input unavailable — no microphone?", 4),
         }
     }
@@ -784,7 +784,7 @@ impl App {
             .conversation
             .apply_listen(ListenAction::Toggle, VoiceMode::Dictation)
         {
-            Some(_) => self.set_status_message("🎙 Transcribing…", 4),
+            Some(_) => self.set_status_message("● Transcribing…", 4),
             None => self.set_status_message("Voice input unavailable — no microphone?", 4),
         }
     }
@@ -911,7 +911,7 @@ impl App {
             // Recording takes over the input row — show a live indicator instead
             // of the typing placeholder.
             frame.render_widget(
-                Paragraph::new("🎙 Listening… (Alt-V to send)").style(
+                Paragraph::new("● Listening… (Alt-V to send)").style(
                     Style::default()
                         .fg(self.theme.modal_error)
                         .add_modifier(Modifier::BOLD),
@@ -1106,7 +1106,7 @@ mod tests {
             vec![
                 PaneInput::Bytes(b"ls -la".to_vec()),
                 PaneInput::Notice {
-                    text: "🎙 Typed".into(),
+                    text: "✓ Typed".into(),
                     hold: false
                 },
             ]
@@ -1133,7 +1133,7 @@ mod tests {
                 PaneInput::Bytes(b"run tests".to_vec()),
                 PaneInput::Bytes(b"\r".to_vec()),
                 PaneInput::Notice {
-                    text: "🎙 Typed".into(),
+                    text: "✓ Typed".into(),
                     hold: false
                 },
             ]
@@ -1147,7 +1147,7 @@ mod tests {
         assert_eq!(
             drain(&mut rx),
             vec![PaneInput::Notice {
-                text: "🎙 Nothing heard".into(),
+                text: "✗ Nothing heard".into(),
                 hold: false
             }]
         );
