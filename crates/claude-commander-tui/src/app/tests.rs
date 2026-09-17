@@ -1314,7 +1314,7 @@ fn test_hide_empty_sections_toggle_and_apply() {
 #[test]
 fn test_stt_rows_present_with_defaults() {
     let app = make_test_app();
-    let rows = app.build_settings_rows(SettingsTab::Conversation);
+    let rows = app.build_settings_rows(SettingsTab::Voice);
 
     let kind_of = |key: &str| {
         rows.iter()
@@ -1340,6 +1340,12 @@ fn test_stt_rows_present_with_defaults() {
     );
     // Media pausing is on by default.
     assert_eq!(kind_of("stt_pause_media"), SettingsRowKind::Toggle(true));
+    // Dictation is insert-only until the user opts into a submit policy; the
+    // row shows the enum's human label, not its config token.
+    assert_eq!(
+        kind_of("stt_dictation_submit"),
+        SettingsRowKind::Text("Never".to_string())
+    );
 }
 
 #[test]
@@ -1354,20 +1360,20 @@ fn test_apply_stt_pause_media_toggle() {
 fn test_apply_stt_text_fields() {
     let mut app = make_test_app();
     app.apply_settings_edit(
-        SettingsTab::Conversation,
+        SettingsTab::Voice,
         "stt_base_url",
         "http://192.168.1.10:8080/v1",
     );
-    app.apply_settings_edit(SettingsTab::Conversation, "stt_model", "large-v3-turbo");
-    app.apply_settings_edit(SettingsTab::Conversation, "stt_language", "en");
+    app.apply_settings_edit(SettingsTab::Voice, "stt_model", "large-v3-turbo");
+    app.apply_settings_edit(SettingsTab::Voice, "stt_language", "en");
     assert_eq!(app.config.stt.base_url, "http://192.168.1.10:8080/v1");
     assert_eq!(app.config.stt.model, "large-v3-turbo");
     assert_eq!(app.config.stt.language.as_deref(), Some("en"));
 
     // Sentinel / empty clears the optional fields back to None.
-    app.apply_settings_edit(SettingsTab::Conversation, "stt_language", "(auto)");
+    app.apply_settings_edit(SettingsTab::Voice, "stt_language", "(auto)");
     assert_eq!(app.config.stt.language, None);
-    app.apply_settings_edit(SettingsTab::Conversation, "stt_prompt", "");
+    app.apply_settings_edit(SettingsTab::Voice, "stt_prompt", "");
     assert_eq!(app.config.stt.prompt, None);
 }
 
@@ -1381,6 +1387,104 @@ fn test_toggle_stt_enabled_via_bool_path() {
     assert!(app.config.stt.enabled);
     app.apply_bool_setting("stt_enabled", false);
     assert!(!app.config.stt.enabled);
+}
+
+#[test]
+fn test_voice_tab_rows_are_grouped_under_three_headers() {
+    // The Voice tab shows one feature's worth of settings split by what the
+    // reader is looking for — transcription in, speech out, and the
+    // conversation agent that joins them — rather than by which TOML table the
+    // field is persisted in. This pins that grouping: the headers, their order,
+    // and which fields sit under each.
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::Voice);
+
+    // Section headers in order, ignoring the blank spacer rows
+    // `with_section_spacers` inserts between groups.
+    let headers: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.kind == SettingsRowKind::Header && !r.label.is_empty())
+        .map(|r| r.label.as_str())
+        .collect();
+    assert_eq!(
+        headers,
+        vec!["Transcription", "Text-to-Speech", "Conversation Mode"]
+    );
+
+    // Walk the list, remembering the most recent non-blank header, so every
+    // field is checked against the group it actually renders under.
+    let mut section = "";
+    let mut under: Vec<(&str, &str)> = Vec::new();
+    for row in &rows {
+        if row.kind == SettingsRowKind::Header {
+            if !row.label.is_empty() {
+                section = row.label.as_str();
+            }
+            continue;
+        }
+        under.push((section, row.field_key.as_str()));
+    }
+
+    assert_eq!(
+        under,
+        vec![
+            ("Transcription", "stt_enabled"),
+            ("Transcription", "stt_base_url"),
+            ("Transcription", "stt_model"),
+            ("Transcription", "stt_language"),
+            ("Transcription", "stt_prompt"),
+            ("Transcription", "stt_input_device"),
+            ("Transcription", "stt_pause_media"),
+            ("Transcription", "stt_dictation_submit"),
+            ("Text-to-Speech", "conversation_base_url"),
+            ("Text-to-Speech", "conversation_model"),
+            ("Text-to-Speech", "conversation_voice"),
+            ("Text-to-Speech", "conversation_format"),
+            ("Text-to-Speech", "conversation_speed"),
+            ("Text-to-Speech", "conversation_volume"),
+            ("Text-to-Speech", "conversation_speak_scope"),
+            ("Conversation Mode", "conversation_enabled"),
+            ("Conversation Mode", "conversation_name"),
+        ]
+    );
+
+    // Every field stays reachable: headers and spacers are skipped by
+    // navigation, so the selectable count is the whole settable surface.
+    assert_eq!(rows.iter().filter(|r| r.is_selectable()).count(), 17);
+
+    // A leading header must not swallow the opening selection.
+    assert!(rows[super::settings::first_selectable_from(&rows, 0)].is_selectable());
+}
+
+#[test]
+fn test_apply_stt_dictation_submit_accepts_token_and_label() {
+    // Config files carry the snake_case token; the option picker hands over the
+    // human label. Both reach `apply_settings_edit`, so both must parse.
+    let mut app = make_test_app();
+    assert_eq!(
+        app.config.stt.dictation_submit,
+        claude_commander_core::conversation::DictationSubmit::Never
+    );
+
+    app.apply_settings_edit(SettingsTab::Voice, "stt_dictation_submit", "agent");
+    assert_eq!(
+        app.config.stt.dictation_submit,
+        claude_commander_core::conversation::DictationSubmit::Agent
+    );
+
+    app.apply_settings_edit(SettingsTab::Voice, "stt_dictation_submit", "Always");
+    assert_eq!(
+        app.config.stt.dictation_submit,
+        claude_commander_core::conversation::DictationSubmit::Always
+    );
+
+    // Anything else leaves the setting alone rather than silently resetting it
+    // to the default — a typo must not quietly turn a submit policy off.
+    app.apply_settings_edit(SettingsTab::Voice, "stt_dictation_submit", "sometimes");
+    assert_eq!(
+        app.config.stt.dictation_submit,
+        claude_commander_core::conversation::DictationSubmit::Always
+    );
 }
 
 #[test]
@@ -10020,5 +10124,127 @@ async fn a_failed_reveal_restores_the_layout_and_the_cursor() {
         app.ui_state.selected_session_id.map(|r| r.id),
         Some(beta),
         "a failed reveal must leave the cursor where it was"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dictation: describing the attached pane, and the Alt-T handler's gates
+// ---------------------------------------------------------------------------
+
+/// Seed one project and one session running `program`, and return the app plus
+/// a ref to that session. The pane descriptor is read out of the *cached
+/// snapshot* rather than the store, so the view has to be synced for
+/// `pane_info_for` to see anything — which is the path the attach loop takes.
+async fn app_with_session_running(program: &str) -> (App, SessionRef) {
+    let mut app = make_test_app();
+    let project = claude_commander_core::session::Project::new(
+        "proj",
+        std::path::PathBuf::from("/tmp/proj"),
+        "main",
+    );
+    let project_id = project.id;
+    let session = claude_commander_core::session::WorktreeSession::new(
+        project_id,
+        "one",
+        "br-one",
+        std::path::PathBuf::from("/tmp/w1"),
+        program,
+    );
+    let session_id = session.id;
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.add_project(project);
+            state.add_session(session);
+        })
+        .await
+        .unwrap();
+    app.sync_local_view_from_store_for_test().await;
+    (app, SessionRef::local(session_id))
+}
+
+#[tokio::test]
+async fn pane_info_for_agent_target_derives_agent_kind_from_program() {
+    // The submit policy's per-harness delay comes from the *agent*, so the pane
+    // descriptor has to carry which harness runs there — read from the session's
+    // configured program, not assumed to be Claude.
+    let (app, session) = app_with_session_running("codex --full-auto").await;
+    let pane = app.pane_info_for(&AttachTarget::Session {
+        session,
+        kind: AttachKind::Agent,
+    });
+    assert_eq!(pane.kind, AttachKind::Agent);
+    assert_eq!(pane.agent, claude_commander_core::agent::AgentKind::Codex);
+}
+
+#[tokio::test]
+async fn pane_info_for_shell_target_is_shell() {
+    // A session's shell pane is a shell even though the session itself runs an
+    // agent: under the `agent` submit policy that is the difference between
+    // typing a command and running it.
+    let (app, session) = app_with_session_running("claude").await;
+    let pane = app.pane_info_for(&AttachTarget::Session {
+        session,
+        kind: AttachKind::Shell,
+    });
+    assert_eq!(pane.kind, AttachKind::Shell);
+}
+
+#[test]
+fn pane_info_for_local_name_is_shell_unknown() {
+    // The commander / a project shell has no session behind it, so there is no
+    // harness to name and nothing that should ever be auto-submitted.
+    let app = make_test_app();
+    let pane = app.pane_info_for(&AttachTarget::LocalName("claude-commander".to_string()));
+    assert_eq!(pane.kind, AttachKind::Shell);
+    assert_eq!(pane.agent, claude_commander_core::agent::AgentKind::Unknown);
+}
+
+#[tokio::test]
+async fn dictation_undeliverable_update_sets_status_toast() {
+    // The transcript consumer runs off the UI loop and cannot touch `&mut App`,
+    // so "there was nothing to type into" comes back as a state update. It has
+    // to land as a toast rather than an error modal — a missed dictation is not
+    // a failure the user must dismiss.
+    let mut app = make_test_app();
+    app.handle_state_update(StateUpdate::DictationUndeliverable)
+        .await;
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("an undeliverable transcript must toast");
+    assert!(
+        msg.contains("Attach to a session to dictate into it"),
+        "unexpected toast: {msg}"
+    );
+    assert!(
+        !matches!(app.ui_state.modal, Modal::Error { .. }),
+        "a missed dictation must not raise an error modal"
+    );
+}
+
+#[tokio::test]
+async fn toggle_dictation_when_idle_in_list_toasts_and_does_not_record() {
+    // Dictation is attach-only: from the session list there is no pane to type
+    // into, so Alt-T must say so rather than open the microphone and collect a
+    // transcript with nowhere to go.
+    let mut app = make_test_app();
+    app.config.stt.enabled = true;
+
+    app.toggle_dictation().await;
+
+    assert!(
+        !app.conversation.is_recording(),
+        "Alt-T must not start recording when nothing is attached"
+    );
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("Alt-T must explain why it did nothing");
+    assert!(
+        msg.contains("Attach to a session to dictate into it"),
+        "unexpected toast: {msg}"
     );
 }

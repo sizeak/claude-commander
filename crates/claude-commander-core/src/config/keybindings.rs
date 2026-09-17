@@ -60,6 +60,7 @@ pub enum BindableAction {
     OpenCommander,
     ToggleConversationOverlay,
     ToggleVoiceInput,
+    ToggleDictation,
     OpenReviewDiff,
     ShowHelp,
     ShowSettings,
@@ -147,6 +148,7 @@ impl BindableAction {
         Self::OpenCommander,
         Self::ToggleConversationOverlay,
         Self::ToggleVoiceInput,
+        Self::ToggleDictation,
         // Scrolling
         Self::ScrollUp,
         Self::ScrollDown,
@@ -199,6 +201,7 @@ impl BindableAction {
             Self::OpenCommander => "open_commander",
             Self::ToggleConversationOverlay => "toggle_conversation_overlay",
             Self::ToggleVoiceInput => "toggle_voice_input",
+            Self::ToggleDictation => "toggle_dictation",
             Self::OpenReviewDiff => "open_review_diff",
             Self::ShowHelp => "show_help",
             Self::ShowSettings => "show_settings",
@@ -263,6 +266,7 @@ impl BindableAction {
             Self::OpenCommander => "Open commander session",
             Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
             Self::ToggleVoiceInput => "Voice input: record / send (STT)",
+            Self::ToggleDictation => "Dictate into session: record / type transcript (STT)",
             Self::OpenReviewDiff => "Review diff & comment",
             Self::ShowHelp => "Show help",
             Self::ShowSettings => "Settings",
@@ -333,6 +337,7 @@ impl BindableAction {
             Self::OpenCommander => "commander",
             Self::ToggleConversationOverlay => "conversation",
             Self::ToggleVoiceInput => "voice",
+            Self::ToggleDictation => "dictate",
             Self::OpenReviewDiff => "review",
             Self::ShowHelp => "help",
             Self::ShowSettings => "settings",
@@ -410,7 +415,8 @@ impl BindableAction {
             | Self::GenerateSummary
             | Self::OpenCommander
             | Self::ToggleConversationOverlay
-            | Self::ToggleVoiceInput => "Review & AI",
+            | Self::ToggleVoiceInput
+            | Self::ToggleDictation => "Review & AI",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
             Self::ShowHelp | Self::ShowSettings | Self::CopyServerToken | Self::Quit => {
                 "Application"
@@ -461,6 +467,7 @@ impl FromStr for BindableAction {
             "open_commander" => Ok(Self::OpenCommander),
             "toggle_conversation_overlay" => Ok(Self::ToggleConversationOverlay),
             "toggle_voice_input" => Ok(Self::ToggleVoiceInput),
+            "toggle_dictation" => Ok(Self::ToggleDictation),
             "open_review_diff" => Ok(Self::OpenReviewDiff),
             "show_help" => Ok(Self::ShowHelp),
             "show_settings" => Ok(Self::ShowSettings),
@@ -844,6 +851,15 @@ impl Default for KeyBindings {
             BindableAction::ToggleVoiceInput,
             vec![kb(KeyCode::Char('v'), alt)],
         );
+        // Alt-t is intercepted on a *shell* pane too, unlike Alt-v — dictation
+        // types into whatever pane is attached, so it has to be reachable from
+        // both. That costs two things the user may want back, and both are
+        // rebindable here: readline's `transpose-words` (Alt-t in a shell) and
+        // Claude Code's own Alt+T thinking toggle.
+        bindings.insert(
+            BindableAction::ToggleDictation,
+            vec![kb(KeyCode::Char('t'), alt)],
+        );
         bindings.insert(
             BindableAction::OpenReviewDiff,
             vec![kb(KeyCode::Char('r'), none), kb(KeyCode::Char('r'), alt)],
@@ -1081,6 +1097,17 @@ pub fn review_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
 /// attach — the attach loop swallows them and toggles the mic in place.
 pub fn voice_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
     trigger_bytes_for(bindings, BindableAction::ToggleVoiceInput)
+}
+
+/// Raw stdin byte patterns that toggle dictation mid-attach (from the
+/// [`ToggleDictation`](BindableAction::ToggleDictation) binding — `Alt-t` by
+/// default, encoded as the `ESC t` metaSendsEscape sequence). See
+/// [`trigger_bytes_for`]. Like the voice trigger these don't exit the attach —
+/// the attach loop swallows them and arms the mic in place — but unlike it they
+/// are intercepted on a shell pane as well as an agent one, because dictation
+/// types into whichever pane is on screen.
+pub fn dictation_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
+    trigger_bytes_for(bindings, BindableAction::ToggleDictation)
 }
 
 /// Whether a binding survives the [`trigger_bytes_for`] filter: a Ctrl- or
@@ -1379,6 +1406,25 @@ mod tests {
         assert_eq!(
             BindableAction::ToggleVoiceInput.config_name(),
             "toggle_voice_input"
+        );
+    }
+
+    #[test]
+    fn test_toggle_dictation_default_bound_to_alt_t() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::ToggleDictation));
+    }
+
+    #[test]
+    fn test_toggle_dictation_config_name_roundtrips() {
+        assert_eq!(
+            "toggle_dictation".parse::<BindableAction>().unwrap(),
+            BindableAction::ToggleDictation
+        );
+        assert_eq!(
+            BindableAction::ToggleDictation.config_name(),
+            "toggle_dictation"
         );
     }
 
@@ -1732,6 +1778,15 @@ mod tests {
         // metaSendsEscape sequence `ESC v` so it can toggle the mic in place.
         let kb = KeyBindings::default();
         assert_eq!(voice_trigger_bytes(&kb), vec![vec![0x1b, b'v']]);
+    }
+
+    #[test]
+    fn test_dictation_trigger_bytes_default_is_alt_t() {
+        // Default ToggleDictation is Alt-t, interceptable mid-attach as the
+        // metaSendsEscape sequence `ESC t` so it can arm the mic in place — on a
+        // shell pane as well as an agent one, unlike Alt-v.
+        let kb = KeyBindings::default();
+        assert_eq!(dictation_trigger_bytes(&kb), vec![vec![0x1b, b't']]);
     }
 
     #[test]

@@ -2,6 +2,12 @@
 //!
 //! Provides fully async terminal attachment that runs within the tokio runtime,
 //! avoiding the need to drop and recreate the runtime for each attach operation.
+//!
+//! The stdin pump owns the only writer to the pane, and it takes bytes from two
+//! places: the terminal it reads, and the [`PaneInjector`] channel that carries
+//! dictation transcripts in from a task that has no writer of its own. Both
+//! queue into the same `outbound` buffer, so injected text is delivered exactly
+//! as if it had been typed — over a local PTY or a remote WebSocket alike.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -13,7 +19,9 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::backend::{AttachEnd, AttachRefresher, AttachResizer, AttachStreams, AttachTerminator};
+use crate::conversation::VoiceMode;
 use crate::error::Result;
+use crate::tmux::{PaneInjector, PaneInput};
 
 /// Classification of a raw stdin burst by the local attach's keystroke
 /// interception state machine. Pure — it performs no I/O and no side effects,
@@ -22,8 +30,8 @@ use crate::error::Result;
 /// [`AttachResult`] / toggle voice / open the switcher).
 ///
 /// The classification order is significant: Ctrl+Q, Ctrl+\, Ctrl+Space, voice,
-/// review, editor, and finally plain forwarding (with optional Ctrl+Z
-/// stripping).
+/// dictation, review, editor, and finally plain forwarding (with optional
+/// Ctrl+Z stripping).
 #[derive(Debug, PartialEq, Eq)]
 enum InputAction {
     /// Forward these bytes to the PTY verbatim and keep looping. An empty
@@ -33,9 +41,16 @@ enum InputAction {
     /// over the pane, then forward the remaining bytes (the 0x00 stripped out;
     /// may be empty).
     OpenSwitcher(Vec<u8>),
-    /// A voice trigger fired: toggle the mic, then forward the remaining bytes
-    /// (trigger bytes stripped out; may be empty).
-    ToggleVoice(Vec<u8>),
+    /// A voice trigger fired: toggle the mic for `mode`, then forward `rest`
+    /// (the trigger bytes stripped out; may be empty).
+    ///
+    /// One variant for both voice hotkeys rather than two, because the effect is
+    /// the same call with a different [`VoiceMode`] and a different on-screen
+    /// message — the *destination* of a transcript is data, not control flow.
+    /// `mode` is only consulted when this toggle happens to start a recording;
+    /// either hotkey stops one already running (see
+    /// [`apply_listen_action`](crate::conversation::apply_listen_action)).
+    ToggleVoice { mode: VoiceMode, rest: Vec<u8> },
     /// Ctrl+V during a remote attach: capture the local clipboard image and
     /// upload it. Carries the original burst verbatim (the `0x16` is *not*
     /// stripped here) so the effectful handler can forward it as a fallback when
@@ -59,10 +74,12 @@ pub trait ImagePasteSink: Send + Sync {
 /// Classify a raw stdin burst. See [`InputAction`] for the contract; this is the
 /// single source of truth for the local attach's keystroke interception and is
 /// covered by characterization tests.
+#[allow(clippy::too_many_arguments)]
 fn classify_input(
     data: &[u8],
     switcher_enabled: bool,
     voice_triggers: &[Vec<u8>],
+    dictation_triggers: &[Vec<u8>],
     review_triggers: &[Vec<u8>],
     editor_triggers: &[Vec<u8>],
     intercept_ctrl_z: bool,
@@ -98,8 +115,25 @@ fn classify_input(
             .iter()
             .any(|pat| contains_subsequence(data, pat))
     {
-        let filtered = remove_subsequences(data, voice_triggers);
-        return InputAction::ToggleVoice(filtered);
+        return InputAction::ToggleVoice {
+            mode: VoiceMode::Conversation,
+            rest: remove_subsequences(data, voice_triggers),
+        };
+    }
+
+    // Dictation toggle (Alt-t by default) — the same interception, aimed at the
+    // pane instead of the conversation agent. Checked here, right after voice and
+    // *before* review, so a shell pane (where Ctrl+Z interception is off and
+    // conversation voice may not be configured at all) still gets it.
+    if !dictation_triggers.is_empty()
+        && dictation_triggers
+            .iter()
+            .any(|pat| contains_subsequence(data, pat))
+    {
+        return InputAction::ToggleVoice {
+            mode: VoiceMode::Dictation,
+            rest: remove_subsequences(data, dictation_triggers),
+        };
     }
 
     // Review-toggle trigger (Alt-r by default). Empty `review_triggers` disables
@@ -326,6 +360,11 @@ pub struct AttachConfig {
     pub editor_triggers: Vec<Vec<u8>>,
     pub review_triggers: Vec<Vec<u8>>,
     pub voice_triggers: Vec<Vec<u8>>,
+    /// Byte patterns that toggle **dictation** — the same mic, transcribed into
+    /// the attached pane instead of the conversation agent. Recognised in the
+    /// same way as `voice_triggers` and checked immediately after them; empty
+    /// (the CLI's setting) disables it.
+    pub dictation_triggers: Vec<Vec<u8>>,
     pub voice_listener: Option<crate::conversation::ListenerHandle>,
     pub recording: Arc<AtomicBool>,
     pub intercept_ctrl_z: bool,
@@ -351,6 +390,11 @@ pub struct AttachConfig {
     /// `None` (local attach) forwards Ctrl+V so the co-located agent reads the
     /// clipboard directly, exactly as before.
     pub image_paste: Option<Arc<dyn ImagePasteSink>>,
+    /// The frontend's long-lived way in to whatever pane is attached. When
+    /// `Some`, this attach installs its own injection channel into it for the
+    /// duration; when `None`, nothing outside the loop can type into the pane.
+    /// See [`PaneInjector`].
+    pub injector: Option<PaneInjector>,
 }
 
 /// Async PTY attachment by tmux session name — the CLI/local entry point.
@@ -376,6 +420,9 @@ pub async fn attach_to_session(
         editor_triggers,
         review_triggers,
         voice_triggers,
+        // Dictation is a TUI affordance (it needs the frontend's long-lived
+        // injector to survive across attaches), so the bare CLI leaves it off.
+        dictation_triggers: Vec::new(),
         voice_listener,
         recording,
         intercept_ctrl_z,
@@ -386,6 +433,7 @@ pub async fn attach_to_session(
         // The CLI/local attach runs the agent on this machine, so it reads the
         // local clipboard itself — no client-side capture.
         image_paste: None,
+        injector: None,
     };
     run_attach(streams, cfg).await
 }
@@ -458,6 +506,7 @@ pub async fn attach_backend_session(
         editor_triggers,
         review_triggers: Vec::new(),
         voice_triggers: Vec::new(),
+        dictation_triggers: Vec::new(),
         voice_listener: None,
         recording: Arc::new(AtomicBool::new(false)),
         intercept_ctrl_z: true,
@@ -466,6 +515,7 @@ pub async fn attach_backend_session(
         switcher_enabled: false,
         session_name: None,
         image_paste,
+        injector: None,
     };
 
     Ok(run_attach(streams, cfg).await?)
@@ -788,6 +838,37 @@ pub fn flush_stdin() {
 /// queue without bound while the operator's Ctrl+Q still gets through.
 const MAX_PENDING_PANE_INPUT: usize = 64 * 1024;
 
+/// The `tmux display-message` argv for a status-line notice on `target`.
+/// `hold` asks for `-d 0`, which tmux(1) documents as "a delay of zero waits
+/// for a key press"; otherwise the session's `display-time` applies. Pure, so
+/// the two shapes are pinned by a test without spawning tmux.
+fn display_message_args(target: &str, text: &str, hold: bool) -> Vec<String> {
+    let mut args = vec![
+        "display-message".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ];
+    if hold {
+        args.push("-d".to_string());
+        args.push("0".to_string());
+    }
+    args.push(text.to_string());
+    args
+}
+
+/// Best-effort status-line feedback in the attached client. Spawned, never
+/// awaited: the pump must not wait on a tmux round-trip. Runs against the
+/// operator's *local* tmux, so for a remote attach it may target a name that
+/// isn't there — accepted, as for the voice toggle before it.
+fn show_status_notice(target: String, text: String, hold: bool) {
+    tokio::spawn(async move {
+        let _ = tokio::process::Command::new("tmux")
+            .args(display_message_args(&target, &text, hold))
+            .status()
+            .await;
+    });
+}
+
 /// Queue `bytes` for the pane, subject to [`MAX_PENDING_PANE_INPUT`].
 fn enqueue_pane_input(outbound: &mut Vec<u8>, bytes: &[u8]) {
     if bytes.is_empty() {
@@ -846,6 +927,7 @@ where
     let editor_triggers = cfg.editor_triggers.clone();
     let review_triggers = cfg.review_triggers.clone();
     let voice_triggers = cfg.voice_triggers.clone();
+    let dictation_triggers = cfg.dictation_triggers.clone();
     let voice_listener = cfg.voice_listener.clone();
     let recording_flag = cfg.recording.clone();
     let intercept_ctrl_z = cfg.intercept_ctrl_z;
@@ -900,8 +982,26 @@ where
     // awaited each `write_all` before reading again, which wedged the escape
     // hatch along with the pane; `ctrl_q_detaches_even_when_the_pane_is_not_draining`
     // pins this one.
+    //
+    // The injection channel is the third source of pane bytes (dictation), and
+    // its receiver lives here on purpose: aborting this task is what makes
+    // `PaneInjector::send` start returning false, which is the only signal the
+    // dictation side has that there is no longer a pane to type into.
+    let (inject_tx, mut inject_rx) = mpsc::unbounded_channel::<PaneInput>();
+    // When no injector is installed, the pump keeps the sender alive itself
+    // rather than dropping it: a closed channel makes `recv()` resolve `None`
+    // immediately and forever, and that arm would then spin the select! loop.
+    let keepalive_inject_tx = match &cfg.injector {
+        Some(injector) => {
+            injector.install(inject_tx);
+            None
+        }
+        None => Some(inject_tx),
+    };
+
     let stdin_shutdown = shutdown_tx.clone();
     let stdin_task = tokio::spawn(async move {
+        let _keepalive_inject_tx = keepalive_inject_tx;
         let mut buf = [0u8; 1024];
         let mut outbound: Vec<u8> = Vec::new();
 
@@ -925,13 +1025,14 @@ where
 
                     // Classify the burst with the pure interception state
                     // machine; perform the matching side effect here. The order
-                    // of checks (Ctrl+Q → Ctrl+\ → Ctrl+Space → voice → review →
-                    // editor → forward) lives in `classify_input` and is
-                    // characterization-tested.
+                    // of checks (Ctrl+Q → Ctrl+\ → Ctrl+Space → voice →
+                    // dictation → review → editor → forward) lives in
+                    // `classify_input` and is characterization-tested.
                     match classify_input(
                         data,
                         switcher_enabled,
                         &voice_triggers,
+                        &dictation_triggers,
                         &review_triggers,
                         &editor_triggers,
                         intercept_ctrl_z,
@@ -971,7 +1072,7 @@ where
                             resume.notified().await;
                             debug!("Attach resumed after the switcher");
                         }
-                        InputAction::ToggleVoice(filtered) => {
+                        InputAction::ToggleVoice { mode, rest } => {
                             // Toggle the mic via the listener channel and stay in
                             // the pane. A `tmux display-message` gives feedback
                             // since the TUI status bar isn't visible here.
@@ -980,21 +1081,27 @@ where
                                     listener,
                                     &recording_flag,
                                     crate::conversation::ListenAction::Toggle,
+                                    mode,
                                 );
-                                let msg = if now_recording {
-                                    "🎙 Recording… (Alt-V to send)"
-                                } else {
-                                    "Transcribing…"
+                                // `●`/`✓`/`✗` rather than the 🎙 emoji: U+1F399 has
+                                // no glyph in many terminal fonts and renders as a
+                                // placeholder box in the tmux status line, where
+                                // there is no fallback font to rescue it.
+                                let msg = match (now_recording, mode) {
+                                    (true, VoiceMode::Conversation) => "● Recording… (Alt-V to send)",
+                                    (true, VoiceMode::Dictation) => "● Dictating… (Alt-t to type)",
+                                    (false, _) => "● Transcribing…",
                                 };
+                                // Both are states the user is *in*, so the notice
+                                // holds until the next keypress rather than
+                                // flashing for tmux's 750 ms `display-time`: the
+                                // keypress that ends recording dismisses the
+                                // first, and the transcript's arrival replaces
+                                // the second (see the injector's `Notice`).
                                 let target = current_session.lock().await.clone();
-                                tokio::spawn(async move {
-                                    let _ = tokio::process::Command::new("tmux")
-                                        .args(["display-message", "-t", &target, msg])
-                                        .status()
-                                        .await;
-                                });
+                                show_status_notice(target, msg.to_string(), true);
                             }
-                            enqueue_pane_input(&mut outbound, &filtered);
+                            enqueue_pane_input(&mut outbound, &rest);
                         }
                         InputAction::PasteImage(orig) => {
                             // Capture the local clipboard image and upload it.
@@ -1012,6 +1119,24 @@ where
                         }
                     }
                 }
+
+                // Dictation text, from a task with no writer of its own. Placed
+                // after the read arm (which is `biased;`, so it is polled first)
+                // and before the write arm: a hotkey must never wait behind an
+                // injection, but an injection should not wait on the pane either.
+                //
+                // While the pump is parked for the switcher it is awaiting
+                // `resume` *inside* the read arm, so this arm is not polled at
+                // all — injected bytes simply queue on the channel and land after
+                // the resume, which `injected_bytes_wait_behind_the_switcher_pause`
+                // pins.
+                Some(input) = inject_rx.recv() => match input {
+                    PaneInput::Bytes(bytes) => enqueue_pane_input(&mut outbound, &bytes),
+                    PaneInput::Notice { text, hold } => {
+                        let target = current_session.lock().await.clone();
+                        show_status_notice(target, text, hold);
+                    }
+                },
 
                 written = writer.write(&outbound), if !outbound.is_empty() => {
                     match written {
@@ -1075,12 +1200,14 @@ mod tests {
             editor_triggers: Vec::new(),
             review_triggers: Vec::new(),
             voice_triggers: Vec::new(),
+            dictation_triggers: Vec::new(),
             voice_listener: None,
             recording: Arc::new(AtomicBool::new(false)),
             intercept_ctrl_z: false,
             switcher_enabled: true,
             session_name: Some("cc-test".to_string()),
             image_paste: None,
+            injector: None,
         }
     }
 
@@ -1098,10 +1225,26 @@ mod tests {
         resume: Arc<Notify>,
         refreshes: Arc<std::sync::atomic::AtomicUsize>,
         refresher: AttachRefresher,
-        _tasks: Vec<tokio::task::JoinHandle<()>>,
+        tasks: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    impl PumpHarness {
+        /// Stop the pumps the way [`AttachSession::finish`] does — abort *and*
+        /// await, so the tasks (and everything they own, including the injection
+        /// receiver) are really gone when this returns.
+        async fn stop(&mut self) {
+            for task in self.tasks.drain(..) {
+                task.abort();
+                let _ = task.await;
+            }
+        }
     }
 
     fn start_pumps() -> PumpHarness {
+        start_pumps_with(pump_cfg())
+    }
+
+    fn start_pumps_with(cfg: AttachConfig) -> PumpHarness {
         let (transport_in, transport_far) = tokio::io::duplex(4096);
         let (term_in, term_far) = tokio::io::duplex(4096);
         let (term_out_far, term_out) = tokio::io::duplex(4096);
@@ -1116,7 +1259,6 @@ mod tests {
             std::future::ready(())
         });
 
-        let cfg = pump_cfg();
         let tasks = spawn_pumps(
             Box::new(transport_far),
             Box::new(transport_out_far),
@@ -1140,7 +1282,7 @@ mod tests {
             resume,
             refreshes,
             refresher,
-            _tasks: tasks,
+            tasks,
         }
     }
 
@@ -1264,6 +1406,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn injected_bytes_reach_the_pane() {
+        // The dictation path: a task with no access to the pane writer queues
+        // bytes through the injector and they land where typed keystrokes do.
+        let injector = PaneInjector::default();
+        let mut cfg = pump_cfg();
+        cfg.injector = Some(injector.clone());
+        let mut h = start_pumps_with(cfg);
+
+        assert!(injector.send(b"hello"), "the attach installed its channel");
+        assert_eq!(read_term(&mut h.transport_out, 500).await, b"hello");
+    }
+
+    #[tokio::test]
+    async fn injected_bytes_wait_behind_the_switcher_pause() {
+        // While the pump is parked for the switcher it is awaiting `resume`
+        // inside the read arm, so the injection arm isn't being polled at all.
+        // The bytes queue on the channel rather than being lost, and land once
+        // the attach is unparked.
+        let injector = PaneInjector::default();
+        let mut cfg = pump_cfg();
+        cfg.injector = Some(injector.clone());
+        let mut h = start_pumps_with(cfg);
+
+        h.term_in.write_all(b"\x00").await.unwrap();
+        assert_eq!(h.shutdown_rx.recv().await, Some(AttachResult::OpenSwitcher));
+
+        assert!(injector.send(b"typed"));
+        assert!(
+            read_term(&mut h.transport_out, 200).await.is_empty(),
+            "nothing may reach the pane while the switcher owns the screen"
+        );
+
+        h.paused.store(false, Ordering::Release);
+        h.resume.notify_one();
+        assert_eq!(read_term(&mut h.transport_out, 500).await, b"typed");
+    }
+
+    #[tokio::test]
+    async fn inject_send_fails_once_the_pump_is_aborted() {
+        // `send` returning false *is* the "nothing is attached" signal — see
+        // `PaneInjector`. It becomes false because the receiver lives in the
+        // stdin pump, which `AttachSession::finish` aborts and awaits.
+        let injector = PaneInjector::default();
+        let mut cfg = pump_cfg();
+        cfg.injector = Some(injector.clone());
+        let mut h = start_pumps_with(cfg);
+        assert!(injector.send(b"live"));
+
+        h.stop().await;
+        assert!(
+            !injector.send(b"gone"),
+            "a finished attach must report itself as unavailable"
+        );
+    }
+
+    #[tokio::test]
     async fn each_refresh_runs_the_transport_hook_once() {
         // Covers the refresher plumbing only. `AttachSession::resume` — which is
         // what calls this in anger — can't be exercised here: constructing a
@@ -1354,6 +1552,9 @@ mod tests {
     fn voice() -> Vec<Vec<u8>> {
         vec![vec![0x1b, b'v']]
     }
+    fn dictation() -> Vec<Vec<u8>> {
+        vec![vec![0x1b, b't']]
+    }
     fn review() -> Vec<Vec<u8>> {
         vec![vec![0x1b, b'r']]
     }
@@ -1365,13 +1566,31 @@ mod tests {
     /// switcher enabled (the TUI's policy). Image paste is off (the local-attach
     /// default), matching the historical calls.
     fn classify(data: &[u8]) -> InputAction {
-        classify_input(data, true, &voice(), &review(), &editor(), true, false)
+        classify_input(
+            data,
+            true,
+            &voice(),
+            &dictation(),
+            &review(),
+            &editor(),
+            true,
+            false,
+        )
     }
 
     /// As [`classify`], but with the switcher off — the bare `attach` CLI, which
     /// has no session list to draw and so leaves Ctrl+Space to the pane.
     fn classify_no_switcher(data: &[u8]) -> InputAction {
-        classify_input(data, false, &voice(), &review(), &editor(), true, false)
+        classify_input(
+            data,
+            false,
+            &voice(),
+            &dictation(),
+            &review(),
+            &editor(),
+            true,
+            false,
+        )
     }
 
     #[test]
@@ -1439,11 +1658,90 @@ mod tests {
     #[test]
     fn classify_voice_trigger_toggles_and_strips() {
         // Lone Alt-V burst toggles voice and forwards nothing.
-        assert_eq!(classify(b"\x1bv"), InputAction::ToggleVoice(vec![]));
+        assert_eq!(
+            classify(b"\x1bv"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Conversation,
+                rest: vec![]
+            }
+        );
         // Trigger embedded in a burst: stripped, the rest forwarded.
         assert_eq!(
             classify(b"x\x1bvy"),
-            InputAction::ToggleVoice(b"xy".to_vec())
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Conversation,
+                rest: b"xy".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_dictation_trigger_toggles_dictation_and_strips() {
+        // Alt-t is the other voice hotkey: same interception shape, different
+        // destination for whatever is transcribed.
+        assert_eq!(
+            classify(b"\x1bt"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Dictation,
+                rest: vec![]
+            }
+        );
+        assert_eq!(
+            classify(b"x\x1bty"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Dictation,
+                rest: b"xy".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_voice_precedes_dictation_when_both_match() {
+        // Ordering: dictation is checked immediately *after* voice, so a burst
+        // holding both starts a conversation recording. Arbitrary but fixed — a
+        // burst containing two hotkeys is a paste, not a keystroke.
+        assert_eq!(
+            classify(b"\x1bv\x1bt"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Conversation,
+                rest: b"\x1bt".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_dictation_precedes_review() {
+        // …and before review, so Alt-t never breaks the attach out to the diff.
+        assert_eq!(
+            classify(b"\x1bt\x1br"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Dictation,
+                rest: b"\x1br".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_dictation_fires_with_ctrl_z_interception_off() {
+        // A *shell* pane's policy: Ctrl+Z stays the user's (job control), and
+        // conversation voice may not even be configured there. Dictation must
+        // still be intercepted — typing into a shell is what it is for.
+        let action = classify_input(
+            b"\x1bt",
+            true,
+            &[],
+            &dictation(),
+            &review(),
+            &editor(),
+            false,
+            false,
+        );
+        assert_eq!(
+            action,
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Dictation,
+                rest: vec![]
+            }
         );
     }
 
@@ -1476,6 +1774,7 @@ mod tests {
             b"a\x1ab",
             false,
             &voice(),
+            &dictation(),
             &review(),
             &editor(),
             false,
@@ -1488,9 +1787,27 @@ mod tests {
     fn classify_empty_triggers_disable_review_and_editor() {
         // With no review/editor triggers configured, those bytes are forwarded
         // as ordinary input rather than intercepted.
-        let action = classify_input(b"\x1br", false, &voice(), &[], &[], true, false);
+        let action = classify_input(
+            b"\x1br",
+            false,
+            &voice(),
+            &dictation(),
+            &[],
+            &[],
+            true,
+            false,
+        );
         assert_eq!(action, InputAction::Forward(b"\x1br".to_vec()));
-        let action = classify_input(b"\x05", false, &voice(), &[], &[], true, false);
+        let action = classify_input(
+            b"\x05",
+            false,
+            &voice(),
+            &dictation(),
+            &[],
+            &[],
+            true,
+            false,
+        );
         assert_eq!(action, InputAction::Forward(b"\x05".to_vec()));
     }
 
@@ -1502,23 +1819,48 @@ mod tests {
             b"\x1bv\x1br",
             false,
             &voice(),
+            &dictation(),
             &review(),
             &editor(),
             true,
             false,
         );
-        assert_eq!(action, InputAction::ToggleVoice(b"\x1br".to_vec()));
+        assert_eq!(
+            action,
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Conversation,
+                rest: b"\x1br".to_vec()
+            }
+        );
     }
 
     #[test]
     fn classify_ctrl_v_pastes_image_when_enabled() {
         // With image paste enabled (remote attach), Ctrl+V (0x16) is intercepted
         // and the original burst carried through for the effectful handler.
-        let action = classify_input(b"\x16", false, &voice(), &review(), &editor(), true, true);
+        let action = classify_input(
+            b"\x16",
+            false,
+            &voice(),
+            &dictation(),
+            &review(),
+            &editor(),
+            true,
+            true,
+        );
         assert_eq!(action, InputAction::PasteImage(b"\x16".to_vec()));
         // Mixed with other bytes, the whole burst rides along (0x16 not stripped
         // here — the handler decides).
-        let action = classify_input(b"a\x16b", false, &voice(), &review(), &editor(), true, true);
+        let action = classify_input(
+            b"a\x16b",
+            false,
+            &voice(),
+            &dictation(),
+            &review(),
+            &editor(),
+            true,
+            true,
+        );
         assert_eq!(action, InputAction::PasteImage(b"a\x16b".to_vec()));
     }
 
@@ -1526,7 +1868,16 @@ mod tests {
     fn classify_ctrl_v_forwards_when_disabled() {
         // Local attach (image paste off): Ctrl+V is forwarded verbatim so the
         // co-located agent reads the clipboard itself — unchanged behaviour.
-        let action = classify_input(b"\x16", false, &voice(), &review(), &editor(), true, false);
+        let action = classify_input(
+            b"\x16",
+            false,
+            &voice(),
+            &dictation(),
+            &review(),
+            &editor(),
+            true,
+            false,
+        );
         assert_eq!(action, InputAction::Forward(b"\x16".to_vec()));
     }
 
@@ -1538,6 +1889,7 @@ mod tests {
             b"\x16\x11",
             false,
             &voice(),
+            &dictation(),
             &review(),
             &editor(),
             true,
@@ -1556,6 +1908,7 @@ mod tests {
                 b"\x16",
                 switcher_enabled,
                 &voice(),
+                &dictation(),
                 &review(),
                 &editor(),
                 true,
@@ -1616,5 +1969,32 @@ mod tests {
             paste_decision(Ok(Some(too_big)), b"\x16"),
             PasteDecision::Forward(b"\x16".to_vec())
         );
+    }
+
+    #[test]
+    fn display_message_args_hold_waits_for_a_key() {
+        // Held notices (recording, transcribing) pass `-d 0`; momentary ones
+        // leave the delay to tmux's `display-time`.
+        assert_eq!(
+            display_message_args("cc-1", "● Dictating…", true),
+            ["display-message", "-t", "cc-1", "-d", "0", "● Dictating…"]
+        );
+        assert_eq!(
+            display_message_args("cc-1", "Typed", false),
+            ["display-message", "-t", "cc-1", "Typed"]
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_notice_does_not_reach_the_pane() {
+        // A notice is for the status line, never for the pane's stdin — text
+        // meant for the operator must not be typed at the agent.
+        let injector = PaneInjector::default();
+        let mut cfg = pump_cfg();
+        cfg.injector = Some(injector.clone());
+        let mut h = start_pumps_with(cfg);
+        assert!(injector.notice("Dictating…", true));
+        assert!(injector.send(b"after"));
+        assert_eq!(read_term(&mut h.transport_out, 500).await, b"after");
     }
 }

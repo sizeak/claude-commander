@@ -97,6 +97,15 @@ pub enum StateUpdate {
     SessionRemoved { session_id: SessionId },
     /// Error occurred
     Error { message: String },
+    /// A dictated transcript arrived with no attached pane to type it into.
+    ///
+    /// Raised off the UI loop, by the transcript consumer task: it holds the
+    /// [`PaneInjector`](claude_commander_core::tmux::PaneInjector) but no `&mut
+    /// App`, and a failed injection is the only way it can learn the attach is
+    /// over. Carries nothing — the pane it wanted is gone, so there is nothing
+    /// left to name — and the handler answers with a toast rather than a modal,
+    /// because a missed dictation is not a failure the user has to dismiss.
+    DictationUndeliverable,
     /// Session creation completed successfully
     SessionCreated {
         session_id: SessionId,
@@ -443,6 +452,9 @@ pub enum UserCommand {
     ToggleConversationOverlay,
     /// Toggle voice input: start/stop recording the mic for transcription (STT)
     ToggleVoiceInput,
+    /// Toggle dictation: record the mic and type the transcript into the
+    /// attached session pane (STT)
+    ToggleDictation,
     /// Open the full-screen review-diff-and-comment view for the session
     OpenReviewDiff,
     /// Show help
@@ -598,6 +610,7 @@ impl UserCommand {
             UserCommand::OpenCommander => Some("commander.open"),
             UserCommand::ToggleConversationOverlay => Some("conversation.toggle"),
             UserCommand::ToggleVoiceInput => Some("stt.toggle_voice"),
+            UserCommand::ToggleDictation => Some("stt.toggle_dictation"),
             UserCommand::GenerateSummary => Some("ai_summary.generate"),
             UserCommand::ShowHelp => Some("ui.help"),
             UserCommand::ShowSettings => Some("ui.settings"),
@@ -659,6 +672,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::OpenCommander => Self::OpenCommander,
             BindableAction::ToggleConversationOverlay => Self::ToggleConversationOverlay,
             BindableAction::ToggleVoiceInput => Self::ToggleVoiceInput,
+            BindableAction::ToggleDictation => Self::ToggleDictation,
             BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
             BindableAction::ShowHelp => Self::ShowHelp,
             BindableAction::ShowSettings => Self::ShowSettings,
@@ -1055,6 +1069,30 @@ mod tests {
             UserCommand::OpenInfo.telemetry_feature(),
             Some("ui.open_info")
         );
+        // The two voice modes are separate features on purpose: they share a
+        // microphone but answer different questions (how often is the assistant
+        // spoken to, how often is a pane dictated into), so folding them into
+        // one name would make neither answerable.
+        assert_eq!(
+            UserCommand::ToggleVoiceInput.telemetry_feature(),
+            Some("stt.toggle_voice")
+        );
+        assert_eq!(
+            UserCommand::ToggleDictation.telemetry_feature(),
+            Some("stt.toggle_dictation")
+        );
+    }
+
+    #[test]
+    fn toggle_dictation_maps_from_bindable_action() {
+        // Dictation reaches `handle_command` by both routes a bound action can:
+        // its own key (Alt-T by default) and the palette's BindableAction
+        // conversion. The conversion is the one a missing match arm would break
+        // silently, since it has a catch-all-shaped `From` impl.
+        assert!(matches!(
+            UserCommand::from(BindableAction::ToggleDictation),
+            UserCommand::ToggleDictation
+        ));
     }
 
     #[test]

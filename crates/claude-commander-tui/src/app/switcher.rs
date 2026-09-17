@@ -112,6 +112,13 @@ impl App {
                     match (switched, in_place) {
                         (true, Some((_, name))) => {
                             session.set_current_session(name).await;
+                            // An in-place switch keeps the same attach — and so
+                            // the same injection channel — but changes what is
+                            // on screen. Without this the dictation policy would
+                            // keep planning against the pane the user left.
+                            self.conversation
+                                .injector
+                                .set_pane(self.pane_info_for(&target));
                             session.resume().await;
                         }
                         // Either the pick can't be reached in place, or the
