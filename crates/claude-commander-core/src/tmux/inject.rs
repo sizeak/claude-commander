@@ -25,6 +25,21 @@ pub struct PaneInfo {
     pub agent: AgentKind,
 }
 
+/// One item on the injection channel: bytes for the pane, or a notice for the
+/// operator. Both go to the pump because both need what only it has — the
+/// pane writer, and the live name of the tmux session the client is showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneInput {
+    /// Type these bytes into the pane, exactly as keystrokes would be.
+    Bytes(Vec<u8>),
+    /// Show `text` in the attached client's tmux status line. With `hold` the
+    /// message stays until the next keypress (`display-message -d 0`, tmux(1):
+    /// "a delay of zero waits for a key press"); otherwise tmux's own
+    /// `display-time` applies. Hold is for states the user is *in* (recording,
+    /// transcribing); a plain notice is for a moment that has passed.
+    Notice { text: String, hold: bool },
+}
+
 /// The way in to the attached pane for a task that is not the attach loop.
 ///
 /// A respawn-stable handle, in the same shape and for the same reason as
@@ -49,14 +64,14 @@ pub struct PaneInjector(Arc<Mutex<InjectorInner>>);
 
 #[derive(Default)]
 struct InjectorInner {
-    tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    tx: Option<mpsc::UnboundedSender<PaneInput>>,
     pane: Option<PaneInfo>,
 }
 
 impl PaneInjector {
     /// Install (or swap in) the current attach's injection channel, dropping any
     /// previous one. Called by each attach as its pumps start.
-    pub fn install(&self, tx: mpsc::UnboundedSender<Vec<u8>>) {
+    pub fn install(&self, tx: mpsc::UnboundedSender<PaneInput>) {
         self.0.lock().unwrap().tx = Some(tx);
     }
 
@@ -76,7 +91,22 @@ impl PaneInjector {
     /// one it installed is gone — see the type docs: that is the caller's signal
     /// that there is nothing attached to type into.
     pub fn send(&self, bytes: &[u8]) -> bool {
-        matches!(&self.0.lock().unwrap().tx, Some(tx) if tx.send(bytes.to_vec()).is_ok())
+        self.push(PaneInput::Bytes(bytes.to_vec()))
+    }
+
+    /// Show a status-line notice in the attached client — the only place the
+    /// operator can see feedback while a pane covers the TUI. `hold` keeps it up
+    /// until the next keypress (see [`PaneInput::Notice`]). Same `false` contract
+    /// as [`send`](Self::send); a notice with nobody attached is simply dropped.
+    pub fn notice(&self, text: impl Into<String>, hold: bool) -> bool {
+        self.push(PaneInput::Notice {
+            text: text.into(),
+            hold,
+        })
+    }
+
+    fn push(&self, input: PaneInput) -> bool {
+        matches!(&self.0.lock().unwrap().tx, Some(tx) if tx.send(input).is_ok())
     }
 }
 
@@ -112,11 +142,31 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         injector.install(tx);
         assert!(injector.send(b"hi"), "an installed channel takes bytes");
+        assert!(injector.notice("hi", false), "and notices");
 
         drop(rx);
         assert!(
             !injector.send(b"hi"),
             "a dead receiver means the attach is over"
+        );
+    }
+
+    #[tokio::test]
+    async fn bytes_and_notices_share_one_ordered_channel() {
+        // The consumer types text and then announces it; the pump must see them
+        // in that order, so both ride the same channel rather than two.
+        let injector = PaneInjector::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        injector.install(tx);
+        assert!(injector.send(b"typed"));
+        assert!(injector.notice("Dictating…", true));
+        assert_eq!(rx.recv().await, Some(PaneInput::Bytes(b"typed".to_vec())));
+        assert_eq!(
+            rx.recv().await,
+            Some(PaneInput::Notice {
+                text: "Dictating…".into(),
+                hold: true
+            })
         );
     }
 }

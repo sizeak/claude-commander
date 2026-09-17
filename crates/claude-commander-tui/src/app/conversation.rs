@@ -457,8 +457,16 @@ async fn dictate(
     injector: &PaneInjector,
     policy: DictationSubmit,
     events: &tokio::sync::mpsc::Sender<AppEvent>,
-    raw: &str,
+    transcript: &Transcript,
 ) {
+    // The attach loop is holding a "🎙 Transcribing…" notice in the pane's
+    // status line (see `PaneInput::Notice`); every branch below replaces it, so
+    // the operator is never left looking at a state that has already ended.
+    if let Some(err) = &transcript.error {
+        warn!(target: "conversation", "dictation transcription failed: {err}");
+        injector.notice(format!("🎙 Transcription failed: {err}"), false);
+        return;
+    }
     // With no pane ever recorded, fall back to the most restrictive descriptor
     // the planner accepts: a shell running an unknown harness. `Agent` never
     // submits into one, and `Always` was an explicit choice to submit anywhere,
@@ -470,8 +478,9 @@ async fn dictate(
         kind: AttachKind::Shell,
         agent: AgentKind::Unknown,
     });
-    let Some(plan) = plan_dictation(raw, policy, pane) else {
+    let Some(plan) = plan_dictation(&transcript.text, policy, pane) else {
         debug!(target: "conversation", "dictated transcript was empty; nothing to type");
+        injector.notice("🎙 Nothing heard", false);
         return;
     };
     // The transcript is the user's speech, so its length is logged and its text
@@ -496,17 +505,21 @@ async fn dictate(
         }
         return;
     }
-    let SubmitPlan::Submit { delay } = plan.submit else {
-        return;
-    };
-    // Some harnesses need a beat to read the typed text as its own keystrokes
-    // before an Enter means "send this" rather than "send what you had".
-    if let Some(delay) = delay {
-        tokio::time::sleep(delay).await;
+    if let SubmitPlan::Submit { delay } = plan.submit {
+        // Some harnesses need a beat to read the typed text as its own
+        // keystrokes before an Enter means "send this" rather than "send what
+        // you had".
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        if !injector.send(b"\r") {
+            warn!(target: "conversation", "the pane went away before the dictated submit");
+            return;
+        }
     }
-    if !injector.send(b"\r") {
-        warn!(target: "conversation", "the pane went away before the dictated submit");
-    }
+    // The text on screen is the real confirmation; this only retires the held
+    // "Transcribing…" so it does not outlive the work it described.
+    injector.notice("🎙 Typed", false);
 }
 
 impl App {
@@ -626,7 +639,7 @@ impl App {
             while let Some(transcript) = rx_text.recv().await {
                 match transcript.mode {
                     VoiceMode::Dictation => {
-                        dictate(&injector, policy, &events, &transcript.text).await;
+                        dictate(&injector, policy, &events, &transcript).await;
                     }
                     VoiceMode::Conversation => {
                         let text = transcript.text.trim().to_string();
@@ -649,6 +662,11 @@ impl App {
                             .await;
                             submit_to_session(&session, &view, &speaker, text).await;
                         }
+                        // If the user spoke from inside an attach, the pane's
+                        // status line is holding "🎙 Transcribing…"; retire it.
+                        // Best-effort — false (no attach) just means the TUI's
+                        // own status bar was visible all along.
+                        injector.notice(format!("🎙 Sent to {}", conv.name), false);
                     }
                 }
             }
@@ -1040,6 +1058,130 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use claude_commander_core::tmux::PaneInput;
+
+    /// An installed injector plus the pump's end of its channel, and an event
+    /// channel standing in for the UI loop.
+    fn wired() -> (
+        PaneInjector,
+        tokio::sync::mpsc::UnboundedReceiver<PaneInput>,
+        tokio::sync::mpsc::Sender<AppEvent>,
+        tokio::sync::mpsc::Receiver<AppEvent>,
+    ) {
+        let injector = PaneInjector::default();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        injector.install(tx);
+        let (ev_tx, ev_rx) = tokio::sync::mpsc::channel(4);
+        (injector, rx, ev_tx, ev_rx)
+    }
+
+    fn heard(text: &str) -> Transcript {
+        Transcript {
+            mode: VoiceMode::Dictation,
+            text: text.into(),
+            error: None,
+        }
+    }
+
+    fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<PaneInput>) -> Vec<PaneInput> {
+        let mut out = Vec::new();
+        while let Ok(i) = rx.try_recv() {
+            out.push(i);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn dictate_types_then_retires_the_held_notice() {
+        let (injector, mut rx, ev_tx, _ev_rx) = wired();
+        dictate(
+            &injector,
+            DictationSubmit::Never,
+            &ev_tx,
+            &heard("ls -la\n"),
+        )
+        .await;
+        assert_eq!(
+            drain(&mut rx),
+            vec![
+                PaneInput::Bytes(b"ls -la".to_vec()),
+                PaneInput::Notice {
+                    text: "🎙 Typed".into(),
+                    hold: false
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn dictate_submit_sends_enter_before_the_notice() {
+        let (injector, mut rx, ev_tx, _ev_rx) = wired();
+        injector.set_pane(PaneInfo {
+            kind: AttachKind::Agent,
+            agent: AgentKind::Claude,
+        });
+        dictate(
+            &injector,
+            DictationSubmit::Agent,
+            &ev_tx,
+            &heard("run tests"),
+        )
+        .await;
+        assert_eq!(
+            drain(&mut rx),
+            vec![
+                PaneInput::Bytes(b"run tests".to_vec()),
+                PaneInput::Bytes(b"\r".to_vec()),
+                PaneInput::Notice {
+                    text: "🎙 Typed".into(),
+                    hold: false
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn dictate_empty_says_nothing_heard_and_types_nothing() {
+        let (injector, mut rx, ev_tx, _ev_rx) = wired();
+        dictate(&injector, DictationSubmit::Always, &ev_tx, &heard("  \n ")).await;
+        assert_eq!(
+            drain(&mut rx),
+            vec![PaneInput::Notice {
+                text: "🎙 Nothing heard".into(),
+                hold: false
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn dictate_failure_reports_it_in_the_pane() {
+        let (injector, mut rx, ev_tx, _ev_rx) = wired();
+        let failed = Transcript {
+            mode: VoiceMode::Dictation,
+            text: String::new(),
+            error: Some("STT down".into()),
+        };
+        dictate(&injector, DictationSubmit::Never, &ev_tx, &failed).await;
+        let out = drain(&mut rx);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            PaneInput::Notice { text, hold: false } if text.contains("STT down")
+        ));
+    }
+
+    #[tokio::test]
+    async fn dictate_with_no_attach_raises_undeliverable() {
+        // Nothing installed: the text has nowhere to go, and the UI loop is
+        // told so it can toast — no notice is attempted (there is no pane).
+        let injector = PaneInjector::default();
+        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel(4);
+        dictate(&injector, DictationSubmit::Never, &ev_tx, &heard("hello")).await;
+        assert!(matches!(
+            ev_rx.try_recv(),
+            Ok(AppEvent::StateUpdate(StateUpdate::DictationUndeliverable))
+        ));
+    }
 
     #[test]
     fn wrap_basic() {

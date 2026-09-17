@@ -21,6 +21,7 @@ use crate::conversation::media::{MediaSignal, signal as media_signal};
 use crate::conversation::recorder::Recorder;
 use crate::conversation::speaker::{SpeakerCommand, SpeakerHandle};
 use crate::conversation::stt::SttClient;
+use crate::error::TtsError;
 
 /// Where a recording's transcript is headed. Fixed when the recording *starts*
 /// (the hotkey that opened the mic picks it) and carried on that recording's
@@ -48,12 +49,45 @@ pub enum ListenerCommand {
     Stop,
 }
 
-/// A finished transcription, tagged with the destination its recording was
-/// started for.
+/// The result of one recording, tagged with the destination it was started
+/// for.
+///
+/// For [`VoiceMode::Conversation`] one is sent only when there is text to
+/// submit — silence and failures are absorbed here, where the speaker and media
+/// gate they affect live. For [`VoiceMode::Dictation`] one is sent for **every**
+/// recording, text or not: the frontend is holding a "Transcribing…" notice in
+/// the attached pane's status line and needs the outcome to replace it, and it
+/// is the only party that can tell the operator "nothing heard" where they are
+/// looking. `error` carries the STT failure, if that is what ended it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transcript {
     pub mode: VoiceMode,
     pub text: String,
+    pub error: Option<String>,
+}
+
+/// What, if anything, the frontend is told about a finished recording — see
+/// [`Transcript`] for the asymmetry between the modes. Pure so it is tested
+/// without a microphone.
+fn transcript_for(mode: VoiceMode, outcome: &Result<String, TtsError>) -> Option<Transcript> {
+    match (mode, outcome) {
+        (_, Ok(text)) if !text.is_empty() => Some(Transcript {
+            mode,
+            text: text.clone(),
+            error: None,
+        }),
+        (VoiceMode::Conversation, _) => None,
+        (VoiceMode::Dictation, Ok(_)) => Some(Transcript {
+            mode,
+            text: String::new(),
+            error: None,
+        }),
+        (VoiceMode::Dictation, Err(e)) => Some(Transcript {
+            mode,
+            text: String::new(),
+            error: Some(e.to_string()),
+        }),
+    }
 }
 
 /// The modes of the recordings the listener has started but not yet paired with
@@ -241,6 +275,15 @@ pub fn spawn_listener(
                         // a reply the user deliberately let keep playing.
                         media_signal(&gate, MediaSignal::Silence);
                     }
+                    // Dictation hears about every outcome (see `Transcript`);
+                    // conversation only about text. Sent before the per-outcome
+                    // bookkeeping below so the frontend's held notice is replaced
+                    // as early as possible.
+                    if let Some(transcript) = transcript_for(mode, &outcome)
+                        && transcript_tx.send(transcript).is_err()
+                    {
+                        break; // app gone
+                    }
                     match outcome {
                         Ok(text) if !text.is_empty() => {
                             debug!(
@@ -249,9 +292,6 @@ pub fn spawn_listener(
                                 t0.elapsed().as_millis(),
                                 text.len()
                             );
-                            if transcript_tx.send(Transcript { mode, text }).is_err() {
-                                break; // app gone
-                            }
                         }
                         // Empty transcript (silence) — nothing to send, but still
                         // worth timing so a slow "no speech" round-trip is visible.
@@ -490,5 +530,56 @@ mod tests {
     fn pending_modes_empty_pop_falls_back_to_conversation() {
         let mut modes = PendingModes::default();
         assert_eq!(modes.pop_for_wav(), VoiceMode::Conversation);
+    }
+
+    #[test]
+    fn conversation_hears_only_text() {
+        // Silence and failures are handled inside the listener for the
+        // conversation (speaker resume, media gate), so nothing is forwarded.
+        assert_eq!(
+            transcript_for(VoiceMode::Conversation, &Ok(String::new())),
+            None
+        );
+        assert_eq!(
+            transcript_for(
+                VoiceMode::Conversation,
+                &Err(TtsError::Audio("boom".into()))
+            ),
+            None
+        );
+        assert_eq!(
+            transcript_for(VoiceMode::Conversation, &Ok("hi".into())),
+            Some(Transcript {
+                mode: VoiceMode::Conversation,
+                text: "hi".into(),
+                error: None
+            })
+        );
+    }
+
+    #[test]
+    fn dictation_hears_every_outcome() {
+        // The frontend holds a "Transcribing…" notice in the pane; it needs
+        // the empty and failed outcomes to replace it, not just the text.
+        assert_eq!(
+            transcript_for(VoiceMode::Dictation, &Ok(String::new())),
+            Some(Transcript {
+                mode: VoiceMode::Dictation,
+                text: String::new(),
+                error: None
+            })
+        );
+        let failed = transcript_for(
+            VoiceMode::Dictation,
+            &Err(TtsError::Audio("mic gone".into())),
+        )
+        .expect("failure is reported");
+        assert!(failed.text.is_empty());
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("mic gone"))
+        );
     }
 }

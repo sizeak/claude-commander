@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use crate::backend::{AttachEnd, AttachRefresher, AttachResizer, AttachStreams, AttachTerminator};
 use crate::conversation::VoiceMode;
 use crate::error::Result;
-use crate::tmux::PaneInjector;
+use crate::tmux::{PaneInjector, PaneInput};
 
 /// Classification of a raw stdin burst by the local attach's keystroke
 /// interception state machine. Pure — it performs no I/O and no side effects,
@@ -838,6 +838,37 @@ pub fn flush_stdin() {
 /// queue without bound while the operator's Ctrl+Q still gets through.
 const MAX_PENDING_PANE_INPUT: usize = 64 * 1024;
 
+/// The `tmux display-message` argv for a status-line notice on `target`.
+/// `hold` asks for `-d 0`, which tmux(1) documents as "a delay of zero waits
+/// for a key press"; otherwise the session's `display-time` applies. Pure, so
+/// the two shapes are pinned by a test without spawning tmux.
+fn display_message_args(target: &str, text: &str, hold: bool) -> Vec<String> {
+    let mut args = vec![
+        "display-message".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ];
+    if hold {
+        args.push("-d".to_string());
+        args.push("0".to_string());
+    }
+    args.push(text.to_string());
+    args
+}
+
+/// Best-effort status-line feedback in the attached client. Spawned, never
+/// awaited: the pump must not wait on a tmux round-trip. Runs against the
+/// operator's *local* tmux, so for a remote attach it may target a name that
+/// isn't there — accepted, as for the voice toggle before it.
+fn show_status_notice(target: String, text: String, hold: bool) {
+    tokio::spawn(async move {
+        let _ = tokio::process::Command::new("tmux")
+            .args(display_message_args(&target, &text, hold))
+            .status()
+            .await;
+    });
+}
+
 /// Queue `bytes` for the pane, subject to [`MAX_PENDING_PANE_INPUT`].
 fn enqueue_pane_input(outbound: &mut Vec<u8>, bytes: &[u8]) {
     if bytes.is_empty() {
@@ -956,7 +987,7 @@ where
     // its receiver lives here on purpose: aborting this task is what makes
     // `PaneInjector::send` start returning false, which is the only signal the
     // dictation side has that there is no longer a pane to type into.
-    let (inject_tx, mut inject_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (inject_tx, mut inject_rx) = mpsc::unbounded_channel::<PaneInput>();
     // When no injector is installed, the pump keeps the sender alive itself
     // rather than dropping it: a closed channel makes `recv()` resolve `None`
     // immediately and forever, and that arm would then spin the select! loop.
@@ -1055,15 +1086,16 @@ where
                                 let msg = match (now_recording, mode) {
                                     (true, VoiceMode::Conversation) => "🎙 Recording… (Alt-V to send)",
                                     (true, VoiceMode::Dictation) => "🎙 Dictating… (Alt-t to type)",
-                                    (false, _) => "Transcribing…",
+                                    (false, _) => "🎙 Transcribing…",
                                 };
+                                // Both are states the user is *in*, so the notice
+                                // holds until the next keypress rather than
+                                // flashing for tmux's 750 ms `display-time`: the
+                                // keypress that ends recording dismisses the
+                                // first, and the transcript's arrival replaces
+                                // the second (see the injector's `Notice`).
                                 let target = current_session.lock().await.clone();
-                                tokio::spawn(async move {
-                                    let _ = tokio::process::Command::new("tmux")
-                                        .args(["display-message", "-t", &target, msg])
-                                        .status()
-                                        .await;
-                                });
+                                show_status_notice(target, msg.to_string(), true);
                             }
                             enqueue_pane_input(&mut outbound, &rest);
                         }
@@ -1094,9 +1126,13 @@ where
                 // all — injected bytes simply queue on the channel and land after
                 // the resume, which `injected_bytes_wait_behind_the_switcher_pause`
                 // pins.
-                Some(bytes) = inject_rx.recv() => {
-                    enqueue_pane_input(&mut outbound, &bytes);
-                }
+                Some(input) = inject_rx.recv() => match input {
+                    PaneInput::Bytes(bytes) => enqueue_pane_input(&mut outbound, &bytes),
+                    PaneInput::Notice { text, hold } => {
+                        let target = current_session.lock().await.clone();
+                        show_status_notice(target, text, hold);
+                    }
+                },
 
                 written = writer.write(&outbound), if !outbound.is_empty() => {
                     match written {
@@ -1929,5 +1965,32 @@ mod tests {
             paste_decision(Ok(Some(too_big)), b"\x16"),
             PasteDecision::Forward(b"\x16".to_vec())
         );
+    }
+
+    #[test]
+    fn display_message_args_hold_waits_for_a_key() {
+        // Held notices (recording, transcribing) pass `-d 0`; momentary ones
+        // leave the delay to tmux's `display-time`.
+        assert_eq!(
+            display_message_args("cc-1", "🎙 Dictating…", true),
+            ["display-message", "-t", "cc-1", "-d", "0", "🎙 Dictating…"]
+        );
+        assert_eq!(
+            display_message_args("cc-1", "Typed", false),
+            ["display-message", "-t", "cc-1", "Typed"]
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_notice_does_not_reach_the_pane() {
+        // A notice is for the status line, never for the pane's stdin — text
+        // meant for the operator must not be typed at the agent.
+        let injector = PaneInjector::default();
+        let mut cfg = pump_cfg();
+        cfg.injector = Some(injector.clone());
+        let mut h = start_pumps_with(cfg);
+        assert!(injector.notice("Dictating…", true));
+        assert!(injector.send(b"after"));
+        assert_eq!(read_term(&mut h.transport_out, 500).await, b"after");
     }
 }
