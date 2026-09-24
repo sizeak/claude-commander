@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../chrome/chrome.dart';
 import '../chrome/chrome_forms.dart';
@@ -171,7 +172,10 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
   Future<void> _recolour(MergedWorkspace w) async {
     final choice = await showDialog<_ColourChoice>(
       context: context,
-      builder: (_) => _ColourDialog(current: w.color),
+      builder: (_) => _ColourDialog(
+        current: w.color,
+        validate: _fleet.api.workspaceColorError,
+      ),
     );
     if (choice == null) return;
     await _edit(() => _fleet.setWorkspaceColor(w.name, choice.hex));
@@ -520,45 +524,181 @@ class _NameDialogState extends State<_NameDialog> {
   }
 }
 
-/// A colour pick: a palette hex, or null to clear the colour.
+/// A colour pick: a `#rrggbb` hex, or null to clear the colour.
 class _ColourChoice {
   final String? hex;
   const _ColourChoice(this.hex);
 }
 
-/// The palette as swatches, plus "No colour". Pops a [_ColourChoice], or null
-/// on dismiss.
-class _ColourDialog extends StatelessWidget {
+/// The active theme's colours as swatches, a hex field (typed or pasted), and
+/// "No colour". Pops a [_ColourChoice], or null on dismiss.
+///
+/// The field is the single source of truth: tapping a swatch writes its hex
+/// into it, and the swatch whose hex the field holds is the selected one — so
+/// a pasted hex that happens to be a theme colour selects that swatch too.
+class _ColourDialog extends StatefulWidget {
   final String? current;
 
-  const _ColourDialog({required this.current});
+  /// Why a normalised `#rrggbb` is refused, or null — the wire rule, through
+  /// the bridge ([CommanderApi.workspaceColorError]), so a fake can stand in
+  /// under `flutter test`.
+  final String? Function(String hex) validate;
+
+  const _ColourDialog({required this.current, required this.validate});
+
+  @override
+  State<_ColourDialog> createState() => _ColourDialogState();
+}
+
+class _ColourDialogState extends State<_ColourDialog> {
+  late final _controller = TextEditingController(
+    text: normalizeWorkspaceColorInput(widget.current ?? ''),
+  );
+
+  /// The swatch the pointer is over, shown in the caption ahead of the
+  /// selection so a desktop user can read a colour's name before picking it.
+  WorkspaceSwatch? _hovered;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  String get _hex => normalizeWorkspaceColorInput(_controller.text);
+
+  /// Null for an empty field: nothing typed is not a mistake, just nothing to
+  /// save.
+  String? get _error => _hex.isEmpty ? null : widget.validate(_hex);
+
+  bool get _valid => _hex.isNotEmpty && _error == null;
+
+  void _set(String text) {
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    setState(() {});
+  }
+
+  Future<void> _paste() async {
+    final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+    if (text == null || !mounted) return;
+    _set(text.trim());
+  }
+
+  void _save() {
+    if (!_valid) return;
+    Navigator.of(context).pop(_ColourChoice(_hex));
+  }
 
   @override
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
+    final swatches = themeSwatches(t);
+    final valid = _valid;
+    final selected = valid
+        ? swatches.where((s) => s.hex == _hex).firstOrNull
+        : null;
+    final shown = _hovered ?? selected;
+    final caption = shown != null
+        ? '${shown.name} · ${shown.hex}'
+        : valid
+        ? 'Custom · $_hex'
+        : '';
+    final preview = valid ? parseWorkspaceColor(_hex) : null;
+
     return AlertDialog(
       title: const Text('Colour'),
-      content: Wrap(
-        spacing: 10,
-        runSpacing: 10,
-        children: [
-          for (final hex in workspacePalette)
-            InkResponse(
-              key: ValueKey('swatch-$hex'),
-              onTap: () => Navigator.of(context).pop(_ColourChoice(hex)),
-              child: Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: parseWorkspaceColor(hex),
-                  shape: BoxShape.circle,
-                  border: hex == current?.toLowerCase()
-                      ? Border.all(color: t.textBright, width: 2)
-                      : null,
-                ),
+      content: SizedBox(
+        width: 320,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  for (final s in swatches)
+                    Tooltip(
+                      message: '${s.name} · ${s.hex}',
+                      child: MouseRegion(
+                        onEnter: (_) => setState(() => _hovered = s),
+                        onExit: (_) => setState(() => _hovered = null),
+                        child: InkResponse(
+                          key: ValueKey('swatch-${s.hex}'),
+                          onTap: () => _set(s.hex),
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              color: parseWorkspaceColor(s.hex),
+                              shape: BoxShape.circle,
+                              border: s == selected
+                                  ? Border.all(color: t.textBright, width: 2)
+                                  : null,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
-            ),
-        ],
+              const SizedBox(height: 10),
+              Text(
+                caption,
+                key: const ValueKey('colour-caption'),
+                style: t.meta(size: 11, color: t.textMuted),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Container(
+                      key: const ValueKey('colour-preview'),
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: preview,
+                        shape: BoxShape.circle,
+                        border: preview == null
+                            ? Border.all(color: t.textFaint, width: 1)
+                            : null,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('colour-hex-field'),
+                      controller: _controller,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      style: TextStyle(fontFamily: t.mono),
+                      decoration: InputDecoration(
+                        labelText: 'Hex',
+                        hintText: '#rrggbb',
+                        errorText: _error,
+                        errorMaxLines: 2,
+                        suffixIcon: IconButton(
+                          tooltip: 'Paste',
+                          icon: const Icon(Icons.content_paste),
+                          onPressed: _paste,
+                        ),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                      onSubmitted: (_) => _save(),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
       actions: [
         TextButton(
@@ -568,6 +708,10 @@ class _ColourDialog extends StatelessWidget {
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: valid ? _save : null,
+          child: const Text('Save'),
         ),
       ],
     );

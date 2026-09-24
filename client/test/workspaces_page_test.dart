@@ -4,6 +4,10 @@ import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/fleet_store.dart';
+import 'package:claude_commander_client/theme/theme_data.dart';
+import 'package:claude_commander_client/theme/tokens.dart';
+import 'package:claude_commander_client/util/workspace_color.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -252,30 +256,178 @@ void main() {
     ]);
   });
 
-  testWidgets('colour picks from the palette, or clears', (tester) async {
-    await pumpPage(tester);
+  group('colour dialog', () {
+    Future<void> pumpThemed(WidgetTester tester, CommanderTokens tokens) async {
+      tester.view.physicalSize = const Size(360, 1400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: themeDataFor(tokens),
+          home: WorkspacesPage(fleet: fleet),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
 
-    await openRowMenu(tester, 'Personal');
-    await tester.tap(find.text('Colour'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('swatch-#6f9fd8')));
-    await tester.pumpAndSettle();
-    expect(
-      lastPut(
-        laptopApi,
-      ).workspaces.firstWhere((w) => w.name == 'Personal').color,
-      '#6f9fd8',
-    );
+    Future<void> openColour(WidgetTester tester, String? name) async {
+      await openRowMenu(tester, name);
+      await tester.tap(find.text('Colour'));
+      await tester.pumpAndSettle();
+    }
 
-    await openRowMenu(tester, 'Work');
-    await tester.tap(find.text('Colour'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('No colour'));
-    await tester.pumpAndSettle();
-    expect(
-      lastPut(laptopApi).workspaces.firstWhere((w) => w.name == 'Work').color,
-      isNull,
-    );
+    String? colourOf(String name) =>
+        lastPut(laptopApi).workspaces.firstWhere((w) => w.name == name).color;
+
+    Finder hexField() => find.byKey(const ValueKey('colour-hex-field'));
+
+    bool saveEnabled(WidgetTester tester) =>
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Save'))
+            .onPressed !=
+        null;
+
+    for (final (label, tokens) in [
+      ('Mission Control', missionControlTokens),
+      ('LCARS', lcarsTokens),
+    ]) {
+      testWidgets('offers the $label theme colours, deduplicated', (
+        tester,
+      ) async {
+        await pumpThemed(tester, tokens);
+        await openColour(tester, 'Personal');
+
+        final swatches = themeSwatches(tokens);
+        final hexes = {for (final s in swatches) s.hex};
+        expect(hexes.length, swatches.length, reason: 'no duplicate colours');
+        expect(hexes, contains(workspaceColorHex(tokens.primary)));
+        expect(hexes, contains(workspaceColorHex(tokens.success)));
+        expect(hexes, contains(workspaceColorHex(tokens.danger)));
+        for (final s in swatches) {
+          expect(find.byKey(ValueKey('swatch-${s.hex}')), findsOneWidget);
+          expect(find.byTooltip('${s.name} · ${s.hex}'), findsOneWidget);
+        }
+        expect(tester.takeException(), isNull);
+      });
+    }
+
+    testWidgets('picking a swatch names it, then Save stores its hex', (
+      tester,
+    ) async {
+      await pumpThemed(tester, missionControlTokens);
+      await openColour(tester, 'Personal');
+
+      final success = workspaceColorHex(missionControlTokens.success);
+      await tester.tap(find.byKey(ValueKey('swatch-$success')));
+      await tester.pumpAndSettle();
+      expect(find.text('Success · $success'), findsOneWidget);
+      expect(tester.widget<TextField>(hexField()).controller!.text, success);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(colourOf('Personal'), success);
+    });
+
+    testWidgets('No colour clears it', (tester) async {
+      await pumpThemed(tester, missionControlTokens);
+      await openColour(tester, 'Work');
+      await tester.tap(find.text('No colour'));
+      await tester.pumpAndSettle();
+      expect(colourOf('Work'), isNull);
+    });
+
+    testWidgets('a typed hex, with or without #, is stored lowercase', (
+      tester,
+    ) async {
+      await pumpThemed(tester, missionControlTokens);
+      await openColour(tester, 'Personal');
+
+      await tester.enterText(hexField(), '  12AB9F ');
+      await tester.pumpAndSettle();
+      expect(find.text('Custom · #12ab9f'), findsOneWidget);
+      expect(saveEnabled(tester), isTrue);
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(colourOf('Personal'), '#12ab9f');
+    });
+
+    testWidgets('the paste button fills the field from the clipboard', (
+      tester,
+    ) async {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async => call.method == 'Clipboard.getData'
+            ? <String, dynamic>{'text': ' #C0FFEE\n'}
+            : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await pumpThemed(tester, missionControlTokens);
+      await openColour(tester, 'Personal');
+
+      await tester.tap(find.byTooltip('Paste'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(hexField()).controller!.text, '#C0FFEE');
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(colourOf('Personal'), '#c0ffee');
+    });
+
+    testWidgets('an invalid hex shows an error and disables Save', (
+      tester,
+    ) async {
+      await pumpThemed(tester, missionControlTokens);
+      await openColour(tester, 'Personal');
+
+      for (final bad in ['#ff88', '#gg8800', 'red', '#ff88001']) {
+        await tester.enterText(hexField(), bad);
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('is not a #rrggbb colour'),
+          findsOneWidget,
+          reason: bad,
+        );
+        expect(saveEnabled(tester), isFalse, reason: bad);
+      }
+
+      // An empty field is not an error yet, but there is nothing to save.
+      await tester.enterText(hexField(), '');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('is not a #rrggbb colour'), findsNothing);
+      expect(saveEnabled(tester), isFalse);
+    });
+
+    testWidgets('the current colour is prefilled and its swatch selected', (
+      tester,
+    ) async {
+      laptopApi.workspacesResponse = [
+        WorkspaceDef(
+          name: 'Work',
+          color: workspaceColorHex(lcarsTokens.nav).toUpperCase(),
+        ),
+        const WorkspaceDef(name: 'Personal', color: '#123456'),
+      ];
+      await fleet.refreshAll();
+      await pumpThemed(tester, lcarsTokens);
+
+      final nav = workspaceColorHex(lcarsTokens.nav);
+      await openColour(tester, 'Work');
+      expect(tester.widget<TextField>(hexField()).controller!.text, nav);
+      expect(find.text('Nav · $nav'), findsOneWidget);
+      expect(saveEnabled(tester), isTrue);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      // A colour that is no theme token is still prefilled, as Custom.
+      await openColour(tester, 'Personal');
+      expect(tester.widget<TextField>(hexField()).controller!.text, '#123456');
+      expect(find.text('Custom · #123456'), findsOneWidget);
+    });
   });
 
   testWidgets('the startup workspace can be pinned', (tester) async {
