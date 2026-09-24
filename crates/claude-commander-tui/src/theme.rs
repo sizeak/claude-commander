@@ -1021,6 +1021,66 @@ impl Theme {
             .bg(self.status_bar_bg)
             .fg(self.status_bar_fg)
     }
+
+    /// The theme's foreground and accent colours as pickable swatches, in
+    /// role order, deduplicated by hex value (the first role keeps it).
+    /// Surfaces that only exist behind other colours — the selection band,
+    /// the status bar, the diff bands — and `Reset` are left out.
+    pub fn swatches(&self) -> Vec<ThemeSwatch> {
+        let mut roles: Vec<(String, Color)> = [
+            ("accent", self.text_accent),
+            ("border", self.border_focused),
+            ("creating", self.status_creating),
+            ("running", self.status_running),
+            ("stopped", self.status_stopped),
+            ("pr", self.status_pr),
+            ("merged", self.status_pr_merged),
+            ("pr open", self.pr_open),
+            ("pr draft", self.pr_draft),
+            ("pr closed", self.pr_closed),
+            ("waiting", self.agent_waiting),
+            ("unread", self.unread_indicator),
+            ("conversation", self.conversation_accent),
+        ]
+        .into_iter()
+        .map(|(role, c)| (role.to_string(), c))
+        .collect();
+        if let AgentWorkingStyle::Solid(c) = self.agent_working {
+            roles.push(("working".to_string(), c));
+        }
+        for (i, (header, title)) in self.project_colors.iter().enumerate() {
+            roles.push((format!("project {}", i + 1), *header));
+            roles.push((format!("project {} title", i + 1), *title));
+        }
+        roles.extend(
+            [
+                ("added", self.diff_added),
+                ("removed", self.diff_removed),
+                ("hunk header", self.diff_hunk_header),
+                ("file header", self.diff_file_header),
+                ("info", self.modal_info),
+                ("warning", self.modal_warning),
+                ("error", self.modal_error),
+                ("pill open", self.pr_pill_open_bg),
+                ("pill draft", self.pr_pill_draft_bg),
+                ("pill closed", self.pr_pill_closed_bg),
+                ("pill review", self.pr_pill_review_bg),
+                ("pill merged", self.pr_pill_merged_bg),
+                ("command", self.palette_command_bg),
+            ]
+            .into_iter()
+            .map(|(role, c)| (role.to_string(), c)),
+        );
+        let mut seen = std::collections::HashSet::new();
+        roles
+            .into_iter()
+            .filter_map(|(role, color)| {
+                let hex = color_to_hex(color)?;
+                seen.insert(hex.clone())
+                    .then_some(ThemeSwatch { role, color, hex })
+            })
+            .collect()
+    }
 }
 
 /// Build a saturated line fill from a base colour for the review diff view.
@@ -1112,25 +1172,56 @@ pub fn dim_color(color: Color, opacity: f32) -> Color {
 /// Approximate RGB values for named ANSI colors
 fn color_to_approx_rgb(color: Color) -> (u8, u8, u8) {
     match color {
-        Color::Black => (0, 0, 0),
-        Color::Red => (205, 0, 0),
-        Color::Green => (0, 205, 0),
-        Color::Yellow => (205, 205, 0),
-        Color::Blue => (0, 0, 238),
-        Color::Magenta => (205, 0, 205),
-        Color::Cyan => (0, 205, 205),
-        Color::White | Color::Gray => (229, 229, 229),
-        Color::DarkGray => (127, 127, 127),
-        Color::LightRed => (255, 0, 0),
-        Color::LightGreen => (0, 255, 0),
-        Color::LightYellow => (255, 255, 0),
-        Color::LightBlue => (92, 92, 255),
-        Color::LightMagenta => (255, 0, 255),
-        Color::LightCyan => (0, 255, 255),
-        Color::Indexed(n) => indexed_to_rgb(n),
         Color::Rgb(r, g, b) => (r, g, b),
         Color::Reset => (200, 200, 200),
+        other => indexed_to_rgb(ansi_index(other).unwrap_or(7)),
     }
+}
+
+/// The xterm palette index of a named or indexed colour (`None` for `Rgb` and
+/// `Reset`, which have no index).
+fn ansi_index(color: Color) -> Option<u8> {
+    Some(match color {
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Indexed(n) => n,
+        Color::Rgb(..) | Color::Reset => return None,
+    })
+}
+
+/// A colour as `#rrggbb`: `Rgb` directly, named and indexed colours through
+/// the standard xterm palette. `None` for `Reset`, which is "whatever the
+/// terminal's default is" and has no fixed value.
+pub fn color_to_hex(color: Color) -> Option<String> {
+    let (r, g, b) = match color {
+        Color::Reset => return None,
+        other => color_to_approx_rgb(other),
+    };
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+/// One pickable colour of a [`Theme`]: the role it plays there and its value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeSwatch {
+    /// The theme role the colour came from (the first, if several share it).
+    pub role: String,
+    pub color: Color,
+    /// `#rrggbb`, lower-case.
+    pub hex: String,
 }
 
 /// Convert a 256-color index to approximate RGB
@@ -1191,6 +1282,75 @@ mod tests {
         let from_config = ColorValue::from(rendered);
         let back: Color = from_config.0;
         assert_eq!(back, rendered);
+    }
+
+    #[test]
+    fn color_to_hex_uses_the_xterm_palette() {
+        assert_eq!(
+            color_to_hex(Color::Rgb(0x12, 0xab, 0xef)).as_deref(),
+            Some("#12abef")
+        );
+        assert_eq!(color_to_hex(Color::Red).as_deref(), Some("#cd0000"));
+        assert_eq!(color_to_hex(Color::White).as_deref(), Some("#ffffff"));
+        assert_eq!(color_to_hex(Color::Gray).as_deref(), Some("#e5e5e5"));
+        assert_eq!(color_to_hex(Color::DarkGray).as_deref(), Some("#7f7f7f"));
+        // A named colour and its index agree.
+        assert_eq!(
+            color_to_hex(Color::Indexed(12)),
+            color_to_hex(Color::LightBlue)
+        );
+        // Cube and grey ramp.
+        assert_eq!(
+            color_to_hex(Color::Indexed(147)).as_deref(),
+            Some("#afafff")
+        );
+        assert_eq!(
+            color_to_hex(Color::Indexed(232)).as_deref(),
+            Some("#080808")
+        );
+        assert_eq!(color_to_hex(Color::Reset), None);
+    }
+
+    #[test]
+    fn swatches_are_deduplicated_by_hex_and_keep_the_first_role() {
+        let theme = Theme::truecolor();
+        let swatches = theme.swatches();
+        let mut hexes: Vec<&str> = swatches.iter().map(|s| s.hex.as_str()).collect();
+        let total = hexes.len();
+        hexes.sort_unstable();
+        hexes.dedup();
+        assert_eq!(hexes.len(), total, "no hex appears twice");
+        assert_eq!(swatches[0].role, "accent");
+        assert_eq!(swatches[0].hex, "#b4befe");
+        // `pr open` is the same sky blue as the focused border, so only the
+        // earlier role is listed.
+        assert!(
+            swatches
+                .iter()
+                .any(|s| s.role == "border" && s.hex == "#89b4fa")
+        );
+        assert!(!swatches.iter().any(|s| s.role == "pr open"));
+        assert!(swatches.iter().any(|s| s.role == "running"));
+        assert!(swatches.iter().any(|s| s.role == "project 1"));
+    }
+
+    #[test]
+    fn swatches_convert_named_colours_and_skip_reset() {
+        for theme in [Theme::basic(), Theme::indexed()] {
+            let swatches = theme.swatches();
+            assert!(!swatches.is_empty());
+            for s in &swatches {
+                assert_eq!(color_to_hex(s.color).as_ref(), Some(&s.hex));
+                assert!(
+                    claude_commander_protocol::workspace::validate_workspace_color(&s.hex).is_ok(),
+                    "{} is a valid workspace colour",
+                    s.hex
+                );
+            }
+        }
+        let mut theme = Theme::basic();
+        theme.text_accent = Color::Reset;
+        assert!(theme.swatches().iter().all(|s| s.role != "accent"));
     }
 
     #[test]

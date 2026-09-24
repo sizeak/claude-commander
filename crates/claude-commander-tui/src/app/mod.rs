@@ -68,6 +68,7 @@ use claude_commander_core::tmux::PaneInfo;
 
 mod actions;
 mod background;
+mod colour_picker;
 mod conversation;
 mod event_loop;
 mod input;
@@ -891,8 +892,9 @@ pub enum WorkspacesEditing {
     Renaming {
         value: Input,
     },
+    /// Enter on the colour row: the swatch grid and hex row.
     Colour {
-        value: Input,
+        picker: Box<colour_picker::ColourPicker>,
     },
     /// `m` on a project: pick its target in the left list (`target` indexes
     /// the merged list), Enter to move, Esc to cancel.

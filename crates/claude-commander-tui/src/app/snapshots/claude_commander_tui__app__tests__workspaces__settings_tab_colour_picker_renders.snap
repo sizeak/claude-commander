@@ -1,0 +1,28 @@
+---
+source: crates/claude-commander-tui/src/app/tests.rs
+expression: terminal.backend()
+---
+" Sessions [Project]:                ┌ Preview · Info · Shell ──────────────────────────────────────────────────────────┐"
+" Recent                             │                                                                                  │"
+"     1 ● main-┌ Settings ──────────────────────────────────────────────────────────────────────────────┐               │"
+"  ────────────│ General  Voice  Keybindings  Theme  Sections  Workspaces  Programs  Server             │               │"
+" main-proj [ma│ ────────────────────────────────────────────────────────────────────────────────────── │               │"
+"     1 ● main-│ Startup workspace: Last used  (s: change)                                              │               │"
+"              │                                                                                        │               │"
+"              │     Main •                  │ Colour    ■ #a6e3a1                                      │               │"
+"              │ ▸ ■ Work                    │                                                          │               │"
+"              │                             │  ··  ■■  ■■  ■■ [■■] ■■  ■■  ■■                          │               │"
+"              │                             │  ■■  ■■  ■■  ■■  ■■  ■■  ■■  ■■                          │               │"
+"              │                             │  ■■  ■■  ■■  ■■  ■■  ■■  ■■  ■■                          │               │"
+"              │                             │  ■■  ■■  ■■  ■■  ■■  ■■  ■■                              │               │"
+"              │                             │  running  #a6e3a1                                        │               │"
+"              │                             │                                                          │               │"
+"              │                             │ Hex          #3366f▏                                     │               │"
+"              │                             │                                                          │               │"
+"              │                             │                                                          │               │"
+"              │                                                                                        │               │"
+"              │ Enter: save  type or paste #rrggbb  Tab: swatches  Esc: cancel                         │               │"
+"              └────────────────────────────────────────────────────────────────────────────────────────┘               │"
+"                                    │                                                                                  │"
+"                                    └──────────────────────────────────────────────────────────────────────────────────┘"
+"  Main  │ Sessions: 1 │ [n]ew session │ s[t]acked │ [N]ew project                                                ? help "

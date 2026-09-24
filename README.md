@@ -159,9 +159,10 @@ workspace: the active one's sessions rank first, the rest are tagged with their
 workspace, and picking one switches workspace before jumping. New projects,
 clones and scans land in the active workspace. **Settings → Workspaces** creates
 (`n`), renames (`r`), deletes (`d`, which moves its projects back to Main) and
-reorders (`J`/`K`) them, sets each one's accent colour, moves projects between
-them (`m`), and chooses which workspace opens at startup (`s`). With remote
-servers, workspaces merge by name and every change is sent to each server. See
+reorders (`J`/`K`) them, picks each one's accent colour (from the theme's
+swatches, or a typed or pasted hex), moves projects between them (`m`), and
+chooses which workspace opens at startup (`s`). With remote servers,
+workspaces merge by name and every change is sent to each server. See
 [Workspaces](docs/configuration.md#workspaces).
 
 ### Status Symbols

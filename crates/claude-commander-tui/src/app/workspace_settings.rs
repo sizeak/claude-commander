@@ -8,6 +8,7 @@
 //! each frame — so the tab holds only cursor/editing state, and every edit goes
 //! through the eager-propagation operations in [`super::workspaces`].
 
+use super::colour_picker::{ColourPicker, ColourPickerFocus, GRID_COLUMNS, PickerOutcome};
 use super::settings::{list_scroll_offset, truncate_str};
 use super::workspaces::workspace_color;
 use super::*;
@@ -221,10 +222,7 @@ impl App {
                 }
             };
             let colour_selected = detail_focused && ws.detail_selected == 0;
-            let colour_value = match &ws.editing {
-                Some(WorkspacesEditing::Colour { value }) => super::input_with_caret(value),
-                _ => w.color.clone().unwrap_or_else(|| "(default)".to_string()),
-            };
+            let colour_value = w.color.clone().unwrap_or_else(|| "(default)".to_string());
             let mut colour_spans = vec![Span::styled(
                 format!("{:<10}", "Colour"),
                 row_style(colour_selected),
@@ -236,48 +234,58 @@ impl App {
                 colour_value,
                 row_style(colour_selected).fg(self.theme.text_accent),
             ));
-            let mut lines = vec![
-                Line::from(colour_spans),
-                Line::from(""),
-                Line::from(Span::styled(
+            let mut lines = vec![Line::from(colour_spans), Line::from("")];
+            if let Some(WorkspacesEditing::Colour { picker }) = &ws.editing {
+                // The picker takes the projects' place while it is open.
+                lines.extend(self.colour_picker_lines(picker));
+            } else {
+                lines.push(Line::from(Span::styled(
                     "Projects",
                     Style::default().fg(self.theme.text_secondary),
-                )),
-            ];
-            let projects = self.workspace_project_rows(w.name.as_deref());
-            if projects.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  (no projects)",
-                    Style::default().fg(self.theme.text_secondary),
                 )));
-            }
-            for (i, p) in projects.iter().enumerate() {
-                let selected = detail_focused && ws.detail_selected == i + 1;
-                let moving = matches!(
-                    &ws.editing,
-                    Some(WorkspacesEditing::MovingProject { project_id, .. }) if *project_id == p.id
-                );
-                let prefix = if moving { "» " } else { "  " };
-                lines.push(Line::from(Span::styled(
-                    format!("{prefix}{}", p.label),
-                    row_style(selected || moving),
-                )));
+                let projects = self.workspace_project_rows(w.name.as_deref());
+                if projects.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "  (no projects)",
+                        Style::default().fg(self.theme.text_secondary),
+                    )));
+                }
+                for (i, p) in projects.iter().enumerate() {
+                    let selected = detail_focused && ws.detail_selected == i + 1;
+                    let moving = matches!(
+                        &ws.editing,
+                        Some(WorkspacesEditing::MovingProject { project_id, .. }) if *project_id == p.id
+                    );
+                    let prefix = if moving { "» " } else { "  " };
+                    lines.push(Line::from(Span::styled(
+                        format!("{prefix}{}", p.label),
+                        row_style(selected || moving),
+                    )));
+                }
             }
             frame.render_widget(Paragraph::new(lines), detail_area);
         }
 
-        // --- Footer ---
+        self.render_workspaces_footer(frame, footer_area, ws);
+    }
+
+    fn render_workspaces_footer(&self, frame: &mut Frame, footer_area: Rect, ws: &WorkspacesState) {
         let footer_text = match &ws.editing {
             Some(WorkspacesEditing::Creating { .. }) => "Enter: create  Esc: cancel",
             Some(WorkspacesEditing::Renaming { .. }) => "Enter: save  Esc: cancel",
-            Some(WorkspacesEditing::Colour { .. }) => "Enter: save (empty = default)  Esc: cancel",
+            Some(WorkspacesEditing::Colour { picker }) => match picker.focus {
+                ColourPickerFocus::Grid => "←↓↑→/hjkl: move  Enter: pick  Tab/#: hex  Esc: cancel",
+                ColourPickerFocus::Hex => {
+                    "Enter: save  type or paste #rrggbb  Tab: swatches  Esc: cancel"
+                }
+            },
             Some(WorkspacesEditing::MovingProject { .. }) => {
                 "j/k: pick workspace  Enter: move  Esc: cancel"
             }
             None if ws.focus == WorkspacesFocus::List => {
                 "n: new  r: rename  d: delete  J/K: reorder  s: startup  →: details  Tab: switch tab"
             }
-            None => "Enter: edit colour  m: move project  ←: back  Tab: switch tab",
+            None => "Enter: pick colour  m: move project  ←: back  Tab: switch tab",
         };
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -286,6 +294,87 @@ impl App {
             )),
             footer_area,
         );
+    }
+
+    /// The open colour picker, as the lines under the Colour row: the swatch
+    /// grid (cell 0 is "No colour"), the highlighted swatch's role and hex,
+    /// then the hex row with a live preview.
+    fn colour_picker_lines(&self, picker: &ColourPicker) -> Vec<Line<'static>> {
+        let grid_focused = picker.focus == ColourPickerFocus::Grid;
+        let secondary = Style::default().fg(self.theme.text_secondary);
+        let bracket = if grid_focused {
+            Style::default().fg(self.theme.text_primary)
+        } else {
+            secondary
+        };
+        let mut lines = Vec::new();
+        let cells: Vec<Option<&crate::theme::ThemeSwatch>> = std::iter::once(None)
+            .chain(picker.swatches.iter().map(Some))
+            .collect();
+        for (row, chunk) in cells.chunks(GRID_COLUMNS).enumerate() {
+            let mut spans = Vec::with_capacity(chunk.len() * 3);
+            for (col, cell) in chunk.iter().enumerate() {
+                let selected = row * GRID_COLUMNS + col == picker.selected;
+                let (open, close) = if selected { ("[", "]") } else { (" ", " ") };
+                spans.push(Span::styled(open, bracket));
+                spans.push(match cell {
+                    Some(s) => Span::styled("■■", Style::default().fg(s.color)),
+                    None => Span::styled("··", secondary),
+                });
+                spans.push(Span::styled(close, bracket));
+            }
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(match picker.selected_swatch() {
+            Some(s) => vec![
+                Span::styled(
+                    format!(" {}", s.role),
+                    Style::default().fg(self.theme.text_primary),
+                ),
+                Span::styled(format!("  {}", s.hex), secondary),
+            ],
+            None => vec![Span::styled(" No colour (default)", secondary)],
+        }));
+        lines.push(Line::from(""));
+
+        let label_style = if grid_focused {
+            Style::default()
+        } else {
+            self.theme.selection()
+        };
+        let mut hex_spans = vec![Span::styled(format!("{:<10}", "Hex"), label_style)];
+        let preview = picker.hex_value().and_then(|h| workspace_color(Some(&h)));
+        hex_spans.push(match preview {
+            Some(c) => Span::styled("■■ ", Style::default().fg(c)),
+            None => Span::raw("   "),
+        });
+        let raw = picker.hex.value();
+        let value_style = if !raw.trim().is_empty() && preview.is_none() {
+            Style::default().fg(self.theme.diff_removed)
+        } else {
+            Style::default().fg(self.theme.text_accent)
+        };
+        if grid_focused && raw.is_empty() {
+            hex_spans.push(Span::styled(
+                "#rrggbb (Tab or # to type or paste)",
+                secondary,
+            ));
+        } else if grid_focused {
+            hex_spans.push(Span::styled(raw.to_string(), value_style));
+        } else {
+            hex_spans.push(Span::styled(
+                super::input_with_caret(&picker.hex),
+                value_style,
+            ));
+        }
+        lines.push(Line::from(hex_spans));
+        if let Some(err) = &picker.error {
+            lines.push(Line::from(Span::styled(
+                format!(" {err}"),
+                Style::default().fg(self.theme.modal_error),
+            )));
+        }
+        lines
     }
 
     /// Handle a keypress while the Workspaces tab is active. Every edit goes to
@@ -330,17 +419,15 @@ impl App {
                         ws.editing = Some(WorkspacesEditing::Renaming { value });
                     }
                 },
-                WorkspacesEditing::Colour { mut value } => match key.code {
-                    KeyCode::Enter => {
+                WorkspacesEditing::Colour { mut picker } => match picker.handle_key(key) {
+                    PickerOutcome::Open => ws.editing = Some(WorkspacesEditing::Colour { picker }),
+                    PickerOutcome::Cancel => {}
+                    PickerOutcome::Pick(color) => {
                         if let Some(w) = merged.get(ws.selected) {
-                            let raw = value.value().to_string();
+                            // An empty colour is `set_workspace_color`'s "clear".
+                            let raw = color.unwrap_or_default();
                             self.set_workspace_color(w.name.clone(), &raw).await;
                         }
-                    }
-                    KeyCode::Esc => {}
-                    _ => {
-                        super::edit_text_input(&mut value, key);
-                        ws.editing = Some(WorkspacesEditing::Colour { value });
                     }
                 },
                 WorkspacesEditing::MovingProject { project_id, target } => {
@@ -474,12 +561,9 @@ impl App {
                     (_, KeyCode::Tab) => self.switch_settings_tab(&mut state, true),
                     (_, KeyCode::BackTab) => self.switch_settings_tab(&mut state, false),
                     (_, KeyCode::Enter) if ws.detail_selected == 0 => {
-                        let current = merged
-                            .get(ws.selected)
-                            .and_then(|w| w.color.clone())
-                            .unwrap_or_default();
+                        let current = merged.get(ws.selected).and_then(|w| w.color.as_deref());
                         ws.editing = Some(WorkspacesEditing::Colour {
-                            value: current.into(),
+                            picker: Box::new(ColourPicker::open(&self.theme, current)),
                         });
                     }
                     (_, KeyCode::Char('m')) if ws.detail_selected > 0 => {

@@ -202,6 +202,20 @@ fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> 
             state.paste_into_draft(text);
             None
         }
+        // Settings → Workspaces: a paste over the colour picker is a hex
+        // colour, wherever the picker's focus is.
+        Modal::Settings(SettingsState {
+            workspaces_state:
+                super::WorkspacesState {
+                    editing: Some(super::WorkspacesEditing::Colour { picker }),
+                    ..
+                },
+            tab: super::SettingsTab::Workspaces,
+            ..
+        }) => {
+            picker.paste(&clean);
+            None
+        }
         _ => None,
     }
 }

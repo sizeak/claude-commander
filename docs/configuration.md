@@ -768,8 +768,11 @@ In the TUI:
 - **Settings → Workspaces** edits everything above: `n` new, `r` rename
   (Main's label included), `d` delete (not Main), `J`/`K` reorder, `s` cycle
   the startup workspace, and `→`/`Enter` into a workspace's details to set its
-  colour (`Enter`; clear the field to remove it) or move a listed project with
-  `m`. Every change is sent to each connected server at once; a server that
+  colour or move a listed project with `m`. `Enter` on the colour row opens a
+  picker: a grid of the active theme's colours (arrows or `h`/`j`/`k`/`l`,
+  `Enter` to pick; the first cell, "No colour", removes it) and a hex row
+  (`Tab` or `#`) that takes a typed or pasted `#rrggbb` (the `#` is optional).
+  Either way the colour is saved as `#rrggbb`; `Esc` cancels. Every change is sent to each connected server at once; a server that
   refuses or can't be reached is named in a status message, and the rest
   still apply it. `startup_workspace` is saved to the local config only, and
   changing it leaves the local definitions as they are (a pinned workspace only

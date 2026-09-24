@@ -11265,29 +11265,137 @@ mod workspaces {
         assert_eq!(ws_state(&app).selected, 1);
     }
 
+    /// Open Work's colour picker under the truecolor theme, so swatch
+    /// positions and hexes are fixed.
+    async fn open_work_colour_picker(app: &mut App) {
+        app.theme = Theme::truecolor();
+        open_workspaces_tab(app);
+        feed(app, KeyCode::Char('j')).await; // Work
+        feed(app, KeyCode::Right).await;
+        assert_eq!(ws_state(app).focus, WorkspacesFocus::Detail);
+        feed(app, KeyCode::Enter).await;
+    }
+
+    fn picker(app: &App) -> &crate::app::colour_picker::ColourPicker {
+        match &ws_state(app).editing {
+            Some(WorkspacesEditing::Colour { picker }) => picker,
+            other => panic!("expected the colour picker, got {other:?}"),
+        }
+    }
+
+    fn work_colour(app: &App) -> Option<&str> {
+        app.config.workspaces[0].color.as_deref()
+    }
+
     #[tokio::test]
-    async fn settings_tab_colour_edit_validates_and_clears() {
+    async fn settings_tab_colour_picker_navigates_and_picks_a_theme_swatch() {
         let (mut app, ..) = app_with_two_workspaces().await;
-        open_workspaces_tab(&mut app);
-        feed(&mut app, KeyCode::Char('j')).await; // Work
+        open_work_colour_picker(&mut app).await;
+        assert_eq!(
+            picker(&app).selected,
+            0,
+            "no colour yet: No colour is selected"
+        );
+        feed(&mut app, KeyCode::Char('l')).await;
         feed(&mut app, KeyCode::Right).await;
-        assert_eq!(ws_state(&app).focus, WorkspacesFocus::Detail);
+        feed(&mut app, KeyCode::Char('j')).await;
+        feed(&mut app, KeyCode::Up).await;
+        feed(&mut app, KeyCode::Char('h')).await;
+        let expected = picker(&app).selected_swatch().unwrap().clone();
+        assert_eq!(expected.role, "accent");
         feed(&mut app, KeyCode::Enter).await;
-        type_programs(&mut app, "#AABBCC").await;
+        assert_eq!(work_colour(&app), Some(expected.hex.as_str()));
+        assert!(ws_state(&app).editing.is_none(), "the picker closed");
+
+        // Reopening preselects the saved swatch.
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(picker(&app).selected, 1);
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_no_colour_clears() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.set_workspace_color(Some("Work".into()), "#b4befe")
+            .await;
+        open_work_colour_picker(&mut app).await;
+        assert_eq!(picker(&app).selected, 1);
+        feed(&mut app, KeyCode::Left).await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(work_colour(&app), None);
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_takes_typed_hex() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_work_colour_picker(&mut app).await;
+        feed(&mut app, KeyCode::Char('#')).await;
+        type_programs(&mut app, "AABBCC").await;
         feed(&mut app, KeyCode::Enter).await;
         assert_eq!(
-            app.config.workspaces[0].color.as_deref(),
+            work_colour(&app),
             Some("#aabbcc"),
             "validated and lower-cased"
         );
+
+        // An off-theme colour reopens in the hex row, not on a swatch.
         feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(picker(&app).selected, 0);
+        assert_eq!(picker(&app).hex.value(), "#aabbcc");
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_takes_a_bracketed_paste() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_work_colour_picker(&mut app).await;
+        app.handle_input(InputEvent::Paste("  3366ff\n".to_string()))
+            .await;
+        assert_eq!(picker(&app).hex.value(), "3366ff");
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(work_colour(&app), Some("#3366ff"), "the # is optional");
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_refuses_invalid_hex() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.set_workspace_color(Some("Work".into()), "#123456")
+            .await;
+        open_work_colour_picker(&mut app).await;
+        feed(&mut app, KeyCode::Tab).await;
         type_programs(&mut app, "zz").await;
         feed(&mut app, KeyCode::Enter).await;
-        assert!(toast(&app).contains("Colour not saved"), "{}", toast(&app));
-        assert!(
-            app.config.workspaces[0].color.is_some(),
-            "kept the old value"
+        let p = picker(&app);
+        assert!(p.error.is_some(), "refused with a message");
+        assert_eq!(work_colour(&app), Some("#123456"), "kept the old value");
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_esc_cancels_without_saving() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_work_colour_picker(&mut app).await;
+        feed(&mut app, KeyCode::Right).await;
+        feed(&mut app, KeyCode::Esc).await;
+        assert!(ws_state(&app).editing.is_none());
+        assert_eq!(
+            ws_state(&app).focus,
+            WorkspacesFocus::Detail,
+            "still in details"
         );
+        assert_eq!(work_colour(&app), None);
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_renders() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.set_workspace_color(Some("Work".into()), "#a6e3a1")
+            .await; // running
+        open_work_colour_picker(&mut app).await;
+        feed(&mut app, KeyCode::Tab).await;
+        type_programs(&mut app, "#3366f").await;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        insta::assert_snapshot!(terminal.backend());
     }
 
     #[tokio::test]
