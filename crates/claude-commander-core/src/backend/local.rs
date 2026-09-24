@@ -22,6 +22,7 @@ use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, ScanResult, SessionId};
 use crate::tmux::HeadlessAttach;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 use super::error::BResult;
 use super::run_local::run_local;
@@ -341,14 +342,32 @@ impl CommanderBackend for LocalBackend {
 
     // -- Projects (gix-backed → `run_local`) --
 
-    async fn add_project(&self, path: PathBuf) -> BResult<ProjectId> {
+    async fn add_project(&self, path: PathBuf, workspace: Option<String>) -> BResult<ProjectId> {
         let svc = self.service.clone();
-        Ok(run_local(move || async move { svc.add_project(path).await }).await?)
+        Ok(run_local(move || async move { svc.add_project(path, workspace).await }).await?)
     }
 
-    async fn ensure_project(&self, path: PathBuf) -> BResult<ProjectId> {
+    async fn ensure_project(&self, path: PathBuf, workspace: Option<String>) -> BResult<ProjectId> {
         let svc = self.service.clone();
-        Ok(run_local(move || async move { svc.ensure_project(path).await }).await?)
+        Ok(run_local(move || async move { svc.ensure_project(path, workspace).await }).await?)
+    }
+
+    async fn set_workspaces(&self, req: SetWorkspacesRequest) -> BResult<()> {
+        Ok(self.service.set_workspace_defs(req)?)
+    }
+
+    async fn rename_workspace(&self, from: String, to: String) -> BResult<()> {
+        self.service.rename_workspace(&from, &to).await?;
+        Ok(())
+    }
+
+    async fn delete_workspace(&self, name: String) -> BResult<()> {
+        self.service.delete_workspace(&name).await?;
+        Ok(())
+    }
+
+    async fn set_project_workspace(&self, id: ProjectId, workspace: Option<String>) -> BResult<()> {
+        Ok(self.service.set_project_workspace(&id, workspace).await?)
     }
 
     async fn remove_project(&self, id: ProjectId) -> BResult<()> {
@@ -356,9 +375,9 @@ impl CommanderBackend for LocalBackend {
         Ok(run_local(move || async move { svc.remove_project(&id).await }).await?)
     }
 
-    async fn scan_directory(&self, dir: PathBuf) -> BResult<ScanResult> {
+    async fn scan_directory(&self, dir: PathBuf, workspace: Option<String>) -> BResult<ScanResult> {
         let svc = self.service.clone();
-        Ok(run_local(move || async move { svc.scan_directory(&dir).await }).await?)
+        Ok(run_local(move || async move { svc.scan_directory(&dir, workspace).await }).await?)
     }
 
     // -- Repository clone --
@@ -786,6 +805,7 @@ mod tests {
                     url: "https://example.invalid/octo/widget.git".to_string(),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap();
@@ -833,6 +853,7 @@ mod tests {
                     url: "--upload-pack=evil".to_string(),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap_err();

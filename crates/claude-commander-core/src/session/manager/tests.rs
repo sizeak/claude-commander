@@ -466,7 +466,7 @@ async fn add_project_records_origin_url() {
     let (tmp, remote, local) = repo_with_remote();
     let (_cdir, _sdir, store, manager) = manager_for(&tmp);
 
-    let id = manager.add_project(local).await.unwrap();
+    let id = manager.add_project(local, None).await.unwrap();
 
     let state = store.read().await;
     let origin = state
@@ -512,7 +512,7 @@ async fn add_project_records_origin_url_matching_a_github_remote_by_slug() {
     );
 
     let (_cdir, _sdir, store, manager) = manager_for(&tmp);
-    let id = manager.add_project(local).await.unwrap();
+    let id = manager.add_project(local, None).await.unwrap();
 
     let state = store.read().await;
     let origin = state.get_project(&id).unwrap().origin_url.clone().unwrap();
@@ -535,7 +535,7 @@ async fn add_project_without_a_remote_records_no_origin_url() {
     git(&local, &["commit", "-m", "c"]);
 
     let (_cdir, _sdir, store, manager) = manager_for(&tmp);
-    let id = manager.add_project(local).await.unwrap();
+    let id = manager.add_project(local, None).await.unwrap();
 
     assert_eq!(
         store.read().await.get_project(&id).unwrap().origin_url,
@@ -567,7 +567,7 @@ async fn backfill_updates_origin_url_when_the_remote_is_repointed() {
     // *correct* a stale value, not only fill an absent one.
     let (tmp, _remote, local) = repo_with_remote();
     let (_cdir, _sdir, store, manager) = manager_for(&tmp);
-    let id = manager.add_project(local.clone()).await.unwrap();
+    let id = manager.add_project(local.clone(), None).await.unwrap();
     assert!(
         store
             .read()
@@ -629,7 +629,7 @@ async fn backfill_updates_origin_url_when_the_remote_is_repointed() {
 async fn backfill_refills_origin_url_after_an_older_binary_drops_the_field() {
     let (tmp, _remote, local) = repo_with_remote();
     let (_cdir, _sdir, store, manager) = manager_for(&tmp);
-    let id = manager.add_project(local).await.unwrap();
+    let id = manager.add_project(local, None).await.unwrap();
 
     // Simulate an older binary (or a pre-`origin_url` state.json) writing the
     // project back without the field. The fill must re-fire: it is never
@@ -656,5 +656,51 @@ async fn backfill_refills_origin_url_after_an_older_binary_drops_the_field() {
     assert_eq!(
         store.read().await.get_project(&id).unwrap().origin_url,
         first
+    );
+}
+
+#[test]
+fn status_bar_workspace_is_hidden_while_the_host_has_only_main() {
+    let config = Config::default();
+    let state = AppState::new();
+    assert_eq!(super::status_bar_workspace(&config, &state, None), None);
+}
+
+#[test]
+fn status_bar_workspace_names_the_tag_or_mains_label() {
+    use claude_commander_protocol::workspace::WorkspaceDef;
+    let config = Config {
+        workspaces: vec![WorkspaceDef::named("Work")],
+        ..Config::default()
+    };
+    let state = AppState::new();
+    assert_eq!(
+        super::status_bar_workspace(&config, &state, Some("Work")).as_deref(),
+        Some("Work")
+    );
+    assert_eq!(
+        super::status_bar_workspace(&config, &state, None).as_deref(),
+        Some("Main")
+    );
+    let relabelled = Config {
+        main_workspace: Some(WorkspaceDef::named("Home")),
+        ..config
+    };
+    assert_eq!(
+        super::status_bar_workspace(&relabelled, &state, None).as_deref(),
+        Some("Home")
+    );
+}
+
+#[test]
+fn status_bar_workspace_shows_for_a_tag_with_no_definition() {
+    let config = Config::default();
+    let mut state = AppState::new();
+    let mut project = crate::session::Project::new("p", std::path::PathBuf::from("/tmp/p"), "main");
+    project.workspace = Some("Orphan".to_string());
+    state.add_project(project);
+    assert_eq!(
+        super::status_bar_workspace(&config, &state, None).as_deref(),
+        Some("Main")
     );
 }

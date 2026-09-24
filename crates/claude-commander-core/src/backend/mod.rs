@@ -55,6 +55,7 @@ use crate::api::{
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 pub use error::{BResult, BackendError};
 pub use local::LocalBackend;
@@ -262,6 +263,9 @@ pub fn empty_snapshot() -> Snapshot {
             // during "connecting…".
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
+        workspaces: Vec::new(),
+        main_workspace: None,
+        startup_workspace: Default::default(),
     }
 }
 
@@ -670,7 +674,13 @@ pub trait CommanderBackend: Send + Sync {
 
     // -- Projects --
 
-    async fn add_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+    /// Register `path` as a project, tagged with `workspace` (`None` = Main) —
+    /// frontends pass their active workspace so a new project lands in it.
+    async fn add_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId>;
 
     /// Register `path` as a project, or answer with the id of the project already
     /// registered for it.
@@ -684,10 +694,46 @@ pub trait CommanderBackend: Send + Sync {
     /// No default: the dedupe belongs where the projects live, so a backend has to
     /// route it to its own host rather than inherit an answer composed from a
     /// snapshot a frontend happens to hold.
-    async fn ensure_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+    ///
+    /// `workspace` tags the project only if this call registers it; an existing
+    /// project keeps its workspace.
+    async fn ensure_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId>;
 
     async fn remove_project(&self, id: ProjectId) -> BResult<()>;
-    async fn scan_directory(&self, dir: std::path::PathBuf) -> BResult<crate::session::ScanResult>;
+
+    // -- Workspaces --
+    //
+    // No defaults: a workspace edit is sent eagerly to every connected backend,
+    // and each must say for itself whether it landed (a frontend toasts the
+    // ones that failed). Rename and delete are idempotent on a backend that
+    // never had the workspace, so that propagation is safe to repeat.
+
+    /// Replace this backend's workspace definitions (and, when set, Main's
+    /// label/colour and the startup choice). Never re-tags projects.
+    async fn set_workspaces(&self, req: SetWorkspacesRequest) -> BResult<()>;
+
+    /// Rename a workspace, rewriting every project tagged with it. A no-op
+    /// success when this backend has no such workspace.
+    async fn rename_workspace(&self, from: String, to: String) -> BResult<()>;
+
+    /// Delete a workspace, moving its projects to Main. A no-op success when
+    /// this backend has no such workspace.
+    async fn delete_workspace(&self, name: String) -> BResult<()>;
+
+    /// Move a project into `workspace` (`None` = Main), defining the workspace
+    /// on this backend if it is new here.
+    async fn set_project_workspace(&self, id: ProjectId, workspace: Option<String>) -> BResult<()>;
+    /// Scan `dir` for git repositories and register them, each new one tagged
+    /// with `workspace` (`None` = Main).
+    async fn scan_directory(
+        &self,
+        dir: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<crate::session::ScanResult>;
 
     // -- Repository clone --
     //
@@ -905,6 +951,7 @@ mod tests {
                 full_name: "octo/widget".to_string(),
             },
             dest_name: None,
+            workspace: None,
         };
         let job = backend.start_clone(req.clone()).await.unwrap();
         assert!(
@@ -947,6 +994,7 @@ mod tests {
                     full_name: "octo/widget".to_string()
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap_err(),

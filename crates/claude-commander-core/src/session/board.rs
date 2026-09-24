@@ -720,6 +720,7 @@ mod tests {
                     .map(|s| s.id)
                     .collect(),
                 origin_url: None,
+                workspace: None,
             })
             .collect();
         projects.sort_by(|a, b| a.name.cmp(&b.name));
@@ -746,6 +747,9 @@ mod tests {
                 tmux_ok: true,
                 version: "test".to_string(),
             },
+            workspaces: Vec::new(),
+            main_workspace: None,
+            startup_workspace: Default::default(),
         }
     }
 
@@ -1127,6 +1131,7 @@ mod tests {
             main_branch: "main".to_string(),
             session_ids: Vec::new(),
             origin_url: None,
+            workspace: None,
         });
 
         let board = board_from(&state, &[], None, &BTreeMap::new());

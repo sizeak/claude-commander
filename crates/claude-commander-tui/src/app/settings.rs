@@ -342,7 +342,7 @@ impl App {
                     ),
                 ])
             }
-            SettingsTab::Sections => {
+            SettingsTab::Sections | SettingsTab::Workspaces => {
                 vec![]
             }
             SettingsTab::Programs => {
@@ -509,6 +509,8 @@ impl App {
 
         if state.tab == SettingsTab::Sections {
             self.render_sections_tab(frame, body_area, footer_area, &state.sections_state);
+        } else if state.tab == SettingsTab::Workspaces {
+            self.render_workspaces_tab(frame, body_area, footer_area, &state.workspaces_state);
         } else if state.tab == SettingsTab::Programs {
             self.render_programs_tab(frame, body_area, footer_area, &state.programs_state);
         } else {
@@ -798,7 +800,7 @@ impl App {
 
     /// Draw the full-height `│` divider between the list and detail panes of a
     /// two-pane settings tab (Sections / Programs).
-    fn render_settings_divider(&self, frame: &mut Frame, divider_area: Rect) {
+    pub(super) fn render_settings_divider(&self, frame: &mut Frame, divider_area: Rect) {
         for row in 0..divider_area.height {
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -1478,6 +1480,10 @@ impl App {
                 // Sections tab handles its own persistence via save_sections_config
                 return;
             }
+            SettingsTab::Workspaces => {
+                // Workspaces tab propagates its own edits (handle_workspaces_key)
+                return;
+            }
             SettingsTab::Programs => {
                 // Programs tab handles its own persistence in handle_programs_key
                 return;
@@ -1533,7 +1539,7 @@ impl App {
     /// Switch the settings modal to the next (`forward`) or previous tab,
     /// rebuilding its rows and resetting the selection to the first selectable
     /// row. The caller restores the modal afterwards.
-    fn switch_settings_tab(&self, state: &mut SettingsState, forward: bool) {
+    pub(super) fn switch_settings_tab(&self, state: &mut SettingsState, forward: bool) {
         state.tab = if forward {
             state.tab.next()
         } else {
@@ -1558,6 +1564,11 @@ impl App {
 
         if state.tab == SettingsTab::Sections {
             self.handle_sections_key(key, state).await;
+            return;
+        }
+
+        if state.tab == SettingsTab::Workspaces {
+            self.handle_workspaces_key(key, state).await;
             return;
         }
 
@@ -2219,6 +2230,7 @@ impl App {
             editing: None,
             rows,
             sections_state: SectionsState::default(),
+            workspaces_state: WorkspacesState::default(),
             programs_state,
             search: None,
         });
@@ -3182,7 +3194,7 @@ fn settings_label_width(rows: &[SettingsRow], area_width: u16) -> u16 {
 
 /// Top scroll offset that keeps `selected` visible in a window `visible` rows
 /// tall: scroll only once the selection passes the bottom edge.
-fn list_scroll_offset(selected: usize, visible: usize) -> usize {
+pub(super) fn list_scroll_offset(selected: usize, visible: usize) -> usize {
     if selected >= visible {
         selected - visible + 1
     } else {
@@ -3494,7 +3506,8 @@ mod tests {
 
     #[test]
     fn settings_tab_cycle_includes_voice() {
-        assert_eq!(SettingsTab::ALL.len(), 7);
+        assert_eq!(SettingsTab::ALL.len(), 8);
+        assert!(SettingsTab::ALL.contains(&SettingsTab::Workspaces));
         assert!(SettingsTab::ALL.contains(&SettingsTab::Voice));
         assert!(SettingsTab::ALL.contains(&SettingsTab::Programs));
         assert!(SettingsTab::ALL.contains(&SettingsTab::Server));
@@ -3502,7 +3515,9 @@ mod tests {
         assert_eq!(SettingsTab::Voice.prev(), SettingsTab::General);
         assert_eq!(SettingsTab::Voice.next(), SettingsTab::Keybindings);
         // Server sits last, after Programs, and wraps back to General.
-        assert_eq!(SettingsTab::Sections.next(), SettingsTab::Programs);
+        assert_eq!(SettingsTab::Sections.next(), SettingsTab::Workspaces);
+        assert_eq!(SettingsTab::Workspaces.next(), SettingsTab::Programs);
+        assert_eq!(SettingsTab::Programs.prev(), SettingsTab::Workspaces);
         assert_eq!(SettingsTab::Programs.next(), SettingsTab::Server);
         assert_eq!(SettingsTab::Server.next(), SettingsTab::General);
         assert_eq!(SettingsTab::General.prev(), SettingsTab::Server);

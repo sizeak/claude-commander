@@ -33,9 +33,17 @@ pub(crate) async fn repo_identity(path: &Path) -> PathBuf {
 }
 
 impl SessionManager {
-    /// Add a new project (git repository)
+    /// Add a new project (git repository), tagged with `workspace` (`None` =
+    /// Main). The tag is written with the project in one state mutation, so no
+    /// snapshot ever shows it in the wrong workspace. Validating the name and
+    /// ensuring its definition exist is the caller's job
+    /// ([`CommanderService::add_project`](crate::api::CommanderService::add_project)).
     #[instrument(skip(self))]
-    pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
+    pub async fn add_project(
+        &self,
+        repo_path: PathBuf,
+        workspace: Option<String>,
+    ) -> Result<ProjectId> {
         // Discover git repository
         let backend = GitBackend::discover(&repo_path)?;
         let main_branch = backend.detect_main_branch()?;
@@ -51,6 +59,7 @@ impl SessionManager {
         let repo_path = canonical_or_keep(backend.path()).await;
         let mut project = Project::new(name, repo_path, main_branch);
         project.origin_url = origin_url;
+        project.workspace = workspace;
         let project_id = project.id;
 
         self.store
@@ -71,9 +80,14 @@ impl SessionManager {
     ///
     /// Walks the directory tree recursively. When a `.git` directory is found
     /// the repo is registered and that subtree is not descended further.
-    /// Repos that already exist (matched by canonicalized git root) are skipped.
+    /// Repos that already exist (matched by canonicalized git root) are skipped
+    /// and keep their workspace; new ones are tagged with `workspace`.
     #[instrument(skip(self))]
-    pub async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
+    pub async fn scan_directory(
+        &self,
+        dir: &Path,
+        workspace: Option<String>,
+    ) -> Result<ScanResult> {
         // Collect all existing repo paths for duplicate detection
         let existing_paths: std::collections::HashSet<PathBuf> = {
             let state = self.store.read().await;
@@ -115,7 +129,7 @@ impl SessionManager {
                 continue;
             }
 
-            match self.add_project(repo_path).await {
+            match self.add_project(repo_path, workspace.clone()).await {
                 Ok(_) => added += 1,
                 Err(e) => {
                     debug!("Failed to add {:?}: {}", canonical, e);

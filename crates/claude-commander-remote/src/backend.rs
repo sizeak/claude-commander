@@ -30,6 +30,7 @@ use claude_commander_core::backend::{
 use claude_commander_core::comment::{ApplyOutcome, Comment};
 use claude_commander_core::session::{ProjectId, ScanResult, SessionId};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::workspace::SetWorkspacesRequest;
 use claude_commander_protocol::ws::AttachKind as WsAttachKind;
 use uuid::Uuid;
 
@@ -298,16 +299,44 @@ impl CommanderBackend for RemoteBackend {
 
     // -- Projects --
 
-    async fn add_project(&self, path: PathBuf) -> BResult<ProjectId> {
+    async fn add_project(&self, path: PathBuf, workspace: Option<String>) -> BResult<ProjectId> {
         self.client
-            .add_project(path)
+            .add_project(path, workspace)
             .await
             .map_err(into_backend_error)
     }
 
-    async fn ensure_project(&self, path: PathBuf) -> BResult<ProjectId> {
+    async fn ensure_project(&self, path: PathBuf, workspace: Option<String>) -> BResult<ProjectId> {
         self.client
-            .ensure_project(path)
+            .ensure_project(path, workspace)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn set_workspaces(&self, req: SetWorkspacesRequest) -> BResult<()> {
+        self.client
+            .set_workspaces(req)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn rename_workspace(&self, from: String, to: String) -> BResult<()> {
+        self.client
+            .rename_workspace(from, to)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn delete_workspace(&self, name: String) -> BResult<()> {
+        self.client
+            .delete_workspace(name)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn set_project_workspace(&self, id: ProjectId, workspace: Option<String>) -> BResult<()> {
+        self.client
+            .set_project_workspace(id, workspace)
             .await
             .map_err(into_backend_error)
     }
@@ -319,12 +348,12 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
-    async fn scan_directory(&self, dir: PathBuf) -> BResult<ScanResult> {
+    async fn scan_directory(&self, dir: PathBuf, workspace: Option<String>) -> BResult<ScanResult> {
         // The wire response mirrors `ScanResult`'s fields (which isn't
         // `Deserialize`); rebuild the core type from it.
         let body = self
             .client
-            .scan_directory(dir)
+            .scan_directory(dir, workspace)
             .await
             .map_err(into_backend_error)?;
         Ok(ScanResult {
@@ -826,6 +855,93 @@ mod tests {
         );
     }
 
+    /// Every workspace route over real HTTP: define, move a project (which
+    /// self-heals the definition), rename (rewrites the tag), delete (back to
+    /// Main) — each visible in the server's own snapshot afterwards.
+    #[tokio::test]
+    async fn workspace_edits_round_trip_over_http() {
+        use claude_commander_protocol::workspace::{StartupWorkspace, WorkspaceDef};
+        let (addr, service, _d, _w) = serve_disabled().await;
+        let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
+        let pid = project.id;
+        service
+            .store()
+            .mutate(move |state| state.add_project(project))
+            .await
+            .unwrap();
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+
+        backend
+            .set_workspaces(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Play")],
+                main: Some(WorkspaceDef::named("Home")),
+                startup_workspace: Some(StartupWorkspace::Main),
+            })
+            .await
+            .unwrap();
+        backend
+            .set_project_workspace(pid, Some("Work".to_string()))
+            .await
+            .unwrap();
+        let snap = backend.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace.as_deref(), Some("Work"));
+        let names: Vec<_> = snap.workspaces.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Play", "Work"], "the move defined Work server-side");
+        assert_eq!(snap.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(snap.startup_workspace, StartupWorkspace::Main);
+
+        backend
+            .rename_workspace("Work".to_string(), "Job".to_string())
+            .await
+            .unwrap();
+        let snap = backend.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace.as_deref(), Some("Job"));
+
+        backend.delete_workspace("Job".to_string()).await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace, None);
+        // Idempotent on a server without the workspace.
+        backend.delete_workspace("Job".to_string()).await.unwrap();
+
+        let err = backend
+            .set_project_workspace(ProjectId::new(), Some("Work".to_string()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::NotFound), "got {err:?}");
+        let err = backend
+            .set_workspaces(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("last")],
+                main: None,
+                startup_workspace: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidRequest(_)),
+            "got {err:?}"
+        );
+    }
+
+    /// `ensure_project` carries the workspace to the server, which tags the
+    /// project it registers.
+    #[tokio::test]
+    async fn ensure_project_over_http_lands_in_the_requested_workspace() {
+        let (addr, service, _d, _w) = serve_disabled().await;
+        let (_repo_dir, repo_path) = create_test_repo().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let id = backend
+            .ensure_project(repo_path, Some("Work".to_string()))
+            .await
+            .unwrap();
+        let tag = service
+            .list_projects()
+            .await
+            .into_iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.workspace);
+        assert_eq!(tag.as_deref(), Some("Work"));
+    }
+
     #[tokio::test]
     async fn unknown_session_rename_is_not_found() {
         let (addr, _service, _d, _w) = serve_disabled().await;
@@ -896,8 +1012,14 @@ mod tests {
         let (_repo, repo_path) = create_test_repo().await;
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
 
-        let first = backend.ensure_project(repo_path.clone()).await.unwrap();
-        let second = backend.ensure_project(repo_path.clone()).await.unwrap();
+        let first = backend
+            .ensure_project(repo_path.clone(), None)
+            .await
+            .unwrap();
+        let second = backend
+            .ensure_project(repo_path.clone(), None)
+            .await
+            .unwrap();
         assert_eq!(
             first, second,
             "the second ensure must return the id the first created"
@@ -947,6 +1069,7 @@ mod tests {
                     url: "https://example.invalid/octo/widget.git".to_string(),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap();
@@ -1000,6 +1123,7 @@ mod tests {
                     url: "--upload-pack=evil".to_string(),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap_err();
@@ -1214,7 +1338,7 @@ mod tests {
         let addr = spawn_server(state).await;
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        backend.add_project(repo_path.clone()).await.unwrap();
+        backend.add_project(repo_path.clone(), None).await.unwrap();
         let sid = backend
             .create_session(CreateSessionOpts {
                 project_path: repo_path.clone(),
@@ -1305,7 +1429,7 @@ mod tests {
         let addr = spawn_server(state).await;
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        backend.add_project(repo_path.clone()).await.unwrap();
+        backend.add_project(repo_path.clone(), None).await.unwrap();
         let sid = backend
             .create_session(CreateSessionOpts {
                 project_path: repo_path.clone(),
@@ -1405,7 +1529,7 @@ mod tests {
         let addr = spawn_server(state).await;
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        backend.add_project(repo_path.clone()).await.unwrap();
+        backend.add_project(repo_path.clone(), None).await.unwrap();
         let sid = backend
             .create_session(CreateSessionOpts {
                 project_path: repo_path.clone(),

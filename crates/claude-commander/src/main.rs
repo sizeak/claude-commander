@@ -314,20 +314,51 @@ async fn main() -> Result<()> {
             app.run().await?;
         }
 
-        Some(Commands::List { all, json }) => {
+        Some(Commands::List {
+            all,
+            json,
+            workspace,
+        }) => {
             setup_logging(cli.debug, false)?;
 
             if json {
-                let service =
-                    claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+                let service = claude_commander_core::api::CommanderService::for_cli(
+                    config.clone(),
+                    frontend(),
+                )?;
+                let projects = service.list_projects().await;
+                let workspaces = claude_commander_core::cli::CliWorkspaces::resolve(
+                    &config,
+                    projects.iter().filter_map(|p| p.workspace.as_deref()),
+                    workspace.as_deref(),
+                )?;
+                let tag_of = |id| {
+                    projects
+                        .iter()
+                        .find(|p| p.id == id)
+                        .and_then(|p| p.workspace.clone())
+                };
                 let sessions = service.list_sessions(all).await?;
                 let entries: Vec<_> = sessions
                     .iter()
-                    .map(claude_commander_core::cli::SessionJsonEntry::from_info)
+                    .map(|s| (s, tag_of(s.project_id)))
+                    .filter(|(_, tag)| workspaces.includes(tag.as_deref()))
+                    .map(|(s, tag)| {
+                        claude_commander_core::cli::SessionJsonEntry::from_info(s)
+                            .with_workspace(tag)
+                    })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
                 let app_state = AppState::load_or_exit();
+                let workspaces = claude_commander_core::cli::CliWorkspaces::resolve(
+                    &config,
+                    app_state
+                        .projects
+                        .values()
+                        .filter_map(|p| p.workspace.as_deref()),
+                    workspace.as_deref(),
+                )?;
 
                 println!("Sessions:");
                 println!();
@@ -337,8 +368,21 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
 
-                for project in app_state.projects.values() {
-                    println!("  {} ({})", project.name, project.main_branch);
+                for project in app_state
+                    .projects
+                    .values()
+                    .filter(|p| workspaces.includes(p.workspace.as_deref()))
+                {
+                    if workspaces.show_column() {
+                        println!(
+                            "  {} ({})  [{}]",
+                            project.name,
+                            project.main_branch,
+                            workspaces.label(project.workspace.as_deref())
+                        );
+                    } else {
+                        println!("  {} ({})", project.name, project.main_branch);
+                    }
 
                     let sessions: Vec<_> = project
                         .worktrees
@@ -526,6 +570,7 @@ async fn main() -> Result<()> {
             base_branch,
             section,
             remote,
+            workspace,
         }) => {
             setup_logging(cli.debug, false)?;
 
@@ -552,6 +597,36 @@ async fn main() -> Result<()> {
                     std::process::exit(2);
                 }
             };
+
+            // `--workspace` (clap-bound to `--path`): register the project in that
+            // workspace first, so `create_session`'s own ensure finds it. An
+            // existing project keeps its workspace — say so rather than
+            // silently ignoring the flag.
+            if let Some(typed) = workspace.as_deref() {
+                let snapshot = backend.snapshot().await?;
+                let tag =
+                    claude_commander_core::cli::resolve_new_session_workspace(&snapshot, typed);
+                let id = match backend
+                    .ensure_project(project_path.clone(), tag.clone())
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(claude_commander_core::backend::BackendError::InvalidRequest(msg)) => {
+                        clap::Error::raw(clap::error::ErrorKind::InvalidValue, format!("{msg}\n"))
+                            .exit();
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if let Some(existing) = snapshot.projects.iter().find(|p| p.id == id)
+                    && existing.workspace != tag
+                {
+                    eprintln!(
+                        "Note: project '{}' is already registered in workspace '{}'; it was not moved.",
+                        existing.name,
+                        existing.workspace.as_deref().unwrap_or("main")
+                    );
+                }
+            }
 
             match &remote {
                 Some(server) => println!("Creating session '{name}' on remote '{server}'..."),

@@ -759,11 +759,15 @@ impl App {
         // Drop a board filter whose project no longer exists in any snapshot
         // (e.g. just deleted) so the columns don't filter to an absent project.
         // Board-only; harmless in list modes.
+        let filter = self.workspace_filter();
         if let Some(f) = self.ui_state.board_filter
-            && !self
-                .backends
-                .iter()
-                .any(|h| h.view.snapshot.projects.iter().any(|p| p.id == f))
+            && !self.backends.iter().any(|h| {
+                h.view
+                    .snapshot
+                    .projects
+                    .iter()
+                    .any(|p| p.id == f && filter.admits(p.workspace.as_deref()))
+            })
         {
             self.ui_state.board_filter = None;
         }
@@ -832,10 +836,18 @@ impl App {
     /// re-anchor the board cursor to the tracked selection.
     fn rebuild_board_view(&mut self) {
         let sections = self.config.effective_sections();
+        // The board and its project sidebar show the active workspace only.
+        let filter = self.workspace_filter();
+        let scoped: Vec<std::borrow::Cow<'_, Snapshot>> = self
+            .backends
+            .iter()
+            .map(|h| filter.scope(&h.view.snapshot))
+            .collect();
         let inputs: Vec<claude_commander_core::session::BoardBackendInput> = self
             .backends
             .iter()
-            .map(|h| {
+            .zip(&scoped)
+            .map(|(h, snapshot)| {
                 let version_warning = if h.id == claude_commander_core::backend::LOCAL_BACKEND_ID {
                     None
                 } else {
@@ -849,7 +861,7 @@ impl App {
                     name: h.backend.descriptor().name,
                     connection: h.view.connection.clone(),
                     version_warning,
-                    snapshot: &h.view.snapshot,
+                    snapshot,
                     agent_states: &h.view.agent_states.states,
                 }
             })
@@ -861,6 +873,8 @@ impl App {
             self.ui_state.board_filter,
             self.config.hide_empty_sections,
         );
+        drop(inputs);
+        drop(scoped);
 
         // Mark rows whose LFS content is still being pulled (UI-only state).
         if !self.ui_state.lfs_pull_in_flight.is_empty() {
@@ -916,6 +930,14 @@ impl App {
     fn rebuild_list_view(&mut self) {
         let single_backend = self.backends.len() == 1;
         let mut items: Vec<SessionListItem> = Vec::new();
+        // Every list block — Recent and each backend's tree — shows the
+        // active workspace only.
+        let filter = self.workspace_filter();
+        let scoped: Vec<std::borrow::Cow<'_, Snapshot>> = self
+            .backends
+            .iter()
+            .map(|h| filter.scope(&h.view.snapshot))
+            .collect();
 
         // Recent-sessions block, prepended above the per-backend tree and
         // independent of any server. Each row is a shortcut to a session that
@@ -926,9 +948,9 @@ impl App {
         let recent_limit = self.config.recent_sessions_limit as usize;
         if recent_limit > 0 {
             let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, SessionListItem)> = Vec::new();
-            for handle in &self.backends {
+            for (handle, snapshot) in self.backends.iter().zip(&scoped) {
                 let agent_states = &handle.view.agent_states.states;
-                for s in &handle.view.snapshot.sessions {
+                for s in &snapshot.sessions {
                     if let Some(at) = s.last_attached_at {
                         candidates.push((
                             at,
@@ -972,8 +994,8 @@ impl App {
         // divider); the per-backend tree appended below is the scrolling list.
         let recents_len = items.len();
 
-        for handle in &self.backends {
-            let snapshot = &handle.view.snapshot;
+        for (handle, snapshot) in self.backends.iter().zip(&scoped) {
+            let snapshot: &Snapshot = snapshot;
             let agent_states = &handle.view.agent_states.states;
             if !single_backend {
                 let version_warning =
@@ -1018,6 +1040,7 @@ impl App {
             };
             items.append(&mut backend_items);
         }
+        drop(scoped);
 
         // Mark rows whose LFS content is still being pulled (UI-only state).
         if !self.ui_state.lfs_pull_in_flight.is_empty() {

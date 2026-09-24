@@ -8,7 +8,11 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::config::AppState;
+use claude_commander_viewmodel::workspace::{
+    MergedWorkspace, WorkspaceSource, find_workspace, merge_workspace_sources, workspaces_visible,
+};
+
+use crate::config::{AppState, Config};
 use crate::git::{PrState, ReviewDecision, effective_pr_state};
 use crate::session::{AgentState, WorktreeSession};
 
@@ -58,9 +62,17 @@ pub struct SessionJsonEntry {
     pub pr_draft: bool,
     pub pr_labels: Vec<String>,
     pub created_at: DateTime<Utc>,
+    /// The session's workspace (its project's tag); `null` is Main.
+    pub workspace: Option<String>,
 }
 
 impl SessionJsonEntry {
+    /// Stamp the entry with its project's workspace tag.
+    pub fn with_workspace(mut self, workspace: Option<String>) -> Self {
+        self.workspace = workspace;
+        self
+    }
+
     pub fn from_info(info: &crate::api::SessionInfo) -> Self {
         Self {
             id: info.id.clone(),
@@ -75,6 +87,7 @@ impl SessionJsonEntry {
             pr_draft: info.pr_draft,
             pr_labels: info.pr_labels.clone(),
             created_at: info.created_at,
+            workspace: None,
         }
     }
 
@@ -92,7 +105,88 @@ impl SessionJsonEntry {
             pr_draft: session.pr_draft,
             pr_labels: session.pr_labels.clone(),
             created_at: session.created_at,
+            workspace: None,
         }
+    }
+}
+
+/// Workspace context for `list`: the merged workspace list for this host and
+/// what `--workspace` resolved to.
+#[derive(Debug, Clone)]
+pub struct CliWorkspaces {
+    pub workspaces: Vec<MergedWorkspace>,
+    /// `None` = no `--workspace` flag (list everything); `Some(tag)` = only
+    /// projects tagged `tag` (`Some(None)` = Main).
+    pub filter: Option<Option<String>>,
+}
+
+impl CliWorkspaces {
+    /// Build from this host's config and the tags its projects carry, and
+    /// resolve `flag` (a name, case-insensitively, or Main by its label or the
+    /// word `main`). An unknown name is an error listing what exists.
+    pub fn resolve<'a>(
+        config: &Config,
+        project_tags: impl IntoIterator<Item = &'a str>,
+        flag: Option<&str>,
+    ) -> crate::Result<Self> {
+        let source = WorkspaceSource {
+            defs: &config.workspaces,
+            main: config.main_workspace.as_ref(),
+            project_tags: project_tags.into_iter().collect(),
+        };
+        let workspaces = merge_workspace_sources(&[source]);
+        let filter = match flag {
+            None => None,
+            Some(typed) => match find_workspace(&workspaces, typed) {
+                Some(w) => Some(w.name.clone()),
+                None => {
+                    let available = workspaces
+                        .iter()
+                        .map(|w| w.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(crate::error::ConfigError::InvalidValue {
+                        key: "workspace".to_string(),
+                        reason: format!("no workspace named '{typed}' (available: {available})"),
+                    }
+                    .into());
+                }
+            },
+        };
+        Ok(Self { workspaces, filter })
+    }
+
+    /// Whether the human listing shows a WORKSPACE column: only once there is
+    /// more than one workspace, matching the TUI hiding its chip until then.
+    pub fn show_column(&self) -> bool {
+        workspaces_visible(&self.workspaces)
+    }
+
+    /// Whether a project tagged `tag` passes the `--workspace` filter.
+    pub fn includes(&self, tag: Option<&str>) -> bool {
+        self.filter.as_ref().is_none_or(|f| f.as_deref() == tag)
+    }
+
+    /// Display label for `tag` (Main's configured label for `None`).
+    pub fn label(&self, tag: Option<&str>) -> String {
+        self.workspaces
+            .iter()
+            .find(|w| w.name.as_deref() == tag)
+            .map_or_else(|| tag.unwrap_or_default().to_string(), |w| w.label.clone())
+    }
+}
+
+/// The tag `new --workspace <typed>` should give a project it registers: an
+/// existing workspace (matched like `list --workspace`) keeps its spelling;
+/// anything else is taken as a new name, which the host validates and defines.
+pub fn resolve_new_session_workspace(
+    snapshot: &crate::api::Snapshot,
+    typed: &str,
+) -> Option<String> {
+    let workspaces = claude_commander_viewmodel::workspace::merge_workspaces([snapshot]);
+    match find_workspace(&workspaces, typed) {
+        Some(w) => w.name.clone(),
+        None => Some(typed.trim().to_string()),
     }
 }
 
@@ -265,6 +359,73 @@ mod tests {
             PathBuf::from("/tmp/wt"),
             "claude",
         )
+    }
+
+    // -- Workspace tests --
+
+    fn config_with(defs: &[&str], main: Option<&str>) -> Config {
+        use claude_commander_protocol::workspace::WorkspaceDef;
+        Config {
+            workspaces: defs.iter().map(|d| WorkspaceDef::named(*d)).collect(),
+            main_workspace: main.map(WorkspaceDef::named),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn cli_workspaces_hide_the_column_until_a_second_workspace() {
+        let one = CliWorkspaces::resolve(&config_with(&[], None), [], None).unwrap();
+        assert!(!one.show_column());
+        assert!(one.includes(Some("anything")), "no flag lists everything");
+        let two = CliWorkspaces::resolve(&config_with(&["Work"], None), [], None).unwrap();
+        assert!(two.show_column());
+        // An orphaned tag is a workspace too.
+        let orphan = CliWorkspaces::resolve(&config_with(&[], None), ["Lost"], None).unwrap();
+        assert!(orphan.show_column());
+    }
+
+    #[test]
+    fn cli_workspace_flag_resolves_names_and_main() {
+        let c = config_with(&["Work"], Some("Home"));
+        let work = CliWorkspaces::resolve(&c, [], Some("work")).unwrap();
+        assert_eq!(work.filter, Some(Some("Work".to_string())));
+        assert!(work.includes(Some("Work")));
+        assert!(!work.includes(None));
+        let home = CliWorkspaces::resolve(&c, [], Some("home")).unwrap();
+        assert_eq!(home.filter, Some(None));
+        assert!(home.includes(None));
+        assert_eq!(home.label(None), "Home");
+        assert_eq!(home.label(Some("Work")), "Work");
+        let err = CliWorkspaces::resolve(&c, [], Some("play")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("play") && msg.contains("Home, Work"), "{msg}");
+    }
+
+    #[test]
+    fn new_session_workspace_keeps_an_existing_spelling_or_takes_a_new_name() {
+        let mut snap = crate::backend::empty_snapshot();
+        snap.workspaces = vec![claude_commander_protocol::workspace::WorkspaceDef::named(
+            "Work",
+        )];
+        assert_eq!(
+            resolve_new_session_workspace(&snap, "work").as_deref(),
+            Some("Work")
+        );
+        assert_eq!(resolve_new_session_workspace(&snap, "main"), None);
+        assert_eq!(
+            resolve_new_session_workspace(&snap, " Fresh ").as_deref(),
+            Some("Fresh")
+        );
+    }
+
+    #[test]
+    fn json_entry_carries_the_workspace_tag() {
+        let entry = SessionJsonEntry::from_session(&make_session("t"), "p")
+            .with_workspace(Some("Work".into()));
+        let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["workspace"], "Work");
+        let main = SessionJsonEntry::from_session(&make_session("t"), "p");
+        assert!(serde_json::to_value(&main).unwrap()["workspace"].is_null());
     }
 
     // -- SessionJsonEntry tests --

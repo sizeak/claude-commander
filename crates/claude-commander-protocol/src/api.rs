@@ -20,6 +20,7 @@ use crate::comment::{Comment, CommentSide};
 use crate::diff::ParsedDiff;
 use crate::pr::{PrState, ReviewDecision};
 use crate::session::{AgentState, ProjectId, SessionId, SessionStatus};
+use crate::workspace::{StartupWorkspace, WorkspaceDef};
 
 /// A session as returned by the list/find/detail endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +210,29 @@ pub struct ProjectInfo {
     /// repo has several spellings. Additive; older servers omit it.
     #[serde(default)]
     pub origin_url: Option<String>,
+    /// Name of the workspace this project is tagged with; `None` is the
+    /// built-in Main workspace. Additive: an older server omits it (every
+    /// project reads as Main), and an older client ignores it.
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+/// Body for `POST /projects`, `POST /projects/ensure` and `POST
+/// /projects/scan` (where `path` is the directory to scan).
+///
+/// `workspace` tags a *newly registered* project (so it lands in the caller's
+/// active workspace); `ensure` and `scan` never re-tag a project that already
+/// exists.
+/// Additive: an older client sends only `path`, and the project lands in Main.
+///
+/// FLUTTER: mirror this DTO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddProjectRequest {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// Why a background fast-forward of a project's main branch was held back.
@@ -316,6 +340,23 @@ pub struct Snapshot {
     #[serde(default)]
     pub operations: Vec<OperationStatus>,
     pub server: ServerStatus,
+    /// This server's workspace definitions, in configured order. Additive: an
+    /// older server omits it (it has only Main).
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceDef>,
+    /// Label + colour of this server's built-in Main workspace; `None` means
+    /// the default label ([`MAIN_WORKSPACE_LABEL`](crate::workspace::MAIN_WORKSPACE_LABEL)).
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub main_workspace: Option<WorkspaceDef>,
+    /// This server's configured `startup_workspace`.
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub startup_workspace: StartupWorkspace,
 }
 
 /// Bulk agent-state snapshot for active sessions.
@@ -636,6 +677,7 @@ mod tests {
                 main_branch: "main".to_string(),
                 session_ids: vec![sid],
                 origin_url: Some("git@github.com:sizeak/claude-commander.git".to_string()),
+                workspace: Some("Work".to_string()),
             }],
             sessions: vec![],
             cascade_paused: Some(sid),
@@ -647,9 +689,19 @@ mod tests {
                 tmux_ok: true,
                 version: "0.0.0".to_string(),
             },
+            workspaces: vec![WorkspaceDef {
+                name: "Work".to_string(),
+                color: Some("#ff8800".to_string()),
+            }],
+            main_workspace: Some(WorkspaceDef::named("Home")),
+            startup_workspace: StartupWorkspace::Named("Work".to_string()),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(back.workspaces, snapshot.workspaces);
+        assert_eq!(back.main_workspace, snapshot.main_workspace);
+        assert_eq!(back.startup_workspace, snapshot.startup_workspace);
         assert_eq!(back.projects.len(), 1);
         assert_eq!(
             back.projects[0].origin_url.as_deref(),
@@ -674,6 +726,64 @@ mod tests {
         assert!(snap.pending_comment_sessions.is_empty());
         assert!(snap.project_pull.is_empty());
         assert!(snap.operations.is_empty());
+        // An older server has no workspaces: only Main, default label, `last`.
+        assert!(snap.workspaces.is_empty());
+        assert!(snap.main_workspace.is_none());
+        assert_eq!(snap.startup_workspace, StartupWorkspace::Last);
+    }
+
+    /// The other direction of wire compatibility: an *older client* decoding a
+    /// new server's payload. Its structs lack the workspace fields, and serde's
+    /// default (no `deny_unknown_fields`) must let it ignore them — pinned with
+    /// a stand-in for the pre-workspace shapes so adding `deny_unknown_fields`
+    /// to either DTO would fail here.
+    #[test]
+    fn an_older_client_ignores_the_workspace_fields() {
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldProjectInfo {
+            id: ProjectId,
+            name: String,
+            repo_path: PathBuf,
+            main_branch: String,
+            session_ids: Vec<SessionId>,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldSnapshot {
+            projects: Vec<OldProjectInfo>,
+            sessions: Vec<serde_json::Value>,
+            server: ServerStatus,
+        }
+        let json = r##"{
+            "projects": [{
+                "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+                "name": "repo", "repo_path": "/repo", "main_branch": "main",
+                "session_ids": [], "workspace": "Work"
+            }],
+            "sessions": [],
+            "server": {"gh_available": false, "tmux_ok": false, "version": "x"},
+            "workspaces": [{"name": "Work", "color": "#ff8800"}],
+            "main_workspace": {"name": "Home"},
+            "startup_workspace": "last"
+        }"##;
+        let old: OldSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(old.projects[0].name, "repo");
+    }
+
+    /// `POST /projects` from an older client (path only) lands in Main; the
+    /// field is skipped on the way out when absent, so a new client talking to
+    /// an old server sends exactly the old body.
+    #[test]
+    fn add_project_request_workspace_is_optional_both_ways() {
+        let old: AddProjectRequest = serde_json::from_str(r#"{"path":"/repo"}"#).unwrap();
+        assert_eq!(old.workspace, None);
+        let body = serde_json::to_string(&AddProjectRequest {
+            path: PathBuf::from("/repo"),
+            workspace: None,
+        })
+        .unwrap();
+        assert_eq!(body, r#"{"path":"/repo"}"#);
     }
 
     /// `origin_url` is additive: a payload from a server that predates it must
@@ -691,6 +801,7 @@ mod tests {
         let info: ProjectInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.name, "repo");
         assert_eq!(info.origin_url, None);
+        assert_eq!(info.workspace, None, "an older server's project is in Main");
     }
 
     #[test]

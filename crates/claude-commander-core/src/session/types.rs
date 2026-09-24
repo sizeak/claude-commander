@@ -52,6 +52,17 @@ pub struct Project {
     /// when a repo is renamed, transferred, or has its remote re-pointed.
     #[serde(default)]
     pub origin_url: Option<String>,
+    /// Name of the workspace this project is tagged with; `None` is the
+    /// built-in Main workspace. A label only — every workspace shares this
+    /// state file. An older binary's write drops it (the project falls back to
+    /// Main); that risk was accepted, and [`Self::extra`] closes it from here on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Every field this binary does not model, kept verbatim so a newer
+    /// binary's additions survive this one's writes. Must stay the last field
+    /// and must stay `flatten`: serde routes only *unclaimed* keys here.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Project {
@@ -70,6 +81,8 @@ impl Project {
             worktrees: Vec::new(),
             shell_tmux_session_name: None,
             origin_url: None,
+            workspace: None,
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -780,6 +793,44 @@ impl SessionListItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `state.json` project written before workspaces existed is in Main.
+    #[test]
+    fn a_project_without_a_workspace_field_is_in_main() {
+        let json = r#"{
+            "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+            "name": "repo", "repo_path": "/repo", "main_branch": "main",
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.workspace, None);
+        assert!(project.extra.is_empty());
+    }
+
+    /// Fields this binary doesn't know (written by a *newer* one) survive a
+    /// load/save round trip instead of being dropped by our next write. That is
+    /// what `Project::extra` is for — `workspace` itself was lost this way by
+    /// every binary that predates it.
+    #[test]
+    fn unknown_project_fields_survive_a_round_trip() {
+        let json = r#"{
+            "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+            "name": "repo", "repo_path": "/repo", "main_branch": "main",
+            "created_at": "2026-01-01T00:00:00Z",
+            "workspace": "Work",
+            "future_flag": true,
+            "future_table": {"nested": [1, 2, 3]}
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.workspace.as_deref(), Some("Work"));
+        let out: serde_json::Value = serde_json::to_value(&project).unwrap();
+        assert_eq!(out["workspace"], "Work");
+        assert_eq!(out["future_flag"], true);
+        assert_eq!(out["future_table"]["nested"][2], 3);
+        // Known fields are not duplicated into the catch-all.
+        assert!(!project.extra.contains_key("workspace"));
+        assert!(!project.extra.contains_key("name"));
+    }
 
     #[test]
     fn test_session_id_display() {

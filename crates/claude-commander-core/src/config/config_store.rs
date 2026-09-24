@@ -526,6 +526,56 @@ mod tests {
         assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
     }
 
+    /// `[[workspaces]]`, `[main_workspace]` and `startup_workspace` must survive
+    /// an unrelated settings edit — the same whole-`Config` re-serialisation
+    /// that once deleted `[server]` would otherwise drop every definition.
+    #[test]
+    fn mutate_preserves_the_workspaces_table() {
+        use claude_commander_protocol::workspace::{StartupWorkspace, WorkspaceDef};
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "startup_workspace = \"Work\"\n\
+             [[workspaces]]\nname = \"Work\"\ncolor = \"#ff8800\"\n\
+             [[workspaces]]\nname = \"Play\"\n\
+             [main_workspace]\nname = \"Home\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        let store = ConfigStore::with_path(config, config_path.clone());
+        store.mutate(|c| c.ui_refresh_fps = 30).unwrap();
+
+        let reloaded = Config::load_from_path(&config_path).unwrap();
+        assert_eq!(
+            reloaded.workspaces,
+            vec![
+                WorkspaceDef {
+                    name: "Work".into(),
+                    color: Some("#ff8800".into())
+                },
+                WorkspaceDef::named("Play"),
+            ]
+        );
+        assert_eq!(reloaded.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(
+            reloaded.startup_workspace,
+            StartupWorkspace::Named("Work".into())
+        );
+        assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
+    }
+
+    /// Absent workspace keys load as "only Main, open on the last one".
+    #[test]
+    fn a_config_without_workspaces_has_only_main() {
+        use claude_commander_protocol::workspace::StartupWorkspace;
+        let config = Config::default();
+        assert!(config.workspaces.is_empty());
+        assert!(config.main_workspace.is_none());
+        assert_eq!(config.startup_workspace, StartupWorkspace::Last);
+    }
+
     /// Changing anything under `[server]` needs a restart: the listener is bound
     /// once at startup, so the settings tab has to say so rather than implying a
     /// live rebind.

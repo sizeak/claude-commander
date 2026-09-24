@@ -147,7 +147,7 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
 
     // Register project + create a session directly through the service (the HTTP
     // path is covered by the other test; here we focus on the WS contract).
-    service.add_project(repo_path.clone()).await.unwrap();
+    service.add_project(repo_path.clone(), None).await.unwrap();
     let session_id = service
         .create_session(claude_commander_core::api::CreateSessionOpts {
             project_path: repo_path.clone(),
@@ -271,7 +271,7 @@ async fn ws_agent_attach_revives_dead_tmux_session() {
     let service = state.service.clone();
     let addr = spawn_server(state).await;
 
-    service.add_project(repo_path.clone()).await.unwrap();
+    service.add_project(repo_path.clone(), None).await.unwrap();
     let session_id = service
         .create_session(claude_commander_core::api::CreateSessionOpts {
             project_path: repo_path.clone(),
@@ -380,7 +380,7 @@ async fn ws_attach_handshake_size_reaches_tmux_without_any_resize() {
     let service = state.service.clone();
     let addr = spawn_server(state).await;
 
-    service.add_project(repo_path.clone()).await.unwrap();
+    service.add_project(repo_path.clone(), None).await.unwrap();
     let session_id = service
         .create_session(claude_commander_core::api::CreateSessionOpts {
             project_path: repo_path.clone(),
@@ -490,7 +490,7 @@ async fn ws_attach_stamps_last_attached_at() {
     let service = state.service.clone();
     let addr = spawn_server(state).await;
 
-    service.add_project(repo_path.clone()).await.unwrap();
+    service.add_project(repo_path.clone(), None).await.unwrap();
     let session_id = service
         .create_session(claude_commander_core::api::CreateSessionOpts {
             project_path: repo_path.clone(),

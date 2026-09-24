@@ -75,6 +75,11 @@ pub enum BindableAction {
     MoveToSection,
     ToggleViewMode,
     ToggleSection,
+    NextWorkspace,
+    PreviousWorkspace,
+    WorkspacePicker,
+    NewWorkspace,
+    MoveProjectToWorkspace,
     TogglePane,
     TogglePaneReverse,
     ShrinkLeftPane,
@@ -137,6 +142,12 @@ impl BindableAction {
         Self::MoveToSection,
         Self::ToggleViewMode,
         Self::ToggleSection,
+        // Workspaces
+        Self::NextWorkspace,
+        Self::PreviousWorkspace,
+        Self::WorkspacePicker,
+        Self::NewWorkspace,
+        Self::MoveProjectToWorkspace,
         // Right pane (list views)
         Self::TogglePane,
         Self::TogglePaneReverse,
@@ -216,6 +227,11 @@ impl BindableAction {
             Self::MoveToSection => "move_to_section",
             Self::ToggleViewMode => "toggle_view_mode",
             Self::ToggleSection => "toggle_section",
+            Self::NextWorkspace => "next_workspace",
+            Self::PreviousWorkspace => "previous_workspace",
+            Self::WorkspacePicker => "workspace_picker",
+            Self::NewWorkspace => "new_workspace",
+            Self::MoveProjectToWorkspace => "move_project_to_workspace",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
             Self::ShrinkLeftPane => "shrink_left_pane",
@@ -281,6 +297,11 @@ impl BindableAction {
             Self::MoveToSection => "Move session to section…",
             Self::ToggleViewMode => "Cycle view: project / sections / stacks / board",
             Self::ToggleSection => "Collapse/expand section",
+            Self::NextWorkspace => "Next workspace",
+            Self::PreviousWorkspace => "Previous workspace",
+            Self::WorkspacePicker => "Switch workspace…",
+            Self::NewWorkspace => "New workspace…",
+            Self::MoveProjectToWorkspace => "Move project to workspace…",
             Self::TogglePane => "Cycle right pane: preview / info / shell",
             Self::TogglePaneReverse => "Cycle right pane (reverse)",
             Self::ShrinkLeftPane => "Narrow the session list",
@@ -352,6 +373,11 @@ impl BindableAction {
             Self::MoveToSection => "move",
             Self::ToggleViewMode => "view",
             Self::ToggleSection => "collapse",
+            Self::NextWorkspace => "next workspace",
+            Self::PreviousWorkspace => "previous workspace",
+            Self::WorkspacePicker => "Workspaces",
+            Self::NewWorkspace => "new workspace",
+            Self::MoveProjectToWorkspace => "move project",
             Self::TogglePane => "pane",
             Self::TogglePaneReverse => "pane back",
             Self::ShrinkLeftPane => "narrower",
@@ -407,6 +433,11 @@ impl BindableAction {
                 "Remote Servers"
             }
             Self::MoveToSection | Self::ToggleViewMode | Self::ToggleSection => "Sections",
+            Self::NextWorkspace
+            | Self::PreviousWorkspace
+            | Self::WorkspacePicker
+            | Self::NewWorkspace
+            | Self::MoveProjectToWorkspace => "Workspaces",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -482,6 +513,11 @@ impl FromStr for BindableAction {
             "move_to_section" => Ok(Self::MoveToSection),
             "toggle_view_mode" => Ok(Self::ToggleViewMode),
             "toggle_section" => Ok(Self::ToggleSection),
+            "next_workspace" => Ok(Self::NextWorkspace),
+            "previous_workspace" => Ok(Self::PreviousWorkspace),
+            "workspace_picker" => Ok(Self::WorkspacePicker),
+            "new_workspace" => Ok(Self::NewWorkspace),
+            "move_project_to_workspace" => Ok(Self::MoveProjectToWorkspace),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
             "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
@@ -873,6 +909,22 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('v'), none)],
         );
         bindings.insert(BindableAction::ToggleSection, vec![]);
+
+        // Workspaces. `w` cycles (wrapping), `W` opens the picker; the rest are
+        // palette-only. Deliberately not Ctrl-w (a terminal's delete-word),
+        // Ctrl-Tab (rarely delivered by terminals) or Alt-1..9 (tab switching
+        // in most terminal emulators).
+        bindings.insert(
+            BindableAction::NextWorkspace,
+            vec![kb(KeyCode::Char('w'), none)],
+        );
+        bindings.insert(
+            BindableAction::WorkspacePicker,
+            vec![kb(KeyCode::Char('W'), shift)],
+        );
+        bindings.insert(BindableAction::PreviousWorkspace, vec![]);
+        bindings.insert(BindableAction::NewWorkspace, vec![]);
+        bindings.insert(BindableAction::MoveProjectToWorkspace, vec![]);
 
         // Right pane (list views only)
         bindings.insert(BindableAction::TogglePane, vec![kb(KeyCode::Tab, none)]);
@@ -1616,7 +1668,7 @@ mod tests {
     fn test_toml_deserialization_override() {
         let toml = r#"
             quit = ["Esc"]
-            navigate_up = "w"
+            navigate_up = "y"
         "#;
 
         let kb: KeyBindings = toml::from_str(toml).unwrap();
@@ -1629,8 +1681,8 @@ mod tests {
         let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         assert_ne!(kb.resolve(&q), Some(BindableAction::Quit));
 
-        // Overridden: navigate_up is now 'w' (single string, not array)
-        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        // Overridden: navigate_up is now 'y' (single string, not array)
+        let w = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&w), Some(BindableAction::NavigateUp));
 
         // Non-overridden defaults still work
@@ -1661,11 +1713,11 @@ mod tests {
         // silently ignored so old configs don't break.
         let toml = r#"
             nonexistent_action = ["k"]
-            navigate_up = "w"
+            navigate_up = "y"
         "#;
         let kb: KeyBindings = toml::from_str(toml).unwrap();
         // Recognised override still applied
-        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        let w = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&w), Some(BindableAction::NavigateUp));
     }
 
@@ -1697,6 +1749,7 @@ mod tests {
                 "Pull Requests",
                 "Remote Servers",
                 "Sections",
+                "Workspaces",
                 "Right Pane",
                 "Review & AI",
                 "Scrolling",
@@ -1909,5 +1962,47 @@ mod tests {
         // costs no key and can't be triggered by a slip.
         let kb = KeyBindings::default();
         assert!(kb.keys_for(BindableAction::SetSessionBase).is_empty());
+    }
+
+    #[test]
+    fn test_workspace_keys_default_to_w_and_shift_w() {
+        let kb = KeyBindings::default();
+        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&w), Some(BindableAction::NextWorkspace));
+        let shift_w = KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_w), Some(BindableAction::WorkspacePicker));
+    }
+
+    #[test]
+    fn test_palette_only_workspace_actions_are_unbound_but_listed() {
+        let kb = KeyBindings::default();
+        for action in [
+            BindableAction::PreviousWorkspace,
+            BindableAction::NewWorkspace,
+            BindableAction::MoveProjectToWorkspace,
+        ] {
+            assert!(kb.keys_for(action).is_empty(), "{action:?} must be unbound");
+            assert!(BindableAction::ALL.contains(&action));
+            assert_eq!(action.section(), "Workspaces");
+        }
+        assert_eq!(BindableAction::NextWorkspace.section(), "Workspaces");
+        assert_eq!(BindableAction::WorkspacePicker.section(), "Workspaces");
+    }
+
+    #[test]
+    fn test_workspace_config_names_roundtrip() {
+        for (action, name) in [
+            (BindableAction::NextWorkspace, "next_workspace"),
+            (BindableAction::PreviousWorkspace, "previous_workspace"),
+            (BindableAction::WorkspacePicker, "workspace_picker"),
+            (BindableAction::NewWorkspace, "new_workspace"),
+            (
+                BindableAction::MoveProjectToWorkspace,
+                "move_project_to_workspace",
+            ),
+        ] {
+            assert_eq!(action.config_name(), name);
+            assert_eq!(name.parse::<BindableAction>().unwrap(), action);
+        }
     }
 }

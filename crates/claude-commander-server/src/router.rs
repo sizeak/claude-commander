@@ -123,6 +123,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/scan", post(projects::scan))
         .route("/projects/ensure", post(projects::ensure))
         .route("/projects/{id}", delete(projects::delete))
+        .route("/projects/{id}/workspace", put(projects::set_workspace))
         .route("/projects/{id}/branches", get(projects::branches))
         .route("/projects/{id}/preview", get(projects::preview))
         // -- repo picker + clone --
@@ -141,6 +142,10 @@ pub fn build_router(state: AppState) -> Router {
         // -- config + health --
         .route("/config", get(config::read).patch(config::update))
         .route("/config/programs", put(config::put_programs))
+        // -- workspaces (definitions; project tags go via /projects/{id}/workspace) --
+        .route("/config/workspaces", put(config::put_workspaces))
+        .route("/config/workspaces/rename", post(config::rename_workspace))
+        .route("/config/workspaces/delete", post(config::delete_workspace))
         .route("/config/reload", post(config::reload))
         .route("/health/tmux", get(config::health_tmux))
         // Bearer auth guards the whole `/api` surface; the CORS layer sits
@@ -308,13 +313,56 @@ mod tests {
             keys,
             [
                 "cascade_paused",
+                "main_workspace",
                 "operations",
                 "pending_comment_sessions",
                 "project_pull",
                 "projects",
                 "server",
                 "sessions",
+                "startup_workspace",
+                "workspaces",
             ]
+        );
+    }
+
+    /// The workspace routes are reachable through the real router (and so
+    /// behind auth, with the static `rename`/`delete` segments not shadowed).
+    #[tokio::test]
+    async fn workspace_routes_are_mounted() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+        for (method, uri, body) in [
+            (
+                "PUT",
+                "/api/config/workspaces",
+                r#"{"workspaces":[{"name":"Work"}]}"#,
+            ),
+            (
+                "POST",
+                "/api/config/workspaces/rename",
+                r#"{"from":"Work","to":"Job"}"#,
+            ),
+            ("POST", "/api/config/workspaces/delete", r#"{"name":"Job"}"#),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), 204, "{method} {uri}");
+        }
+        let req = Request::put(format!("/api/projects/{}/workspace", uuid::Uuid::new_v4()))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"workspace":"Work"}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            404,
+            "an unknown project, not an unmounted route"
         );
     }
 }

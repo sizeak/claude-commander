@@ -68,6 +68,9 @@ pub struct ConfigSnapshot {
     pub rounded_borders: bool,
     /// Whether the user has configured any custom list sections.
     pub sections_configured: bool,
+    /// Whether the user has defined any workspaces beyond Main. A flag only —
+    /// never the names, which are user text.
+    pub workspaces_configured: bool,
 }
 
 impl ConfigSnapshot {
@@ -82,6 +85,7 @@ impl ConfigSnapshot {
             nix_develop: config.nix_develop,
             rounded_borders: config.rounded_borders,
             sections_configured: !config.sections.is_empty(),
+            workspaces_configured: !config.workspaces.is_empty(),
         }
     }
 }
@@ -148,6 +152,20 @@ mod tests {
             "claude"
         );
         assert_eq!(program_basename(""), "");
+    }
+
+    /// Workspaces are reported as a flag, never by name: a name is user text.
+    #[test]
+    fn config_snapshot_flags_workspaces_without_their_names() {
+        let mut config = Config::default();
+        assert!(!ConfigSnapshot::from_config(&config).workspaces_configured);
+        config.workspaces = vec![claude_commander_protocol::workspace::WorkspaceDef::named(
+            "Secret Client Project",
+        )];
+        let snap = ConfigSnapshot::from_config(&config);
+        assert!(snap.workspaces_configured);
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("Secret Client Project"), "{json}");
     }
 
     #[test]

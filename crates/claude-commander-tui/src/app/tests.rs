@@ -2100,6 +2100,7 @@ fn keybindings_settings_state(app: &App, search: Option<&str>) -> crate::app::Se
         editing: None,
         rows,
         sections_state: SectionsState::default(),
+        workspaces_state: WorkspacesState::default(),
         programs_state: ProgramsState::default(),
         search: search.map(|q| q.into()),
     }
@@ -2140,6 +2141,7 @@ fn render_general_tab_draws_section_headers() {
         editing: None,
         rows,
         sections_state: Default::default(),
+        workspaces_state: Default::default(),
         programs_state: Default::default(),
         search: None,
     });
@@ -2431,11 +2433,12 @@ async fn programs_tab_tab_key_switches_tabs() {
         _ => panic!("expected a settings modal"),
     }
 
-    // BackTab from Programs lands on Sections.
+    // BackTab from Programs lands on Workspaces, which sits between it and
+    // Sections.
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
     feed_programs_key(&mut app, KeyCode::BackTab).await;
     match &app.ui_state.modal {
-        Modal::Settings(s) => assert_eq!(s.tab, SettingsTab::Sections),
+        Modal::Settings(s) => assert_eq!(s.tab, SettingsTab::Workspaces),
         _ => panic!("expected a settings modal"),
     }
 }
@@ -2752,7 +2755,9 @@ async fn app_on_sections_tab_with_pinned_session(
     app.refresh_list_items().await;
 
     // No dedicated opener for the Sections tab; reach it as a user would.
+    // Programs → Workspaces → Sections.
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
+    feed_programs_key(app, crossterm::event::KeyCode::BackTab).await;
     feed_programs_key(app, crossterm::event::KeyCode::BackTab).await;
     sid
 }
@@ -2881,6 +2886,7 @@ async fn creating_a_section_refuses_the_reserved_catchall_name() {
 
     let mut app = make_test_app();
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
+    feed_programs_key(&mut app, KeyCode::BackTab).await; // Workspaces tab
     feed_programs_key(&mut app, KeyCode::BackTab).await; // Sections tab
 
     // A section spelled like the catch-all would render as a second header of
@@ -9845,6 +9851,8 @@ async fn palette_jump_into_a_collapsed_section_attaches_to_the_picked_session() 
             agent_state: None,
             unread: false,
             last_attached_at: None,
+            workspace: None,
+            other_workspace: None,
         })],
         selected_idx: 0,
         scroll: 0,
@@ -10240,4 +10248,1109 @@ async fn toggle_dictation_when_idle_in_list_toasts_and_does_not_record() {
         msg.contains("Attach to a session to dictate into it"),
         "unexpected toast: {msg}"
     );
+}
+
+// ===========================================================================
+// Workspaces
+// ===========================================================================
+
+mod workspaces {
+    use super::*;
+    use crate::app::workspaces::{WorkspaceFilter, set_request_for, set_request_for_backend};
+    use crate::app::{WorkspacesEditing, WorkspacesFocus, WorkspacesState};
+    use claude_commander_core::backend::mock::MockWorkspaceCall;
+    use claude_commander_protocol::workspace::{
+        SetWorkspacesRequest, StartupWorkspace, WorkspaceDef,
+    };
+    use claude_commander_viewmodel::workspace::MergedWorkspace;
+    use crossterm::event::KeyCode;
+
+    fn merged(names: &[&str]) -> Vec<MergedWorkspace> {
+        let mut out = vec![MergedWorkspace {
+            name: None,
+            label: "Main".to_string(),
+            color: None,
+        }];
+        out.extend(names.iter().map(|n| MergedWorkspace {
+            name: Some(n.to_string()),
+            label: n.to_string(),
+            color: None,
+        }));
+        out
+    }
+
+    /// Seed the local backend with one Main project and one project tagged
+    /// `Work` (each with one attached session), and define `Work` in config.
+    /// Returns (main session, work session, main project, work project).
+    async fn app_with_two_workspaces() -> (App, SessionId, SessionId, ProjectId, ProjectId) {
+        use claude_commander_core::session::{Project, WorktreeSession};
+        let mut app = make_test_app();
+        let main_proj = Project::new("main-proj", std::path::PathBuf::from("/tmp/mp"), "main");
+        let mut work_proj = Project::new("work-proj", std::path::PathBuf::from("/tmp/wp"), "main");
+        work_proj.workspace = Some("Work".to_string());
+        let (mp, wp) = (main_proj.id, work_proj.id);
+        let mut main_sess = WorktreeSession::new(
+            mp,
+            "main-sess",
+            "main-br",
+            std::path::PathBuf::from("/tmp/m1"),
+            "claude",
+        );
+        main_sess.status = SessionStatus::Running;
+        main_sess.last_attached_at = Some(chrono::Utc::now());
+        let mut work_sess = WorktreeSession::new(
+            wp,
+            "work-sess",
+            "work-br",
+            std::path::PathBuf::from("/tmp/w1"),
+            "claude",
+        );
+        work_sess.status = SessionStatus::Running;
+        work_sess.last_attached_at = Some(chrono::Utc::now() - chrono::Duration::seconds(60));
+        let (ms, ws) = (main_sess.id, work_sess.id);
+        app.service
+            .store()
+            .mutate(move |state| {
+                state.add_project(main_proj);
+                state.add_project(work_proj);
+                state.add_session(main_sess);
+                state.add_session(work_sess);
+            })
+            .await
+            .unwrap();
+        app.service
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Work")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap();
+        app.config = app.service.read_config();
+        app.sync_local_view_from_store_for_test().await;
+        app.ui_state.view_mode = ViewMode::ProjectGrouped;
+        app.refresh_list_items().await;
+        (app, ms, ws, mp, wp)
+    }
+
+    fn listed_sessions(app: &App) -> Vec<SessionId> {
+        app.ui_state
+            .list_items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::Worktree { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn listed_projects(app: &App) -> Vec<ProjectId> {
+        app.ui_state
+            .list_items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::Project { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn recent_sessions(app: &App) -> Vec<SessionId> {
+        app.ui_state.list_items[..app.ui_state.recents_len]
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::RecentSession { session, .. } => Some(session.id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn feed(app: &mut App, code: KeyCode) {
+        feed_programs_key(app, code).await;
+    }
+
+    async fn feed_shift(app: &mut App, c: char) {
+        let state = match std::mem::replace(&mut app.ui_state.modal, Modal::None) {
+            Modal::Settings(s) => s,
+            other => {
+                app.ui_state.modal = other;
+                panic!("expected a settings modal");
+            }
+        };
+        app.handle_settings_key(
+            crossterm::event::KeyEvent::new(
+                KeyCode::Char(c),
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
+            state,
+        )
+        .await;
+    }
+
+    fn open_workspaces_tab(app: &mut App) {
+        app.ui_state.modal = Modal::Settings(SettingsState {
+            tab: SettingsTab::Workspaces,
+            selected_row: 0,
+            editing: None,
+            rows: Vec::new(),
+            sections_state: SectionsState::default(),
+            workspaces_state: WorkspacesState::default(),
+            programs_state: ProgramsState::default(),
+            search: None,
+        });
+    }
+
+    fn ws_state(app: &App) -> &WorkspacesState {
+        match &app.ui_state.modal {
+            Modal::Settings(s) => &s.workspaces_state,
+            _ => panic!("expected a settings modal"),
+        }
+    }
+
+    fn toast(app: &App) -> String {
+        app.ui_state
+            .status_message
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .unwrap_or_default()
+    }
+
+    // -- pure helpers --
+
+    #[test]
+    fn set_request_sends_main_only_when_it_is_being_edited() {
+        let list = merged(&["Work", "Home"]);
+        let req = set_request_for(&list, false);
+        assert_eq!(
+            req.workspaces,
+            vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Home")]
+        );
+        assert_eq!(req.main, None, "a default Main needs no table");
+        assert_eq!(req.startup_workspace, None);
+        assert_eq!(
+            set_request_for(&list, true).main,
+            Some(WorkspaceDef::named("Main")),
+            "renaming Main back to its default must still be sent"
+        );
+        // A relabelled Main (from whichever server set it) is not pushed onto
+        // servers that never asked for it by an unrelated edit — on one that
+        // defines a workspace of that name it would be refused.
+        let mut relabelled = list.clone();
+        relabelled[0].label = "Home base".into();
+        assert_eq!(set_request_for(&relabelled, false).main, None);
+        assert_eq!(
+            set_request_for(&relabelled, true).main,
+            Some(WorkspaceDef::named("Home base"))
+        );
+    }
+
+    #[test]
+    fn a_backend_request_keeps_its_own_spellings_and_its_mains_label_free() {
+        let mut snap = empty_snapshot();
+        snap.workspaces = vec![WorkspaceDef::named("work")];
+        snap.main_workspace = Some(WorkspaceDef::named("Play"));
+        let wanted = SetWorkspacesRequest {
+            workspaces: vec![
+                WorkspaceDef::named("Work"),
+                WorkspaceDef::named("work"),
+                WorkspaceDef::named("Play"),
+                WorkspaceDef::named("New"),
+            ],
+            main: None,
+            startup_workspace: None,
+        };
+        assert_eq!(
+            set_request_for_backend(&wanted, &snap).workspaces,
+            vec![WorkspaceDef::named("work"), WorkspaceDef::named("New")]
+        );
+    }
+
+    #[test]
+    fn next_startup_cycles_last_main_then_each_workspace() {
+        use crate::app::workspace_settings::next_startup;
+        let list = merged(&["Work"]);
+        let s1 = next_startup(&StartupWorkspace::Last, &list);
+        assert_eq!(s1, StartupWorkspace::Main);
+        let s2 = next_startup(&s1, &list);
+        assert_eq!(s2, StartupWorkspace::Named("Work".into()));
+        assert_eq!(next_startup(&s2, &list), StartupWorkspace::Last);
+        assert_eq!(
+            next_startup(&StartupWorkspace::Named("Gone".into()), &list),
+            StartupWorkspace::Main
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_all_borrows_and_only_narrows_projects_and_sessions() {
+        let (app, ms, ws, mp, wp) = app_with_two_workspaces().await;
+        let snap = &app.local_view().snapshot;
+        assert!(matches!(
+            WorkspaceFilter::All.scope(snap),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let work = WorkspaceFilter::Only(Some("Work".into())).scope(snap);
+        assert_eq!(
+            work.projects.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![wp]
+        );
+        assert_eq!(
+            work.sessions
+                .iter()
+                .map(|s| s.session_id)
+                .collect::<Vec<_>>(),
+            vec![ws]
+        );
+        let main = WorkspaceFilter::Only(None).scope(snap);
+        assert_eq!(
+            main.projects.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![mp]
+        );
+        assert_eq!(
+            main.sessions
+                .iter()
+                .map(|s| s.session_id)
+                .collect::<Vec<_>>(),
+            vec![ms]
+        );
+    }
+
+    // -- scoping --
+
+    #[tokio::test]
+    async fn one_workspace_filters_nothing() {
+        let mut app = make_test_app();
+        assert_eq!(app.workspace_filter(), WorkspaceFilter::All);
+        app.ui_state.active_workspace = Some("Anything".into());
+        assert_eq!(app.workspace_filter(), WorkspaceFilter::All);
+        assert_eq!(app.visible_active_workspace(), None);
+    }
+
+    #[tokio::test]
+    async fn list_view_and_recents_show_only_the_active_workspace() {
+        let (mut app, ms, ws, mp, wp) = app_with_two_workspaces().await;
+        assert_eq!(listed_projects(&app), vec![mp]);
+        assert_eq!(listed_sessions(&app), vec![ms]);
+        assert_eq!(recent_sessions(&app), vec![ms]);
+
+        app.switch_workspace(Some("Work".into()), true).await;
+        assert_eq!(listed_projects(&app), vec![wp]);
+        assert_eq!(listed_sessions(&app), vec![ws]);
+        assert_eq!(recent_sessions(&app), vec![ws]);
+    }
+
+    #[tokio::test]
+    async fn board_and_its_sidebar_show_only_the_active_workspace() {
+        let (mut app, ms, ws, mp, wp) = app_with_two_workspaces().await;
+        app.ui_state.view_mode = ViewMode::Board;
+        app.refresh_list_items().await;
+        let sidebar: Vec<ProjectId> = app
+            .ui_state
+            .board
+            .projects
+            .iter()
+            .map(|p| p.project_id)
+            .collect();
+        assert_eq!(sidebar, vec![mp]);
+        assert!(app.ui_state.board.position_of(ms).is_some());
+        assert!(app.ui_state.board.position_of(ws).is_none());
+
+        app.switch_workspace(Some("Work".into()), true).await;
+        let sidebar: Vec<ProjectId> = app
+            .ui_state
+            .board
+            .projects
+            .iter()
+            .map(|p| p.project_id)
+            .collect();
+        assert_eq!(sidebar, vec![wp]);
+        assert!(app.ui_state.board.position_of(ws).is_some());
+        assert!(app.ui_state.board.position_of(ms).is_none());
+    }
+
+    #[tokio::test]
+    async fn switching_clears_a_board_filter_and_lands_on_the_first_row() {
+        let (mut app, _ms, ws, mp, _wp) = app_with_two_workspaces().await;
+        app.ui_state.board_filter = Some(mp);
+        app.switch_workspace(Some("Work".into()), true).await;
+        assert_eq!(app.ui_state.board_filter, None);
+        let first = app.ui_state.list_state.selected().unwrap();
+        let first_selectable = app
+            .ui_state
+            .list_items
+            .iter()
+            .position(|i| i.is_selectable())
+            .unwrap();
+        assert_eq!(first, first_selectable);
+        // Recents lead the list, so the first row is the Work session's.
+        assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(ws));
+    }
+
+    #[tokio::test]
+    async fn switching_remembers_the_workspace_in_tui_json() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.switch_workspace(Some("Work".into()), true).await;
+        assert_eq!(
+            app.tui_prefs.prefs().last_workspace.as_deref(),
+            Some("Work")
+        );
+        app.switch_workspace(None, true).await;
+        assert_eq!(app.tui_prefs.prefs().last_workspace, None);
+    }
+
+    #[tokio::test]
+    async fn startup_workspace_last_restores_and_named_pins() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.tui_prefs.set_last_workspace(Some("Work".into())).await;
+        app.apply_startup_workspace();
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+
+        app.config.startup_workspace = StartupWorkspace::Main;
+        app.apply_startup_workspace();
+        assert_eq!(app.active_workspace(), None);
+
+        // A pin on a workspace that no longer exists opens Main.
+        app.config.startup_workspace = StartupWorkspace::Named("Gone".into());
+        app.apply_startup_workspace();
+        assert_eq!(app.active_workspace(), None);
+    }
+
+    #[tokio::test]
+    async fn the_new_session_project_picker_is_scoped() {
+        let (mut app, _ms, _ws, mp, wp) = app_with_two_workspaces().await;
+        let picker = app.new_project_picker(LOCAL_BACKEND_ID, mp).await;
+        let ids: Vec<ProjectId> = picker.choices.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![mp]);
+        app.switch_workspace(Some("Work".into()), true).await;
+        let picker = app.new_project_picker(LOCAL_BACKEND_ID, wp).await;
+        let ids: Vec<ProjectId> = picker.choices.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![wp]);
+    }
+
+    // -- w / W --
+
+    #[tokio::test]
+    async fn w_with_one_workspace_says_so() {
+        let mut app = make_test_app();
+        app.handle_command(UserCommand::NextWorkspace).await;
+        assert!(
+            toast(&app).contains("Only one workspace"),
+            "{}",
+            toast(&app)
+        );
+        assert_eq!(app.ui_state.active_workspace, None);
+    }
+
+    #[tokio::test]
+    async fn w_cycles_and_wraps() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.handle_command(UserCommand::NextWorkspace).await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+        app.handle_command(UserCommand::NextWorkspace).await;
+        assert_eq!(app.active_workspace(), None, "wraps back to Main");
+        app.handle_command(UserCommand::PreviousWorkspace).await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+    }
+
+    #[tokio::test]
+    async fn workspace_picker_lists_every_workspace_and_switches() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.handle_command(UserCommand::WorkspacePicker).await;
+        let labels: Vec<String> = match &app.ui_state.modal {
+            Modal::QuickSwitch {
+                mode: PaletteMode::WorkspacePicker,
+                matches,
+                ..
+            } => matches
+                .iter()
+                .map(|m| match m {
+                    QuickSwitchItem::Workspace { label, .. } => label.clone(),
+                    other => panic!("unexpected row {other:?}"),
+                })
+                .collect(),
+            _ => panic!("expected the workspace picker"),
+        };
+        assert_eq!(
+            labels,
+            vec!["Main  (current)".to_string(), "Work".to_string()]
+        );
+        if let Modal::QuickSwitch { selected_idx, .. } = &mut app.ui_state.modal {
+            *selected_idx = 1;
+        }
+        app.activate_quick_switch_selection().await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+        assert!(matches!(app.ui_state.modal, Modal::None));
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_picker_query_creates_and_switches() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.handle_command(UserCommand::WorkspacePicker).await;
+        for c in "Zebra".chars() {
+            if let Modal::QuickSwitch { query, .. } = &mut app.ui_state.modal {
+                super::super::edit_text_input(query, key(KeyCode::Char(c)));
+            }
+            app.refilter_quick_switch();
+        }
+        app.activate_quick_switch_selection().await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Zebra"));
+        assert!(
+            app.config.workspaces.iter().any(|w| w.name == "Zebra"),
+            "the new workspace is defined locally"
+        );
+    }
+
+    // -- palette --
+
+    #[tokio::test]
+    async fn palette_ranks_the_active_workspace_first_and_tags_the_rest() {
+        let (app, ms, ws, ..) = app_with_two_workspaces().await;
+        let rows = app.gather_quick_switch_matches("sess").await;
+        let order: Vec<SessionId> = rows.iter().map(|m| m.session_id).collect();
+        assert_eq!(order, vec![ms, ws]);
+        assert_eq!(rows[0].other_workspace, None);
+        assert_eq!(rows[1].other_workspace.as_deref(), Some("Work"));
+        assert_eq!(rows[1].workspace.as_deref(), Some("Work"));
+    }
+
+    #[tokio::test]
+    async fn palette_rows_carry_no_tag_with_one_workspace() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.service.delete_workspace("Work").await.unwrap();
+        app.sync_local_view_from_store_for_test().await;
+        let rows = app.gather_quick_switch_matches("").await;
+        assert!(rows.iter().all(|m| m.other_workspace.is_none()));
+    }
+
+    #[tokio::test]
+    async fn picking_a_session_in_another_workspace_switches_first() {
+        let (mut app, _ms, ws, ..) = app_with_two_workspaces().await;
+        app.open_quick_switch_with_mode(PaletteMode::SessionOnly)
+            .await;
+        let idx = match &app.ui_state.modal {
+            Modal::QuickSwitch { matches, .. } => matches
+                .iter()
+                .position(|m| matches!(m, QuickSwitchItem::Session(s) if s.session_id == ws))
+                .unwrap(),
+            _ => panic!("expected the palette"),
+        };
+        if let Modal::QuickSwitch { selected_idx, .. } = &mut app.ui_state.modal {
+            *selected_idx = idx;
+        }
+        app.activate_quick_switch_selection().await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+        assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(ws));
+    }
+
+    // -- moving / creating --
+
+    #[tokio::test]
+    async fn move_project_picker_offers_other_workspaces_and_moves() {
+        let (mut app, _ms, _ws, mp, _wp) = app_with_two_workspaces().await;
+        app.ui_state.selected_session_id = None;
+        app.ui_state.selected_project_id = Some((LOCAL_BACKEND_ID, mp));
+        app.handle_command(UserCommand::MoveProjectToWorkspace)
+            .await;
+        let targets: Vec<Option<String>> = match &app.ui_state.modal {
+            Modal::QuickSwitch { matches, .. } => matches
+                .iter()
+                .map(|m| match m {
+                    QuickSwitchItem::ProjectWorkspace { target, .. } => target.clone(),
+                    other => panic!("unexpected row {other:?}"),
+                })
+                .collect(),
+            _ => panic!("expected the move picker"),
+        };
+        assert_eq!(
+            targets,
+            vec![Some("Work".to_string())],
+            "not its own workspace"
+        );
+        app.activate_quick_switch_selection().await;
+        let tag = app
+            .local_view()
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == mp)
+            .unwrap()
+            .workspace
+            .clone();
+        assert_eq!(tag.as_deref(), Some("Work"));
+        assert!(
+            !listed_projects(&app).contains(&mp),
+            "it left the Main view"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_workspace_input_creates_and_switches() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.handle_command(UserCommand::NewWorkspace).await;
+        assert!(matches!(
+            app.ui_state.modal,
+            Modal::Input {
+                on_submit: InputAction::NewWorkspace,
+                ..
+            }
+        ));
+        app.ui_state.modal = Modal::None;
+        app.handle_input_submit(InputAction::NewWorkspace, "Home".into(), None, None)
+            .await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Home"));
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Work".to_string(), "Home".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_reserved_or_duplicate_name_is_refused_with_a_toast() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        assert_eq!(app.create_workspace("work").await, None);
+        assert!(toast(&app).contains("not created"), "{}", toast(&app));
+        assert_eq!(app.create_workspace("last").await, None);
+        assert_eq!(app.config.workspaces.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn move_project_is_only_offered_with_a_project() {
+        let mut s = AppUiState::default();
+        assert!(!s.is_command_available(BindableAction::MoveProjectToWorkspace));
+        s.selected_project_id = Some((LOCAL_BACKEND_ID, ProjectId::new()));
+        assert!(s.is_command_available(BindableAction::MoveProjectToWorkspace));
+        // The rest are always listed (no zero-count gating).
+        for a in [
+            BindableAction::NextWorkspace,
+            BindableAction::PreviousWorkspace,
+            BindableAction::WorkspacePicker,
+            BindableAction::NewWorkspace,
+        ] {
+            assert!(AppUiState::default().is_command_available(a), "{a:?}");
+        }
+    }
+
+    // -- propagation to remotes --
+
+    #[tokio::test]
+    async fn creating_propagates_to_every_backend() {
+        let mut app = build_app_with_mock_remotes(vec![("box", empty_snapshot())]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        assert!(app.create_workspace("Work").await.is_some());
+        assert_eq!(
+            remote_mock(&app, remote).workspace_calls(),
+            vec![MockWorkspaceCall::SetWorkspaces(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Work")],
+                main: None,
+                startup_workspace: None,
+            })]
+        );
+        assert_eq!(
+            app.service.read_config().workspaces,
+            vec![WorkspaceDef::named("Work")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_degraded_backend_is_named_in_the_toast_and_the_rest_still_apply() {
+        let mut app = build_app_with_mock_remotes(vec![("box", empty_snapshot())]);
+        let remote = BackendId(1);
+        app.backend_mut_for_test(remote).view.connection = ConnectionState::Degraded {
+            reason: "down".into(),
+        };
+        assert!(app.create_workspace("Work").await.is_some());
+        assert!(remote_mock(&app, remote).workspace_calls().is_empty());
+        assert!(toast(&app).contains("box"), "{}", toast(&app));
+        assert_eq!(app.service.read_config().workspaces.len(), 1);
+    }
+
+    /// Two servers that disagree ("Work" here, "work" there — created while
+    /// each could not reach the other) merge into two entries by exact name,
+    /// but no server accepts both. Each backend gets the list narrowed to what
+    /// it can take, so the disagreement never blocks an edit.
+    #[tokio::test]
+    async fn a_case_clash_between_servers_does_not_block_edits() {
+        let mut snap = empty_snapshot();
+        snap.workspaces = vec![WorkspaceDef::named("work")];
+        let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.service
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Work")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap();
+        app.refresh_local_view().await;
+
+        assert!(app.create_workspace("Play").await.is_some());
+        assert!(
+            !toast(&app).contains("not"),
+            "every backend took it: {}",
+            toast(&app)
+        );
+        assert_eq!(
+            app.service.read_config().workspaces,
+            vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")]
+        );
+        assert_eq!(
+            remote_mock(&app, remote).workspace_calls(),
+            vec![MockWorkspaceCall::SetWorkspaces(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("work"), WorkspaceDef::named("Play")],
+                main: None,
+                startup_workspace: None,
+            })]
+        );
+    }
+
+    /// When no backend takes a new workspace it does not exist anywhere, so
+    /// the TUI must not switch to it (or remember it as `last_workspace`).
+    #[tokio::test]
+    async fn a_workspace_no_backend_took_is_not_switched_to() {
+        let mut app = make_test_app();
+        // A hand-edited config the server's own rule now refuses to extend:
+        // Main is labelled "home" and a workspace is named "Home".
+        let mut config = app.service.read_config();
+        config.workspaces = vec![WorkspaceDef::named("Home")];
+        config.main_workspace = Some(WorkspaceDef::named("home"));
+        app.service.update_config(config).unwrap();
+        app.config = app.service.read_config();
+        app.refresh_local_view().await;
+
+        assert_eq!(app.create_workspace("Play").await, None);
+        assert!(toast(&app).contains("not applied"), "{}", toast(&app));
+
+        app.handle_input_submit(InputAction::NewWorkspace, "Play".into(), None, None)
+            .await;
+        assert_eq!(app.active_workspace(), None);
+        assert_eq!(app.tui_prefs.prefs().last_workspace, None);
+    }
+
+    /// `s` in the settings tab changes only the startup choice: workspaces
+    /// defined only on a remote are not copied into the local config — except
+    /// a pinned one, which the local server needs defined to accept the pin.
+    #[tokio::test]
+    async fn setting_the_startup_workspace_leaves_local_definitions_alone() {
+        let mut snap = empty_snapshot();
+        snap.workspaces = vec![WorkspaceDef::named("Remote")];
+        let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.service
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Work")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap();
+        app.refresh_local_view().await;
+
+        app.set_startup_workspace(StartupWorkspace::Main).await;
+        let c = app.service.read_config();
+        assert_eq!(c.startup_workspace, StartupWorkspace::Main);
+        assert_eq!(c.workspaces, vec![WorkspaceDef::named("Work")]);
+        assert!(remote_mock(&app, remote).workspace_calls().is_empty());
+
+        app.set_startup_workspace(StartupWorkspace::Named("Remote".into()))
+            .await;
+        let c = app.service.read_config();
+        assert_eq!(
+            c.startup_workspace,
+            StartupWorkspace::Named("Remote".into())
+        );
+        assert_eq!(
+            c.workspaces,
+            vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Remote")]
+        );
+    }
+
+    /// A directory scan registers into the workspace being looked at, as a
+    /// single add does (the server tags them; no after-the-fact re-tag).
+    #[tokio::test]
+    async fn scanning_a_directory_lands_repos_in_the_active_workspace() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.switch_workspace(Some("Work".into()), true).await;
+        let root = tempfile::TempDir::new().unwrap();
+        let repo = root.path().join("scanned");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            &["init", "-b", "main"][..],
+            &["config", "user.email", "t@t.t"],
+            &["config", "user.name", "t"],
+            &["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let status = claude_commander_core::git::git_command_std()
+                .current_dir(&repo)
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+
+        app.handle_input_submit(
+            InputAction::ScanDirectory,
+            root.path().display().to_string(),
+            None,
+            None,
+        )
+        .await;
+        let scanned = app
+            .local_view()
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.name == "scanned")
+            .cloned()
+            .expect("the scan registered the repo");
+        assert_eq!(scanned.workspace.as_deref(), Some("Work"));
+        assert!(
+            listed_projects(&app).contains(&scanned.id),
+            "it shows in the active workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_and_delete_go_to_every_backend_and_the_active_one_follows() {
+        let mut app = build_app_with_mock_remotes(vec![("box", empty_snapshot())]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.create_workspace("Work").await.unwrap();
+        app.switch_workspace(Some("Work".into()), true).await;
+
+        assert!(
+            app.rename_workspace_everywhere(Some("Work".into()), "Job")
+                .await
+        );
+        assert_eq!(app.active_workspace().as_deref(), Some("Job"));
+        assert_eq!(app.tui_prefs.prefs().last_workspace.as_deref(), Some("Job"));
+
+        app.delete_workspace_everywhere("Job").await;
+        assert_eq!(app.active_workspace(), None);
+        let calls = remote_mock(&app, remote).workspace_calls();
+        assert_eq!(
+            calls[1..],
+            [
+                MockWorkspaceCall::Rename {
+                    from: "Work".into(),
+                    to: "Job".into()
+                },
+                MockWorkspaceCall::Delete("Job".into()),
+            ]
+        );
+        assert!(app.service.read_config().workspaces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn moving_a_remote_project_writes_to_its_owner_only() {
+        let (snap, _sid, pid) = snapshot_with_one_session();
+        let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.move_project_to_workspace(pid, Some("Work".into()))
+            .await;
+        assert_eq!(
+            remote_mock(&app, remote).workspace_calls(),
+            vec![MockWorkspaceCall::SetProject {
+                id: pid,
+                workspace: Some("Work".into())
+            }]
+        );
+        assert!(
+            app.service.read_config().workspaces.is_empty(),
+            "the local backend is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn registering_an_existing_clone_lands_in_the_active_workspace() {
+        let mut app = build_app_with_mock_remotes(vec![("box", empty_snapshot())]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.create_workspace("Work").await.unwrap();
+        app.switch_workspace(Some("Work".into()), true).await;
+        app.handle_confirm(ConfirmAction::RegisterExistingClone {
+            backend: remote,
+            dest: std::path::PathBuf::from("/srv/repo"),
+        })
+        .await;
+        for _ in 0..100 {
+            if !remote_mock(&app, remote)
+                .project_add_workspaces()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            remote_mock(&app, remote).project_add_workspaces(),
+            vec![Some("Work".to_string())]
+        );
+    }
+
+    // -- status bar --
+
+    fn status_bar_text(app: &mut App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        status_bar_row(terminal.backend().buffer())
+    }
+
+    #[tokio::test]
+    async fn status_bar_with_one_workspace_has_no_chip() {
+        let mut app = make_test_app();
+        app.ui_state.view_mode = ViewMode::ProjectGrouped;
+        app.refresh_list_items().await;
+        let bar = status_bar_text(&mut app);
+        assert!(!bar.contains("Main"), "{bar}");
+        insta::assert_snapshot!(bar.trim_end());
+    }
+
+    #[tokio::test]
+    async fn status_bar_with_two_workspaces_shows_the_chip_and_waiting_hints() {
+        let (mut app, _ms, ws, ..) = app_with_two_workspaces().await;
+        // The Work session is waiting for input, so Main's bar hints at it.
+        app.backend_mut_for_test(LOCAL_BACKEND_ID)
+            .view
+            .agent_states
+            .states
+            .insert(ws, AgentState::WaitingForInput);
+        app.refresh_list_items().await;
+        let bar = status_bar_text(&mut app);
+        assert!(bar.starts_with("  Main  Work ●1 │ Sessions: 1"), "{bar}");
+        assert!(bar.contains("Sessions: 1"), "counts are scoped: {bar}");
+        insta::assert_snapshot!(bar.trim_end());
+
+        // In Work, its own waiting session is not an "elsewhere" hint.
+        app.switch_workspace(Some("Work".into()), true).await;
+        let bar = status_bar_text(&mut app);
+        assert!(bar.starts_with("  Work  │ Sessions"), "{bar}");
+    }
+
+    #[tokio::test]
+    async fn board_header_names_the_workspace_once_there_are_two() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.ui_state.view_mode = ViewMode::Board;
+        app.switch_workspace(Some("Work".into()), true).await;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let top: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(top.starts_with(" Claude Commander · Work"), "{top}");
+    }
+
+    // -- settings tab --
+
+    #[tokio::test]
+    async fn settings_tab_renders_list_colour_projects_and_startup() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.set_workspace_color(Some("Work".into()), "#3366ff")
+            .await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('j')).await; // select Work
+        // Wide enough for the whole tab bar and footer.
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[tokio::test]
+    async fn settings_tab_n_creates_and_r_renames() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('n')).await;
+        type_programs(&mut app, "Home").await;
+        feed(&mut app, KeyCode::Enter).await;
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Work".to_string(), "Home".to_string()]);
+        assert_eq!(ws_state(&app).selected, 2, "the new workspace is selected");
+
+        feed(&mut app, KeyCode::Char('r')).await;
+        for _ in 0.."Home".len() {
+            feed(&mut app, KeyCode::Backspace).await;
+        }
+        type_programs(&mut app, "House").await;
+        feed(&mut app, KeyCode::Enter).await;
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Work".to_string(), "House".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn settings_tab_renaming_main_changes_only_its_label() {
+        let (mut app, _ms, _ws, mp, _wp) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('r')).await;
+        for _ in 0.."Main".len() {
+            feed(&mut app, KeyCode::Backspace).await;
+        }
+        type_programs(&mut app, "Personal").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(
+            app.config.main_workspace,
+            Some(WorkspaceDef::named("Personal"))
+        );
+        assert!(
+            listed_projects(&app).contains(&mp),
+            "Main keeps its projects"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_tab_d_deletes_but_refuses_main() {
+        let (mut app, _ms, _ws, _mp, wp) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('d')).await;
+        assert!(
+            toast(&app).contains("Main can't be deleted"),
+            "{}",
+            toast(&app)
+        );
+        feed(&mut app, KeyCode::Char('j')).await;
+        feed(&mut app, KeyCode::Char('d')).await;
+        assert!(app.config.workspaces.is_empty());
+        // Its project is back in Main (the only workspace, so nothing filters).
+        assert!(listed_projects(&app).contains(&wp));
+        assert_eq!(ws_state(&app).selected, 0, "cursor clamped");
+    }
+
+    #[tokio::test]
+    async fn settings_tab_shift_j_k_reorders_named_workspaces_only() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.create_workspace("Home").await.unwrap();
+        open_workspaces_tab(&mut app);
+        // Main can't move.
+        feed_shift(&mut app, 'J').await;
+        assert_eq!(ws_state(&app).selected, 0);
+        feed(&mut app, KeyCode::Char('j')).await; // Work
+        feed_shift(&mut app, 'J').await;
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Home".to_string(), "Work".to_string()]);
+        assert_eq!(ws_state(&app).selected, 2, "the cursor follows the row");
+        feed_shift(&mut app, 'K').await;
+        feed_shift(&mut app, 'K').await; // can't pass Main
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Work".to_string(), "Home".to_string()]);
+        assert_eq!(ws_state(&app).selected, 1);
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_edit_validates_and_clears() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('j')).await; // Work
+        feed(&mut app, KeyCode::Right).await;
+        assert_eq!(ws_state(&app).focus, WorkspacesFocus::Detail);
+        feed(&mut app, KeyCode::Enter).await;
+        type_programs(&mut app, "#AABBCC").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(
+            app.config.workspaces[0].color.as_deref(),
+            Some("#aabbcc"),
+            "validated and lower-cased"
+        );
+        feed(&mut app, KeyCode::Enter).await;
+        type_programs(&mut app, "zz").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert!(toast(&app).contains("Colour not saved"), "{}", toast(&app));
+        assert!(
+            app.config.workspaces[0].color.is_some(),
+            "kept the old value"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_tab_m_moves_a_project_to_the_picked_workspace() {
+        let (mut app, _ms, _ws, mp, _wp) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Right).await; // Main's details
+        feed(&mut app, KeyCode::Char('j')).await; // its project
+        feed(&mut app, KeyCode::Char('m')).await;
+        assert!(matches!(
+            ws_state(&app).editing,
+            Some(WorkspacesEditing::MovingProject { project_id, target: 0 }) if project_id == mp
+        ));
+        feed(&mut app, KeyCode::Char('j')).await; // target Work
+        feed(&mut app, KeyCode::Enter).await;
+        let tag = app
+            .local_view()
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == mp)
+            .unwrap()
+            .workspace
+            .clone();
+        assert_eq!(tag.as_deref(), Some("Work"));
+        assert!(ws_state(&app).editing.is_none());
+    }
+
+    #[tokio::test]
+    async fn settings_tab_s_cycles_the_local_startup_workspace() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('s')).await;
+        assert_eq!(app.config.startup_workspace, StartupWorkspace::Main);
+        feed(&mut app, KeyCode::Char('s')).await;
+        assert_eq!(
+            app.config.startup_workspace,
+            StartupWorkspace::Named("Work".into())
+        );
+        assert_eq!(
+            app.service.read_config().startup_workspace,
+            StartupWorkspace::Named("Work".into()),
+            "persisted through the service"
+        );
+    }
+
+    #[test]
+    fn the_help_modal_documents_workspaces() {
+        let app = make_test_app();
+        let text: String = app
+            .build_help_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The bindable actions, under their own section…
+        assert!(text.contains("Workspaces:"), "help: {text}");
+        assert!(text.contains("Next workspace"), "help: {text}");
+        assert!(text.contains("Move project to workspace"), "help: {text}");
+        // …and how the palette treats them, which no action describes.
+        assert!(
+            text.contains("searches every workspace"),
+            "help must say the palette spans workspaces: {text}"
+        );
+    }
 }

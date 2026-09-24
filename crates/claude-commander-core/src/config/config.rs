@@ -331,6 +331,27 @@ pub struct Config {
     #[serde(default)]
     pub sections: Vec<crate::session::SectionConfig>,
 
+    /// User-defined workspaces (`[[workspaces]]`: `name`, optional `color` as
+    /// `#rrggbb`), in display order. A workspace is a label on a project; the
+    /// built-in Main workspace (untagged projects) is never listed here. Edited
+    /// through `CommanderService::set_workspace_defs` / `rename_workspace` /
+    /// `delete_workspace` — the latter two also rewrite project tags, which a
+    /// plain config write cannot.
+    #[serde(default)]
+    pub workspaces: Vec<claude_commander_protocol::workspace::WorkspaceDef>,
+
+    /// Display label and colour for the built-in Main workspace
+    /// (`[main_workspace]`). Unset shows "Main" with the frontend's default
+    /// colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_workspace: Option<claude_commander_protocol::workspace::WorkspaceDef>,
+
+    /// Which workspace a frontend opens on: `"last"` (default — whichever that
+    /// client last had active), `"main"`, or a workspace name. A pinned name
+    /// that no longer exists falls back to Main.
+    #[serde(default)]
+    pub startup_workspace: claude_commander_protocol::workspace::StartupWorkspace,
+
     /// Advisory WIP limit for the implicit "In Progress" catch-all section.
     /// When set, the section header shows `count/n`, rendering in the warning
     /// colour when `count == n` and the error colour when `count > n`. Purely
@@ -615,6 +636,9 @@ impl Default for Config {
             rounded_borders: false,
             precompute_review_caches: true,
             sections: Vec::new(),
+            workspaces: Vec::new(),
+            main_workspace: None,
+            startup_workspace: Default::default(),
             in_progress_limit: None,
             recent_sessions_limit: default_recent_sessions_limit(),
             commander_enabled: false,

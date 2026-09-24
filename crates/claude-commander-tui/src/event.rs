@@ -512,6 +512,16 @@ pub enum UserCommand {
     GrowLeftPane,
     /// Collapse or expand the section containing the selected item.
     ToggleSection,
+    /// Switch to the next workspace (wrapping).
+    NextWorkspace,
+    /// Switch to the previous workspace (wrapping; palette-only by default).
+    PreviousWorkspace,
+    /// Open the workspace picker palette.
+    WorkspacePicker,
+    /// Create a workspace and switch to it (palette-only by default).
+    NewWorkspace,
+    /// Move the selected project to another workspace (palette-only by default).
+    MoveProjectToWorkspace,
 }
 
 impl UserCommand {
@@ -628,6 +638,16 @@ impl UserCommand {
             UserCommand::SetSessionBase => Some("ui.set_session_base"),
             UserCommand::ToggleViewMode => Some("ui.toggle_view_mode"),
             UserCommand::ToggleSection => Some("ui.toggle_section"),
+            // Switching is client-side only (a filter), so the UI is the only
+            // place it can be counted. Creating / moving is counted again by
+            // the service (`workspace.update_defs` / `workspace.move_project`)
+            // under a distinct name, so these name opening the flow.
+            UserCommand::NextWorkspace | UserCommand::PreviousWorkspace => {
+                Some("ui.switch_workspace")
+            }
+            UserCommand::WorkspacePicker => Some("ui.workspace_picker"),
+            UserCommand::NewWorkspace => Some("ui.new_workspace"),
+            UserCommand::MoveProjectToWorkspace => Some("ui.move_project_to_workspace"),
             UserCommand::TogglePane | UserCommand::TogglePaneReverse => Some("ui.toggle_pane"),
         }
     }
@@ -689,6 +709,11 @@ impl From<BindableAction> for UserCommand {
             BindableAction::SetSessionBase => Self::SetSessionBase,
             BindableAction::ToggleViewMode => Self::ToggleViewMode,
             BindableAction::ToggleSection => Self::ToggleSection,
+            BindableAction::NextWorkspace => Self::NextWorkspace,
+            BindableAction::PreviousWorkspace => Self::PreviousWorkspace,
+            BindableAction::WorkspacePicker => Self::WorkspacePicker,
+            BindableAction::NewWorkspace => Self::NewWorkspace,
+            BindableAction::MoveProjectToWorkspace => Self::MoveProjectToWorkspace,
             BindableAction::TogglePane => Self::TogglePane,
             BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
             BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
@@ -1080,6 +1105,55 @@ mod tests {
         assert_eq!(
             UserCommand::ToggleDictation.telemetry_feature(),
             Some("stt.toggle_dictation")
+        );
+    }
+
+    #[test]
+    fn workspace_keys_map_to_workspace_commands() {
+        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(w, &kb()),
+            Some(UserCommand::NextWorkspace)
+        ));
+        let shift_w = KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(shift_w, &kb()),
+            Some(UserCommand::WorkspacePicker)
+        ));
+        for (action, expected) in [
+            (BindableAction::PreviousWorkspace, "PreviousWorkspace"),
+            (BindableAction::NewWorkspace, "NewWorkspace"),
+            (
+                BindableAction::MoveProjectToWorkspace,
+                "MoveProjectToWorkspace",
+            ),
+        ] {
+            assert_eq!(format!("{:?}", UserCommand::from(action)), expected);
+        }
+    }
+
+    #[test]
+    fn workspace_commands_record_ui_features() {
+        assert_eq!(
+            UserCommand::NextWorkspace.telemetry_feature(),
+            Some("ui.switch_workspace")
+        );
+        assert_eq!(
+            UserCommand::PreviousWorkspace.telemetry_feature(),
+            Some("ui.switch_workspace")
+        );
+        assert_eq!(
+            UserCommand::WorkspacePicker.telemetry_feature(),
+            Some("ui.workspace_picker")
+        );
+        // Distinct from the service's `workspace.*` names, so no double count.
+        assert_eq!(
+            UserCommand::NewWorkspace.telemetry_feature(),
+            Some("ui.new_workspace")
+        );
+        assert_eq!(
+            UserCommand::MoveProjectToWorkspace.telemetry_feature(),
+            Some("ui.move_project_to_workspace")
         );
     }
 

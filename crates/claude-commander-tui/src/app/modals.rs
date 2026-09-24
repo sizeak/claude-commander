@@ -812,6 +812,21 @@ impl App {
             ">",
             width = key_col_width,
         )));
+        lines.push(Line::from(format!(
+            "  {:<width$}The palette searches every workspace: the active one's",
+            "workspaces",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}sessions rank first, others are tagged with their",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}workspace, and picking one switches workspace first.",
+            "",
+            width = key_col_width,
+        )));
 
         // Clone picker (in-modal keys, not bindable actions). The command
         // itself is listed under Projects above; these are the picker's own.
@@ -1236,6 +1251,8 @@ impl App {
             PaletteMode::RemoteServerPicker => " Remove Remote Server ",
             PaletteMode::ProgramPicker { .. } => " Change Program ",
             PaletteMode::BasePicker { .. } => " Set Session Base ",
+            PaletteMode::WorkspacePicker => " Switch Workspace — or type a new name ",
+            PaletteMode::MoveProjectPicker { .. } => " Move Project to Workspace ",
             // The fetch state lives in the title (as the Checkout modal
             // does with "fetching origin…") so a slow or failed `gh`
             // listing is visible rather than reading as an empty account.
@@ -1330,6 +1347,16 @@ impl App {
                         format!(" ({})", m.project_name),
                         Style::default().fg(self.theme.text_secondary),
                     ));
+                    // A session outside the active workspace: tag it, dimly —
+                    // picking it switches workspace first.
+                    if let Some(workspace) = &m.other_workspace {
+                        spans.push(Span::styled(
+                            format!(" \u{00b7} {workspace}"),
+                            Style::default()
+                                .fg(self.theme.text_secondary)
+                                .add_modifier(Modifier::DIM),
+                        ));
+                    }
                     frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
                 }
                 QuickSwitchItem::Command(entry) => {
@@ -1381,7 +1408,9 @@ impl App {
                 | QuickSwitchItem::RemoteServerRemove { label, .. }
                 | QuickSwitchItem::GithubRepo { label, .. }
                 | QuickSwitchItem::BaseChange { label, .. }
-                | QuickSwitchItem::ProgramChange { label, .. } => {
+                | QuickSwitchItem::ProgramChange { label, .. }
+                | QuickSwitchItem::Workspace { label, .. }
+                | QuickSwitchItem::ProjectWorkspace { label, .. } => {
                     let style = if is_selected {
                         self.theme.selection()
                     } else {

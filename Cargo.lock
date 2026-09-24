@@ -938,7 +938,9 @@ dependencies = [
 name = "claude-commander-viewmodel"
 version = "0.36.0"
 dependencies = [
+ "claude-commander-protocol",
  "fuzzy-matcher",
+ "serde_json",
 ]
 
 [[package]]

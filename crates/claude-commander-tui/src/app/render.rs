@@ -232,7 +232,11 @@ impl App {
         let sessions = self.ui_state.board.worktree_count();
         let projects = self.ui_state.board.projects.len();
 
-        let title_text = " Claude Commander";
+        // Name the workspace once there is more than one to be in.
+        let title_text = match self.visible_active_workspace() {
+            Some(ws) => format!(" Claude Commander \u{00b7} {}", ws.label),
+            None => " Claude Commander".to_string(),
+        };
         // When a project filter is active, name it and how to clear it; the
         // session count then reflects the filtered card count.
         let counts_text = match self.ui_state.board_filter.and_then(|pid| {
@@ -677,11 +681,13 @@ impl App {
         let restart_needed = self.service.restart_required();
 
         // Count sessions across every backend's snapshot so the bar is correct
-        // in the list views too (the board is only built in board view).
+        // in the list views too (the board is only built in board view) —
+        // within the active workspace, like the views themselves.
+        let filter = self.workspace_filter();
         let session_count: usize = self
             .backends
             .iter()
-            .map(|h| h.view.snapshot.sessions.len())
+            .map(|h| filter.scope(&h.view.snapshot).sessions.len())
             .sum();
 
         let sessions_span = Span::styled(
@@ -750,6 +756,19 @@ impl App {
                     Span::styled(label, base_style.fg(colour)),
                 ],
             );
+        }
+
+        // The workspace chip and the other workspaces' waiting hints lead the
+        // bar, ahead of everything spliced above (whose indices assume the
+        // session count is first, so this goes in last). Absent until a second
+        // workspace exists.
+        let workspace_spans = self.workspace_status_spans(base_style);
+        if !workspace_spans.is_empty() {
+            let mut lead = vec![Span::styled(" ", base_style)];
+            lead.extend(workspace_spans);
+            // `Sessions` leads with its own space, so the separator doesn't.
+            lead.push(Span::styled(" \u{2502}", base_style));
+            left_spans.splice(0..0, lead);
         }
 
         // A trailing separator visually detaches the buttons from the status.

@@ -297,6 +297,7 @@ mod tests {
             main_branch: "main".to_string(),
             session_ids: Vec::new(),
             origin_url: None,
+            workspace: None,
         }
     }
 

@@ -102,6 +102,10 @@ pub(super) fn sort_palette_matches(scored: &mut [(i64, QuickSwitchMatch)], query
     } else {
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
     }
+    // The active workspace's sessions first, keeping the order above within
+    // each half (the sort is stable). Rows only differ here once a second
+    // workspace exists, since `other_workspace` is `None` until then.
+    scored.sort_by_key(|(_, m)| m.other_workspace.is_some());
 }
 
 /// What the copy-token command should report back to the operator.
@@ -732,16 +736,20 @@ impl App {
 
     /// Build the project picker for a new-session dialog: every project sorted
     /// by name, with `default` pre-selected.
-    async fn new_project_picker(
+    pub(super) async fn new_project_picker(
         &self,
         backend: BackendId,
         default: ProjectId,
     ) -> super::ProjectPicker {
+        // Scoped to the active workspace like the lists; the default (the
+        // selected row's project) is always offered.
+        let filter = self.workspace_filter();
         let mut choices: Vec<super::ProjectChoice> = self
             .view_for(backend)
             .snapshot
             .projects
             .iter()
+            .filter(|p| p.id == default || filter.admits(p.workspace.as_deref()))
             .map(|p| super::ProjectChoice {
                 id: p.id,
                 name: p.name.clone(),
@@ -1349,6 +1357,14 @@ impl App {
     /// so an active project filter never narrows the palette.
     fn scored_palette_sessions(&self, query: &str) -> Vec<(i64, QuickSwitchMatch)> {
         let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
+        // The palette spans every workspace; rows outside the active one carry
+        // its label as a tag (and rank after the active workspace's rows).
+        let merged = self.merged_workspaces();
+        let tagging = claude_commander_viewmodel::workspace::workspaces_visible(&merged);
+        let active = claude_commander_viewmodel::workspace::effective_workspace(
+            self.ui_state.active_workspace.as_deref(),
+            &merged,
+        );
         for handle in &self.backends {
             let agent_states = &handle.view.agent_states.states;
             for session in &handle.view.snapshot.sessions {
@@ -1366,6 +1382,18 @@ impl App {
                 ) else {
                     continue;
                 };
+                let workspace = claude_commander_viewmodel::workspace::session_workspace(
+                    &handle.view.snapshot,
+                    session,
+                );
+                let other_workspace = (tagging && workspace != active.as_deref())
+                    .then(|| {
+                        merged
+                            .iter()
+                            .find(|w| w.name.as_deref() == workspace)
+                            .map(|w| w.label.clone())
+                    })
+                    .flatten();
                 scored.push((
                     score,
                     QuickSwitchMatch {
@@ -1380,6 +1408,8 @@ impl App {
                         agent_state: agent_states.get(&session.session_id).copied(),
                         unread: session.unread,
                         last_attached_at: session.last_attached_at,
+                        workspace: workspace.map(str::to_string),
+                        other_workspace,
                     },
                 ));
             }
@@ -1445,6 +1475,12 @@ impl App {
         }
         if eff_mode == PaletteMode::GithubRepoPicker {
             return self.gather_github_repo_picker_items(eff_query);
+        }
+        if eff_mode == PaletteMode::WorkspacePicker {
+            return self.gather_workspace_picker_items(eff_query);
+        }
+        if let PaletteMode::MoveProjectPicker { project_id } = eff_mode {
+            return self.gather_move_project_items(project_id, eff_query);
         }
         if matches!(eff_mode, PaletteMode::Unified | PaletteMode::SessionOnly) {
             for m in self.gather_quick_switch_matches(eff_query).await {
@@ -1528,6 +1564,10 @@ impl App {
                 Some(self.gather_remote_server_picker_items(eff_query))
             }
             PaletteMode::GithubRepoPicker => Some(self.gather_github_repo_picker_items(eff_query)),
+            PaletteMode::WorkspacePicker => Some(self.gather_workspace_picker_items(eff_query)),
+            PaletteMode::MoveProjectPicker { project_id } => {
+                Some(self.gather_move_project_items(project_id, eff_query))
+            }
             PaletteMode::Unified | PaletteMode::CommandOnly | PaletteMode::SessionOnly => None,
         };
         if let Some(rows) = picker_rows {
@@ -2332,6 +2372,9 @@ impl App {
         let req = CloneRequest {
             source: source.clone(),
             dest_name,
+            // The clone registers a new project: it lands in the workspace
+            // being looked at.
+            workspace: self.active_workspace(),
         };
         tokio::spawn(async move {
             // One task owns the whole job: accept it, then poll until it
@@ -2820,7 +2863,8 @@ impl App {
                 // filesystem, so the path is only meaningful on the local
                 // backend. Remote add-project routing is deferred until there's
                 // a server-side path completer to pick a remote path with.
-                match self.local_arc().add_project(path).await {
+                let workspace = self.active_workspace();
+                match self.local_arc().add_project(path, workspace).await {
                     Ok(project_id) => {
                         self.ui_state.status_message = Some((
                             format!("Added project {}", project_id),
@@ -2881,7 +2925,8 @@ impl App {
 
                 // If the path itself is a git repo, just add it directly
                 if path.join(".git").exists() {
-                    match self.local_arc().add_project(path).await {
+                    let workspace = self.active_workspace();
+                    match self.local_arc().add_project(path, workspace).await {
                         Ok(project_id) => {
                             self.ui_state.status_message = Some((
                                 format!("Added project {}", project_id),
@@ -2910,8 +2955,14 @@ impl App {
                 // Local-only this phase for the same reason as add-project above:
                 // the scanned directory is a local filesystem path. Remote
                 // scan/add routing is deferred until a server-side path picker
-                // exists.
-                match self.local_arc().scan_directory(path.clone()).await {
+                // exists. What it registers lands in the workspace being looked
+                // at, as a single add does.
+                let workspace = self.active_workspace();
+                match self
+                    .local_arc()
+                    .scan_directory(path.clone(), workspace)
+                    .await
+                {
                     Ok(result) => {
                         if result.added == 0 && result.skipped == 0 {
                             self.ui_state.modal = Modal::Error {
@@ -3028,6 +3079,11 @@ impl App {
                     token: (!token.is_empty()).then(|| token.to_string()),
                 };
                 self.spawn_remote_server_probe(server);
+            }
+            InputAction::NewWorkspace => {
+                if let Some(name) = self.create_workspace(&value).await {
+                    self.switch_workspace(Some(name), true).await;
+                }
             }
             InputAction::CloneDestName { backend, source } => {
                 // Blank means "derive the name from the source" — a real choice,
@@ -3206,8 +3262,11 @@ impl App {
                 ));
                 let handle = self.backend_arc(backend);
                 let tx = self.event_loop.sender();
+                // `ensure` tags only a project it newly registers, so an
+                // already-registered checkout keeps its workspace.
+                let workspace = self.active_workspace();
                 tokio::spawn(async move {
-                    let update = match handle.ensure_project(dest).await {
+                    let update = match handle.ensure_project(dest, workspace).await {
                         Ok(project_id) => StateUpdate::ProjectAdded {
                             backend_id: backend.0,
                             project_id,

@@ -35,6 +35,9 @@ use axum::{
 use claude_commander_core::Config;
 use claude_commander_core::api::SetProgramsRequest;
 use claude_commander_core::error::SessionError;
+use claude_commander_protocol::workspace::{
+    DeleteWorkspaceRequest, RenameWorkspaceRequest, SetWorkspacesRequest,
+};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -171,6 +174,41 @@ pub async fn put_programs(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PUT /config/workspaces` → replace the workspace definitions (plus, when
+/// given, Main's label and the startup choice) → 204. Never re-tags a project;
+/// a refused name/colour/duplicate is a 400. Like `programs`, workspaces have
+/// their own route rather than a `ConfigPatch` field.
+pub async fn put_workspaces(
+    State(state): State<AppState>,
+    Json(req): Json<SetWorkspacesRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.service.set_workspace_defs(req)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /config/workspaces/rename` `{from, to}` → rename a workspace and
+/// rewrite its projects' tags → 204. Idempotent: an unknown `from` is a no-op
+/// 204, so a rename sent to every server is safe on the ones without it.
+pub async fn rename_workspace(
+    State(state): State<AppState>,
+    Json(req): Json<RenameWorkspaceRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.service.rename_workspace(&req.from, &req.to).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /config/workspaces/delete` `{name}` → drop a workspace, moving its
+/// projects to Main → 204 (a no-op 204 when unknown). A POST with a body, not
+/// `DELETE /config/workspaces/{name}`: every string is a valid name, including
+/// the static segments beside that capture.
+pub async fn delete_workspace(
+    State(state): State<AppState>,
+    Json(req): Json<DeleteWorkspaceRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.service.delete_workspace(&req.name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /config/reload` → `reload_config` → `{ "reloaded": bool }`
 /// (true when the on-disk config differed and was re-read).
 pub async fn reload(State(state): State<AppState>) -> Result<Response, ApiError> {
@@ -196,7 +234,7 @@ mod tests {
     use axum::http::Request;
     use axum::{
         Router,
-        routing::{get, put},
+        routing::{get, post, put},
     };
     use claude_commander_core::Config;
     use tempfile::TempDir;
@@ -208,6 +246,9 @@ mod tests {
         Router::new()
             .route("/config", get(super::read).patch(super::update))
             .route("/config/programs", put(super::put_programs))
+            .route("/config/workspaces", put(super::put_workspaces))
+            .route("/config/workspaces/rename", post(super::rename_workspace))
+            .route("/config/workspaces/delete", post(super::delete_workspace))
             .with_state(state)
     }
 
@@ -419,6 +460,121 @@ mod tests {
         let status = put_programs(state.clone(), serde_json::json!({ "programs": [] })).await;
         assert_eq!(status, 204);
         assert!(state.service.read_config().programs.is_empty());
+    }
+
+    async fn send_json(
+        state: AppState,
+        method: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::http::StatusCode {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        send(router(state), req).await.0
+    }
+
+    /// `PUT /config/workspaces` replaces the definitions; the snapshot serves
+    /// them back.
+    #[tokio::test]
+    async fn put_workspaces_updates_config_and_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let status = send_json(
+            state.clone(),
+            "PUT",
+            "/config/workspaces",
+            serde_json::json!({
+                "workspaces": [{"name": "Work", "color": "#FF8800"}, {"name": "Play"}],
+                "main": {"name": "Home"},
+                "startup_workspace": "Work"
+            }),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let snap = state.service.snapshot().await.unwrap();
+        let names: Vec<_> = snap.workspaces.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Work", "Play"]);
+        assert_eq!(snap.workspaces[0].color.as_deref(), Some("#ff8800"));
+        assert_eq!(snap.main_workspace.unwrap().name, "Home");
+    }
+
+    /// A refused list (reserved name) is a 400 and writes nothing.
+    #[tokio::test]
+    async fn put_workspaces_rejects_a_reserved_name() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let status = send_json(
+            state.clone(),
+            "PUT",
+            "/config/workspaces",
+            serde_json::json!({ "workspaces": [{"name": "last"}] }),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(state.service.read_config().workspaces.is_empty());
+    }
+
+    /// Rename and delete are idempotent 204s, and rewrite what they name.
+    #[tokio::test]
+    async fn rename_and_delete_workspace_routes() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        send_json(
+            state.clone(),
+            "PUT",
+            "/config/workspaces",
+            serde_json::json!({ "workspaces": [{"name": "Work"}] }),
+        )
+        .await;
+        let renamed = send_json(
+            state.clone(),
+            "POST",
+            "/config/workspaces/rename",
+            serde_json::json!({ "from": "Work", "to": "Job" }),
+        )
+        .await;
+        assert_eq!(renamed, 204);
+        assert_eq!(state.service.read_config().workspaces[0].name, "Job");
+        let unknown = send_json(
+            state.clone(),
+            "POST",
+            "/config/workspaces/rename",
+            serde_json::json!({ "from": "Nope", "to": "Other" }),
+        )
+        .await;
+        assert_eq!(unknown, 204, "renaming an unknown workspace is a no-op");
+
+        // A workspace may be *named* "delete" — the body carries the name.
+        for name in ["Job", "delete"] {
+            let status = send_json(
+                state.clone(),
+                "POST",
+                "/config/workspaces/delete",
+                serde_json::json!({ "name": name }),
+            )
+            .await;
+            assert_eq!(status, 204);
+        }
+        assert!(state.service.read_config().workspaces.is_empty());
+    }
+
+    /// Workspaces stay off the general PATCH surface, like `programs`.
+    #[tokio::test]
+    async fn patch_rejects_workspace_fields() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        for body in [
+            serde_json::json!({ "workspaces": [{"name": "Work"}] }),
+            serde_json::json!({ "startup_workspace": "main" }),
+            serde_json::json!({ "main_workspace": {"name": "Home"} }),
+        ] {
+            let status = patch(state.clone(), body).await;
+            assert!(status.is_client_error(), "got {status}");
+        }
     }
 
     /// `programs` remains off-limits on the general PATCH surface: the dedicated

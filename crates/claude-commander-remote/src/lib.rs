@@ -36,7 +36,7 @@
 //! | `mark_unread` | `POST /api/sessions/unread` (batch) |
 //! | `add_project` | `POST /api/projects` → `{id}` |
 //! | `remove_project` | `DELETE /api/projects/{id}` |
-//! | `scan_directory` | `POST /api/projects/scan` → `{path}` |
+//! | `scan_directory` | `POST /api/projects/scan` → `{path, workspace?}` |
 //! | `cascade_merge` / `push_stack` | `POST /api/sessions/{id}/cascade` / `…/push-stack` |
 //! | `cascade_resume` / `cascade_abandon` | `POST /api/cascade/resume` / `…/abandon` |
 //! | `list_comments` / `open_review` | `GET /api/sessions/{id}/comments` / `…/review` |

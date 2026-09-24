@@ -13,13 +13,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use claude_commander_protocol::api::{
-    AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
-    OperationStatus, PreviewData, ProgramInfo, ReviewSnapshot, SessionDetail, SetProgramsRequest,
-    SetSessionBase, SetSessionBaseOutcome, Snapshot, ToggleReviewed,
+    AddProjectRequest, AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide,
+    NewComment, OperationStatus, PreviewData, ProgramInfo, ReviewSnapshot, SessionDetail,
+    SetProgramsRequest, SetSessionBase, SetSessionBaseOutcome, Snapshot, ToggleReviewed,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::session::{ProjectId, SessionId};
+use claude_commander_protocol::workspace::{
+    DeleteWorkspaceRequest, RenameWorkspaceRequest, SetProjectWorkspace, SetWorkspacesRequest,
+};
 use claude_commander_protocol::ws::AttachKind;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
 use serde::Serialize;
@@ -617,8 +620,15 @@ impl RemoteClient {
 
     // -- Projects --
 
-    pub async fn add_project(&self, path: PathBuf) -> ClientResult<ProjectId> {
-        let body = serde_json::json!({ "path": path });
+    /// `POST /projects` — register `path`, tagged with `workspace` (`None` =
+    /// Main). An absent workspace is omitted from the body, so an older server
+    /// sees exactly the request it always did.
+    pub async fn add_project(
+        &self,
+        path: PathBuf,
+        workspace: Option<String>,
+    ) -> ClientResult<ProjectId> {
+        let body = AddProjectRequest { path, workspace };
         let env: IdEnvelope<ProjectId> =
             self.post_json(self.endpoint(&["projects"]), &body).await?;
         Ok(env.id)
@@ -633,8 +643,14 @@ impl RemoteClient {
     /// second `add_project` would leave two entries for one repository. The
     /// dedupe rule (and the path resolution behind it) is the server's, so no
     /// client re-states it.
-    pub async fn ensure_project(&self, path: PathBuf) -> ClientResult<ProjectId> {
-        let body = serde_json::json!({ "path": path });
+    ///
+    /// `workspace` tags the project only if the server registers it here.
+    pub async fn ensure_project(
+        &self,
+        path: PathBuf,
+        workspace: Option<String>,
+    ) -> ClientResult<ProjectId> {
+        let body = AddProjectRequest { path, workspace };
         let env: IdEnvelope<ProjectId> = self
             .post_json(self.endpoint(&["projects", "ensure"]), &body)
             .await?;
@@ -645,9 +661,61 @@ impl RemoteClient {
         self.delete_ok(self.project_url(id, &[])).await
     }
 
-    pub async fn scan_directory(&self, dir: PathBuf) -> ClientResult<ScanResponse> {
+    // -- Workspaces --
+
+    /// `PUT /config/workspaces` — replace the server's workspace definitions.
+    pub async fn set_workspaces(&self, req: SetWorkspacesRequest) -> ClientResult<()> {
+        self.put_json_ok(self.endpoint(&["config", "workspaces"]), &req)
+            .await
+    }
+
+    /// `POST /config/workspaces/rename` — rename a workspace server-side,
+    /// rewriting its projects' tags. A no-op success where it is unknown.
+    pub async fn rename_workspace(&self, from: String, to: String) -> ClientResult<()> {
+        self.post_json_ok(
+            self.endpoint(&["config", "workspaces", "rename"]),
+            &RenameWorkspaceRequest { from, to },
+        )
+        .await
+    }
+
+    /// `POST /config/workspaces/delete` — delete a workspace server-side,
+    /// moving its projects to Main. A no-op success where it is unknown.
+    pub async fn delete_workspace(&self, name: String) -> ClientResult<()> {
+        self.post_json_ok(
+            self.endpoint(&["config", "workspaces", "delete"]),
+            &DeleteWorkspaceRequest { name },
+        )
+        .await
+    }
+
+    /// `PUT /projects/{id}/workspace` — move a project (`None` = Main).
+    pub async fn set_project_workspace(
+        &self,
+        id: ProjectId,
+        workspace: Option<String>,
+    ) -> ClientResult<()> {
+        self.put_json_ok(
+            self.project_url(id, &["workspace"]),
+            &SetProjectWorkspace { workspace },
+        )
+        .await
+    }
+
+    /// `POST /projects/scan` — register every repo under `dir`, each new one
+    /// tagged with `workspace` (`None` = Main; omitted from the body, so an
+    /// older server sees the body it always did).
+    pub async fn scan_directory(
+        &self,
+        dir: PathBuf,
+        workspace: Option<String>,
+    ) -> ClientResult<ScanResponse> {
         let url = self.endpoint(&["projects", "scan"]);
-        self.post_json(url, &ScanRequest { path: dir }).await
+        let body = AddProjectRequest {
+            path: dir,
+            workspace,
+        };
+        self.post_json(url, &body).await
     }
 
     // -- GitHub repos / repository clone --
@@ -862,12 +930,6 @@ struct ReviewedBody {
 pub struct ScanResponse {
     pub added: usize,
     pub skipped: usize,
-}
-
-/// Request body for `POST /projects/scan`: the directory to scan.
-#[derive(serde::Serialize)]
-struct ScanRequest {
-    path: PathBuf,
 }
 
 fn diff_side_param(side: DiffSide) -> &'static str {

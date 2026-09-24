@@ -60,6 +60,13 @@ pub struct TuiPrefs {
     /// [`DEFAULT_LEFT_PANE_PCT`](crate::app::DEFAULT_LEFT_PANE_PCT).
     #[serde(default)]
     pub left_pane_pct: Option<u16>,
+    /// Name of the workspace that was active when the TUI last switched, for
+    /// `startup_workspace = "last"`. `None`/absent means Main — including
+    /// every `tui.json` written before workspaces existed, which is why this
+    /// needs no schema bump. Stored by name (workspace identity), never by
+    /// position.
+    #[serde(default)]
+    pub last_workspace: Option<String>,
 }
 
 /// The UI-pref fields as they lived in `state.json` before `tui.json` existed,
@@ -90,6 +97,8 @@ impl From<LegacyStatePrefs> for TuiPrefs {
             // Legacy state.json predates multi-backend; its selection is local.
             last_selected_backend: None,
             left_pane_pct: l.left_pane_pct,
+            // Legacy state.json predates workspaces: Main.
+            last_workspace: None,
         }
     }
 }
@@ -181,6 +190,12 @@ impl TuiPrefsStore {
     /// Persist the last-active session-list view so it survives restarts.
     pub async fn set_view_mode(&self, view: ViewMode) {
         self.update(|p| p.view_mode = Some(view)).await;
+    }
+
+    /// Persist the active workspace (`None` = Main) for `startup_workspace =
+    /// "last"`.
+    pub async fn set_last_workspace(&self, workspace: Option<String>) {
+        self.update(|p| p.last_workspace = workspace).await;
     }
 
     /// Persist the left-pane width (already clamped by the caller).
@@ -373,6 +388,46 @@ mod tests {
             TuiPrefsStore::load(dir.path()).prefs().left_pane_pct,
             Some(45)
         );
+    }
+
+    #[tokio::test]
+    async fn last_workspace_persists_and_survives_reload() {
+        let dir = TempDir::new().unwrap();
+        {
+            let store = TuiPrefsStore::load(dir.path());
+            store.set_last_workspace(Some("Work".to_string())).await;
+        }
+        assert_eq!(
+            TuiPrefsStore::load(dir.path())
+                .prefs()
+                .last_workspace
+                .as_deref(),
+            Some("Work")
+        );
+        // Switching back to Main records `None`, not a stale name.
+        {
+            let store = TuiPrefsStore::load(dir.path());
+            store.set_last_workspace(None).await;
+        }
+        assert_eq!(TuiPrefsStore::load(dir.path()).prefs().last_workspace, None);
+    }
+
+    /// A `tui.json` written before workspaces existed is already at the current
+    /// schema. The new field must read as "Main" without a schema bump — a bump
+    /// would re-run the v0->v1 view reset on everyone.
+    #[test]
+    fn last_workspace_is_additive_without_a_schema_bump() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("tui.json"),
+            format!(
+                r#"{{"schema_version": {CURRENT_PREFS_SCHEMA}, "view_mode": "ProjectGrouped"}}"#
+            ),
+        )
+        .unwrap();
+        let prefs = TuiPrefsStore::load(dir.path()).prefs();
+        assert_eq!(prefs.last_workspace, None);
+        assert_eq!(prefs.view_mode, Some(ViewMode::ProjectGrouped));
     }
 
     #[test]

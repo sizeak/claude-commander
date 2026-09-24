@@ -228,6 +228,27 @@ dim_unfocused_opacity = 0.4
 # below (so the block acts as a view, not a duplicate). Set to 0 to hide it.
 # recent_sessions_limit = 5
 
+# Workspaces: named groups of projects (see "Workspaces" below). Array order is
+# display order; the built-in Main workspace (untagged projects) is implicit and
+# never listed. `color` is optional, as `#rrggbb`.
+#
+# [[workspaces]]
+# name = "Work"
+# color = "#e5a50a"
+#
+# [[workspaces]]
+# name = "Personal"
+#
+# Label and colour for the built-in Main workspace (default label "Main").
+#
+# [main_workspace]
+# name = "Home"
+#
+# Which workspace to open on: "last" (default — whichever this client last had
+# active), "main", or a workspace name (falls back to Main if it no longer
+# exists).
+# startup_workspace = "last"
+
 # Interval in milliseconds for syncing state file changes from other instances (0 = disabled)
 state_sync_interval_ms = 2000
 
@@ -306,6 +327,11 @@ state_sync_interval_ms = 2000
 # set_session_base = ["B"]                 # palette-only by default; bind a key here
 # toggle_keep_alive = ["K"]                # palette-only by default; bind a key here
 # reset_session = ["Ctrl-r"]               # palette-only by default; bind a key here
+# next_workspace = ["w"]                  # cycle workspaces (wraps)
+# workspace_picker = ["W"]                 # switch / create a workspace
+# previous_workspace = []                  # palette-only by default; bind a key here
+# new_workspace = []                       # palette-only by default
+# move_project_to_workspace = []           # palette-only by default
 
 # Remote claude-commander servers. Each entry adds a server node to the
 # session tree with that server's projects and sessions under it (full
@@ -684,6 +710,85 @@ Nothing detects this for you — querying the terminal background (`OSC 11`) is 
 scope — so it is a claim you make about your own terminal. Leaving it unset keeps whatever the
 preset declares, which is `dark` for all of them. Editable in-app from **Settings ▸ Theme ▸
 Appearance** (`,` key); clear the field to fall back to the preset.
+
+## Workspaces
+
+A workspace is a **label on a project**. Every workspace shares one state file,
+one server and one set of background loops; switching workspace only changes
+which projects and sessions a frontend shows. A project with no label is in the
+built-in **Main** workspace, which can be relabelled (`[main_workspace]`) but not
+deleted. Workspace UI stays hidden until a second workspace exists.
+
+- Definitions live in `config.toml` as `[[workspaces]]` (`name`, optional
+  `color` as `#rrggbb`); a project's workspace is stored with the project in
+  `state.json`. Names are trimmed, at most 40 characters, contain no control
+  characters, and may not be `last` or `main` (any case) — those are the
+  non-name values of `startup_workspace`.
+- **Renaming** a workspace rewrites every project tagged with it (and a
+  `startup_workspace` pinned to it); **deleting** one moves its projects back to
+  Main. Both go through the app (or the server's API) rather than a hand edit of
+  `config.toml`, because a hand-edited rename would strand the projects under
+  the old name. A project whose workspace has no definition still shows up —
+  under a workspace of that name — and moving a project into an undefined
+  workspace defines it.
+- With remote servers, definitions **merge by name**: the local server's order
+  (the TUI) or the first server's order (the Flutter app) comes first, and names
+  only another server defines are appended. Main merges by being untagged, never
+  by its label. Each server stores its own projects' labels and definitions;
+  creating, renaming, deleting and reordering is sent to every connected server.
+  Merging is exact, but a server refuses two names that differ only in case (or
+  a name equal to its Main label), so if two servers ended up with "Work" and
+  "work" each is sent the list with its own spelling kept and the other's
+  dropped — the disagreement never blocks an edit. Rename one to reconcile.
+- An older binary that rewrites `state.json` or `config.toml` drops the
+  workspace fields it does not know (those projects fall back to Main). From
+  this version on, unknown project fields in `state.json` are preserved.
+
+In the TUI:
+
+- `w` (`next_workspace`) cycles workspaces, wrapping; `W` (`workspace_picker`)
+  opens a picker listing each workspace with its count of sessions waiting for
+  input, where typing a name that doesn't exist creates it. **Previous
+  workspace**, **New workspace…** and **Move project to workspace…** are
+  palette-only until you bind them under `[keybindings]`.
+- The active workspace scopes the list views, the board and its project
+  sidebar, the Recent block and the status-bar counts. Switching lands on the
+  first row and clears a board project filter. The palette and the in-session
+  `Ctrl-Space` switcher search every workspace — the active one's sessions
+  first, the rest tagged — and picking a session elsewhere switches there first.
+- The status bar shows a chip in the workspace's `color` and `Label ●N` hints
+  for other workspaces with sessions waiting; the board header and an attached
+  session's tmux status line carry the name. All of it is hidden while there is
+  only one workspace.
+- New projects, clones and directory scans go into the active workspace (in
+  the Flutter app too — `POST /projects/scan` takes the same optional
+  `workspace` as `POST /projects`).
+- The active workspace is per client, remembered in `tui.json`
+  (`last_workspace`) and applied at startup when `startup_workspace = "last"`.
+- **Settings → Workspaces** edits everything above: `n` new, `r` rename
+  (Main's label included), `d` delete (not Main), `J`/`K` reorder, `s` cycle
+  the startup workspace, and `→`/`Enter` into a workspace's details to set its
+  colour (`Enter`; clear the field to remove it) or move a listed project with
+  `m`. Every change is sent to each connected server at once; a server that
+  refuses or can't be reached is named in a status message, and the rest
+  still apply it. `startup_workspace` is saved to the local config only, and
+  changing it leaves the local definitions as they are (a pinned workspace only
+  another server defines is added locally, since the pin needs a definition).
+
+From the CLI:
+
+```sh
+claude-commander list --workspace work        # only sessions in "Work"
+claude-commander list --workspace main        # only Main (or use Main's label)
+claude-commander new fix-login -d ~/src/app --workspace work
+```
+
+`list` adds a `[workspace]` column to each project line once there is more than
+one workspace; `list --json` always carries a `workspace` field (`null` for
+Main).
+`new --workspace` requires `--path`: it applies only when that path registers a
+new project — an existing project keeps its workspace — and an unknown name
+creates the workspace.
 
 ## Session List Sections
 

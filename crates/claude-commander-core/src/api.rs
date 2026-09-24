@@ -12,6 +12,10 @@ use claude_commander_protocol::github::{
     CloneJob, CloneJobId, CloneRequest, CloneSource, GithubRepo, validate_clone_url,
     validate_dest_name, validate_repo_slug,
 };
+use claude_commander_protocol::workspace::{
+    SetWorkspacesRequest, WorkspaceDef, WorkspaceRejection, validate_set_workspaces,
+    validate_workspace_label,
+};
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -32,6 +36,7 @@ use crate::git::{
     run_clone,
 };
 use crate::reviewed::ReviewedStore;
+use crate::session::workspace;
 use crate::session::{
     AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionLookup, SessionManager,
     SessionStatus, WorktreeSession, apply_assignment, clear_override_and_reassign,
@@ -273,6 +278,148 @@ impl CommanderService {
         self.config_store.mutate(|c| c.programs = programs)
     }
 
+    // -- Workspaces --
+
+    /// Replace the workspace definitions (order = display order), and — when
+    /// given — Main's label/colour and the startup choice. Never re-tags a
+    /// project: [`Self::rename_workspace`] and [`Self::delete_workspace`] do
+    /// that, because a replace cannot tell a rename from a delete + create.
+    /// Validated against the protocol's rules first, so nothing is written for
+    /// a refused list.
+    ///
+    /// `main: None` leaves Main's label alone, so names are checked against
+    /// the label this server already stores — otherwise a replace that omits
+    /// `main` (every create/reorder/colour edit, and any older client) could
+    /// define a workspace named like Main, which a rename is refused for.
+    pub fn set_workspace_defs(&self, req: SetWorkspacesRequest) -> Result<()> {
+        let touches_main = req.main.is_some();
+        let checked = SetWorkspacesRequest {
+            // Only the stored label takes part (it is not written back), and
+            // a hand-edited invalid one must not block every edit.
+            main: req.main.or_else(|| {
+                self.read_config()
+                    .main_workspace
+                    .map(|m| WorkspaceDef::named(m.name))
+                    .filter(|m| validate_workspace_label(&m.name).is_ok())
+            }),
+            ..req
+        };
+        let mut req = validate_set_workspaces(&checked).map_err(|e| {
+            let name = match &e {
+                WorkspaceRejection::Reserved { name }
+                | WorkspaceRejection::Duplicate { name }
+                | WorkspaceRejection::UnknownStartup { name } => name.clone(),
+                WorkspaceRejection::BadColor { color } => color.clone(),
+                _ => "workspaces".to_string(),
+            };
+            workspace::workspace_rejected(&name, e)
+        })?;
+        if !touches_main {
+            // Validated against the stored label only; nothing to write back.
+            req.main = None;
+        }
+        self.telemetry.feature("workspace.update_defs");
+        self.config_store.mutate(|c| {
+            c.workspaces = req.workspaces;
+            if let Some(main) = req.main {
+                c.main_workspace = Some(main);
+            }
+            if let Some(startup) = req.startup_workspace {
+                c.startup_workspace = startup;
+            }
+        })
+    }
+
+    /// Rename workspace `from` to `to`: the definition, a startup pin on it, and
+    /// every project tagged with it, in that order. Returns `false` (touching
+    /// nothing) when this host neither defines `from` nor tags a project with
+    /// it — so a rename sent eagerly to every server is a harmless no-op on the
+    /// ones that never had the workspace.
+    pub async fn rename_workspace(&self, from: &str, to: &str) -> Result<bool> {
+        let renamed_def = self
+            .config_store
+            .mutate(|c| workspace::rename_workspace_def(c, from, to))?
+            .map_err(|e| workspace::workspace_rejected(to, e))?;
+        let to = claude_commander_protocol::workspace::validate_workspace_name(to)
+            .map_err(|e| workspace::workspace_rejected(to, e))?;
+        let (from_owned, to_tag) = (from.to_string(), to.clone());
+        let moved = self
+            .store
+            .mutate(move |state| workspace::retag_projects(state, &from_owned, Some(&to_tag)))
+            .await?;
+        if !renamed_def && moved == 0 {
+            return Ok(false);
+        }
+        if !renamed_def {
+            // Tags existed without a definition (lost to an older binary's
+            // write); give the new name one so it keeps its place.
+            self.config_store
+                .mutate(|c| workspace::ensure_workspace_defined(c, &to))?;
+        }
+        self.telemetry.feature("workspace.rename");
+        Ok(true)
+    }
+
+    /// Delete workspace `name`: drop its definition (a startup pin on it
+    /// becomes Main) and move its projects to Main. Returns `false` when there
+    /// was nothing to delete. Main itself has no name and cannot be deleted.
+    pub async fn delete_workspace(&self, name: &str) -> Result<bool> {
+        let removed_def = self
+            .config_store
+            .mutate(|c| workspace::delete_workspace_def(c, name))?;
+        let owned = name.to_string();
+        let moved = self
+            .store
+            .mutate(move |state| workspace::retag_projects(state, &owned, None))
+            .await?;
+        if !removed_def && moved == 0 {
+            return Ok(false);
+        }
+        self.telemetry.feature("workspace.delete");
+        Ok(true)
+    }
+
+    /// Move project `id` into `workspace` (`None` = Main). A name this host
+    /// has no definition for gets one appended — the self-heal that lets a
+    /// client move a project into a workspace it created on another server.
+    pub async fn set_project_workspace(
+        &self,
+        id: &ProjectId,
+        workspace: Option<String>,
+    ) -> Result<()> {
+        let tag = workspace::validate_tag(workspace.as_deref())?;
+        let id = *id;
+        let exists = self.store.read().await.projects.contains_key(&id);
+        if !exists {
+            return Err(SessionError::ProjectNotFound(id.to_string()).into());
+        }
+        self.telemetry.feature("workspace.move_project");
+        if let Some(name) = &tag {
+            self.config_store
+                .mutate(|c| workspace::ensure_workspace_defined(c, name))?;
+        }
+        self.store
+            .mutate(move |state| match state.projects.get_mut(&id) {
+                Some(project) => {
+                    project.workspace = tag;
+                    Ok(())
+                }
+                None => Err(SessionError::ProjectNotFound(id.to_string()).into()),
+            })
+            .await?
+    }
+
+    /// Validate `workspace` for a project about to be registered and make sure
+    /// it is defined, returning the tag to store.
+    fn prepare_new_project_workspace(&self, workspace: Option<String>) -> Result<Option<String>> {
+        let tag = workspace::validate_tag(workspace.as_deref())?;
+        if let Some(name) = &tag {
+            self.config_store
+                .mutate(|c| workspace::ensure_workspace_defined(c, name))?;
+        }
+        Ok(tag)
+    }
+
     /// Reload config from disk if the file changed since the last read.
     pub fn reload_config(&self) -> Result<bool> {
         self.config_store.reload_if_changed()
@@ -285,16 +432,30 @@ impl CommanderService {
 
     // -- Projects --
 
-    /// Register a git repository as a project.
-    pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
+    /// Register a git repository as a project, tagged with `workspace`
+    /// (`None` = Main) — how a new project lands in the caller's active
+    /// workspace. An undefined workspace name is defined on the way.
+    pub async fn add_project(
+        &self,
+        repo_path: PathBuf,
+        workspace: Option<String>,
+    ) -> Result<ProjectId> {
         self.telemetry.feature("project.add");
-        self.manager.add_project(repo_path).await
+        let tag = self.prepare_new_project_workspace(workspace)?;
+        self.manager.add_project(repo_path, tag).await
     }
 
-    /// Scan a directory for git repositories and register them as projects.
-    pub async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
+    /// Scan a directory for git repositories and register them as projects,
+    /// each tagged with `workspace` (`None` = Main) like [`Self::add_project`].
+    /// Repositories that are already projects keep their tag.
+    pub async fn scan_directory(
+        &self,
+        dir: &Path,
+        workspace: Option<String>,
+    ) -> Result<ScanResult> {
         self.telemetry.feature("project.scan_directory");
-        self.manager.scan_directory(dir).await
+        let tag = self.prepare_new_project_workspace(workspace)?;
+        self.manager.scan_directory(dir, tag).await
     }
 
     // -- Repository clone --
@@ -363,6 +524,9 @@ impl CommanderService {
     /// [`CloneStatus::DestinationExists`]: claude_commander_protocol::github::CloneStatus::DestinationExists
     pub async fn start_clone(&self, req: CloneRequest) -> Result<CloneJob> {
         let dir_name = clone_dir_name(&req)?;
+        // Checked up front like the destination: `clone_then_register` would
+        // only refuse it after the whole clone, then delete the checkout.
+        workspace::validate_tag(req.workspace.as_deref())?;
         let config = self.read_config();
         let projects_dir = config.projects_dir()?;
         // `projects_dir()` only *resolves* a path (as `worktrees_dir()` does), so
@@ -394,7 +558,7 @@ impl CommanderService {
             let job_dest = dest.clone();
             self.clone_jobs
                 .spawn(dest, source_label, async move {
-                    clone_then_register(service, req.source, job_dest, timeout).await
+                    clone_then_register(service, req.source, req.workspace, job_dest, timeout).await
                 })
                 .await
         };
@@ -720,7 +884,10 @@ impl CommanderService {
             backend.path().to_path_buf()
         };
 
-        let project_id = self.ensure_project(path).await?;
+        // A session on an unregistered repo registers it in Main; a caller that
+        // wants it elsewhere ensures the project with a workspace first (the
+        // CLI's `new -d <path> --workspace`).
+        let project_id = self.ensure_project(path, None).await?;
 
         let session_id = self
             .manager
@@ -1206,7 +1373,14 @@ impl CommanderService {
     /// [`repo_identity`](crate::session::repo_identity), not by the
     /// caller's string — see there for why comparing raw paths silently
     /// duplicates.
-    pub async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
+    ///
+    /// `workspace` tags the project only when this call registers it; an
+    /// existing project keeps its workspace.
+    pub async fn ensure_project(
+        &self,
+        path: PathBuf,
+        workspace: Option<String>,
+    ) -> Result<ProjectId> {
         let identity = crate::session::repo_identity(&path).await;
         let existing = {
             let state = self.store.read().await;
@@ -1218,7 +1392,10 @@ impl CommanderService {
         };
         match existing {
             Some(id) => Ok(id),
-            None => self.manager.add_project(path).await,
+            None => {
+                let tag = self.prepare_new_project_workspace(workspace)?;
+                self.manager.add_project(path, tag).await
+            }
         }
     }
 
@@ -1606,6 +1783,14 @@ impl CommanderService {
         let tmux_ok = self.cached_tmux_ok().await;
         let pending = self.sessions_with_pending_comments().await?;
 
+        let (workspaces, main_workspace, startup_workspace) = {
+            let config = self.config_store.read();
+            (
+                config.workspaces.clone(),
+                config.main_workspace.clone(),
+                config.startup_workspace.clone(),
+            )
+        };
         let (projects, sessions, cascade_paused) = {
             let state = self.store.read().await;
             (
@@ -1634,6 +1819,9 @@ impl CommanderService {
                 tmux_ok,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
+            workspaces,
+            main_workspace,
+            startup_workspace,
         })
     }
 
@@ -2994,6 +3182,7 @@ fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
             main_branch: p.main_branch.clone(),
             session_ids: p.worktrees.clone(),
             origin_url: p.origin_url.clone(),
+            workspace: p.workspace.clone(),
         })
         .collect()
 }
@@ -3048,6 +3237,9 @@ pub fn snapshot_from_state(state: &AppState) -> Snapshot {
             tmux_ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
+        workspaces: Vec::new(),
+        main_workspace: None,
+        startup_workspace: Default::default(),
     }
 }
 
@@ -3165,13 +3357,14 @@ fn occupied_destination(dest: &Path) -> Option<bool> {
 async fn clone_then_register(
     service: CommanderService,
     source: CloneSource,
+    workspace: Option<String>,
     dest: PathBuf,
     timeout: Duration,
 ) -> CloneOutcome {
     let cloned = async {
         run_clone(&source, &dest, timeout).await?;
         let path = dest.clone();
-        run_local(move || async move { service.ensure_project(path).await })
+        run_local(move || async move { service.ensure_project(path, workspace).await })
             .await
             .map_err(|e| match e {
                 RunLocalError::Inner(err) => err,
@@ -3214,6 +3407,7 @@ fn remove_partial_clone(dest: &Path) {
 mod tests {
     use super::*;
     use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::workspace::{StartupWorkspace, WorkspaceDef};
 
     use crate::comment::CommentSide;
     use crate::git::{PrState, git_command_std};
@@ -4423,6 +4617,280 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
+    // -- Workspaces --
+
+    fn one_commit_repo(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let repo = dir.path().join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        repo
+    }
+
+    async fn project_tag(svc: &CommanderService, id: &ProjectId) -> Option<String> {
+        svc.store().read().await.projects[id].workspace.clone()
+    }
+
+    fn def_names(svc: &CommanderService) -> Vec<String> {
+        svc.read_config()
+            .workspaces
+            .into_iter()
+            .map(|d| d.name)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn moving_a_project_tags_it_and_defines_a_missing_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+
+        svc.set_project_workspace(&pid, Some(" Work ".into()))
+            .await
+            .unwrap();
+        assert_eq!(project_tag(&svc, &pid).await.as_deref(), Some("Work"));
+        assert_eq!(
+            def_names(&svc),
+            ["Work"],
+            "the move self-heals the definition"
+        );
+
+        // Moving again neither duplicates the definition nor loses the tag.
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        assert_eq!(def_names(&svc), ["Work"]);
+
+        svc.set_project_workspace(&pid, None).await.unwrap();
+        assert_eq!(project_tag(&svc, &pid).await, None, "None is Main");
+        assert_eq!(def_names(&svc), ["Work"], "leaving a workspace keeps it");
+    }
+
+    #[tokio::test]
+    async fn moving_a_project_refuses_bad_names_and_unknown_projects() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        let err = svc
+            .set_project_workspace(&pid, Some("last".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Session(SessionError::InvalidName { .. })),
+            "{err:?}"
+        );
+        assert!(
+            def_names(&svc).is_empty(),
+            "nothing defined for a refused name"
+        );
+        let err = svc
+            .set_project_workspace(&ProjectId::new(), Some("Work".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Session(SessionError::ProjectNotFound(_))),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_workspace_rewrites_tags_definition_and_startup_pin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: Some(StartupWorkspace::Named("Work".into())),
+        })
+        .unwrap();
+
+        assert!(svc.rename_workspace("Work", "Job").await.unwrap());
+        assert_eq!(project_tag(&svc, &pid).await.as_deref(), Some("Job"));
+        assert_eq!(def_names(&svc), ["Job", "Play"], "order is kept");
+        assert_eq!(
+            svc.read_config().startup_workspace,
+            StartupWorkspace::Named("Job".into())
+        );
+
+        // Idempotent on a host that never had it — eager propagation is safe.
+        assert!(!svc.rename_workspace("Nope", "Other").await.unwrap());
+        assert!(
+            svc.rename_workspace("Job", "Play").await.is_err(),
+            "collision"
+        );
+    }
+
+    /// A tag whose definition was lost (an older binary rewrote config.toml)
+    /// still renames, and the new name gets a definition back.
+    #[tokio::test]
+    async fn rename_workspace_heals_an_orphaned_tag() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.store()
+            .mutate(move |s| s.projects.get_mut(&pid).unwrap().workspace = Some("Lost".into()))
+            .await
+            .unwrap();
+        assert!(svc.rename_workspace("Lost", "Found").await.unwrap());
+        assert_eq!(project_tag(&svc, &pid).await.as_deref(), Some("Found"));
+        assert_eq!(def_names(&svc), ["Found"]);
+    }
+
+    #[tokio::test]
+    async fn delete_workspace_moves_its_projects_to_main() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: None,
+            startup_workspace: Some(StartupWorkspace::Named("Work".into())),
+        })
+        .unwrap();
+
+        assert!(svc.delete_workspace("Work").await.unwrap());
+        assert_eq!(project_tag(&svc, &pid).await, None);
+        assert!(def_names(&svc).is_empty());
+        assert_eq!(svc.read_config().startup_workspace, StartupWorkspace::Main);
+        assert!(!svc.delete_workspace("Work").await.unwrap(), "idempotent");
+    }
+
+    #[tokio::test]
+    async fn set_workspace_defs_validates_and_leaves_unset_fields_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef {
+                name: "Work".into(),
+                color: Some("#ABCDEF".into()),
+            }],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: Some(StartupWorkspace::Main),
+        })
+        .unwrap();
+        // A later replace without main/startup keeps both.
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        let c = svc.read_config();
+        assert_eq!(def_names(&svc), ["Play"]);
+        assert_eq!(c.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(c.startup_workspace, StartupWorkspace::Main);
+
+        let err = svc
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("A"), WorkspaceDef::named("a")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidName { .. })
+        ));
+        assert_eq!(def_names(&svc), ["Play"], "a refused list writes nothing");
+    }
+
+    /// `main: None` means "leave Main's label alone", not "there is no Main
+    /// label": a replace from a client that sends no `main` (every create,
+    /// reorder and colour edit, and any older client) must still be refused
+    /// when a name clashes with the label this server stores.
+    #[tokio::test]
+    async fn set_workspace_defs_checks_names_against_the_stored_main_label() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: None,
+        })
+        .unwrap();
+        let err = svc
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("home")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidName { .. })
+        ));
+        assert!(def_names(&svc).is_empty(), "a refused list writes nothing");
+        assert_eq!(
+            svc.read_config().main_workspace,
+            Some(WorkspaceDef::named("Home"))
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_carries_workspace_config_and_project_tags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: Some(StartupWorkspace::Named("Work".into())),
+        })
+        .unwrap();
+        let snap = svc.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(snap.workspaces, vec![WorkspaceDef::named("Work")]);
+        assert_eq!(snap.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(
+            snap.startup_workspace,
+            StartupWorkspace::Named("Work".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_project_lands_in_the_requested_workspace_but_ensure_never_retags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let repo = one_commit_repo(&dir, "repo");
+        let id = svc
+            .ensure_project(repo.clone(), Some("Work".into()))
+            .await
+            .unwrap();
+        assert_eq!(project_tag(&svc, &id).await.as_deref(), Some("Work"));
+        assert_eq!(def_names(&svc), ["Work"]);
+
+        let again = svc
+            .ensure_project(repo.clone(), Some("Play".into()))
+            .await
+            .unwrap();
+        assert_eq!(again, id);
+        assert_eq!(project_tag(&svc, &id).await.as_deref(), Some("Work"));
+        assert_eq!(def_names(&svc), ["Work"], "no definition for an unused tag");
+
+        let other = one_commit_repo(&dir, "other");
+        let added = svc.add_project(other, None).await.unwrap();
+        assert_eq!(project_tag(&svc, &added).await, None);
+        assert!(
+            svc.add_project(one_commit_repo(&dir, "bad"), Some("main".into()))
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn reconcile_session_branches_adopts_local_rename() {
         // Regression: renaming a worktree's branch (`git branch -m`) left
@@ -5499,6 +5967,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&remote),
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5535,6 +6004,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&remote),
                 dest_name: Some("renamed".to_string()),
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5573,6 +6043,7 @@ mod tests {
                 .start_clone(CloneRequest {
                     source: url_source(&remote),
                     dest_name: Some(name.to_string()),
+                    workspace: None,
                 })
                 .await
                 .unwrap()
@@ -5608,6 +6079,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&dir.path().join("does-not-exist")),
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5648,6 +6120,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&remote),
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5689,6 +6162,7 @@ mod tests {
                 svc.start_clone(CloneRequest {
                     source: source.clone(),
                     dest_name: None,
+                    workspace: None,
                 })
                 .await
                 .is_err(),
@@ -5714,6 +6188,7 @@ mod tests {
                 svc.start_clone(CloneRequest {
                     source: url_source(&remote),
                     dest_name: Some(name.to_string()),
+                    workspace: None,
                 })
                 .await
                 .is_err(),
@@ -5743,6 +6218,7 @@ mod tests {
                     full_name: format!("https://sizeak:{SECRET}@github.com/o/r"),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap_err();
@@ -5763,6 +6239,7 @@ mod tests {
                     url: format!("file://sizeak:{SECRET}@{}", missing.display()),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5797,6 +6274,72 @@ mod tests {
         assert!(svc.clone_job(CloneJobId::new()).await.is_none());
     }
 
+    /// A directory scan registers what it finds into the caller's workspace,
+    /// the same way a single add does — so a scan run from the TUI and one run
+    /// from the Flutter app (through `POST /projects/scan`) land alike. A
+    /// refused name is refused before anything is registered.
+    #[tokio::test]
+    async fn scan_directory_tags_new_projects_with_the_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let root = dir.path().join("repos");
+        let repo = root.join("one");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("README"), "v1\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+
+        let err = svc
+            .scan_directory(&root, Some("last".into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidName { .. })
+        ));
+        assert!(svc.list_projects().await.is_empty(), "nothing registered");
+
+        let result = svc
+            .scan_directory(&root, Some("Work".into()))
+            .await
+            .unwrap();
+        assert_eq!(result.added, 1);
+        let projects = svc.list_projects().await;
+        assert_eq!(projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(def_names(&svc), ["Work"], "the workspace is defined");
+    }
+
+    /// A clone's `workspace` is checked before anything is cloned: a refused
+    /// name would otherwise only surface after the whole checkout, which
+    /// `clone_then_register` then deletes.
+    #[tokio::test]
+    async fn start_clone_refuses_a_bad_workspace_before_cloning() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+        for bad in ["main", &"x".repeat(41)] {
+            let err = svc
+                .start_clone(CloneRequest {
+                    source: url_source(&remote),
+                    dest_name: None,
+                    workspace: Some(bad.to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, crate::Error::Session(SessionError::InvalidName { .. })),
+                "{bad}: {err:?}"
+            );
+        }
+        assert!(
+            !svc.read_config().projects_dir().unwrap().exists(),
+            "nothing was cloned"
+        );
+    }
+
     /// The projects directory is created on demand: `Config::projects_dir` only
     /// *resolves* a path (matching `worktrees_dir`), so a first clone on a fresh
     /// machine has nowhere to land unless `start_clone` creates it.
@@ -5815,6 +6358,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&remote),
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()

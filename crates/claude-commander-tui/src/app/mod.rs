@@ -78,6 +78,8 @@ mod selection;
 mod settings;
 mod state;
 mod switcher;
+mod workspace_settings;
+mod workspaces;
 
 #[cfg(test)]
 mod tests;
@@ -545,6 +547,13 @@ pub struct QuickSwitchMatch {
     /// query is empty (newest first, mirroring the pinned "Recent" block).
     /// `None` for sessions never attached, which sort to the bottom.
     pub last_attached_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The session's workspace (its project's tag; `None` = Main). Picking a
+    /// session outside the active workspace switches to this one first.
+    pub workspace: Option<String>,
+    /// The workspace's label when it is *not* the active one (and workspace UI
+    /// is showing), drawn as a dim tag; `None` for active-workspace rows, which
+    /// also rank first.
+    pub other_workspace: Option<String>,
 }
 
 /// How the quick-switch palette was opened.
@@ -588,6 +597,14 @@ pub enum PaletteMode {
     /// that changes the session's program and relaunches it.
     ProgramPicker {
         session_id: SessionId,
+    },
+    /// Workspace picker (`W`): one row per merged workspace; selecting one
+    /// switches to it. An unmatched query creates a workspace of that name.
+    WorkspacePicker,
+    /// Target picker for moving `project_id` to another workspace. An
+    /// unmatched query creates a workspace of that name and moves it there.
+    MoveProjectPicker {
+        project_id: ProjectId,
     },
 }
 
@@ -639,6 +656,19 @@ pub enum QuickSwitchItem {
         session_id: SessionId,
         /// The launch command to switch to.
         program: String,
+        /// Pre-formatted display label.
+        label: String,
+    },
+    /// Selecting this row switches to workspace `name` (`None` = Main).
+    Workspace {
+        name: Option<String>,
+        /// Pre-formatted display label (with waiting count / current marker).
+        label: String,
+    },
+    /// Selecting this row moves `project_id` into `target` (`None` = Main).
+    ProjectWorkspace {
+        project_id: ProjectId,
+        target: Option<String>,
         /// Pre-formatted display label.
         label: String,
     },
@@ -737,17 +767,19 @@ pub enum SettingsTab {
     Keybindings,
     Theme,
     Sections,
+    Workspaces,
     Programs,
     Server,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 7] = [
+    const ALL: [SettingsTab; 8] = [
         Self::General,
         Self::Voice,
         Self::Keybindings,
         Self::Theme,
         Self::Sections,
+        Self::Workspaces,
         Self::Programs,
         Self::Server,
     ];
@@ -759,6 +791,7 @@ impl SettingsTab {
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
             Self::Sections => "Sections",
+            Self::Workspaces => "Workspaces",
             Self::Programs => "Programs",
             Self::Server => "Server",
         }
@@ -770,7 +803,8 @@ impl SettingsTab {
             Self::Voice => Self::Keybindings,
             Self::Keybindings => Self::Theme,
             Self::Theme => Self::Sections,
-            Self::Sections => Self::Programs,
+            Self::Sections => Self::Workspaces,
+            Self::Workspaces => Self::Programs,
             Self::Programs => Self::Server,
             Self::Server => Self::General,
         }
@@ -783,7 +817,8 @@ impl SettingsTab {
             Self::Keybindings => Self::Voice,
             Self::Theme => Self::Keybindings,
             Self::Sections => Self::Theme,
-            Self::Programs => Self::Sections,
+            Self::Workspaces => Self::Sections,
+            Self::Programs => Self::Workspaces,
             Self::Server => Self::Programs,
         }
     }
@@ -823,6 +858,48 @@ impl Default for SectionsState {
             editing: None,
         }
     }
+}
+
+/// Which pane is focused in the Workspaces tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspacesFocus {
+    #[default]
+    List,
+    /// The right pane: the colour row, then the workspace's projects.
+    Detail,
+}
+
+/// State for the Workspaces tab. The list it edits is the *merged* one across
+/// every backend (index 0 is Main), read fresh from the snapshots each frame,
+/// so this holds only cursor and editing state.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspacesState {
+    /// Index into the merged workspace list.
+    pub selected: usize,
+    pub focus: WorkspacesFocus,
+    /// Detail-pane row: 0 = colour, 1.. = the workspace's projects.
+    pub detail_selected: usize,
+    pub editing: Option<WorkspacesEditing>,
+}
+
+/// Editing state for the Workspaces tab.
+#[derive(Debug, Clone)]
+pub enum WorkspacesEditing {
+    Creating {
+        value: Input,
+    },
+    Renaming {
+        value: Input,
+    },
+    Colour {
+        value: Input,
+    },
+    /// `m` on a project: pick its target in the left list (`target` indexes
+    /// the merged list), Enter to move, Esc to cancel.
+    MovingProject {
+        project_id: ProjectId,
+        target: usize,
+    },
 }
 
 /// Which pane is focused in the Programs tab
@@ -911,6 +988,8 @@ pub struct SettingsState {
     pub rows: Vec<SettingsRow>,
     /// State for the Sections tab (lazily initialised on first tab switch)
     pub sections_state: SectionsState,
+    /// State for the Workspaces tab
+    pub workspaces_state: WorkspacesState,
     /// State for the Programs tab (lazily initialised on first tab switch)
     pub programs_state: ProgramsState,
     /// Active search filter for the Keybindings tab. `Some` while the search
@@ -1408,6 +1487,9 @@ pub enum InputAction {
     /// the name derived from `source` and editable. An empty submission means
     /// "derive it" (`CloneRequest::dest_name = None`), which is a valid choice
     /// rather than an error.
+    /// Name for a new workspace (`NewWorkspace`); created on every backend,
+    /// then switched to.
+    NewWorkspace,
     CloneDestName {
         /// Backend the clone runs on — the one the picker was opened against,
         /// carried explicitly so it can't drift with the tree selection.
@@ -1502,6 +1584,11 @@ pub struct AppUiState {
     /// sidebar cursor (see `refresh_list_items`), cleared by Esc in the main
     /// view. `ProjectId`s are globally unique, so this needs no backend qualifier.
     pub board_filter: Option<ProjectId>,
+    /// The workspace the user asked to see (`None` = Main). Kept as asked:
+    /// the *effective* workspace is this when some backend still has it, else
+    /// Main (see `App::active_workspace`), so a startup workspace takes effect
+    /// once the snapshot carrying it arrives.
+    pub active_workspace: Option<String>,
     /// Enriched PR info for the currently selected session
     pub enriched_pr: Option<(SessionId, EnrichedPrInfo)>,
     /// Session whose enriched-PR fetch came back empty (no PR data, or `gh`
@@ -1735,6 +1822,7 @@ impl Default for AppUiState {
             board_heading_regions: Vec::new(),
             board_column_rects: None,
             board_filter: None,
+            active_workspace: None,
             enriched_pr: None,
             enriched_pr_unavailable: None,
             ai_summaries: std::collections::HashMap::new(),
@@ -1847,6 +1935,9 @@ impl AppUiState {
             | BindableAction::OpenReviewDiff
             | BindableAction::OpenInfo
             | BindableAction::MoveToSection => has_session,
+            // Moving acts on the selected project (a session row selects its
+            // project too) on its owning backend.
+            BindableAction::MoveProjectToWorkspace => has_project,
             // Opening the operator's editor only works against a local worktree;
             // a remote backend has no path on this machine.
             BindableAction::OpenInEditor => {
@@ -2859,6 +2950,11 @@ impl App {
         if let Some(pct) = self.tui_prefs.prefs().left_pane_pct {
             self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
         }
+
+        // Pick the workspace to open on (`startup_workspace`, else the one
+        // `tui.json` remembers) before the first build, so the views are
+        // scoped from the first frame.
+        self.apply_startup_workspace();
 
         // Restore last selection from persisted state
         self.refresh_list_items().await;
