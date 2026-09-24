@@ -57,13 +57,13 @@ pub struct CommanderService {
     reviewed: Arc<ReviewedStore>,
     telemetry: Telemetry,
     /// Bounded in-memory ledger of recent cascade / push-stack operations,
-    /// surfaced through [`Self::workspace_snapshot`]. Capped at
+    /// surfaced through [`Self::snapshot`]. Capped at
     /// [`OPERATION_LEDGER_CAP`]; oldest entries are evicted.
     operations: Arc<std::sync::Mutex<std::collections::VecDeque<OperationStatus>>>,
     /// Monotonic id source for ledger entries (stable for the process lifetime).
     next_op_id: Arc<std::sync::atomic::AtomicU64>,
     /// Cached `gh --version` availability. Computed once (fork/exec is not free)
-    /// and reused for every `workspace_snapshot`.
+    /// and reused for every `snapshot`.
     gh_available: Arc<tokio::sync::OnceCell<bool>>,
     /// Shared agent-state detector with a short TTL cache, reused across
     /// non-`fresh` [`Self::agent_states`] calls so repeated polls don't
@@ -81,7 +81,7 @@ pub struct CommanderService {
     /// falls back to on-demand detection.
     agent_states_primed: Arc<std::sync::atomic::AtomicBool>,
     /// Most recent per-project background-pull status, maintained by the pull
-    /// loop and surfaced in [`WorkspaceSnapshot::project_pull`].
+    /// loop and surfaced in [`Snapshot::project_pull`].
     pull_status: Arc<std::sync::Mutex<BTreeMap<ProjectId, PullStatus>>>,
     /// Last PR-status fan-out time, for debouncing manual refresh bursts.
     last_pr_check: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
@@ -91,7 +91,7 @@ pub struct CommanderService {
     /// once per service, even if both a local TUI and an embedded caller ask.
     background_started: Arc<std::sync::atomic::AtomicBool>,
     /// Short-TTL cache of the last `tmux -V` probe result, so per-client
-    /// [`Self::workspace_snapshot`] polling (~2s cadence) doesn't fork a
+    /// [`Self::snapshot`] polling (~2s cadence) doesn't fork a
     /// subprocess on every poll. See [`Self::cached_tmux_ok`].
     tmux_ok_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     /// Running and recently-finished repository clones, started by
@@ -107,7 +107,7 @@ const OPERATION_LEDGER_CAP: usize = 32;
 /// `agent_states` polls.
 const AGENT_STATE_CACHE_TTL: Duration = Duration::from_millis(1000);
 
-/// TTL for the [`CommanderService::workspace_snapshot`] tmux-availability cache.
+/// TTL for the [`CommanderService::snapshot`] tmux-availability cache.
 /// Long enough that a 2s client poll reuses the last probe rather than forking
 /// `tmux -V` every time, short enough that tmux coming up/going down surfaces
 /// within a few seconds.
@@ -679,7 +679,7 @@ impl CommanderService {
     }
 
     /// tmux availability with a short-TTL cache ([`TMUX_OK_CACHE_TTL`]) so a
-    /// per-client `workspace_snapshot` poll doesn't fork `tmux -V` every call.
+    /// per-client `snapshot` poll doesn't fork `tmux -V` every call.
     /// The lock is never held across the probe `.await`; two concurrent stale
     /// callers may both re-probe once (a benign, self-healing race).
     async fn cached_tmux_ok(&self) -> bool {
@@ -1601,7 +1601,7 @@ impl CommanderService {
     /// `project_pull` reflects the background pull loop's latest per-project
     /// status ([`Self::spawn_background_tasks`]); it is empty until the loop has
     /// run (or when project auto-pull is disabled).
-    pub async fn workspace_snapshot(&self) -> Result<WorkspaceSnapshot> {
+    pub async fn snapshot(&self) -> Result<Snapshot> {
         let gh_available = self.gh_available().await;
         let tmux_ok = self.cached_tmux_ok().await;
         let pending = self.sessions_with_pending_comments().await?;
@@ -1618,7 +1618,7 @@ impl CommanderService {
         let mut pending_comment_sessions: Vec<SessionId> = pending.into_iter().collect();
         pending_comment_sessions.sort();
 
-        Ok(WorkspaceSnapshot {
+        Ok(Snapshot {
             projects,
             sessions,
             cascade_paused,
@@ -1638,7 +1638,7 @@ impl CommanderService {
     }
 
     /// List projects (sorted by name), for clients that only need the project
-    /// set rather than a full [`Self::workspace_snapshot`].
+    /// set rather than a full [`Self::snapshot`].
     pub async fn list_projects(&self) -> Vec<ProjectInfo> {
         let state = self.store.read().await;
         build_project_info_list(&state)
@@ -2093,7 +2093,7 @@ impl CommanderService {
     /// Every loop drives the same observable surface the frontends read: the
     /// agent loop maintains [`Self::agent_states`]' cache and persists unread
     /// transitions; the PR loop persists results via [`Self::apply_pr_results`];
-    /// the pull loop feeds [`WorkspaceSnapshot::project_pull`]; the sync loop
+    /// the pull loop feeds [`Snapshot::project_pull`]; the sync loop
     /// reloads the state file. Each wakes the [`StateStore`] change-feed on a
     /// real change (either via a persisted mutation or [`StateStore::notify_change`]),
     /// so a subscriber (the TUI's per-backend change-feed task) re-reads the
@@ -2335,7 +2335,7 @@ impl CommanderService {
 
     /// Fast-forward each project's main branch on a fixed cadence, recording the
     /// per-project outcome in [`Self::pull_status`] (surfaced through
-    /// [`WorkspaceSnapshot::project_pull`]) and waking the change-feed when any
+    /// [`Snapshot::project_pull`]) and waking the change-feed when any
     /// project's status changes. No-op loop when disabled or `interval_secs` 0.
     fn spawn_project_pull_loop(
         &self,
@@ -2936,7 +2936,7 @@ pub use claude_commander_protocol::api::{
     DiffStat, NewComment, OperationKind, OperationOutcome, OperationStatus, PrRetarget,
     PreviewData, ProgramInfo, ProjectInfo, PullBlockReason, PullStatus, RenameSession,
     ReviewSnapshot, ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection,
-    SetSessionBase, SetSessionBaseOutcome, ToggleReviewed, WorkspaceSnapshot,
+    SetSessionBase, SetSessionBaseOutcome, Snapshot, ToggleReviewed,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
@@ -2981,7 +2981,7 @@ pub(crate) fn session_info_from_session(
 
 /// Build the [`ProjectInfo`] list from state, sorted by project name (stable
 /// ordering for the tree). Sessions are carried by id only; the full
-/// [`SessionInfo`] list rides alongside in [`WorkspaceSnapshot`].
+/// [`SessionInfo`] list rides alongside in [`Snapshot`].
 fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
     let mut projects: Vec<_> = state.projects.values().collect();
     projects.sort_by(|a, b| a.name.cmp(&b.name));
@@ -3027,16 +3027,16 @@ fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<Sessi
     entries.into_iter().map(|(_, info)| info).collect()
 }
 
-/// Build a [`WorkspaceSnapshot`] purely from persisted state, with no live
+/// Build a [`Snapshot`] purely from persisted state, with no live
 /// gh/tmux probing — the I/O-bearing fields ([`ServerStatus`], pending
 /// comments, operations) get cheap placeholders. The full
-/// [`CommanderService::workspace_snapshot`] is the production source of truth
+/// [`CommanderService::snapshot`] is the production source of truth
 /// (the change-feed cache reads it); this synchronous, allocation-only
 /// projection is retained for the tree-builder tests, which feed a
 /// hand-constructed `AppState` through the same DTO builders.
 #[cfg(any(test, feature = "test-support"))]
-pub fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
-    WorkspaceSnapshot {
+pub fn snapshot_from_state(state: &AppState) -> Snapshot {
+    Snapshot {
         projects: build_project_info_list(state),
         sessions: build_session_info_list(state, true),
         cascade_paused: state.cascade_paused_at,
@@ -4145,12 +4145,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_carries_projects_and_sessions() {
+    async fn snapshot_carries_projects_and_sessions() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (pid, sid) = seed_project_session(&svc).await;
 
-        let snap = svc.workspace_snapshot().await.unwrap();
+        let snap = svc.snapshot().await.unwrap();
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.projects[0].id, pid);
         assert_eq!(snap.projects[0].session_ids, vec![sid]);
@@ -4654,7 +4654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_reports_paused_cascade() {
+    async fn snapshot_reports_paused_cascade() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (_pid, sid) = seed_project_session(&svc).await;
@@ -4662,7 +4662,7 @@ mod tests {
             .mutate(move |state| state.cascade_paused_at = Some(sid))
             .await
             .unwrap();
-        let snap = svc.workspace_snapshot().await.unwrap();
+        let snap = svc.snapshot().await.unwrap();
         assert_eq!(snap.cascade_paused, Some(sid));
     }
 
@@ -5356,20 +5356,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_surfaces_project_pull_cache() {
+    async fn snapshot_surfaces_project_pull_cache() {
         use crate::api::{PullBlockReason, PullStatus};
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (pid, _sid) = seed_project_session(&svc).await;
         // The pull loop maintains this cache; inject an outcome directly to prove
-        // `workspace_snapshot` surfaces it in `project_pull`.
+        // `snapshot` surfaces it in `project_pull`.
         svc.pull_status.lock().unwrap().insert(
             pid,
             PullStatus::Blocked {
                 reason: PullBlockReason::Dirty,
             },
         );
-        let snap = svc.workspace_snapshot().await.unwrap();
+        let snap = svc.snapshot().await.unwrap();
         assert_eq!(
             snap.project_pull.get(&pid),
             Some(&PullStatus::Blocked {

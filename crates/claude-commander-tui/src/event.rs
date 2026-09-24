@@ -149,7 +149,7 @@ pub enum StateUpdate {
     /// TUI's `Vec<BackendHandle>`.
     BackendChanged {
         backend_id: usize,
-        snapshot: Box<claude_commander_core::api::WorkspaceSnapshot>,
+        snapshot: Box<claude_commander_core::api::Snapshot>,
         states: Box<claude_commander_core::api::AgentStatesSnapshot>,
     },
     /// A backend's connection health changed (a remote server's poller moved

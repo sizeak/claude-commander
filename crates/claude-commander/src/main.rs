@@ -540,7 +540,7 @@ async fn main() -> Result<()> {
             // `--project` and `--path` are mutually exclusive (clap-enforced).
             let project_path = match (project, path, remote.as_deref()) {
                 (Some(name), _, _) => {
-                    let snapshot = backend.workspace_snapshot().await?;
+                    let snapshot = backend.snapshot().await?;
                     claude_commander_core::session::resolve_project_path(&snapshot.projects, &name)?
                 }
                 (None, Some(p), _) => p,

@@ -2585,7 +2585,7 @@ impl App {
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let result = match factory(&server) {
-                Ok(backend) => match backend.workspace_snapshot().await {
+                Ok(backend) => match backend.snapshot().await {
                     Ok(snap) => Ok(snap.server.tmux_ok),
                     Err(e) => Err(e.to_string()),
                 },

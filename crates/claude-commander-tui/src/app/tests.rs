@@ -3658,7 +3658,7 @@ fn buffer_lines(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> 
 // ---------------------------------------------------------------------------
 
 use super::reconcile_remote_servers;
-use claude_commander_core::api::WorkspaceSnapshot;
+use claude_commander_core::api::Snapshot;
 use claude_commander_core::backend::{
     BackendId, ConnectionState, RemoteBackendFactory, SessionRef, empty_snapshot, mock::MockBackend,
 };
@@ -3668,11 +3668,7 @@ use claude_commander_core::backend::{
 /// matching snapshot — the board is derived from the snapshot in production, so
 /// snapshot-reading helpers (`selected_session_is_creating`, Info content) need
 /// the session present there too.
-fn snapshot_with_session(
-    pid: ProjectId,
-    sid: SessionId,
-    status: SessionStatus,
-) -> WorkspaceSnapshot {
+fn snapshot_with_session(pid: ProjectId, sid: SessionId, status: SessionStatus) -> Snapshot {
     let mut state = claude_commander_core::config::AppState::default();
     let mut project = claude_commander_core::session::Project::new(
         "P",
@@ -3692,12 +3688,12 @@ fn snapshot_with_session(
     project.add_worktree(sid);
     state.projects.insert(pid, project);
     state.sessions.insert(sid, sess);
-    claude_commander_core::api::workspace_snapshot_from_state(&state)
+    claude_commander_core::api::snapshot_from_state(&state)
 }
 
 /// A snapshot carrying one running session under one project, for exercising a
 /// remote backend's tree contents / command gating.
-fn snapshot_with_one_session() -> (WorkspaceSnapshot, SessionId, ProjectId) {
+fn snapshot_with_one_session() -> (Snapshot, SessionId, ProjectId) {
     use claude_commander_core::session::{Project, SessionStatus, WorktreeSession};
     let mut state = claude_commander_core::config::AppState::default();
     let project = Project::new("remote-proj", std::path::PathBuf::from("/tmp/rp"), "main");
@@ -3716,7 +3712,7 @@ fn snapshot_with_one_session() -> (WorkspaceSnapshot, SessionId, ProjectId) {
     state.projects.insert(pid, project);
     state.sessions.insert(sid, sess);
     (
-        claude_commander_core::api::workspace_snapshot_from_state(&state),
+        claude_commander_core::api::snapshot_from_state(&state),
         sid,
         pid,
     )
@@ -3724,7 +3720,7 @@ fn snapshot_with_one_session() -> (WorkspaceSnapshot, SessionId, ProjectId) {
 
 /// Build an `App` with the local backend plus one mock remote per `(name,
 /// snapshot)`, wired through the real `App::new` factory path.
-fn build_app_with_mock_remotes(servers: Vec<(&str, WorkspaceSnapshot)>) -> App {
+fn build_app_with_mock_remotes(servers: Vec<(&str, Snapshot)>) -> App {
     let tmp = tempfile::TempDir::new().unwrap();
     let config_path = tmp.path().join("config.toml");
     let state_path = tmp.path().join("state.json");
@@ -3733,7 +3729,7 @@ fn build_app_with_mock_remotes(servers: Vec<(&str, WorkspaceSnapshot)>) -> App {
     // `projects_dir` defaults to the user's REAL `~/Projects`, which the
     // repo-clone paths write into. Pin it under `tmp`.
     config.projects_dir = Some(tmp.path().join("projects"));
-    let mut snapshots: std::collections::HashMap<String, WorkspaceSnapshot> = Default::default();
+    let mut snapshots: std::collections::HashMap<String, Snapshot> = Default::default();
     for (name, snap) in servers {
         config
             .remote_servers
@@ -5020,7 +5016,7 @@ async fn palette_includes_remote_backend_sessions() {
 /// last_attached_at)` pairs, all under one project.
 fn snapshot_with_attach_times(
     sessions: &[(&str, Option<chrono::DateTime<chrono::Utc>>)],
-) -> (WorkspaceSnapshot, Vec<SessionId>) {
+) -> (Snapshot, Vec<SessionId>) {
     use claude_commander_core::session::{Project, SessionStatus, WorktreeSession};
     let mut state = claude_commander_core::config::AppState::default();
     let mut project = Project::new("proj", std::path::PathBuf::from("/tmp/p"), "main");
@@ -5036,10 +5032,7 @@ fn snapshot_with_attach_times(
         ids.push(id);
     }
     state.projects.insert(pid, project);
-    (
-        claude_commander_core::api::workspace_snapshot_from_state(&state),
-        ids,
-    )
+    (claude_commander_core::api::snapshot_from_state(&state), ids)
 }
 
 /// The palette must score a session's branch and program, not only its title —
@@ -5072,7 +5065,7 @@ async fn palette_scores_branch_and_program_but_not_project_name() {
     project.add_worktree(sid);
     state.sessions.insert(sid, session);
     state.projects.insert(pid, project);
-    let snap = claude_commander_core::api::workspace_snapshot_from_state(&state);
+    let snap = claude_commander_core::api::snapshot_from_state(&state);
 
     let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
     app.bootstrap_backend_views().await;
@@ -5499,7 +5492,7 @@ async fn app_with_editor_capable_session() -> (App, SessionId, std::path::PathBu
     project.add_worktree(sid);
     state.projects.insert(pid, project);
     state.sessions.insert(sid, sess);
-    let snap = claude_commander_core::api::workspace_snapshot_from_state(&state);
+    let snap = claude_commander_core::api::snapshot_from_state(&state);
 
     let mut app = build_app_with_mock_remotes(vec![("buildbox", snap)]);
     app.bootstrap_backend_views().await;
@@ -9790,7 +9783,7 @@ async fn app_with_sectioned_sessions(alpha_section: Option<&str>) -> (App, Sessi
     let beta = mk("beta-sess");
     state.projects.insert(pid, project);
 
-    let mut snap = claude_commander_core::api::workspace_snapshot_from_state(&state);
+    let mut snap = claude_commander_core::api::snapshot_from_state(&state);
     for s in snap.sessions.iter_mut() {
         let name = if s.session_id == alpha || s.session_id == alpha_two {
             alpha_section.map(str::to_string)

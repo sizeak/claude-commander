@@ -145,7 +145,7 @@ async fn fetch_and_send_backend_change(
     backend: Arc<dyn CommanderBackend>,
     tx: tokio::sync::mpsc::Sender<AppEvent>,
 ) -> bool {
-    let snapshot = match backend.workspace_snapshot().await {
+    let snapshot = match backend.snapshot().await {
         Ok(s) => s,
         Err(e) => {
             debug!("Snapshot refresh for backend {backend_id} failed: {e}");
@@ -182,7 +182,7 @@ async fn fetch_and_send_backend_change(
 /// for the rest of the outage.
 fn connection_from_snapshot(
     is_local: bool,
-    snapshot: &claude_commander_core::api::WorkspaceSnapshot,
+    snapshot: &claude_commander_core::api::Snapshot,
 ) -> Option<ConnectionState> {
     if !is_local {
         return None;
@@ -2384,7 +2384,7 @@ impl App {
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
         let backend = self.backend_arc(id);
-        let snapshot = backend.workspace_snapshot().await;
+        let snapshot = backend.snapshot().await;
         let states = backend.agent_states(false).await;
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
@@ -2413,7 +2413,7 @@ impl App {
         // Read back through the backend (which wraps the same store the test
         // seeded) rather than the store directly, so this stays clear of the
         // Phase-C store-access gate.
-        if let Ok(snapshot) = self.local_arc().workspace_snapshot().await {
+        if let Ok(snapshot) = self.local_arc().snapshot().await {
             self.backends[0].view.snapshot = snapshot;
             self.backends[0].view.connection =
                 claude_commander_core::backend::ConnectionState::Connected;
@@ -2643,7 +2643,7 @@ impl App {
             {
                 continue;
             }
-            let snapshot = handle.backend.workspace_snapshot().await;
+            let snapshot = handle.backend.snapshot().await;
             let states = handle.backend.agent_states(false).await;
             match (snapshot, states) {
                 (Ok(snapshot), Ok(states)) => {

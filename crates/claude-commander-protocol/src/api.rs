@@ -265,7 +265,7 @@ pub enum OperationOutcome {
 }
 
 /// One entry in the service's in-memory ring ledger of recent cascade /
-/// push-stack operations, surfaced through [`WorkspaceSnapshot`].
+/// push-stack operations, surfaced through [`Snapshot`].
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,7 +299,7 @@ pub struct ServerStatus {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceSnapshot {
+pub struct Snapshot {
     pub projects: Vec<ProjectInfo>,
     pub sessions: Vec<SessionInfo>,
     /// The session a paused cascade is stalled at, if any.
@@ -623,12 +623,12 @@ mod tests {
     }
 
     #[test]
-    fn workspace_snapshot_round_trips_with_maps() {
+    fn snapshot_round_trips_with_maps() {
         let pid = ProjectId::new();
         let sid = SessionId::new();
         let mut project_pull = BTreeMap::new();
         project_pull.insert(pid, PullStatus::UpToDate);
-        let snapshot = WorkspaceSnapshot {
+        let snapshot = Snapshot {
             projects: vec![ProjectInfo {
                 id: pid,
                 name: "repo".to_string(),
@@ -649,7 +649,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&snapshot).unwrap();
-        let back: WorkspaceSnapshot = serde_json::from_str(&json).unwrap();
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.projects.len(), 1);
         assert_eq!(
             back.projects[0].origin_url.as_deref(),
@@ -660,16 +660,16 @@ mod tests {
         assert!(back.server.gh_available);
     }
 
-    /// A `WorkspaceSnapshot` with the optional collections omitted still
+    /// A `Snapshot` with the optional collections omitted still
     /// deserializes (they default to empty).
     #[test]
-    fn workspace_snapshot_defaults_optional_collections() {
+    fn snapshot_defaults_optional_collections() {
         let json = r#"{
             "projects": [],
             "sessions": [],
             "server": {"gh_available": false, "tmux_ok": false, "version": "x"}
         }"#;
-        let snap: WorkspaceSnapshot = serde_json::from_str(json).unwrap();
+        let snap: Snapshot = serde_json::from_str(json).unwrap();
         assert!(snap.cascade_paused.is_none());
         assert!(snap.pending_comment_sessions.is_empty());
         assert!(snap.project_pull.is_empty());

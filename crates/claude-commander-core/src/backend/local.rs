@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CommanderService, CreateOptions, CreateSessionOpts, DiffSide,
     NewComment, OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot,
-    SessionDetail, SetSessionBaseOutcome, WorkspaceSnapshot,
+    SessionDetail, SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, ScanResult, SessionId};
@@ -213,8 +213,8 @@ impl CommanderBackend for LocalBackend {
 
     // -- Queries (all `Send`: store reads, tmux, git CLI) --
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
-        Ok(self.service.workspace_snapshot().await?)
+    async fn snapshot(&self) -> BResult<Snapshot> {
+        Ok(self.service.snapshot().await?)
     }
 
     async fn agent_states(&self, fresh: bool) -> BResult<AgentStatesSnapshot> {
@@ -597,11 +597,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_delegates() {
+    async fn snapshot_delegates() {
         let dir = tempfile::TempDir::new().unwrap();
         let be = backend(&dir);
         let (pid, sid) = seed(&be).await;
-        let snap = be.workspace_snapshot().await.unwrap();
+        let snap = be.snapshot().await.unwrap();
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.projects[0].id, pid);
         assert_eq!(snap.sessions.len(), 1);

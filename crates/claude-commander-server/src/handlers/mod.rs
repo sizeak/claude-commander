@@ -11,7 +11,7 @@ pub mod paste;
 pub mod projects;
 pub mod review;
 pub mod sessions;
-pub mod workspace;
+pub mod snapshot;
 
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -16,7 +16,7 @@ use tracing::warn;
 
 use crate::auth::require_bearer;
 use crate::handlers::{
-    blobs, cascade, config, github, health, paste, projects, review, sessions, workspace,
+    blobs, cascade, config, github, health, paste, projects, review, sessions, snapshot,
 };
 use crate::state::AppState;
 use crate::ws;
@@ -59,10 +59,10 @@ pub fn build_router(state: AppState) -> Router {
 
     let api = Router::new()
         // -- workspace surface --
-        .route("/workspace", get(workspace::snapshot))
-        .route("/agent-states", get(workspace::agent_states))
-        .route("/pr-refresh", post(workspace::pr_refresh))
-        .route("/create-options", get(workspace::create_options))
+        .route("/workspace", get(snapshot::snapshot))
+        .route("/agent-states", get(snapshot::agent_states))
+        .route("/pr-refresh", post(snapshot::pr_refresh))
+        .route("/create-options", get(snapshot::create_options))
         .route("/comments/pending", get(review::pending))
         // -- cascade / push-stack --
         .route("/cascade/resume", post(cascade::resume))
@@ -280,6 +280,41 @@ mod tests {
                 .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .is_none(),
             "empty allowlist must not emit a CORS allow header"
+        );
+    }
+
+    /// The snapshot is served at `/api/workspace` with a fixed top-level key
+    /// set. The Rust type is named `Snapshot`, but the URL and the JSON shape
+    /// are the wire contract every client (TUI remote, Flutter) builds against,
+    /// so a rename must not move either.
+    #[tokio::test]
+    async fn snapshot_is_served_at_api_workspace_with_a_stable_shape() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+
+        let req = Request::get("/api/workspace").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("snapshot is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "cascade_paused",
+                "operations",
+                "pending_comment_sessions",
+                "project_pull",
+                "projects",
+                "server",
+                "sessions",
+            ]
         );
     }
 }

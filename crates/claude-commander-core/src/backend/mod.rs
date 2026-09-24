@@ -50,7 +50,7 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, ServerStatus,
-    SessionDetail, SetSessionBaseOutcome, WorkspaceSnapshot,
+    SessionDetail, SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
@@ -218,7 +218,7 @@ pub use claude_commander_protocol::connection::ConnectionState;
 /// synchronously (no `.await` on the hot path).
 #[derive(Debug, Clone)]
 pub struct BackendView {
-    pub snapshot: WorkspaceSnapshot,
+    pub snapshot: Snapshot,
     pub agent_states: AgentStatesSnapshot,
     pub connection: ConnectionState,
 }
@@ -238,13 +238,13 @@ impl BackendView {
     }
 }
 
-/// An empty [`WorkspaceSnapshot`] placeholder (no projects/sessions). Used to
+/// An empty [`Snapshot`] placeholder (no projects/sessions). Used to
 /// seed a [`BackendView`] before its first real snapshot lands (and by tests to
 /// stand up a `mock::MockBackend` — plain text, since that module only exists
 /// under `cfg(test)` or the `test-support` feature, so a link to it would be
 /// unresolvable in a normal doc build).
-pub fn empty_snapshot() -> WorkspaceSnapshot {
-    WorkspaceSnapshot {
+pub fn empty_snapshot() -> Snapshot {
+    Snapshot {
         projects: Vec::new(),
         sessions: Vec::new(),
         cascade_paused: None,
@@ -560,7 +560,7 @@ pub trait CommanderBackend: Send + Sync {
 
     // -- Queries --
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot>;
+    async fn snapshot(&self) -> BResult<Snapshot>;
 
     /// Bulk agent-state snapshot for active sessions. `fresh` bypasses any TTL
     /// cache and forces a re-capture.

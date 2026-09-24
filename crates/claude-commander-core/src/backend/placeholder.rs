@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    SetSessionBaseOutcome, WorkspaceSnapshot,
+    SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
@@ -88,7 +88,7 @@ impl CommanderBackend for PlaceholderBackend {
         BackendChangeFeed::new(self.gen_rx.clone())
     }
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
+    async fn snapshot(&self) -> BResult<Snapshot> {
         self.unavailable()
     }
 
@@ -292,7 +292,7 @@ mod tests {
         let b = PlaceholderBackend::new("buildbox", "invalid url");
         assert_eq!(b.descriptor().name, "buildbox");
         assert_eq!(b.descriptor().kind, BackendKind::Remote);
-        let err = b.workspace_snapshot().await.unwrap_err();
+        let err = b.snapshot().await.unwrap_err();
         match err {
             BackendError::Unavailable { reason } => assert_eq!(reason, "invalid url"),
             other => panic!("expected Unavailable, got {other:?}"),

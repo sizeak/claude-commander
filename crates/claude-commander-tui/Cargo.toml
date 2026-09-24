@@ -119,7 +119,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 # Re-state core with `test-support` to reach its test scaffolding
-# (`backend::mock::MockBackend`, `api::workspace_snapshot_from_state`), which is
+# (`backend::mock::MockBackend`, `api::snapshot_from_state`), which is
 # `#[cfg(test)]`-gated in core and therefore invisible across the crate boundary.
 # Being a dev-dependency, the feature is active for `cargo test` only — a plain
 # `cargo build` of this crate still gets core without it.

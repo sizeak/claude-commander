@@ -145,7 +145,7 @@ impl From<claude_commander_protocol::api::PullBlockReason> for BlockReason {
 
 impl PullOutcome {
     /// Project this pull outcome onto the protocol [`PullStatus`] DTO surfaced in
-    /// [`WorkspaceSnapshot::project_pull`](claude_commander_protocol::api::WorkspaceSnapshot).
+    /// [`Snapshot::project_pull`](claude_commander_protocol::api::Snapshot).
     pub fn to_status(self) -> claude_commander_protocol::api::PullStatus {
         use claude_commander_protocol::api::PullStatus as S;
         match self {

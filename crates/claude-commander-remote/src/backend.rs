@@ -21,7 +21,7 @@ use claude_commander_client::{
 use claude_commander_core::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    SetSessionBaseOutcome, WorkspaceSnapshot,
+    SetSessionBaseOutcome, Snapshot,
 };
 use claude_commander_core::backend::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
@@ -140,11 +140,8 @@ impl CommanderBackend for RemoteBackend {
 
     // -- Queries --
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
-        self.client
-            .workspace_snapshot()
-            .await
-            .map_err(into_backend_error)
+    async fn snapshot(&self) -> BResult<Snapshot> {
+        self.client.snapshot().await.map_err(into_backend_error)
     }
 
     async fn agent_states(&self, fresh: bool) -> BResult<AgentStatesSnapshot> {
@@ -622,7 +619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_round_trips_seeded_state() {
+    async fn snapshot_round_trips_seeded_state() {
         let (addr, service, _d, _w) = serve_disabled().await;
         let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
         let pid = project.id;
@@ -644,7 +641,7 @@ mod tests {
             .unwrap();
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        let snap = backend.workspace_snapshot().await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.projects[0].id, pid);
         assert_eq!(snap.sessions.len(), 1);
@@ -714,7 +711,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snap = backend.workspace_snapshot().await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
         let s = snap
             .sessions
             .iter()
@@ -751,7 +748,7 @@ mod tests {
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
         // Precondition: not unread.
-        let before = backend.workspace_snapshot().await.unwrap();
+        let before = backend.snapshot().await.unwrap();
         assert!(
             !before
                 .sessions
@@ -763,7 +760,7 @@ mod tests {
 
         backend.mark_unread(vec![sid]).await.unwrap();
 
-        let after = backend.workspace_snapshot().await.unwrap();
+        let after = backend.snapshot().await.unwrap();
         assert!(
             after
                 .sessions
@@ -796,7 +793,7 @@ mod tests {
 
         let backend =
             RemoteBackend::with_config(spec(addr, Some("the-wrong-token")), idle_config()).unwrap();
-        let err = backend.workspace_snapshot().await.unwrap_err();
+        let err = backend.snapshot().await.unwrap_err();
         assert!(matches!(err, BackendError::Auth), "got {err:?}");
     }
 
@@ -814,7 +811,7 @@ mod tests {
 
         let backend =
             RemoteBackend::with_config(spec(addr, Some("the-real-token")), idle_config()).unwrap();
-        let snap = backend.workspace_snapshot().await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
         assert!(snap.projects.is_empty());
     }
 
@@ -822,7 +819,7 @@ mod tests {
     async fn connection_refused_is_unavailable() {
         let addr = unused_addr().await;
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        let err = backend.workspace_snapshot().await.unwrap_err();
+        let err = backend.snapshot().await.unwrap_err();
         assert!(
             matches!(err, BackendError::Unavailable { .. }),
             "got {err:?}"
@@ -1090,7 +1087,7 @@ mod tests {
         // Connection refused → Unavailable.
         let dead = unused_addr().await;
         let refused = RemoteBackend::with_config(spec(dead, Some(SECRET)), idle_config()).unwrap();
-        assert_clean(&refused.workspace_snapshot().await.unwrap_err());
+        assert_clean(&refused.snapshot().await.unwrap_err());
 
         // 401 from a token server we hold the wrong secret for → Auth.
         let data_dir = TempDir::new().unwrap();
@@ -1102,7 +1099,7 @@ mod tests {
         );
         let addr = spawn_server(state).await;
         let authed = RemoteBackend::with_config(spec(addr, Some(SECRET)), idle_config()).unwrap();
-        let auth_err = authed.workspace_snapshot().await.unwrap_err();
+        let auth_err = authed.snapshot().await.unwrap_err();
         assert!(matches!(auth_err, BackendError::Auth));
         assert_clean(&auth_err);
 
@@ -1234,7 +1231,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snap = backend.workspace_snapshot().await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
         assert!(
             snap.sessions.iter().any(|s| s.session_id == sid),
             "created session should appear in the snapshot"

@@ -187,7 +187,7 @@ default = ["audio", "clipboard"]
 audio = ["dep:rodio", "dep:cpal", "dep:hound"]
 clipboard = ["dep:arboard"]
 # Exposes test scaffolding (`backend::mock::MockBackend`,
-# `api::workspace_snapshot_from_state`) to OTHER crates' tests. A `#[cfg(test)]`
+# `api::snapshot_from_state`) to OTHER crates' tests. A `#[cfg(test)]`
 # item is invisible across a crate boundary, and `claude-commander-tui`'s tests
 # need both — so they are gated on `any(test, feature = "test-support")` instead.
 # Enable it only from a `[dev-dependencies]` entry: it is off by default, so

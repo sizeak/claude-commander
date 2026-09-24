@@ -18,7 +18,7 @@
 //!
 //! | Trait method | HTTP |
 //! |---|---|
-//! | `workspace_snapshot` | `GET /api/workspace` |
+//! | `snapshot` | `GET /api/workspace` |
 //! | `agent_states(fresh)` | `GET /api/agent-states?fresh=` |
 //! | `session_detail(q, lines)` | `GET /api/sessions/{q}/detail?lines=` (404 → `None`) |
 //! | `preview(Session)` / `preview(Project)` | `GET /api/sessions/{id}/preview?lines=` / `GET /api/projects/{id}/preview` |

@@ -83,7 +83,7 @@ pub fn find_session_exact<'a>(
 }
 
 /// Resolve a `--project <name>` flag to the project's on-disk repo path using a
-/// backend's [`WorkspaceSnapshot`](crate::api::WorkspaceSnapshot). Matches a
+/// backend's [`Snapshot`](crate::api::Snapshot). Matches a
 /// project by name (case-insensitive) and returns its `repo_path` — the path
 /// the session's worktree will fork from. For a remote backend this is the
 /// server-side path, so the caller never has to know it.

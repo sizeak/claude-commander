@@ -1,6 +1,6 @@
 //! An in-memory [`CommanderBackend`] test double.
 //!
-//! [`MockBackend`] serves a fixed [`WorkspaceSnapshot`] + agent states and
+//! [`MockBackend`] serves a fixed [`Snapshot`] + agent states and
 //! exposes a drivable connection watch + change feed, so multi-backend TUI tests
 //! can stand up a fake remote server without any network or tmux. Mutations are
 //! accepted as no-ops (tests assert on rendering/selection, not persistence);
@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    SetSessionBaseOutcome, WorkspaceSnapshot,
+    SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
@@ -34,7 +34,7 @@ use super::{
 /// See the module docs.
 pub struct MockBackend {
     descriptor: BackendDescriptor,
-    snapshot: Mutex<WorkspaceSnapshot>,
+    snapshot: Mutex<Snapshot>,
     states: Mutex<AgentStatesSnapshot>,
     branches: Mutex<Vec<BranchInfo>>,
     fail: Mutex<bool>,
@@ -108,7 +108,7 @@ pub struct MockBackend {
 
 impl MockBackend {
     /// A remote-kind mock named `name` serving `snapshot`, initially connected.
-    pub fn new(name: impl Into<String>, snapshot: WorkspaceSnapshot) -> Self {
+    pub fn new(name: impl Into<String>, snapshot: Snapshot) -> Self {
         let (conn_tx, conn_rx) = watch::channel(ConnectionState::Connected);
         let (gen_tx, gen_rx) = watch::channel(0u64);
         Self {
@@ -342,7 +342,7 @@ impl CommanderBackend for MockBackend {
         Some(self.conn_rx.clone())
     }
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
+    async fn snapshot(&self) -> BResult<Snapshot> {
         self.guard()?;
         Ok(self.snapshot.lock().unwrap().clone())
     }

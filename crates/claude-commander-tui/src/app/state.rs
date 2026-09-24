@@ -1,7 +1,7 @@
 //! State management: state updates, session sync, list refresh, selection persistence.
 
 use super::*;
-use claude_commander_core::api::{ProjectInfo, SessionInfo, WorkspaceSnapshot};
+use claude_commander_core::api::{ProjectInfo, SessionInfo, Snapshot};
 use std::collections::BTreeMap;
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
@@ -1169,7 +1169,7 @@ pub(super) fn order_recent<T>(
 /// Index a snapshot's sessions by id for O(1) lookup during stack-chain
 /// building.
 fn session_index(
-    snapshot: &claude_commander_core::api::WorkspaceSnapshot,
+    snapshot: &claude_commander_core::api::Snapshot,
 ) -> std::collections::HashMap<
     claude_commander_core::session::SessionId,
     &claude_commander_core::api::SessionInfo,
@@ -1227,7 +1227,7 @@ pub(super) fn apply_viewed_session_refresh(
 /// the delete-confirm dialog derives its preview from the cached snapshot rather
 /// than reading the store, so a remote backend's snapshot drives it identically.
 pub(super) fn stack_retarget_preview_from_snapshot(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     session_id: SessionId,
 ) -> Option<(usize, String)> {
     let deleted = snapshot
@@ -1287,7 +1287,7 @@ pub(super) fn stack_retarget_preview_from_snapshot(
 /// session shows no marker rather than a possibly-wrong one; every row is still
 /// a legal target.
 pub(super) fn base_picker_rows_from_snapshot(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     session_id: SessionId,
 ) -> Vec<(Option<SessionId>, String, String)> {
     let Some(session) = snapshot
@@ -1356,7 +1356,7 @@ const CURRENT_SUFFIX: &str = " — current base";
 // ---- List-view item builders (revived from main; reuse board.rs helpers) ----
 
 pub(super) fn build_project_grouped_items(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     agent_states: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionListItem> {
     let by_id = session_index(snapshot);
@@ -1398,7 +1398,7 @@ pub(super) fn build_project_grouped_items(
 }
 
 pub(super) fn build_section_grouped_items(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     sections: &[claude_commander_core::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
@@ -1487,7 +1487,7 @@ pub(super) fn build_section_grouped_items(
 }
 
 pub(super) fn build_stacked_section_items(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     sections: &[claude_commander_core::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
@@ -1747,7 +1747,7 @@ mod unread_transition_tests {
 mod stack_order_tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use claude_commander_core::api::workspace_snapshot_from_state;
+    use claude_commander_core::api::snapshot_from_state;
     use claude_commander_core::session::{ProjectId, WorktreeSession};
     use std::path::PathBuf;
 
@@ -1788,11 +1788,11 @@ mod stack_order_tests {
         }
     }
 
-    /// Build the DTO [`WorkspaceSnapshot`] the tree builders now consume, from a
+    /// Build the DTO [`Snapshot`] the tree builders now consume, from a
     /// list of domain sessions — same shaped input as before, projected through
-    /// the production `workspace_snapshot_from_state` so tests exercise the real
+    /// the production `snapshot_from_state` so tests exercise the real
     /// conversion path.
-    fn appstate_from(sessions: Vec<WorktreeSession>) -> WorkspaceSnapshot {
+    fn appstate_from(sessions: Vec<WorktreeSession>) -> Snapshot {
         let mut state = claude_commander_core::config::AppState::default();
         // Group sessions by their project_id so projects with multiple
         // worktrees stay linked correctly.
@@ -1813,7 +1813,7 @@ mod stack_order_tests {
             state.projects.get_mut(&pid).unwrap().add_worktree(s.id);
             state.sessions.insert(s.id, s);
         }
-        workspace_snapshot_from_state(&state)
+        snapshot_from_state(&state)
     }
 
     /// The picker offers main plus every non-descendant sibling, and never the
@@ -2899,7 +2899,7 @@ mod stack_order_tests {
         // Project into the DTO snapshot the builders now consume, once, outside
         // the timed loop — we measure the builders, not snapshot construction
         // (the cached snapshot is built on change, not per refresh).
-        let snapshot = workspace_snapshot_from_state(&state);
+        let snapshot = snapshot_from_state(&state);
 
         // Warm up so the first-touch allocation cost doesn't dominate the timing.
         for _ in 0..50 {

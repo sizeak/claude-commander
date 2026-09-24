@@ -15,7 +15,7 @@ use std::time::Duration;
 use claude_commander_protocol::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, ProgramInfo, ReviewSnapshot, SessionDetail, SetProgramsRequest,
-    SetSessionBase, SetSessionBaseOutcome, ToggleReviewed, WorkspaceSnapshot,
+    SetSessionBase, SetSessionBaseOutcome, Snapshot, ToggleReviewed,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
@@ -438,7 +438,7 @@ impl RemoteClient {
         self.post_empty_ok(self.endpoint(&["pr-refresh"])).await
     }
 
-    pub async fn workspace_snapshot(&self) -> ClientResult<WorkspaceSnapshot> {
+    pub async fn snapshot(&self) -> ClientResult<Snapshot> {
         self.get_json(self.endpoint(&["workspace"])).await
     }
 
