@@ -8,8 +8,8 @@
 //! each frame — so the tab holds only cursor/editing state, and every edit goes
 //! through the eager-propagation operations in [`super::workspaces`].
 
-use super::colour_picker::{ColourPicker, ColourPickerFocus, GRID_COLUMNS, PickerOutcome};
-use super::settings::{list_scroll_offset, truncate_str};
+use super::colour_picker::{ColourPicker, ColourPickerFocus, PickerOutcome};
+use super::settings::{list_scroll_offset, settings_areas, truncate_str};
 use super::workspaces::workspace_color;
 use super::*;
 use claude_commander_protocol::workspace::StartupWorkspace;
@@ -19,6 +19,46 @@ use claude_commander_viewmodel::workspace::MergedWorkspace;
 struct WorkspaceProjectRow {
     id: ProjectId,
     label: String,
+}
+
+/// The Workspaces tab's panes within the settings body: the workspace list,
+/// the divider, and the detail pane (colour, projects, the colour picker).
+pub(super) struct WorkspacesPanes {
+    pub list: Rect,
+    pub divider: Rect,
+    pub detail: Rect,
+}
+
+pub(super) fn workspaces_panes(body_area: Rect) -> WorkspacesPanes {
+    // Below the startup header row and a blank line.
+    let panes = Rect {
+        y: body_area.y + 2,
+        height: body_area.height.saturating_sub(2),
+        ..body_area
+    };
+    let list_width = panes.width.clamp(16, 28);
+    WorkspacesPanes {
+        list: Rect {
+            width: list_width,
+            ..panes
+        },
+        divider: Rect {
+            x: panes.x + list_width,
+            width: 1,
+            ..panes
+        },
+        detail: Rect {
+            x: panes.x + list_width + 2,
+            width: panes.width.saturating_sub(list_width + 2),
+            ..panes
+        },
+    }
+}
+
+/// How wide the colour picker's pane is when the settings modal is drawn in
+/// a frame `area` — what [`ColourPicker::fit_to_width`] is given each frame.
+pub(super) fn colour_picker_width(area: Rect) -> u16 {
+    workspaces_panes(settings_areas(area).body).detail.width
 }
 
 /// How the Startup row reads.
@@ -110,27 +150,12 @@ impl App {
                 ..body_area
             },
         );
-        let panes = Rect {
-            y: body_area.y + 2,
-            height: body_area.height.saturating_sub(2),
-            ..body_area
-        };
-
-        let list_width = panes.width.clamp(16, 28);
-        let list_area = Rect {
-            width: list_width,
-            ..panes
-        };
-        let divider_area = Rect {
-            x: panes.x + list_width,
-            width: 1,
-            ..panes
-        };
-        let detail_area = Rect {
-            x: panes.x + list_width + 2,
-            width: panes.width.saturating_sub(list_width + 2),
-            ..panes
-        };
+        let WorkspacesPanes {
+            list: list_area,
+            divider: divider_area,
+            detail: detail_area,
+        } = workspaces_panes(body_area);
+        let list_width = list_area.width;
         self.render_settings_divider(frame, divider_area);
 
         // --- Workspace list ---
@@ -311,10 +336,12 @@ impl App {
         let cells: Vec<Option<&crate::theme::ThemeSwatch>> = std::iter::once(None)
             .chain(picker.swatches.iter().map(Some))
             .collect();
-        for (row, chunk) in cells.chunks(GRID_COLUMNS).enumerate() {
+        // `columns` was fitted to this pane's width before the frame was drawn.
+        let columns = picker.columns.max(1);
+        for (row, chunk) in cells.chunks(columns).enumerate() {
             let mut spans = Vec::with_capacity(chunk.len() * 3);
             for (col, cell) in chunk.iter().enumerate() {
-                let selected = row * GRID_COLUMNS + col == picker.selected;
+                let selected = row * columns + col == picker.selected;
                 let (open, close) = if selected { ("[", "]") } else { (" ", " ") };
                 spans.push(Span::styled(open, bracket));
                 spans.push(match cell {

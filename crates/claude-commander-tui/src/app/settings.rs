@@ -436,7 +436,12 @@ impl App {
         area: Rect,
         state: &SettingsState,
     ) {
-        let modal_area = modals::centered_rect(75, 85, area);
+        let SettingsAreas {
+            modal: modal_area,
+            content: content_area,
+            body: body_area,
+            footer: footer_area,
+        } = settings_areas(area);
         frame.render_widget(Clear, modal_area);
 
         let block = Block::default()
@@ -444,13 +449,7 @@ impl App {
             .borders(Borders::ALL)
             .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.modal_info));
-        let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
-
-        let content_area = inner.inner(Margin {
-            horizontal: 1,
-            vertical: 0,
-        });
 
         if content_area.height < 4 {
             return;
@@ -492,20 +491,6 @@ impl App {
             ))),
             sep_area,
         );
-
-        // --- Body area (between separator and footer) ---
-        let body_area = Rect {
-            y: content_area.y + 2,
-            height: content_area.height.saturating_sub(4),
-            ..content_area
-        };
-
-        // --- Footer ---
-        let footer_area = Rect {
-            y: content_area.y + content_area.height.saturating_sub(1),
-            height: 1,
-            ..content_area
-        };
 
         if state.tab == SettingsTab::Sections {
             self.render_sections_tab(frame, body_area, footer_area, &state.sections_state);
@@ -3190,6 +3175,43 @@ fn settings_label_width(rows: &[SettingsRow], area_width: u16) -> u16 {
     // the label below its floor (on a very narrow terminal labels truncate).
     let cap = area_width.saturating_sub(MIN_VALUE + GAP).max(MIN_LABEL);
     desired.min(cap)
+}
+
+/// Where the settings modal draws within a frame `area`. Shared by the
+/// renderer and by state that must agree with what it draws (the colour
+/// picker's grid width).
+pub(super) struct SettingsAreas {
+    pub modal: Rect,
+    /// Inside the border and a one-column side margin.
+    pub content: Rect,
+    /// Between the tab bar's separator and the footer.
+    pub body: Rect,
+    pub footer: Rect,
+}
+
+pub(super) fn settings_areas(area: Rect) -> SettingsAreas {
+    let modal = modals::centered_rect(75, 85, area);
+    let content = Block::default()
+        .borders(Borders::ALL)
+        .inner(modal)
+        .inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        });
+    SettingsAreas {
+        modal,
+        content,
+        body: Rect {
+            y: content.y + 2,
+            height: content.height.saturating_sub(4),
+            ..content
+        },
+        footer: Rect {
+            y: content.y + content.height.saturating_sub(1),
+            height: 1,
+            ..content
+        },
+    }
 }
 
 /// Top scroll offset that keeps `selected` visible in a window `visible` rows

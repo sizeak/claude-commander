@@ -12,9 +12,12 @@ use tui_input::Input;
 use crate::theme::{Theme, ThemeSwatch};
 use claude_commander_protocol::workspace::{WorkspaceRejection, validate_workspace_color};
 
-/// Cells per grid row. Fixed rather than width-derived so `j`/`k` move by
-/// the same step the grid is drawn with.
-pub(crate) const GRID_COLUMNS: usize = 8;
+/// The most cells a grid row holds. A narrower pane gets fewer (see
+/// [`ColourPicker::fit_to_width`]).
+pub(crate) const MAX_GRID_COLUMNS: usize = 8;
+
+/// Terminal columns one grid cell takes: `[■■]`.
+pub(crate) const CELL_WIDTH: u16 = 4;
 
 /// Which part of the picker has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +36,10 @@ pub struct ColourPicker {
     pub hex: Input,
     /// Why the last Enter on the hex row was refused.
     pub error: Option<String>,
+    /// Cells per grid row. The renderer fits it to the pane on every frame
+    /// ([`Self::fit_to_width`]) and `j`/`k` step by it, so navigation always
+    /// moves by the row width the user is looking at.
+    pub columns: usize,
 }
 
 /// What a key did to the picker.
@@ -60,7 +67,9 @@ pub(crate) fn normalize_hex(raw: &str) -> Result<String, WorkspaceRejection> {
 
 impl ColourPicker {
     /// Open on `current` (the workspace's saved colour): the matching swatch
-    /// is preselected; a colour the theme doesn't have goes in the hex row.
+    /// is preselected; a colour the theme doesn't have goes in the hex row,
+    /// which then has focus — so Enter keeps it rather than picking the
+    /// grid's "No colour".
     pub fn open(theme: &Theme, current: Option<&str>) -> Self {
         let swatches = theme.swatches();
         let current = current.and_then(|c| normalize_hex(c).ok());
@@ -70,14 +79,24 @@ impl ColourPicker {
             hex: Input::default(),
             error: None,
             swatches,
+            columns: MAX_GRID_COLUMNS,
         };
         if let Some(current) = current {
             match picker.swatches.iter().position(|s| s.hex == current) {
                 Some(i) => picker.selected = i + 1,
-                None => picker.hex = current.into(),
+                None => {
+                    picker.hex = current.into();
+                    picker.focus = ColourPickerFocus::Hex;
+                }
             }
         }
         picker
+    }
+
+    /// Fit the grid to a pane `width` columns wide: as many whole cells as
+    /// fit, at least one and at most [`MAX_GRID_COLUMNS`].
+    pub fn fit_to_width(&mut self, width: u16) {
+        self.columns = usize::from(width / CELL_WIDTH).clamp(1, MAX_GRID_COLUMNS);
     }
 
     /// Number of grid cells, "No colour" included.
@@ -106,6 +125,7 @@ impl ColourPicker {
 
     fn grid_key(&mut self, key: KeyEvent) -> PickerOutcome {
         let last = self.cells() - 1;
+        let columns = self.columns.max(1);
         match key.code {
             KeyCode::Esc => return PickerOutcome::Cancel,
             KeyCode::Enter => {
@@ -114,14 +134,14 @@ impl ColourPicker {
             KeyCode::Left | KeyCode::Char('h') => self.selected = self.selected.saturating_sub(1),
             KeyCode::Right | KeyCode::Char('l') => self.selected = (self.selected + 1).min(last),
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected >= GRID_COLUMNS {
-                    self.selected -= GRID_COLUMNS;
+                if self.selected >= columns {
+                    self.selected -= columns;
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 // Onto a short last row, land on its last cell.
-                if self.selected / GRID_COLUMNS < last / GRID_COLUMNS {
-                    self.selected = (self.selected + GRID_COLUMNS).min(last);
+                if self.selected / columns < last / columns {
+                    self.selected = (self.selected + columns).min(last);
                 }
             }
             KeyCode::Tab | KeyCode::BackTab => self.focus = ColourPickerFocus::Hex,
@@ -162,16 +182,13 @@ impl ColourPicker {
         }
     }
 
-    /// A bracketed paste: it always lands in the hex row. Pasted over the
-    /// grid, it replaces the row (the paste *is* the colour); in the row, it
-    /// goes in at the caret like typing.
+    /// A bracketed paste: it always replaces the hex row and focuses it,
+    /// wherever the focus was — the paste *is* the colour (as in the Flutter
+    /// client's picker).
     pub fn paste(&mut self, text: &str) {
         let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-        if self.focus == ColourPickerFocus::Grid {
-            self.hex = Input::default();
-            self.focus = ColourPickerFocus::Hex;
-        }
-        super::insert_into_input(&mut self.hex, clean.trim());
+        self.hex = clean.trim().into();
+        self.focus = ColourPickerFocus::Hex;
         self.error = None;
     }
 }
@@ -224,10 +241,19 @@ mod tests {
     }
 
     #[test]
-    fn opening_on_an_off_theme_colour_prefills_the_hex_row() {
-        let p = picker(Some("#123456"));
+    fn opening_on_an_off_theme_colour_prefills_and_focuses_the_hex_row() {
+        let mut p = picker(Some("#123456"));
         assert_eq!(p.selected, 0);
         assert_eq!(p.hex.value(), "#123456");
+        assert_eq!(
+            p.focus,
+            ColourPickerFocus::Hex,
+            "Enter must keep the colour, not pick the grid's No colour"
+        );
+        assert_eq!(
+            press(&mut p, &[KeyCode::Enter]),
+            PickerOutcome::Pick(Some("#123456".into()))
+        );
     }
 
     #[test]
@@ -240,13 +266,16 @@ mod tests {
     #[test]
     fn arrows_and_hjkl_move_around_the_grid() {
         let mut p = picker(None);
-        assert!(p.cells() > GRID_COLUMNS * 2, "the test needs three rows");
+        assert!(
+            p.cells() > MAX_GRID_COLUMNS * 2,
+            "the test needs three rows"
+        );
         press(&mut p, &[KeyCode::Right, KeyCode::Char('l')]);
         assert_eq!(p.selected, 2);
         press(&mut p, &[KeyCode::Down]);
-        assert_eq!(p.selected, 2 + GRID_COLUMNS);
+        assert_eq!(p.selected, 2 + MAX_GRID_COLUMNS);
         press(&mut p, &[KeyCode::Char('j')]);
-        assert_eq!(p.selected, 2 + 2 * GRID_COLUMNS);
+        assert_eq!(p.selected, 2 + 2 * MAX_GRID_COLUMNS);
         press(&mut p, &[KeyCode::Char('k'), KeyCode::Up]);
         assert_eq!(p.selected, 2);
         press(&mut p, &[KeyCode::Up]);
@@ -256,10 +285,27 @@ mod tests {
     }
 
     #[test]
+    fn the_grid_fits_its_width_and_navigation_follows() {
+        let mut p = picker(None);
+        p.fit_to_width(26); // the detail pane at 80x24
+        assert_eq!(p.columns, 6);
+        press(&mut p, &[KeyCode::Down]);
+        assert_eq!(p.selected, 6, "j steps by the drawn row width");
+        press(&mut p, &[KeyCode::Up]);
+        assert_eq!(p.selected, 0);
+        p.fit_to_width(200);
+        assert_eq!(p.columns, MAX_GRID_COLUMNS, "capped");
+        p.fit_to_width(2);
+        assert_eq!(p.columns, 1, "at least one");
+        press(&mut p, &[KeyCode::Down]);
+        assert_eq!(p.selected, 1);
+    }
+
+    #[test]
     fn down_onto_a_short_last_row_lands_on_its_last_cell() {
         let mut p = picker(None);
         let last = p.cells() - 1;
-        p.selected = (last / GRID_COLUMNS) * GRID_COLUMNS - 1; // end of the row above
+        p.selected = (last / MAX_GRID_COLUMNS) * MAX_GRID_COLUMNS - 1; // end of the row above
         press(&mut p, &[KeyCode::Down]);
         assert_eq!(p.selected, last);
         press(&mut p, &[KeyCode::Down, KeyCode::Right]);
@@ -355,10 +401,12 @@ mod tests {
     }
 
     #[test]
-    fn paste_in_the_hex_row_inserts_at_the_caret() {
+    fn paste_in_the_hex_row_replaces_it_too() {
         let mut p = picker(None);
         press(&mut p, &[KeyCode::Char('#')]);
-        p.paste("aabbcc");
-        assert_eq!(p.hex.value(), "#aabbcc");
+        type_str(&mut p, "12");
+        p.paste(" aabbcc ");
+        assert_eq!(p.hex.value(), "aabbcc", "the paste *is* the colour");
+        assert_eq!(p.focus, ColourPickerFocus::Hex);
     }
 }

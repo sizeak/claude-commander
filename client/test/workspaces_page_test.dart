@@ -288,24 +288,43 @@ void main() {
             .onPressed !=
         null;
 
-    for (final (label, tokens) in [
-      ('Mission Control', missionControlTokens),
-      ('LCARS', lcarsTokens),
+    // Each theme reuses its primary for one other role; that role's swatch
+    // must be dropped and the shared hex offered once, as Primary.
+    for (final (label, tokens, duplicate, duplicateColor) in [
+      (
+        'Mission Control',
+        missionControlTokens,
+        'Nav',
+        missionControlTokens.nav,
+      ),
+      ('LCARS', lcarsTokens, 'Working', lcarsTokens.working),
     ]) {
       testWidgets('offers the $label theme colours, deduplicated', (
         tester,
       ) async {
+        final shared = workspaceColorHex(tokens.primary);
+        expect(
+          workspaceColorHex(duplicateColor),
+          shared,
+          reason: '$label must reuse its primary as $duplicate for this test',
+        );
+
         await pumpThemed(tester, tokens);
         await openColour(tester, 'Personal');
 
-        final swatches = themeSwatches(tokens);
-        final hexes = {for (final s in swatches) s.hex};
-        expect(hexes.length, swatches.length, reason: 'no duplicate colours');
-        expect(hexes, contains(workspaceColorHex(tokens.primary)));
-        expect(hexes, contains(workspaceColorHex(tokens.success)));
-        expect(hexes, contains(workspaceColorHex(tokens.danger)));
-        for (final s in swatches) {
-          expect(find.byKey(ValueKey('swatch-${s.hex}')), findsOneWidget);
+        Finder tooltipStarting(String prefix) => find.byWidgetPredicate(
+          (w) => w is Tooltip && (w.message ?? '').startsWith(prefix),
+        );
+        expect(
+          tooltipStarting('$duplicate · '),
+          findsNothing,
+          reason: '$duplicate shares Primary\'s hex, so it is not offered',
+        );
+        expect(find.byKey(ValueKey('swatch-$shared')), findsOneWidget);
+        expect(find.byTooltip('Primary · $shared'), findsOneWidget);
+        expect(tooltipStarting('Primary · '), findsOneWidget);
+        // Every offered colour is drawn, once.
+        for (final s in themeSwatches(tokens)) {
           expect(find.byTooltip('${s.name} · ${s.hex}'), findsOneWidget);
         }
         expect(tester.takeException(), isNull);

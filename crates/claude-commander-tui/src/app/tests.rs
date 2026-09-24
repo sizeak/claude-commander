@@ -11276,6 +11276,8 @@ mod workspaces {
         feed(app, KeyCode::Enter).await;
     }
 
+    use crate::app::colour_picker::ColourPickerFocus;
+
     fn picker(app: &App) -> &crate::app::colour_picker::ColourPicker {
         match &ws_state(app).editing {
             Some(WorkspacesEditing::Colour { picker }) => picker,
@@ -11337,10 +11339,15 @@ mod workspaces {
             "validated and lower-cased"
         );
 
-        // An off-theme colour reopens in the hex row, not on a swatch.
+        // An off-theme colour reopens in the hex row, not on a swatch, with
+        // the row focused so Enter keeps it rather than clearing it.
         feed(&mut app, KeyCode::Enter).await;
         assert_eq!(picker(&app).selected, 0);
         assert_eq!(picker(&app).hex.value(), "#aabbcc");
+        assert_eq!(picker(&app).focus, ColourPickerFocus::Hex);
+        feed(&mut app, KeyCode::Enter).await;
+        assert!(ws_state(&app).editing.is_none(), "the picker closed");
+        assert_eq!(work_colour(&app), Some("#aabbcc"), "Enter kept the colour");
     }
 
     #[tokio::test]
@@ -11360,7 +11367,17 @@ mod workspaces {
         app.set_workspace_color(Some("Work".into()), "#123456")
             .await;
         open_work_colour_picker(&mut app).await;
+        // An off-theme colour opens with the hex row focused; Tab goes to the
+        // grid and back without leaving the picker or the Workspaces tab.
+        assert_eq!(picker(&app).focus, ColourPickerFocus::Hex);
         feed(&mut app, KeyCode::Tab).await;
+        assert_eq!(picker(&app).focus, ColourPickerFocus::Grid);
+        feed(&mut app, KeyCode::Tab).await;
+        assert!(
+            matches!(&app.ui_state.modal, Modal::Settings(s) if s.tab == SettingsTab::Workspaces),
+            "Tab stayed inside the picker"
+        );
+        assert_eq!(picker(&app).focus, ColourPickerFocus::Hex);
         type_programs(&mut app, "zz").await;
         feed(&mut app, KeyCode::Enter).await;
         let p = picker(&app);
@@ -11396,6 +11413,51 @@ mod workspaces {
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
         insta::assert_snapshot!(terminal.backend());
+    }
+
+    /// At 80x24 the detail pane is narrower than a full grid row, so the
+    /// grid must wrap to what fits: every drawn row ends on a whole cell, and
+    /// the highlighted cell is on screen wherever the cursor goes.
+    #[tokio::test]
+    async fn settings_tab_colour_picker_fits_an_80_column_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_work_colour_picker(&mut app).await;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        let screen = buffer_lines(&terminal);
+        let grid_rows: Vec<&str> = screen.lines().filter(|l| l.contains("[··]")).collect();
+        assert_eq!(
+            grid_rows.len(),
+            1,
+            "the No colour cell is highlighted:\n{screen}"
+        );
+        // The grid's first row: the detail pane, between the list divider
+        // and the modal's right border.
+        let row = grid_rows[0]
+            .split('│')
+            .find(|seg| seg.contains("[··]"))
+            .unwrap();
+        let squares = row.matches('■').count();
+        assert!(
+            squares % 2 == 0 && row.trim_end().ends_with("■■"),
+            "the row's last cell is cut off: {row:?}"
+        );
+
+        // Walk the cursor across the whole grid; its cell is always drawn.
+        let cells = picker(&app).cells();
+        for i in 1..cells {
+            feed(&mut app, KeyCode::Right).await;
+            assert_eq!(picker(&app).selected, i);
+            terminal.draw(|f| app.render(f)).unwrap();
+            let screen = buffer_lines(&terminal);
+            assert!(
+                screen.contains("[■■]"),
+                "cell {i} is highlighted off screen:\n{screen}"
+            );
+        }
     }
 
     #[tokio::test]

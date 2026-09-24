@@ -1024,8 +1024,10 @@ impl Theme {
 
     /// The theme's foreground and accent colours as pickable swatches, in
     /// role order, deduplicated by hex value (the first role keeps it).
-    /// Surfaces that only exist behind other colours — the selection band,
-    /// the status bar, the diff bands — and `Reset` are left out.
+    /// The diff bands, the selection and the status bar are left out (they
+    /// are washes behind other text, too faint to read as an accent), as is
+    /// `Reset`. The PR pill and command-palette backgrounds are kept: they
+    /// are accent-strength fills, not washes.
     pub fn swatches(&self) -> Vec<ThemeSwatch> {
         let mut roles: Vec<(String, Color)> = [
             ("accent", self.text_accent),

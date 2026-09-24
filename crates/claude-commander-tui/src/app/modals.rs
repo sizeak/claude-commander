@@ -295,6 +295,22 @@ impl App {
             _ => None,
         };
 
+        // Fit an open colour picker's grid to the pane it is about to be drawn
+        // in, so the rows drawn and the rows `j`/`k` step through agree —
+        // including after a resize.
+        if let Modal::Settings(SettingsState {
+            tab: SettingsTab::Workspaces,
+            workspaces_state:
+                WorkspacesState {
+                    editing: Some(WorkspacesEditing::Colour { picker }),
+                    ..
+                },
+            ..
+        }) = &mut self.ui_state.modal
+        {
+            picker.fit_to_width(super::workspace_settings::colour_picker_width(area));
+        }
+
         match &self.ui_state.modal {
             Modal::None => {}
 
