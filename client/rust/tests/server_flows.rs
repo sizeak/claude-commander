@@ -81,7 +81,7 @@ impl Fixture {
         let state = test_state(&data, &worktrees);
         let service = state.service.clone();
         let addr = rt.block_on(spawn_server(state));
-        rt.block_on(service.add_project(repo_path.clone()))
+        rt.block_on(service.add_project(repo_path.clone(), None))
             .expect("register project");
         let base = format!("http://{addr}");
         // Connect through the cdylib registry — validates the URL and spawns the
@@ -230,14 +230,14 @@ fn join_existing_by_prefix() {
     fx.kill(&sid);
 }
 
-/// The workspace snapshot carries the registered project and any live sessions.
+/// The snapshot carries the registered project and any live sessions.
 #[test]
-fn workspace_snapshot_lists_projects_and_sessions() {
+fn snapshot_lists_projects_and_sessions() {
     let Some(fx) = Fixture::start() else { return };
     let sid = fx.create_session("cdylib-snapshot");
     let id = full_id(&sid);
 
-    let snap = simple::workspace_snapshot(fx.handle.clone()).expect("workspace_snapshot");
+    let snap = simple::snapshot(fx.handle.clone()).expect("snapshot");
     assert!(
         snap.projects
             .iter()
@@ -317,7 +317,7 @@ fn rename_and_set_section_round_trip() {
 
     simple::rename_session(fx.handle.clone(), id.clone(), "renamed-title".to_string())
         .expect("rename_session");
-    let snap = simple::workspace_snapshot(fx.handle.clone()).unwrap();
+    let snap = simple::snapshot(fx.handle.clone()).unwrap();
     assert_eq!(
         snap.sessions
             .iter()
@@ -344,7 +344,7 @@ fn mark_unread_then_read_round_trip() {
     let id = full_id(&sid);
 
     let unread = |fx: &Fixture| -> bool {
-        simple::workspace_snapshot(fx.handle.clone())
+        simple::snapshot(fx.handle.clone())
             .unwrap()
             .sessions
             .iter()
@@ -387,6 +387,7 @@ fn projects_add_list_branches_and_scan() {
     let new_id = simple::add_project(
         fx.handle.clone(),
         second_path.to_string_lossy().into_owned(),
+        None,
     )
     .expect("add_project");
     assert!(
@@ -394,7 +395,7 @@ fn projects_add_list_branches_and_scan() {
         "add_project must return a valid project id"
     );
 
-    let snap = simple::workspace_snapshot(fx.handle.clone()).unwrap();
+    let snap = simple::snapshot(fx.handle.clone()).unwrap();
     assert!(
         snap.projects.len() >= 2,
         "both the fixture repo and the added repo should be registered (got {})",
@@ -515,6 +516,8 @@ fn clone_from_a_local_bare_repo_registers_a_project() {
                 value: remote.to_string_lossy().into_owned(),
             },
             dest_name: Some("cloned-by-client".to_string()),
+            // The app's active workspace rides along and tags the result.
+            workspace: Some("Cloned".to_string()),
         },
     )
     .expect("start_clone");
@@ -546,7 +549,7 @@ fn clone_from_a_local_bare_repo_registers_a_project() {
     // Read through the workspace snapshot rather than a `GET /projects` call:
     // `RemoteClient` has no method for that route (projects reach a client in the
     // workspace snapshot), and adding one is outside this task's surface.
-    let snap = simple::workspace_snapshot(fx.handle.clone()).expect("workspace_snapshot");
+    let snap = simple::snapshot(fx.handle.clone()).expect("snapshot");
     // `ProjectInfoDto` is not `Debug` (it is an frb mirror), so report the paths.
     let paths: Vec<&str> = snap.projects.iter().map(|p| p.repo_path.as_str()).collect();
     let cloned = snap
@@ -562,6 +565,12 @@ fn clone_from_a_local_bare_repo_registers_a_project() {
     // than through `canonical_repo_slug` because this source is a local path, for
     // which canonicalisation is `None` by design — comparing two `None`s would
     // pass even with the field dropped.
+    assert_eq!(
+        cloned.workspace.as_deref(),
+        Some("Cloned"),
+        "a clone started in a workspace must land in it"
+    );
+
     let origin = cloned
         .origin_url
         .as_deref()
@@ -592,6 +601,97 @@ fn clone_from_a_local_bare_repo_registers_a_project() {
             "GET /github/repos must resolve to the repos route"
         );
     }
+}
+
+/// The workspace route group, through the exact functions Dart calls: define
+/// workspaces, register a project into one, move a project, rename (which
+/// rewrites tags) and delete (which moves projects back to Main). Every step is
+/// read back through `snapshot`, which also pins the DTO flattening of the new
+/// snapshot fields.
+#[test]
+fn workspaces_define_tag_move_rename_and_delete() {
+    use rust_lib_claude_commander_client::api::mirrors::{SetWorkspacesRequestDto, WorkspaceDef};
+    let Some(fx) = Fixture::start() else { return };
+
+    simple::set_workspaces(
+        fx.handle.clone(),
+        SetWorkspacesRequestDto {
+            workspaces: vec![
+                WorkspaceDef {
+                    name: "Work".into(),
+                    color: Some("#FF8800".into()),
+                },
+                WorkspaceDef {
+                    name: "Personal".into(),
+                    color: None,
+                },
+            ],
+            main: Some(WorkspaceDef {
+                name: "Home".into(),
+                color: None,
+            }),
+            startup_workspace: Some("Work".into()),
+        },
+    )
+    .expect("set_workspaces");
+    let snap = simple::snapshot(fx.handle.clone()).unwrap();
+    let names: Vec<&str> = snap.workspaces.iter().map(|w| w.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Work", "Personal"],
+        "definition order is display order"
+    );
+    assert_eq!(
+        snap.workspaces[0].color.as_deref(),
+        Some("#ff8800"),
+        "the server normalises the colour"
+    );
+    assert_eq!(
+        snap.main_workspace.as_ref().map(|m| m.name.as_str()),
+        Some("Home")
+    );
+    assert_eq!(snap.startup_workspace, "Work");
+
+    // A project registered with a workspace lands in it.
+    let (_second_repo, second_path) = fx.rt.block_on(create_test_repo());
+    let pid = simple::add_project(
+        fx.handle.clone(),
+        second_path.to_string_lossy().into_owned(),
+        Some("Work".into()),
+    )
+    .expect("add_project");
+    let workspace_of = |id: &str| {
+        simple::snapshot(fx.handle.clone())
+            .unwrap()
+            .projects
+            .into_iter()
+            .find(|p| p.id.as_uuid().to_string() == id)
+            .expect("project present")
+            .workspace
+    };
+    assert_eq!(workspace_of(&pid).as_deref(), Some("Work"));
+
+    // Moving it re-tags it; moving to None puts it back in Main.
+    simple::set_project_workspace(fx.handle.clone(), pid.clone(), Some("Personal".into()))
+        .expect("set_project_workspace");
+    assert_eq!(workspace_of(&pid).as_deref(), Some("Personal"));
+
+    // Rename rewrites the tag along with the definition.
+    simple::rename_workspace(fx.handle.clone(), "Personal".into(), "Side".into())
+        .expect("rename_workspace");
+    assert_eq!(workspace_of(&pid).as_deref(), Some("Side"));
+
+    // Delete moves the project to Main.
+    simple::delete_workspace(fx.handle.clone(), "Side".into()).expect("delete_workspace");
+    assert_eq!(workspace_of(&pid), None);
+    let snap = simple::snapshot(fx.handle.clone()).unwrap();
+    assert!(snap.workspaces.iter().all(|w| w.name != "Side"));
+
+    // A refused name surfaces as an error the app can show, not a silent drop.
+    assert!(
+        simple::set_project_workspace(fx.handle.clone(), pid, Some("main".into())).is_err(),
+        "a reserved name must be refused"
+    );
 }
 
 /// The cascade / push-stack operation-status route group: push-stack records an

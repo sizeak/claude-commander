@@ -23,7 +23,7 @@ use claude_commander_protocol::session::{SessionId, SessionStatus};
 
 use crate::api::mirrors::{
     AgentStatesSnapshotDto, CloneJobDto, CloneRequestDto, OperationStatusDto, PreviewDataDto,
-    WorkspaceSnapshotDto,
+    SetWorkspacesRequestDto, SnapshotDto,
 };
 use crate::api::registry::{call, map_client_err, parse_project_id, parse_session_id, with_client};
 
@@ -60,13 +60,13 @@ pub fn health_tmux(base_url: String, token: String) -> Result<bool> {
     call(client.health_tmux())
 }
 
-// -- Workspace surface --
+// -- Snapshot surface --
 
-/// The whole workspace snapshot (projects, sessions, cascade/pending/pull state,
-/// operations ledger, server health) in one shot.
-pub fn workspace_snapshot(handle: String) -> Result<WorkspaceSnapshotDto> {
+/// The whole server snapshot (projects, sessions, cascade/pending/pull state,
+/// operations ledger, server health, workspace config) in one shot.
+pub fn snapshot(handle: String) -> Result<SnapshotDto> {
     let client = with_client(&handle)?;
-    Ok(call(client.workspace_snapshot())?.into())
+    Ok(call(client.snapshot())?.into())
 }
 
 /// Bulk agent-state snapshot (the commander sentinel entry is stripped by the
@@ -82,7 +82,7 @@ pub fn agent_states(handle: String, fresh: bool) -> Result<AgentStatesSnapshotDt
 /// page + its tests unchanged.
 pub fn list_sessions(handle: String, include_stopped: bool) -> Result<Vec<SessionInfo>> {
     let client = with_client(&handle)?;
-    let mut sessions = call(client.workspace_snapshot())?.sessions;
+    let mut sessions = call(client.snapshot())?.sessions;
     if !include_stopped {
         sessions.retain(|s| s.status != SessionStatus::Stopped);
     }
@@ -286,10 +286,11 @@ pub fn attach_dead_after_millis() -> u32 {
 // -- Projects --
 
 /// Register a project (git repo) by server-side path; returns the new project's
-/// full-id string.
-pub fn add_project(handle: String, path: String) -> Result<String> {
+/// full-id string. `workspace` tags it (the app's active workspace); `None`
+/// registers it in Main.
+pub fn add_project(handle: String, path: String, workspace: Option<String>) -> Result<String> {
     let client = with_client(&handle)?;
-    let id = call(client.add_project(PathBuf::from(path)))?;
+    let id = call(client.add_project(PathBuf::from(path), workspace))?;
     Ok(id.as_uuid().to_string())
 }
 
@@ -301,10 +302,48 @@ pub fn add_project(handle: String, path: String) -> Result<String> {
 /// already a project, and `add_project` would register a second entry for the
 /// same repository. The dedupe (including how a path is resolved to a repository)
 /// is the server's — no client restates the rule.
-pub fn ensure_project(handle: String, path: String) -> Result<String> {
+///
+/// `workspace` tags the project only when this call newly registers it; an
+/// already-registered project keeps the workspace it has.
+pub fn ensure_project(handle: String, path: String, workspace: Option<String>) -> Result<String> {
     let client = with_client(&handle)?;
-    let id = call(client.ensure_project(PathBuf::from(path)))?;
+    let id = call(client.ensure_project(PathBuf::from(path), workspace))?;
     Ok(id.as_uuid().to_string())
+}
+
+/// Move a project to another workspace (`None` = Main). The server defines the
+/// workspace on itself if it had no definition for it yet, which is how a
+/// workspace created on another server reaches this one.
+pub fn set_project_workspace(
+    handle: String,
+    project_id: String,
+    workspace: Option<String>,
+) -> Result<()> {
+    let client = with_client(&handle)?;
+    call(client.set_project_workspace(parse_project_id(&project_id)?, workspace))
+}
+
+// -- Workspace definitions --
+
+/// Replace the server's workspace definitions wholesale (`PUT
+/// /config/workspaces`). Never re-tags a project — renaming and deleting have
+/// their own calls below because they must.
+pub fn set_workspaces(handle: String, request: SetWorkspacesRequestDto) -> Result<()> {
+    let client = with_client(&handle)?;
+    call(client.set_workspaces(request.into()))
+}
+
+/// Rename a workspace and rewrite every project tagged with it. A no-op on a
+/// server that has no workspace called `from`.
+pub fn rename_workspace(handle: String, from: String, to: String) -> Result<()> {
+    let client = with_client(&handle)?;
+    call(client.rename_workspace(from, to))
+}
+
+/// Delete a workspace, moving its projects to Main. Idempotent.
+pub fn delete_workspace(handle: String, name: String) -> Result<()> {
+    let client = with_client(&handle)?;
+    call(client.delete_workspace(name))
 }
 
 /// Remove a project (its sessions must already be gone).
@@ -524,6 +563,7 @@ mod tests {
                     ),
                 },
                 dest_name: None,
+                workspace: None,
             },
         );
         crate::api::registry::disconnect_server(handle);

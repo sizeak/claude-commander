@@ -23,14 +23,16 @@ pub use claude_commander_protocol::api::{
 pub use claude_commander_protocol::github::{CloneJobId, GithubRepo};
 pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
 pub use claude_commander_protocol::session::{AgentState, ProjectId, SessionId, SessionStatus};
+pub use claude_commander_protocol::workspace::WorkspaceDef;
 pub use claude_commander_protocol::ws::AttachKind;
 
 use claude_commander_protocol::api::{
     AgentStatesSnapshot, DiffStat, OperationOutcome, OperationStatus, PreviewData, ProjectInfo,
-    PullStatus, WorkspaceSnapshot,
+    PullStatus, Snapshot,
 };
 use claude_commander_protocol::connection::ConnectionState;
 use claude_commander_protocol::github::{CloneJob, CloneRequest, CloneSource, CloneStatus};
+use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 // All three id newtypes are a single `Uuid`, so one mirror covers them all.
 #[frb(mirror(SessionId, ProjectId, CloneJobId))]
@@ -148,6 +150,15 @@ pub struct _BranchInfo {
     pub is_remote: bool,
 }
 
+/// One user-defined workspace (`[[workspaces]]`). Mirrored rather than wrapped
+/// so the Workspaces settings page can construct the list it sends back to
+/// [`crate::api::simple::set_workspaces`] directly. `color` is `#rrggbb`.
+#[frb(mirror(WorkspaceDef))]
+pub struct _WorkspaceDef {
+    pub name: String,
+    pub color: Option<String>,
+}
+
 #[frb(mirror(OperationKind))]
 pub enum _OperationKind {
     Cascade,
@@ -184,6 +195,9 @@ pub struct ProjectInfoDto {
     /// [`crate::api::simple::canonical_repo_slug`] and compares the results —
     /// never the raw strings, since one repo has several spellings.
     pub origin_url: Option<String>,
+    /// The workspace this project is tagged with, or `None` for the built-in
+    /// Main workspace (and for a server that predates workspaces).
+    pub workspace: Option<String>,
 }
 
 impl From<ProjectInfo> for ProjectInfoDto {
@@ -195,6 +209,7 @@ impl From<ProjectInfo> for ProjectInfoDto {
             main_branch: p.main_branch,
             session_ids: p.session_ids,
             origin_url: p.origin_url,
+            workspace: p.workspace,
         }
     }
 }
@@ -299,7 +314,7 @@ pub struct ProjectPullDto {
 
 /// A single snapshot of everything the session tree renders. The `BTreeMap`
 /// pull statuses are flattened to a `Vec`; every data enum is flattened above.
-pub struct WorkspaceSnapshotDto {
+pub struct SnapshotDto {
     pub projects: Vec<ProjectInfoDto>,
     pub sessions: Vec<SessionInfo>,
     pub cascade_paused: Option<SessionId>,
@@ -307,10 +322,20 @@ pub struct WorkspaceSnapshotDto {
     pub project_pull: Vec<ProjectPullDto>,
     pub operations: Vec<OperationStatusDto>,
     pub server: ServerStatus,
+    /// This server's workspace definitions, in display order. Main is never
+    /// among them — it is the untagged default (see [`Self::main_workspace`]).
+    pub workspaces: Vec<WorkspaceDef>,
+    /// Main's display label and colour, when this server has renamed it.
+    pub main_workspace: Option<WorkspaceDef>,
+    /// `startup_workspace` in its wire/TOML string form: `"last"`, `"main"`, or
+    /// a workspace name. A string rather than a Dart enum because the protocol
+    /// type carries data in its `Named` arm, and the two keywords are reserved
+    /// names, so the string is unambiguous (`protocol::workspace`).
+    pub startup_workspace: String,
 }
 
-impl From<WorkspaceSnapshot> for WorkspaceSnapshotDto {
-    fn from(s: WorkspaceSnapshot) -> Self {
+impl From<Snapshot> for SnapshotDto {
+    fn from(s: Snapshot) -> Self {
         Self {
             projects: s.projects.into_iter().map(Into::into).collect(),
             sessions: s.sessions,
@@ -326,6 +351,9 @@ impl From<WorkspaceSnapshot> for WorkspaceSnapshotDto {
                 .collect(),
             operations: s.operations.into_iter().map(Into::into).collect(),
             server: s.server,
+            workspaces: s.workspaces,
+            main_workspace: s.main_workspace,
+            startup_workspace: s.startup_workspace.into(),
         }
     }
 }
@@ -505,6 +533,9 @@ impl From<CloneSourceDto> for CloneSource {
 pub struct CloneRequestDto {
     pub source: CloneSourceDto,
     pub dest_name: Option<String>,
+    /// The workspace to tag the cloned project with once it is registered —
+    /// the app's active one. `None` lands it in Main.
+    pub workspace: Option<String>,
 }
 
 impl From<CloneRequestDto> for CloneRequest {
@@ -512,6 +543,27 @@ impl From<CloneRequestDto> for CloneRequest {
         Self {
             source: r.source.into(),
             dest_name: r.dest_name,
+            workspace: r.workspace,
+        }
+    }
+}
+
+/// Body for [`crate::api::simple::set_workspaces`] — the Dart-constructible
+/// form of [`SetWorkspacesRequest`]. `startup_workspace` travels in its string
+/// form (see [`SnapshotDto::startup_workspace`]); `None` for it or for `main`
+/// leaves the server's current value untouched.
+pub struct SetWorkspacesRequestDto {
+    pub workspaces: Vec<WorkspaceDef>,
+    pub main: Option<WorkspaceDef>,
+    pub startup_workspace: Option<String>,
+}
+
+impl From<SetWorkspacesRequestDto> for SetWorkspacesRequest {
+    fn from(r: SetWorkspacesRequestDto) -> Self {
+        Self {
+            workspaces: r.workspaces,
+            main: r.main,
+            startup_workspace: r.startup_workspace.map(Into::into),
         }
     }
 }
@@ -627,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_dto_flattens_pull_map_and_operations() {
+    fn snapshot_dto_flattens_pull_map_and_operations() {
         let pid = ProjectId::new();
         let mut project_pull = BTreeMap::new();
         project_pull.insert(
@@ -636,7 +688,7 @@ mod tests {
                 reason: PullBlockReason::Dirty,
             },
         );
-        let snap = WorkspaceSnapshot {
+        let snap = Snapshot {
             projects: vec![ProjectInfo {
                 id: pid,
                 name: "repo".into(),
@@ -644,6 +696,7 @@ mod tests {
                 main_branch: "main".into(),
                 session_ids: vec![],
                 origin_url: None,
+                workspace: None,
             }],
             sessions: vec![],
             cascade_paused: None,
@@ -662,8 +715,11 @@ mod tests {
                 tmux_ok: true,
                 version: "0.0.0".into(),
             },
+            workspaces: Vec::new(),
+            main_workspace: None,
+            startup_workspace: Default::default(),
         };
-        let dto: WorkspaceSnapshotDto = snap.into();
+        let dto: SnapshotDto = snap.into();
         assert_eq!(dto.projects[0].repo_path, "/repo");
         assert_eq!(dto.project_pull.len(), 1);
         assert_eq!(dto.project_pull[0].project_id, pid);
@@ -683,6 +739,91 @@ mod tests {
         assert_eq!(dto.operations[0].outcome.detail, "2 merged");
     }
 
+    /// The workspace fields are named explicitly in `From`, like every other
+    /// field, so a dropped one would compile — hence a test per field.
+    #[test]
+    fn snapshot_dto_carries_the_workspace_config_and_project_tags() {
+        use claude_commander_protocol::workspace::StartupWorkspace;
+        let snap = Snapshot {
+            projects: vec![ProjectInfo {
+                id: ProjectId::new(),
+                name: "repo".into(),
+                repo_path: PathBuf::from("/repo"),
+                main_branch: "main".into(),
+                session_ids: vec![],
+                origin_url: None,
+                workspace: Some("Work".into()),
+            }],
+            sessions: vec![],
+            cascade_paused: None,
+            pending_comment_sessions: vec![],
+            project_pull: BTreeMap::new(),
+            operations: vec![],
+            server: ServerStatus {
+                gh_available: true,
+                tmux_ok: true,
+                version: "0.0.0".into(),
+            },
+            workspaces: vec![WorkspaceDef {
+                name: "Work".into(),
+                color: Some("#ff8800".into()),
+            }],
+            main_workspace: Some(WorkspaceDef::named("Home")),
+            startup_workspace: StartupWorkspace::Named("Work".into()),
+        };
+        let dto: SnapshotDto = snap.into();
+        assert_eq!(dto.projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(dto.workspaces.len(), 1);
+        assert_eq!(dto.workspaces[0].color.as_deref(), Some("#ff8800"));
+        assert_eq!(dto.main_workspace.map(|m| m.name).as_deref(), Some("Home"));
+        assert_eq!(dto.startup_workspace, "Work");
+    }
+
+    /// The startup choice crosses the bridge as its wire string, and the two
+    /// keywords must come back as the keyword arms rather than as names.
+    #[test]
+    fn set_workspaces_dto_parses_the_startup_string() {
+        use claude_commander_protocol::workspace::StartupWorkspace;
+        let req = |s: Option<&str>| -> SetWorkspacesRequest {
+            SetWorkspacesRequestDto {
+                workspaces: vec![WorkspaceDef::named("Work")],
+                main: None,
+                startup_workspace: s.map(str::to_string),
+            }
+            .into()
+        };
+        assert_eq!(req(None).startup_workspace, None);
+        assert_eq!(
+            req(Some("last")).startup_workspace,
+            Some(StartupWorkspace::Last)
+        );
+        assert_eq!(
+            req(Some("main")).startup_workspace,
+            Some(StartupWorkspace::Main)
+        );
+        assert_eq!(
+            req(Some("Work")).startup_workspace,
+            Some(StartupWorkspace::Named("Work".into()))
+        );
+        assert_eq!(req(None).workspaces, vec![WorkspaceDef::named("Work")]);
+    }
+
+    /// A clone started from the app lands in its active workspace, so the DTO
+    /// must hand the tag through rather than defaulting it.
+    #[test]
+    fn clone_request_dto_carries_the_workspace() {
+        let req: CloneRequest = CloneRequestDto {
+            source: CloneSourceDto {
+                kind: CloneSourceKind::Github,
+                value: "acme/widget".into(),
+            },
+            dest_name: None,
+            workspace: Some("Work".into()),
+        }
+        .into();
+        assert_eq!(req.workspace.as_deref(), Some("Work"));
+    }
+
     /// The repo picker's "already added" badge reads `origin_url` off the
     /// snapshot's projects, so the flattening must carry it. `ProjectInfo` names
     /// its fields explicitly in `From`, which is why a missing field here
@@ -696,6 +837,7 @@ mod tests {
             main_branch: "main".into(),
             session_ids: vec![],
             origin_url: Some("git@github.com:sizeak/claude-commander.git".into()),
+            workspace: None,
         }
         .into();
         assert_eq!(
@@ -712,6 +854,7 @@ mod tests {
             main_branch: "main".into(),
             session_ids: vec![],
             origin_url: None,
+            workspace: None,
         }
         .into();
         assert_eq!(without.origin_url, None);
@@ -785,6 +928,7 @@ mod tests {
                 value: "sizeak/claude-commander".into(),
             },
             dest_name: None,
+            workspace: None,
         }
         .into();
         assert_eq!(
@@ -801,6 +945,7 @@ mod tests {
                 value: "https://github.com/sizeak/claude-commander.git".into(),
             },
             dest_name: Some("cc".into()),
+            workspace: None,
         }
         .into();
         assert_eq!(

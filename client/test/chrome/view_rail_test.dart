@@ -6,7 +6,7 @@ import 'package:claude_commander_client/pages/activity_page.dart';
 import 'package:claude_commander_client/pages/session_list_page.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:claude_commander_client/widgets/brand_mark.dart';
@@ -24,20 +24,20 @@ import '../support/insets.dart';
 void main() {
   late FakeCommanderApi api;
   late CommanderStore store;
-  late WorkspaceStore workspace;
+  late FleetStore fleetStore;
 
   setUp(() {
     api = FakeCommanderApi();
     store = CommanderStore(api: api, config: testConfig);
-    workspace = WorkspaceStore.withStores([store]);
+    fleetStore = FleetStore.withStores([store]);
   });
 
-  tearDown(() => workspace.dispose());
+  tearDown(() => fleetStore.dispose());
 
   /// A themeless `MaterialApp` falls back to Mission Control tokens, which is how
   /// every other page test pumps its subject; passing [tokens] opts into LCARS.
-  Widget host(Widget body, {CommanderTokens? tokens}) => WorkspaceScope(
-    workspace: workspace,
+  Widget host(Widget body, {CommanderTokens? tokens}) => FleetScope(
+    fleet: fleetStore,
     child: MaterialApp(
       theme: tokens == null ? null : themeDataFor(tokens),
       home: Scaffold(body: body),
@@ -211,7 +211,7 @@ void main() {
     ) async {
       useInsets(tester, top: 24);
       // Connected, like every other test here: an unconnected store leaves
-      // `workspace` null, which renders the list's `CircularProgressIndicator`
+      // `snapshot` null, which renders the list's `CircularProgressIndicator`
       // and hangs `pumpAndSettle` forever on its animation.
       api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
       unawaited(store.connect());

@@ -34,7 +34,7 @@ void main() {
     home: ChromeWide(
       ChromeWideSpec(
         fleetList: const SizedBox.expand(),
-        workspace: const SizedBox.expand(),
+        detail: const SizedBox.expand(),
         modes: const [],
         needsInputCount: 0,
         activeCount: 0,

@@ -1,4 +1,4 @@
-/// The desktop/tablet shell and its workspace frame, for both themes.
+/// The desktop/tablet shell and its detail frame, for both themes.
 ///
 /// Dispatch goes through the [Chrome] interface like every other element in this
 /// layer: `buildWide` and `buildWideDetail` are declared on [ChromeForms] and
@@ -20,13 +20,14 @@ import 'chrome.dart';
 import 'chrome_forms.dart';
 import 'lcars/bleed.dart';
 import 'lcars/elbow.dart';
+import 'title_menu.dart';
 
 /// Logical width at or above which LCARS gets its **third** column — the elbow
 /// nav rail as a column of its own, separate from the fleet list.
 ///
 /// Higher than the wide/narrow breakpoint on purpose. The two LCARS side columns
 /// are fixed at [kLcarsNavWidth] + [_lcarsFleetWidth] = 394px, so at 900px the
-/// workspace would be left ~500px, where the deck's workspace frames assume
+/// detail pane would be left ~500px, where the deck's detail frames assume
 /// 1120px+. Between the wide breakpoint and this one, LCARS folds the nav into
 /// the fleet column instead (see [LcarsWide]).
 const double kLcarsThreeColumnWidth = 1180;
@@ -34,7 +35,7 @@ const double kLcarsThreeColumnWidth = 1180;
 /// The wide shell's structure, described rather than laid out.
 ///
 /// Deliberately **not** a pair of column widths: the two themes disagree about
-/// how many columns there are. Mission Control has two (fleet rail + workspace)
+/// how many columns there are. Mission Control has two (fleet rail + detail)
 /// with the mode toggle and the actions in the rail's footer; LCARS has three
 /// above [kLcarsThreeColumnWidth], the first being an elbow nav rail that needs
 /// the very same live data the Mission Control footer does. So the nav's inputs
@@ -46,8 +47,8 @@ class ChromeWideSpec {
   /// The fleet pane's body (the shared session list).
   final Widget fleetList;
 
-  /// The detail/workspace pane.
-  final Widget workspace;
+  /// The detail pane: the selected session, the Activity feed, or the empty state.
+  final Widget detail;
 
   /// The Fleet / Activity destinations the shell's nav drives.
   final List<ChromeNavItem> modes;
@@ -55,6 +56,10 @@ class ChromeWideSpec {
   /// How many sessions are asking for a human answer. LCARS gives this its own
   /// `INPUT nn` nav block, coloured [CommanderTokens.attention] when non-zero.
   final int needsInputCount;
+
+  /// Turns the fleet pane's title into the workspace switcher ("Fleet · Work
+  /// ▾"). Null keeps the plain title.
+  final ChromeTitleMenu? titleMenu;
 
   /// Cross-server session counts for the fleet pane's header line.
   final int activeCount;
@@ -72,12 +77,13 @@ class ChromeWideSpec {
 
   const ChromeWideSpec({
     required this.fleetList,
-    required this.workspace,
+    required this.detail,
     required this.modes,
     required this.needsInputCount,
     required this.activeCount,
     required this.totalCount,
     required this.serverCount,
+    this.titleMenu,
     this.newSession,
     this.settings,
     this.style = ChromeViewRailStyle.branded,
@@ -96,7 +102,7 @@ class ChromeWide extends StatelessWidget {
       Chrome.of(context).buildWide(context, spec);
 }
 
-/// One tab of the workspace pane. Carries its own [Key] so the key travels with
+/// One tab of the detail pane. Carries its own [Key] so the key travels with
 /// the tab rather than being re-derived by each theme's renderer.
 @immutable
 class ChromeWideTab {
@@ -106,7 +112,7 @@ class ChromeWideTab {
   const ChromeWideTab({required this.tabKey, required this.label});
 }
 
-/// The workspace pane's frame: an identity header, a tab strip, and the active
+/// The detail pane's frame: an identity header, a tab strip, and the active
 /// tab's body.
 ///
 /// Described rather than pre-built because the tab strip is *structurally*
@@ -148,7 +154,7 @@ class ChromeWideDetailSpec {
   });
 }
 
-/// The workspace pane, framed for the active theme. See [ChromeWideDetailSpec].
+/// The detail pane, framed for the active theme. See [ChromeWideDetailSpec].
 class ChromeWideDetail extends StatelessWidget {
   final ChromeWideDetailSpec spec;
   const ChromeWideDetail(this.spec, {super.key});
@@ -167,7 +173,7 @@ String _countsLine(ChromeWideSpec spec) =>
 
 // ── Mission Control ──────────────────────────────────────────────────────────
 
-/// Mission Control's two panes: the fleet rail and the workspace, split by a
+/// Mission Control's two panes: the fleet rail and the detail pane, split by a
 /// hairline. Unchanged from the hand-built layout this replaced.
 class MissionControlWide extends StatelessWidget {
   final ChromeWideSpec spec;
@@ -181,9 +187,9 @@ class MissionControlWide extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SizedBox(width: _mcRailWidth, child: _rail(t)),
+            SizedBox(width: _mcRailWidth, child: _rail(context, t)),
             VerticalDivider(width: 1, color: t.borderSubtle),
-            Expanded(child: spec.workspace),
+            Expanded(child: spec.detail),
           ],
         ),
       ),
@@ -193,19 +199,19 @@ class MissionControlWide extends StatelessWidget {
   /// The persistent Fleet rail: a branded header (brand mark + "Fleet" + mono
   /// counts), the shared session list, and a footer carrying the
   /// FLEET/ACTIVITY toggle, settings, and new-session.
-  Widget _rail(CommanderTokens t) => Container(
+  Widget _rail(BuildContext context, CommanderTokens t) => Container(
     color: t.canvas,
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _header(t),
+        _header(context, t),
         Expanded(child: spec.fleetList),
         _footer(t),
       ],
     ),
   );
 
-  Widget _header(CommanderTokens t) => Padding(
+  Widget _header(BuildContext context, CommanderTokens t) => Padding(
     padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
     child: Row(
       children: [
@@ -215,8 +221,10 @@ class MissionControlWide extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Fleet',
+              chromeMenuTitle(
+                context,
+                title: 'Fleet',
+                menu: spec.titleMenu,
                 style: TextStyle(
                   fontSize: 19,
                   fontWeight: FontWeight.w700,
@@ -294,7 +302,7 @@ class _ModeToggle extends StatelessWidget {
 }
 
 /// A rounded-square icon button for the rail footer (settings ⚙, new-session +)
-/// and the workspace header (refresh). A [ChromeActionKind.primary] action fills
+/// and the detail pane header (refresh). A [ChromeActionKind.primary] action fills
 /// with the primary role; anything else is a bordered surface.
 class _McIconButton extends StatelessWidget {
   final ChromeButtonAction action;
@@ -328,7 +336,7 @@ class _McIconButton extends StatelessWidget {
   }
 }
 
-/// Mission Control's workspace: header, the underline tab row, then the body.
+/// Mission Control's detail pane: header, the underline tab row, then the body.
 class MissionControlDetail extends StatelessWidget {
   final ChromeWideDetailSpec spec;
   const MissionControlDetail(this.spec, {super.key});
@@ -451,11 +459,11 @@ class MissionControlDetail extends StatelessWidget {
 
 // ── LCARS ────────────────────────────────────────────────────────────────────
 
-/// LCARS' wide shell: an elbow nav rail, the fleet column, then the workspace.
+/// LCARS' wide shell: an elbow nav rail, the fleet column, then the detail pane.
 ///
 /// Three columns above [kLcarsThreeColumnWidth]. Below it — but still wide
 /// enough for the two-pane shell — the nav rail folds into the fleet column as a
-/// horizontal run of blocks under the list, so the workspace keeps its width
+/// horizontal run of blocks under the list, so the detail pane keeps its width
 /// rather than paying 104px for a rail.
 class LcarsWide extends StatelessWidget {
   final ChromeWideSpec spec;
@@ -507,16 +515,16 @@ class LcarsWide extends StatelessWidget {
                   SizedBox(
                     key: const ValueKey('wide-fleet'),
                     width: _lcarsFleetWidth,
-                    child: _fleet(t, accent, bleed, folded: !three),
+                    child: _fleet(context, t, accent, bleed, folded: !three),
                   ),
                   // Open through the band, as above.
                   const SizedBox(width: _lcarsGap),
                   Expanded(
-                    key: const ValueKey('wide-workspace'),
+                    key: const ValueKey('wide-detail'),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        // The workspace column's own cap, as the design deck's
+                        // The detail column's own cap, as the design deck's
                         // landscape frames draw it — a short bar with a
                         // bottom-left radius above the session title, present in
                         // L1, L2 and L3 alike. The implementation had dropped
@@ -535,9 +543,9 @@ class LcarsWide extends StatelessWidget {
                         // The same gap the fleet column leaves under its cap, so
                         // the two columns' titles start level.
                         const SizedBox(height: 7),
-                        // Held below. The workspace closes with page content,
+                        // Held below. The detail pane closes with page content,
                         // which has no business under the gesture strip.
-                        Expanded(child: spec.workspace),
+                        Expanded(child: spec.detail),
                         SizedBox(height: bleed.bottom),
                       ],
                     ),
@@ -657,6 +665,7 @@ class LcarsWide extends StatelessWidget {
   /// list, and — when the nav has folded in — a horizontal run of nav blocks
   /// beneath it.
   Widget _fleet(
+    BuildContext context,
     CommanderTokens t,
     Color accent,
     EdgeInsets bleed, {
@@ -671,7 +680,13 @@ class LcarsWide extends StatelessWidget {
           color: accent,
         ),
         const SizedBox(height: 7),
-        Text('FLEET', style: t.display(size: 22)),
+        chromeMenuTitle(
+          context,
+          title: 'FLEET',
+          menu: spec.titleMenu,
+          upper: true,
+          style: t.display(size: 22),
+        ),
         Text(
           // With no nav column there is no INPUT block, so the count that needs
           // acting on rides along with the rest of the fleet's numbers.
@@ -768,13 +783,13 @@ class LcarsWide extends StatelessWidget {
   );
 }
 
-/// LCARS' workspace: the title header, then the body with the tabs stood up as a
+/// LCARS' detail pane: the title header, then the body with the tabs stood up as a
 /// column of elbow blocks alongside it.
 ///
 /// The tabs are a column and not a row because an underline row is a Mission
 /// Control shape — LCARS marks selection by *filling* a block, and a filled block
 /// wants to be part of a bracket down one edge. It sits on the right so the
-/// workspace is framed on the side the shell's nav rail does not already occupy.
+/// detail pane is framed on the side the shell's nav rail does not already occupy.
 class LcarsDetail extends StatelessWidget {
   final ChromeWideDetailSpec spec;
   const LcarsDetail(this.spec, {super.key});
@@ -793,7 +808,7 @@ class LcarsDetail extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 // The tab column sits *inboard* of the content, between the
-                // fleet list and the workspace — that is where the design deck's
+                // fleet list and the detail pane — that is where the design deck's
                 // landscape frames put it, and it keeps the rail-then-content
                 // reading order consistent with the outer nav rail. Emulator
                 // capture caught it pinned to the far right edge.
@@ -813,7 +828,7 @@ class LcarsDetail extends StatelessWidget {
     final badge = spec.badge;
     final refresh = spec.refresh;
     return Padding(
-      // No top pad: the workspace column now opens with an elbow cap and the
+      // No top pad: the detail column now opens with an elbow cap and the
       // gap under it, exactly as the fleet column does, so paying for it twice
       // would drop this title below the FLEET title beside it.
       padding: const EdgeInsets.fromLTRB(0, 0, 0, 9),
@@ -932,7 +947,7 @@ const _lcarsSeam = 4.0;
 /// A nav destination block's height.
 const _lcarsNavBlock = 30.0;
 
-/// The workspace tab column, which also sizes the header's refresh block so the
+/// The detail tab column, which also sizes the header's refresh block so the
 /// two line up down the pane's right edge.
 const _lcarsTabWidth = 96.0;
 

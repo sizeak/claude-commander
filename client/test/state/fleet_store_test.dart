@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/fake_commander_api.dart';
@@ -16,15 +16,15 @@ ServerConfig _cfg(String id, String name) => ServerConfig(
 );
 
 void main() {
-  // A workspace whose per-server stores are each backed by their own fake, so
+  // A fleet whose per-server stores are each backed by their own fake, so
   // the aggregator can be exercised without a live bridge.
   late Map<String, FakeCommanderApi> fakes;
   late InMemoryServerListStore listStore;
 
-  WorkspaceStore build(List<ServerConfig> initial) {
+  FleetStore build(List<ServerConfig> initial) {
     fakes = {for (final c in initial) c.id: FakeCommanderApi()};
     listStore = InMemoryServerListStore();
-    return WorkspaceStore(
+    return FleetStore(
       api: FakeCommanderApi(),
       listStore: listStore,
       storeFactory: (cfg) {
@@ -133,7 +133,7 @@ void main() {
     localFakes[a.id]!.listSessionsResponse = [
       sessionInfo(id: '11111111-1111-1111-1111-111111111111', projectName: 'A'),
     ];
-    final ws = WorkspaceStore(
+    final ws = FleetStore(
       api: FakeCommanderApi(),
       listStore: InMemoryServerListStore([a, b]),
       storeFactory: (cfg) =>
@@ -156,7 +156,7 @@ void main() {
     () async {
       final a = _cfg('id-a', 'laptop');
       final fake = FakeCommanderApi()..connectGate = Completer<void>();
-      final ws = WorkspaceStore(
+      final ws = FleetStore(
         api: FakeCommanderApi(),
         listStore: InMemoryServerListStore([a]),
         storeFactory: (cfg) => CommanderStore(api: fake, config: cfg),
@@ -182,7 +182,7 @@ void main() {
       final a = _cfg('id-a', 'laptop');
       final b = _cfg('id-b', 'codespace');
       final ws = build([a, b]);
-      fakes[a.id]!.workspaceSnapshotError = StateError('unreachable');
+      fakes[a.id]!.snapshotError = StateError('unreachable');
       fakes[b.id]!.listSessionsResponse = [
         sessionInfo(
           id: '22222222-2222-2222-2222-222222222222',

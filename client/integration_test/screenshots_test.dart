@@ -1,6 +1,6 @@
 // Renders the README's client screenshots from the REAL app driven against a
 // REAL, hermetic claude-commander-server. Launch via docs/tool/capture-client.sh,
-// which seeds the demo workspace (see docs/tool/fixture.sh) and passes the
+// which seeds the demo state (see docs/tool/fixture.sh) and passes the
 // server's address/token plus an output directory through --dart-define.
 //
 // Not a test of behaviour: every expectation here exists so a capture can never
@@ -13,7 +13,7 @@
 // host to receive the bytes, whereas this test writes them itself via dart:io.
 //
 // The layouts are produced by resizing the *view*, not by two different apps:
-// `AdaptiveShell` picks the phone flow or the desktop rail+workspace off the
+// `AdaptiveShell` picks the phone flow or the desktop rail+detail off the
 // incoming constraints, so setting `tester.view.physicalSize` renders whichever
 // one the README needs at a realistic device size.
 
@@ -26,7 +26,7 @@ import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/services/commander_api.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/src/rust/frb_generated.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -174,7 +174,7 @@ void main() {
     // A throwaway prefs store: the run must not read or write the real device's
     // theme choice, and it starts every capture on the default theme.
     final theme = ThemeController(store: InMemoryPrefStore());
-    final workspace = WorkspaceStore(
+    final fleet = FleetStore(
       api: api,
       listStore: InMemoryServerListStore(const [
         ServerConfig(
@@ -185,12 +185,12 @@ void main() {
         ),
       ]),
     );
-    await workspace.loadAndConnectAll();
+    await fleet.loadAndConnectAll();
 
     await tester.pumpWidget(
       RepaintBoundary(
         key: shotKey,
-        child: CommanderApp(api: api, workspace: workspace, theme: theme),
+        child: CommanderApp(api: api, fleet: fleet, theme: theme),
       ),
     );
 
@@ -262,7 +262,7 @@ void main() {
     await theme.select(ThemeId.missionControl);
     await waitFor(tester, find.text(_focusSession));
 
-    // ---- desktop: rail + workspace ----
+    // ---- desktop: rail + detail ----
     // Resizing the view re-runs AdaptiveShell's LayoutBuilder, which swaps the
     // phone flow for the wide layout. Wait for the swap explicitly: capturing a
     // phone shell stretched across a 1440px frame would look like the desktop
@@ -274,7 +274,7 @@ void main() {
       reason: 'wide layout replaced the phone shell',
     );
     await waitFor(tester, find.text(_focusSession));
-    // Selecting a session fills the workspace beside the list. The Agent tab is
+    // Selecting a session fills the detail pane beside the list. The Agent tab is
     // the one worth showing — go there by name, and fall back to the Overview
     // body's hero button if this chrome renders its tabs some other way.
     await tapRow(tester, _focusSession);

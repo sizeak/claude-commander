@@ -12,7 +12,7 @@ void main() {
 
   setUp(() => api = FakeCommanderApi());
 
-  /// A connected store whose workspace exposes [projects]. The create page reads
+  /// A connected store whose snapshot exposes [projects]. The create page reads
   /// its api/handle/projects from the store, so it must be connected first.
   Future<CommanderStore> connectedStore(List<ProjectInfoDto> projects) async {
     api.projectsResponse = projects;
@@ -54,7 +54,7 @@ void main() {
   testWidgets('projects arriving after the page opens fill the picker in', (
     tester,
   ) async {
-    // Open before any project is known (e.g. the workspace snapshot is still in
+    // Open before any project is known (e.g. the snapshot is still in
     // flight) — the empty state shows, not a broken form.
     final store = await connectedStore(const []);
     await pumpPage(tester, store);
@@ -172,7 +172,7 @@ void main() {
     api.createSessionResponse = 'sess-1';
     final store = await connectedStore([projectInfo()]);
     await pumpPage(tester, store);
-    final before = api.countOf('workspaceSnapshot');
+    final before = api.countOf('snapshot');
 
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Title'),
@@ -184,11 +184,11 @@ void main() {
     // Nothing has ticked the change feed, so without an explicit refetch the
     // list behind this page would still be showing the pre-create snapshot and
     // the new session would look lost until the next poll.
-    expect(api.countOf('workspaceSnapshot'), greaterThan(before));
+    expect(api.countOf('snapshot'), greaterThan(before));
     // And it happened as part of the create, not before it.
     final methods = [for (final c in api.calls) c.method];
     expect(
-      methods.lastIndexOf('workspaceSnapshot'),
+      methods.lastIndexOf('snapshot'),
       greaterThan(methods.indexOf('createSession')),
     );
   });

@@ -81,7 +81,7 @@ void main() {
   ///
   /// Tested on the widget directly, and that is the whole point: every caller
   /// pre-filters to `EdgeInsets.only(top:)` (`lcars_chrome.dart`'s `_content`
-  /// and `_viewContent`, `chrome_wide.dart`'s `_fleet` and workspace cap), so a
+  /// and `_viewContent`, `chrome_wide.dart`'s `_fleet` and detail cap), so a
   /// frame-level test cannot tell `bleed.top` from `bleed.vertical` no matter
   /// what insets it drives — mutating one to the other left all 50 tests across
   /// the four bleed files green. Only a cap handed a bottom inset it should

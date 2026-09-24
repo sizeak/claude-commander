@@ -5,12 +5,13 @@ import '../chrome/chrome_forms.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
-import '../state/workspace_store.dart';
+import '../state/fleet_store.dart';
 import '../theme/theme_controller.dart';
 import '../theme/tokens.dart';
 import '../window/window_controller.dart';
 import 'session_list_page.dart';
 import 'theme_picker_page.dart';
+import 'workspaces_page.dart';
 
 /// Whether a server's base URL points at the local machine, driving the
 /// `local` / `remote` tag on its row. Compares the parsed [Uri.host] so a name
@@ -28,7 +29,7 @@ bool _isLocalServer(String baseUrl) {
       host == '[::1]';
 }
 
-/// The settings screen: the configured servers, the per-server workspace
+/// The settings screen: the configured servers, the per-server project
 /// editors, and the appearance controls.
 ///
 /// Replaces the ⚙ popup menu that offered Servers / Projects / Programs as
@@ -43,14 +44,14 @@ class SettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final workspace = WorkspaceScope.of(context)!;
+    final fleet = FleetScope.of(context)!;
     return ChromePage(
       title: 'Settings',
       code: '47-X',
-      // The workspace re-broadcasts every child store's notifications, so this
+      // The fleet re-broadcasts every child store's notifications, so this
       // single listener also covers the per-server connection dots and counts.
       body: ListenableBuilder(
-        listenable: workspace,
+        listenable: fleet,
         builder: (context, _) => ListView(
           padding: const EdgeInsets.fromLTRB(14, 4, 14, 24),
           children: [
@@ -58,10 +59,10 @@ class SettingsPage extends StatelessWidget {
             // eyebrow is an uppercase form by definition, and this way it does
             // not depend on whether a chrome cases the label for us.
             const ChromeEyebrow('SERVERS'),
-            ..._serverRows(context, workspace),
+            ..._serverRows(context, fleet),
             const SizedBox(height: 16),
-            const ChromeEyebrow('WORKSPACE'),
-            ..._workspaceRows(context, workspace),
+            const ChromeEyebrow('PROJECTS'),
+            ..._projectRows(context, fleet),
             const SizedBox(height: 16),
             // Desktop only, and structurally so: on a phone there is no
             // WindowController in scope, so this yields nothing.
@@ -76,42 +77,56 @@ class SettingsPage extends StatelessWidget {
 
   /// One row per configured server, or a single row inviting the first one.
   /// Both open the servers manager, which is where add / edit / remove live.
-  List<Widget> _serverRows(BuildContext context, WorkspaceStore workspace) {
-    final servers = workspace.servers;
+  List<Widget> _serverRows(BuildContext context, FleetStore fleet) {
+    final servers = fleet.servers;
     if (servers.isEmpty) {
       return [
         _SettingsRow(
           label: 'No servers configured',
           caption: 'Add one to see its sessions',
-          onTap: () => openServers(context, workspace),
+          onTap: () => openServers(context, fleet),
         ),
       ];
     }
     return [
       for (final store in servers)
-        _ServerRow(store: store, onTap: () => openServers(context, workspace)),
+        _ServerRow(store: store, onTap: () => openServers(context, fleet)),
     ];
   }
 
-  /// The per-server editors. Both need a live server handle to load anything,
-  /// so they disable together — and say why, rather than being inertly greyed.
-  List<Widget> _workspaceRows(BuildContext context, WorkspaceStore workspace) {
+  /// The project editors. Each needs a live server handle to load anything, so
+  /// they disable together — and say why, rather than being inertly greyed.
+  List<Widget> _projectRows(BuildContext context, FleetStore fleet) {
     // Matches the popup menu this screen replaces: one connected server is
     // enough, since the pickers prompt for which one to act on.
-    final enabled = workspace.servers.any((s) => s.handle != null);
+    final enabled = fleet.servers.any((s) => s.handle != null);
     const unavailable = 'Needs a connected server';
     return [
       _SettingsRow(
         label: 'Projects',
         caption: enabled ? 'Repositories and their branches' : unavailable,
-        onTap: enabled ? () => openProjects(context, workspace) : null,
+        onTap: enabled ? () => openProjects(context, fleet) : null,
       ),
       _SettingsRow(
         label: 'Programs',
         caption: enabled
             ? 'Agents offered when creating a session'
             : unavailable,
-        onTap: enabled ? () => openPrograms(context, workspace) : null,
+        onTap: enabled ? () => openPrograms(context, fleet) : null,
+      ),
+      _SettingsRow(
+        label: 'Workspaces',
+        caption: !enabled
+            ? unavailable
+            : fleet.workspacesVisible
+            ? '${fleet.workspaces.length} workspaces'
+            : 'Group projects to switch between',
+        // Not behind a server pick: a workspace edit goes to every server.
+        onTap: enabled
+            ? () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => WorkspacesPage(fleet: fleet)),
+              )
+            : null,
       ),
     ];
   }

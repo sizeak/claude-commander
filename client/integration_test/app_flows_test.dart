@@ -22,7 +22,7 @@ import 'package:claude_commander_client/main.dart';
 import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/services/commander_api.dart';
 import 'package:claude_commander_client/src/rust/frb_generated.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:flutter/material.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
@@ -98,18 +98,18 @@ void main() {
         .textInput(text);
   }
 
-  // A workspace tab in the WIDE shell. The desktop target is wider than
+  // A detail tab in the WIDE shell. The desktop target is wider than
   // `kWideBreakpoint` (900 logical px, adaptive_shell.dart:25), so the app lays
-  // out as a fleet list beside a tabbed workspace pane and switches views in
+  // out as a fleet list beside a tabbed detail pane and switches views in
   // place — it does NOT push terminal/review routes the way the phone shell
   // does. Hence tabs here and no back-navigation at all.
   //
-  // Addressed by key, from adaptive_shell.dart:311 (`ValueKey('ws-tab-${tab.name}')`),
+  // Addressed by key, from adaptive_shell.dart:311 (`ValueKey('detail-tab-${tab.name}')`),
   // for two reasons: the enum spellings differ from the display labels
   // (detail=Overview, terminal=Agent, shell=Shell, review=Changes), and 'Shell'
   // is BOTH a tab label and the lifecycle bar's caption for its shell button, so
   // `find.text('Shell')` is ambiguous.
-  Finder wsTab(String name) => find.byKey(ValueKey('ws-tab-$name'));
+  Finder wsTab(String name) => find.byKey(ValueKey('detail-tab-$name'));
 
   Future<void> openTab(WidgetTester tester, String name) async {
     await tester.tap(wsTab(name));
@@ -167,10 +167,7 @@ void main() {
     await tester.pumpWidget(
       CommanderApp(
         api: api,
-        workspace: WorkspaceStore(
-          api: api,
-          listStore: InMemoryServerListStore(),
-        ),
+        fleet: FleetStore(api: api, listStore: InMemoryServerListStore()),
         // A throwaway store: the e2e run must not read or write the real
         // device preferences, and it exercises the default theme.
         theme: ThemeController(store: InMemoryPrefStore()),
@@ -256,7 +253,7 @@ void main() {
     // row's InkWell reliably receives the gesture)
     await tester.tap(find.byType(ChromeListRow));
     await tester.pump();
-    // Selecting a row fills the workspace pane, so wait for its tab strip.
+    // Selecting a row fills the detail pane, so wait for its tab strip.
     await waitFor(tester, wsTab('review'));
 
     // ---- terminal: do work + write a file for the later review ----

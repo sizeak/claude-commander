@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
 // These functions are ignored because they are not marked as `pub`: `commander_sentinel_id`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 enum AgentState { working, idle, waitingForInput, unknown }
 
@@ -138,10 +138,14 @@ class CloneRequestDto {
   final CloneSourceDto source;
   final String? destName;
 
-  const CloneRequestDto({required this.source, this.destName});
+  /// The workspace to tag the cloned project with once it is registered —
+  /// the app's active one. `None` lands it in Main.
+  final String? workspace;
+
+  const CloneRequestDto({required this.source, this.destName, this.workspace});
 
   @override
-  int get hashCode => source.hashCode ^ destName.hashCode;
+  int get hashCode => source.hashCode ^ destName.hashCode ^ workspace.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -149,7 +153,8 @@ class CloneRequestDto {
       other is CloneRequestDto &&
           runtimeType == other.runtimeType &&
           source == other.source &&
-          destName == other.destName;
+          destName == other.destName &&
+          workspace == other.workspace;
 }
 
 /// Where a clone should come from — the Dart-constructible form of
@@ -521,6 +526,10 @@ class ProjectInfoDto {
   /// never the raw strings, since one repo has several spellings.
   final String? originUrl;
 
+  /// The workspace this project is tagged with, or `None` for the built-in
+  /// Main workspace (and for a server that predates workspaces).
+  final String? workspace;
+
   const ProjectInfoDto({
     required this.id,
     required this.name,
@@ -528,6 +537,7 @@ class ProjectInfoDto {
     required this.mainBranch,
     required this.sessionIds,
     this.originUrl,
+    this.workspace,
   });
 
   @override
@@ -537,7 +547,8 @@ class ProjectInfoDto {
       repoPath.hashCode ^
       mainBranch.hashCode ^
       sessionIds.hashCode ^
-      originUrl.hashCode;
+      originUrl.hashCode ^
+      workspace.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -549,7 +560,8 @@ class ProjectInfoDto {
           repoPath == other.repoPath &&
           mainBranch == other.mainBranch &&
           sessionIds == other.sessionIds &&
-          originUrl == other.originUrl;
+          originUrl == other.originUrl &&
+          workspace == other.workspace;
 }
 
 /// One project's pull status — the flattened form of the snapshot's
@@ -802,9 +814,38 @@ enum SessionStatus {
   pushing,
 }
 
+/// Body for [`crate::api::simple::set_workspaces`] — the Dart-constructible
+/// form of [`SetWorkspacesRequest`]. `startup_workspace` travels in its string
+/// form (see [`SnapshotDto::startup_workspace`]); `None` for it or for `main`
+/// leaves the server's current value untouched.
+class SetWorkspacesRequestDto {
+  final List<WorkspaceDef> workspaces;
+  final WorkspaceDef? main;
+  final String? startupWorkspace;
+
+  const SetWorkspacesRequestDto({
+    required this.workspaces,
+    this.main,
+    this.startupWorkspace,
+  });
+
+  @override
+  int get hashCode =>
+      workspaces.hashCode ^ main.hashCode ^ startupWorkspace.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SetWorkspacesRequestDto &&
+          runtimeType == other.runtimeType &&
+          workspaces == other.workspaces &&
+          main == other.main &&
+          startupWorkspace == other.startupWorkspace;
+}
+
 /// A single snapshot of everything the session tree renders. The `BTreeMap`
 /// pull statuses are flattened to a `Vec`; every data enum is flattened above.
-class WorkspaceSnapshotDto {
+class SnapshotDto {
   final List<ProjectInfoDto> projects;
   final List<SessionInfo> sessions;
   final SessionId? cascadePaused;
@@ -813,7 +854,20 @@ class WorkspaceSnapshotDto {
   final List<OperationStatusDto> operations;
   final ServerStatus server;
 
-  const WorkspaceSnapshotDto({
+  /// This server's workspace definitions, in display order. Main is never
+  /// among them — it is the untagged default (see [`Self::main_workspace`]).
+  final List<WorkspaceDef> workspaces;
+
+  /// Main's display label and colour, when this server has renamed it.
+  final WorkspaceDef? mainWorkspace;
+
+  /// `startup_workspace` in its wire/TOML string form: `"last"`, `"main"`, or
+  /// a workspace name. A string rather than a Dart enum because the protocol
+  /// type carries data in its `Named` arm, and the two keywords are reserved
+  /// names, so the string is unambiguous (`protocol::workspace`).
+  final String startupWorkspace;
+
+  const SnapshotDto({
     required this.projects,
     required this.sessions,
     this.cascadePaused,
@@ -821,6 +875,9 @@ class WorkspaceSnapshotDto {
     required this.projectPull,
     required this.operations,
     required this.server,
+    required this.workspaces,
+    this.mainWorkspace,
+    required this.startupWorkspace,
   });
 
   @override
@@ -831,12 +888,15 @@ class WorkspaceSnapshotDto {
       pendingCommentSessions.hashCode ^
       projectPull.hashCode ^
       operations.hashCode ^
-      server.hashCode;
+      server.hashCode ^
+      workspaces.hashCode ^
+      mainWorkspace.hashCode ^
+      startupWorkspace.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is WorkspaceSnapshotDto &&
+      other is SnapshotDto &&
           runtimeType == other.runtimeType &&
           projects == other.projects &&
           sessions == other.sessions &&
@@ -844,5 +904,29 @@ class WorkspaceSnapshotDto {
           pendingCommentSessions == other.pendingCommentSessions &&
           projectPull == other.projectPull &&
           operations == other.operations &&
-          server == other.server;
+          server == other.server &&
+          workspaces == other.workspaces &&
+          mainWorkspace == other.mainWorkspace &&
+          startupWorkspace == other.startupWorkspace;
+}
+
+/// One user-defined workspace (`[[workspaces]]`). Mirrored rather than wrapped
+/// so the Workspaces settings page can construct the list it sends back to
+/// [`crate::api::simple::set_workspaces`] directly. `color` is `#rrggbb`.
+class WorkspaceDef {
+  final String name;
+  final String? color;
+
+  const WorkspaceDef({required this.name, this.color});
+
+  @override
+  int get hashCode => name.hashCode ^ color.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WorkspaceDef &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          color == other.color;
 }

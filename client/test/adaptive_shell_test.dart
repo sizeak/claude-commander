@@ -11,7 +11,7 @@ import 'package:claude_commander_client/pages/session_list_page.dart';
 import 'package:claude_commander_client/pages/terminal_page.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:flutter/material.dart';
@@ -23,18 +23,18 @@ import 'support/fixtures.dart';
 void main() {
   late FakeCommanderApi api;
   late CommanderStore store;
-  late WorkspaceStore workspace;
+  late FleetStore fleet;
 
   setUp(() {
     api = FakeCommanderApi();
     store = CommanderStore(api: api, config: testConfig);
-    workspace = WorkspaceStore.withStores([store]);
+    fleet = FleetStore.withStores([store]);
   });
 
-  tearDown(() => workspace.dispose());
+  tearDown(() => fleet.dispose());
 
-  Widget wrap() => WorkspaceScope(
-    workspace: workspace,
+  Widget wrap() => FleetScope(
+    fleet: fleet,
     child: const MaterialApp(home: AdaptiveShell()),
   );
 
@@ -65,7 +65,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(PhoneShell), findsOneWidget);
-    // No persistent workspace pane in the narrow layout.
+    // No persistent detail pane in the narrow layout.
     expect(find.text('Select a session'), findsNothing);
     expect(find.byType(SessionDetailBody), findsNothing);
   });
@@ -119,12 +119,12 @@ void main() {
   });
 
   testWidgets(
-    'wide layout is rail + workspace; the empty-state shows until a session '
+    'wide layout is rail + detail; the empty-state shows until a session '
     'is selected',
     (tester) async {
       await pumpWide(tester);
 
-      // The rail carries the shared list and the empty workspace shows the
+      // The rail carries the shared list and the empty detail pane shows the
       // placeholder — no route push, no detail body yet.
       expect(find.byType(SessionListBody), findsOneWidget);
       expect(find.text('Select a session'), findsOneWidget);
@@ -133,7 +133,7 @@ void main() {
   );
 
   testWidgets(
-    'selecting a session opens its workspace on the Agent tab, in place',
+    'selecting a session opens its detail on the Agent tab, in place',
     (tester) async {
       await pumpWide(tester);
 
@@ -147,10 +147,10 @@ void main() {
       expect(find.byType(SessionDetailPage), findsNothing);
       expect(find.text('Select a session'), findsNothing);
       // The underline tab row is present.
-      expect(find.byKey(const ValueKey('ws-tab-detail')), findsOneWidget);
-      expect(find.byKey(const ValueKey('ws-tab-terminal')), findsOneWidget);
-      expect(find.byKey(const ValueKey('ws-tab-shell')), findsOneWidget);
-      expect(find.byKey(const ValueKey('ws-tab-review')), findsOneWidget);
+      expect(find.byKey(const ValueKey('detail-tab-detail')), findsOneWidget);
+      expect(find.byKey(const ValueKey('detail-tab-terminal')), findsOneWidget);
+      expect(find.byKey(const ValueKey('detail-tab-shell')), findsOneWidget);
+      expect(find.byKey(const ValueKey('detail-tab-review')), findsOneWidget);
       expect(find.text('Agent'), findsOneWidget);
     },
   );
@@ -163,20 +163,20 @@ void main() {
     await tester.pumpAndSettle();
 
     // Overview tab → the detail body, off the default agent attach.
-    await tester.tap(find.byKey(const ValueKey('ws-tab-detail')));
+    await tester.tap(find.byKey(const ValueKey('detail-tab-detail')));
     await tester.pumpAndSettle();
     expect(find.byType(SessionDetailBody), findsOneWidget);
     expect(find.byType(TerminalBody), findsNothing);
 
     // Agent tab → back to an agent-pane attach.
-    await tester.tap(find.byKey(const ValueKey('ws-tab-terminal')));
+    await tester.tap(find.byKey(const ValueKey('detail-tab-terminal')));
     await tester.pump();
     await tester.pump();
     expect(find.byType(TerminalBody), findsOneWidget);
     expect(find.byType(SessionDetailBody), findsNothing);
 
     // Shell tab → the paired shell attach.
-    await tester.tap(find.byKey(const ValueKey('ws-tab-shell')));
+    await tester.tap(find.byKey(const ValueKey('detail-tab-shell')));
     await tester.pump();
     await tester.pump();
     expect(find.byType(TerminalBody), findsOneWidget);
@@ -189,7 +189,7 @@ void main() {
     await tester.tap(find.text('Alpha'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('ws-tab-review')));
+    await tester.tap(find.byKey(const ValueKey('detail-tab-review')));
     await tester.pumpAndSettle();
 
     expect(find.byType(ReviewBody), findsOneWidget);
@@ -197,11 +197,11 @@ void main() {
   });
 
   testWidgets(
-    'the FLEET/ACTIVITY toggle swaps the workspace to the Activity feed while '
+    'the FLEET/ACTIVITY toggle swaps the detail pane to the Activity feed while '
     'the rail stays visible',
     (tester) async {
       await pumpWide(tester);
-      // A session is selected first, to prove ACTIVITY overrides the workspace.
+      // A session is selected first, to prove ACTIVITY overrides the fleet.
       await tester.tap(find.text('Alpha'));
       await tester.pumpAndSettle();
       expect(find.byType(TerminalBody), findsOneWidget);
@@ -209,12 +209,12 @@ void main() {
       await tester.tap(find.text('ACTIVITY'));
       await tester.pumpAndSettle();
 
-      // Workspace is now the Activity feed; the rail (list) is still there.
+      // The detail pane is now the Activity feed; the rail (list) is still there.
       expect(find.byType(ActivityBody), findsOneWidget);
       expect(find.byType(TerminalBody), findsNothing);
       expect(find.byType(SessionListBody), findsOneWidget);
 
-      // Toggling back to FLEET restores the selected session's workspace.
+      // Toggling back to FLEET restores the selected session's fleet.
       await tester.tap(find.text('FLEET'));
       await tester.pumpAndSettle();
       expect(find.byType(ActivityBody), findsNothing);
@@ -223,7 +223,7 @@ void main() {
   );
 
   testWidgets(
-    'the wide workspace shows the terminal-snapshot preview and captures pane '
+    'the wide detail pane shows the terminal-snapshot preview and captures pane '
     'lines for it',
     (tester) async {
       useSize(tester, const Size(1400, 900));
@@ -239,7 +239,7 @@ void main() {
       await tester.tap(find.text('Alpha'));
       await tester.pumpAndSettle();
       // The preview lives on Overview; selection lands on Agent by default.
-      await tester.tap(find.byKey(const ValueKey('ws-tab-detail')));
+      await tester.tap(find.byKey(const ValueKey('detail-tab-detail')));
       await tester.pumpAndSettle();
 
       expect(find.text('Terminal snapshot'), findsOneWidget);
@@ -262,8 +262,8 @@ void main() {
   group('LCARS', () {
     /// The same shell under the opt-in theme, which frames the wide layout as
     /// three columns rather than two.
-    Widget wrapLcars() => WorkspaceScope(
-      workspace: workspace,
+    Widget wrapLcars() => FleetScope(
+      fleet: fleet,
       child: MaterialApp(
         theme: themeDataFor(lcarsTokens),
         home: const AdaptiveShell(),
@@ -291,14 +291,14 @@ void main() {
       // count (nothing is waiting in this fixture).
       expect(find.text('CMDR'), findsOneWidget);
       expect(find.text('INPUT 00'), findsOneWidget);
-      // Still one shared list and one workspace — only the framing differs.
+      // Still one shared list and one detail pane — only the framing differs.
       expect(find.byType(SessionListBody), findsOneWidget);
       expect(find.text('Select a session'), findsOneWidget);
     });
 
     testWidgets(
       'below the three-column width the nav folds into the fleet pane, and the '
-      'modes still drive the workspace',
+      'modes still drive the detail pane',
       (tester) async {
         await pumpLcars(tester, width: kLcarsThreeColumnWidth - 1);
 
@@ -313,9 +313,7 @@ void main() {
       },
     );
 
-    testWidgets('the workspace tabs are a column of elbow blocks', (
-      tester,
-    ) async {
+    testWidgets('the detail tabs are a column of elbow blocks', (tester) async {
       await pumpLcars(tester);
       api.openReviewResponse = reviewSnapshot(files: const []);
 
@@ -327,15 +325,15 @@ void main() {
 
       // Same tab set, same keys — but blocks rather than an underline row.
       for (final tab in ['detail', 'terminal', 'shell', 'review']) {
-        expect(find.byKey(ValueKey('ws-tab-$tab')), findsOneWidget);
+        expect(find.byKey(ValueKey('detail-tab-$tab')), findsOneWidget);
       }
       expect(
-        tester.widget(find.byKey(const ValueKey('ws-tab-detail'))),
+        tester.widget(find.byKey(const ValueKey('detail-tab-detail'))),
         isA<ChromeElbow>(),
       );
 
       // And they still switch the body in place.
-      await tester.tap(find.byKey(const ValueKey('ws-tab-review')));
+      await tester.tap(find.byKey(const ValueKey('detail-tab-review')));
       await tester.pumpAndSettle();
       expect(find.byType(ReviewBody), findsOneWidget);
       expect(find.byType(SessionDetailBody), findsNothing);

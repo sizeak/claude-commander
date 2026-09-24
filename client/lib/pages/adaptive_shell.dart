@@ -7,13 +7,14 @@ import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
-import '../state/workspace_store.dart';
+import '../state/fleet_store.dart';
 import '../theme/agent_glyphs.dart';
 import '../theme/tokens.dart';
 import '../util/session_filter.dart';
 import '../util/viewport.dart';
 import '../widgets/brand_mark.dart';
 import '../widgets/session_chips.dart';
+import '../widgets/workspace_menu.dart';
 import 'activity_page.dart';
 import 'phone_shell.dart';
 import 'review_page.dart';
@@ -22,17 +23,17 @@ import 'session_list_page.dart';
 import 'terminal_page.dart';
 
 /// Logical width at or above which the app switches from the stacked phone
-/// layout to the desktop/tablet rail + workspace layout — provided the viewport
+/// layout to the desktop/tablet rail + detail layout — provided the viewport
 /// is also tall enough. See [useWideLayout].
 const double kWideBreakpoint = 900;
 
-/// Whether [constraints] should get the rail + workspace layout rather than the
+/// Whether [constraints] should get the rail + detail layout rather than the
 /// stacked [PhoneShell].
 ///
 /// Width alone is not the question, and taking it as such put a phone on the
 /// wrong shell: a Pixel 8a is 914 × 411dp held sideways, clearing
 /// [kWideBreakpoint] by 14dp with barely 400dp of height. Measured on that
-/// device, the wide layout spends 71dp on the workspace header and 40 on the
+/// device, the wide layout spends 71dp on the detail pane header and 40 on the
 /// tab strip before the pane gets a row; it resizes for the soft keyboard
 /// instead of panning, so the pane disappears entirely when the keyboard opens
 /// (and the fleet column overflowed its box by 126px); and it suppresses the
@@ -60,7 +61,7 @@ const double kWideBreakpoint = 900;
 bool useWideLayout(BuildContext context, BoxConstraints constraints) =>
     constraints.maxWidth >= kWideBreakpoint && !isShortViewport(context);
 
-/// Which surface the shell's FLEET/ACTIVITY toggle is driving the workspace to:
+/// Which surface the shell's FLEET/ACTIVITY toggle is driving the detail pane to:
 /// the selected session's [_DetailPane] (fleet), or the cross-server
 /// [ActivityBody] feed (activity). The fleet list stays visible in both.
 enum _RailMode { fleet, activity }
@@ -68,7 +69,7 @@ enum _RailMode { fleet, activity }
 /// The responsive home. Where [useWideLayout] says no — a narrow viewport, or a
 /// wide but short one such as a phone held sideways — it is the [PhoneShell] (a
 /// bottom-nav Fleet + Activity shell over a stacked `Navigator.push` flow).
-/// Otherwise [ChromeWide]: the fleet list, a **workspace** whose Overview /
+/// Otherwise [ChromeWide]: the fleet list, a **detail pane** whose Overview /
 /// Agent / Shell / Changes tabs switch in place, and the shell's navigation —
 /// the FLEET/ACTIVITY toggle, the needs-input count, new-session and settings.
 ///
@@ -90,22 +91,27 @@ class AdaptiveShell extends StatefulWidget {
 
 class _AdaptiveShellState extends State<AdaptiveShell> {
   /// The server that owns [_selected]. Held alongside the session so the
-  /// workspace can be scoped to (and driven by) the right server.
+  /// detail pane can be scoped to (and driven by) the right server.
   CommanderStore? _selectedStore;
 
-  /// The session shown in the wide layout's workspace, or null when nothing is
+  /// The session shown in the wide layout's detail pane, or null when nothing is
   /// selected. Re-resolved from its owning store on every build so it tracks
-  /// live updates and survives a session vanishing (the workspace then shows its
+  /// live updates and survives a session vanishing (the detail pane then shows its
   /// gone-state until dismissed).
   SessionInfo? _selected;
 
-  /// Whether the workspace shows the selected session (fleet) or the Activity
+  /// Whether the detail pane shows the selected session (fleet) or the Activity
   /// feed. Selecting a session from the rail always snaps back to fleet.
   _RailMode _mode = _RailMode.fleet;
+
+  /// The workspace that was active when [_selected] was picked. A switch away
+  /// from it clears the selection.
+  String? _selectedWorkspace;
 
   void _select(CommanderStore store, SessionInfo session) => setState(() {
     _selectedStore = store;
     _selected = session;
+    _selectedWorkspace = FleetScope.of(context)?.activeWorkspace;
     _mode = _RailMode.fleet;
   });
 
@@ -126,20 +132,26 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   }
 
   Widget _wide(BuildContext context) {
-    final workspace = WorkspaceScope.of(context)!;
+    final fleet = FleetScope.of(context)!;
     return ListenableBuilder(
-      listenable: workspace,
+      listenable: fleet,
       builder: (context, _) {
-        // Drop a selection whose server was removed.
+        final workspace = fleet.activeWorkspace;
+        // Drop a selection whose server was removed — or that belongs to the
+        // workspace the user just switched away from: a switch lands on a
+        // fresh list, with nothing selected, rather than keeping a session the
+        // list no longer shows.
         var store = _selectedStore;
-        if (store != null && !workspace.servers.contains(store)) {
+        if (store != null &&
+            (!fleet.servers.contains(store) ||
+                _selectedWorkspace != workspace)) {
           store = null;
           _selectedStore = null;
           _selected = null;
         }
         // Re-resolve the selection against the latest snapshot: pick up fresh
         // info, and fall back to the last-known info if the session vanished so
-        // the workspace can show its gone-state rather than blanking.
+        // the detail pane can show its gone-state rather than blanking.
         final sel = _selected;
         final resolved = (store == null || sel == null)
             ? null
@@ -148,8 +160,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
         // A single cross-server pass powers the shell's counts: the fleet
         // header's totals and the nav's needs-input badge.
         var active = 0, total = 0, needsInput = 0;
-        for (final s in workspace.servers) {
-          for (final x in s.sessions) {
+        for (final s in fleet.servers) {
+          for (final x in s.sessionsIn(workspace)) {
             total++;
             if (x.status.isActive) active++;
             // The same union the list rows' attention glyph uses — an agent
@@ -166,7 +178,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
               selectedId: resolved?.id,
               onSelect: _select,
             ),
-            workspace: _workspace(context, workspace, store, resolved),
+            detail: _detail(context, fleet, store, resolved),
             modes: [
               ChromeNavItem(
                 label: 'FLEET',
@@ -190,12 +202,13 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             needsInputCount: needsInput,
             activeCount: active,
             totalCount: total,
-            serverCount: workspace.servers.length,
+            serverCount: fleet.servers.length,
+            titleMenu: workspaceTitleMenu(fleet),
             newSession: ChromeButtonAction(
               icon: Icons.add,
               label: 'New session',
               kind: ChromeActionKind.primary,
-              onPressed: () => openCreateSession(context, workspace),
+              onPressed: () => openCreateSession(context, fleet),
             ),
             settings: ChromeButtonAction(
               icon: Icons.settings,
@@ -209,10 +222,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   }
 
   /// The right pane: the Activity feed when the rail is toggled to activity,
-  /// otherwise the selected session's workspace (or the empty-state).
-  Widget _workspace(
+  /// otherwise the selected session's detail (or the empty-state).
+  Widget _detail(
     BuildContext context,
-    WorkspaceStore workspace,
+    FleetStore fleet,
     CommanderStore? store,
     SessionInfo? resolved,
   ) {
@@ -229,14 +242,14 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
         session: resolved,
         api: store.api,
         handle: store.handle,
-        onRefresh: workspace.refreshAll,
+        onRefresh: fleet.refreshAll,
         onDismiss: _clear,
       ),
     );
   }
 }
 
-/// Placeholder shown in the workspace when no session is selected.
+/// Placeholder shown in the detail pane when no session is selected.
 class _EmptyDetail extends StatelessWidget {
   const _EmptyDetail();
 
@@ -257,7 +270,7 @@ class _EmptyDetail extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            'Pick a session from the fleet to open its workspace.',
+            'Pick a session from the fleet to open it.',
             style: t.meta(size: 11, color: t.textFaint),
           ),
         ],
@@ -266,7 +279,7 @@ class _EmptyDetail extends StatelessWidget {
   }
 }
 
-/// The workspace tabs. Display labels are Overview / Agent / Shell / Changes;
+/// The detail tabs. Display labels are Overview / Agent / Shell / Changes;
 /// the enum spellings are kept from the previous segmented control so the wiring
 /// (detail→Overview, terminal→Agent, shell→Shell, review→Changes) is unchanged.
 enum _DetailTab {
@@ -279,7 +292,7 @@ enum _DetailTab {
   final String label;
 }
 
-/// The wide layout's workspace: a header (state glyph + title + PR badge + meta
+/// The wide layout's detail pane: a header (state glyph + title + PR badge + meta
 /// + refresh), the tab strip, and the active tab's body switched in place (no
 /// route push). [ChromeWideDetail] frames all three — the tab strip is a
 /// horizontal underline row in Mission Control and a column of elbow blocks in
@@ -292,7 +305,7 @@ class _DetailPane extends StatefulWidget {
   /// they show a hint until a handle is available.
   final String? handle;
 
-  /// Refreshes every server (the workspace header's refresh button).
+  /// Refreshes every server (the detail pane header's refresh button).
   final Future<void> Function() onRefresh;
 
   /// Clear the selection (used by the detail body's delete/dismiss).
@@ -348,7 +361,7 @@ class _DetailPaneState extends State<_DetailPane> {
         tabs: [
           for (final tab in _DetailTab.values)
             ChromeWideTab(
-              tabKey: ValueKey('ws-tab-${tab.name}'),
+              tabKey: ValueKey('detail-tab-${tab.name}'),
               label: tab.label,
             ),
         ],

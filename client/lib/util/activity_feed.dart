@@ -10,7 +10,7 @@ import 'session_filter.dart' show SessionStatusActive;
 /// The feed is honest about the data the server actually exposes. Notably absent
 /// are the deck's "committed N files" and "CI passed/failed" rows: neither a
 /// per-session commit count nor a CI check status is carried in
-/// [WorkspaceSnapshotDto] / [SessionInfo], so those kinds are deliberately not
+/// [SnapshotDto] / [SessionInfo], so those kinds are deliberately not
 /// synthesised (see the module doc on [ActivityKind]).
 
 /// The kinds of event the feed can surface — only those derivable from
@@ -111,9 +111,14 @@ class ActivityEvent {
 /// Recent tab's rationale — a dead session isn't current activity). A single
 /// session can yield both a state event (waiting/working/…) and a PR event, as
 /// the deck shows (e.g. an agent waiting on a session that also has a PR ready).
+///
+/// [where] narrows the sessions that contribute — the Activity page passes the
+/// active workspace's membership test. Operation events carry no session, so
+/// they are never narrowed.
 List<ActivityEvent> buildActivityFeed(
   List<CommanderStore> servers, {
   DateTime? now,
+  bool Function(CommanderStore store, SessionInfo session)? where,
 }) {
   final events = <ActivityEvent>[];
 
@@ -123,6 +128,7 @@ List<ActivityEvent> buildActivityFeed(
 
     for (final s in store.sessions) {
       if (!s.status.isActive) continue;
+      if (where != null && !where(store, s)) continue;
       final agent = store.agentStateFor(s.id);
 
       final state = _stateEvent(s, agent, serverId, serverName);

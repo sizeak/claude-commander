@@ -12,7 +12,7 @@ import '../widgets/brand_mark.dart';
 /// test the connection, and save. On save we probe the server first; a failed
 /// probe offers "Save anyway?" so an offline server can still be added (it shows
 /// degraded in the list until it comes up). [onSubmit] owns persisting +
-/// connecting the server (via `WorkspaceStore`); this page never touches storage.
+/// connecting the server (via `FleetStore`); this page never touches storage.
 class ConnectionPage extends StatefulWidget {
   final CommanderApi api;
 
@@ -25,7 +25,7 @@ class ConnectionPage extends StatefulWidget {
   /// config after a successful (or "save anyway") save.
   ///
   /// This form dismisses when it returns, so it must not await anything that can
-  /// outlast the commit. The edit path (`WorkspaceStore.updateServer`) therefore
+  /// outlast the commit. The edit path (`FleetStore.updateServer`) therefore
   /// returns at the persist point and reconnects in the background. The add path
   /// (`addServer`) does await its first connect — the button reads "Connect", so
   /// confirming it is the point — which is bounded by the client's request

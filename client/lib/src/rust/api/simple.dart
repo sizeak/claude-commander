@@ -24,10 +24,10 @@ Future<bool> healthTmux({required String baseUrl, required String token}) =>
       token: token,
     );
 
-/// The whole workspace snapshot (projects, sessions, cascade/pending/pull state,
-/// operations ledger, server health) in one shot.
-Future<WorkspaceSnapshotDto> workspaceSnapshot({required String handle}) =>
-    RustLib.instance.api.crateApiSimpleWorkspaceSnapshot(handle: handle);
+/// The whole server snapshot (projects, sessions, cascade/pending/pull state,
+/// operations ledger, server health, workspace config) in one shot.
+Future<SnapshotDto> snapshot({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleSnapshot(handle: handle);
 
 /// Bulk agent-state snapshot (the commander sentinel entry is stripped by the
 /// DTO). `fresh` forces a re-detection rather than a cached read.
@@ -234,9 +234,17 @@ Future<int> attachDeadAfterMillis() =>
     RustLib.instance.api.crateApiSimpleAttachDeadAfterMillis();
 
 /// Register a project (git repo) by server-side path; returns the new project's
-/// full-id string.
-Future<String> addProject({required String handle, required String path}) =>
-    RustLib.instance.api.crateApiSimpleAddProject(handle: handle, path: path);
+/// full-id string. `workspace` tags it (the app's active workspace); `None`
+/// registers it in Main.
+Future<String> addProject({
+  required String handle,
+  required String path,
+  String? workspace,
+}) => RustLib.instance.api.crateApiSimpleAddProject(
+  handle: handle,
+  path: path,
+  workspace: workspace,
+);
 
 /// Register a project by server-side path, or return the id of the project
 /// already registered for it; returns a full-id string either way.
@@ -246,10 +254,60 @@ Future<String> addProject({required String handle, required String path}) =>
 /// already a project, and `add_project` would register a second entry for the
 /// same repository. The dedupe (including how a path is resolved to a repository)
 /// is the server's — no client restates the rule.
-Future<String> ensureProject({required String handle, required String path}) =>
-    RustLib.instance.api.crateApiSimpleEnsureProject(
+///
+/// `workspace` tags the project only when this call newly registers it; an
+/// already-registered project keeps the workspace it has.
+Future<String> ensureProject({
+  required String handle,
+  required String path,
+  String? workspace,
+}) => RustLib.instance.api.crateApiSimpleEnsureProject(
+  handle: handle,
+  path: path,
+  workspace: workspace,
+);
+
+/// Move a project to another workspace (`None` = Main). The server defines the
+/// workspace on itself if it had no definition for it yet, which is how a
+/// workspace created on another server reaches this one.
+Future<void> setProjectWorkspace({
+  required String handle,
+  required String projectId,
+  String? workspace,
+}) => RustLib.instance.api.crateApiSimpleSetProjectWorkspace(
+  handle: handle,
+  projectId: projectId,
+  workspace: workspace,
+);
+
+/// Replace the server's workspace definitions wholesale (`PUT
+/// /config/workspaces`). Never re-tags a project — renaming and deleting have
+/// their own calls below because they must.
+Future<void> setWorkspaces({
+  required String handle,
+  required SetWorkspacesRequestDto request,
+}) => RustLib.instance.api.crateApiSimpleSetWorkspaces(
+  handle: handle,
+  request: request,
+);
+
+/// Rename a workspace and rewrite every project tagged with it. A no-op on a
+/// server that has no workspace called `from`.
+Future<void> renameWorkspace({
+  required String handle,
+  required String from,
+  required String to,
+}) => RustLib.instance.api.crateApiSimpleRenameWorkspace(
+  handle: handle,
+  from: from,
+  to: to,
+);
+
+/// Delete a workspace, moving its projects to Main. Idempotent.
+Future<void> deleteWorkspace({required String handle, required String name}) =>
+    RustLib.instance.api.crateApiSimpleDeleteWorkspace(
       handle: handle,
-      path: path,
+      name: name,
     );
 
 /// Remove a project (its sessions must already be gone).

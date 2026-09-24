@@ -2,12 +2,13 @@ import 'package:claude_commander_client/pages/projects_page.dart';
 import 'package:claude_commander_client/pages/servers_page.dart';
 import 'package:claude_commander_client/pages/settings_page.dart';
 import 'package:claude_commander_client/pages/theme_picker_page.dart';
+import 'package:claude_commander_client/pages/workspaces_page.dart';
 import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/window/window_controller.dart';
@@ -30,42 +31,41 @@ const remoteConfig = ServerConfig(
 void main() {
   late FakeCommanderApi api;
   late CommanderStore store;
-  late WorkspaceStore workspace;
+  late FleetStore fleet;
   late ThemeController theme;
 
   setUp(() {
     api = FakeCommanderApi();
     store = CommanderStore(api: api, config: testConfig);
-    workspace = WorkspaceStore.withStores([store]);
+    fleet = FleetStore.withStores([store]);
     // Never the device's real preferences: the theme row and picker must not
     // touch (or read) whatever the developer has selected.
     theme = ThemeController(store: InMemoryPrefStore());
   });
 
-  tearDown(() => workspace.dispose());
+  tearDown(() => fleet.dispose());
 
   /// Hosts the page the way `main()` does: the scopes above the `MaterialApp`,
   /// with the app rebuilt on a theme change so a selection actually rethemes.
   ///
   /// [window] defaults to null, which is the phone case — and the case every test
   /// that predates the window section is asserting.
-  Widget wrap(WorkspaceStore workspace, {WindowController? window}) =>
-      WorkspaceScope(
-        workspace: workspace,
-        child: WindowScope(
-          controller: window,
-          child: ThemeScope(
-            controller: theme,
-            child: ListenableBuilder(
-              listenable: theme,
-              builder: (context, _) => MaterialApp(
-                theme: themeDataFor(theme.tokens),
-                home: const SettingsPage(),
-              ),
-            ),
+  Widget wrap(FleetStore fleet, {WindowController? window}) => FleetScope(
+    fleet: fleet,
+    child: WindowScope(
+      controller: window,
+      child: ThemeScope(
+        controller: theme,
+        child: ListenableBuilder(
+          listenable: theme,
+          builder: (context, _) => MaterialApp(
+            theme: themeDataFor(theme.tokens),
+            home: const SettingsPage(),
           ),
         ),
-      );
+      ),
+    ),
+  );
 
   /// Pushes a route and lets its transition finish, without `pumpAndSettle` —
   /// the pages pushed here may hold a progress indicator, which never settles.
@@ -77,11 +77,11 @@ void main() {
 
   testWidgets('renders the three sections', (tester) async {
     await store.connect();
-    await tester.pumpWidget(wrap(workspace));
+    await tester.pumpWidget(wrap(fleet));
     await tester.pumpAndSettle();
 
     expect(find.text('SERVERS'), findsOneWidget);
-    expect(find.text('WORKSPACE'), findsOneWidget);
+    expect(find.text('PROJECTS'), findsOneWidget);
     expect(find.text('APPEARANCE'), findsOneWidget);
   });
 
@@ -93,13 +93,13 @@ void main() {
       sessionInfo(id: '99999999-2222-3333-4444-555555555555', title: 'Beta'),
     ];
     // Both stores are local to this test rather than reusing the one from
-    // setUp: `WorkspaceStore.dispose()` disposes its children, so a store held
-    // by two workspaces would be disposed twice — once here and once by the
+    // setUp: `FleetStore.dispose()` disposes its children, so a store held
+    // by two fleet stores would be disposed twice — once here and once by the
     // shared tearDown.
     final local = CommanderStore(api: api, config: testConfig);
     final remoteApi = FakeCommanderApi();
     final remote = CommanderStore(api: remoteApi, config: remoteConfig);
-    final both = WorkspaceStore.withStores([local, remote]);
+    final both = FleetStore.withStores([local, remote]);
     addTearDown(both.dispose);
 
     await local.connect();
@@ -120,7 +120,7 @@ void main() {
   ) async {
     api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
     await store.connect();
-    await tester.pumpWidget(wrap(workspace));
+    await tester.pumpWidget(wrap(fleet));
     await tester.pumpAndSettle();
     expect(find.text('1 · local'), findsOneWidget);
 
@@ -140,7 +140,7 @@ void main() {
 
   testWidgets('tapping a server row opens the servers manager', (tester) async {
     await store.connect();
-    await tester.pumpWidget(wrap(workspace));
+    await tester.pumpWidget(wrap(fleet));
     await tester.pumpAndSettle();
 
     await tapAndPush(tester, find.text('test'));
@@ -149,10 +149,7 @@ void main() {
   });
 
   testWidgets('with no servers configured, offers to add one', (tester) async {
-    final empty = WorkspaceStore(
-      api: api,
-      listStore: InMemoryServerListStore(),
-    );
+    final empty = FleetStore(api: api, listStore: InMemoryServerListStore());
     addTearDown(empty.dispose);
     await tester.pumpWidget(wrap(empty));
     await tester.pumpAndSettle();
@@ -162,25 +159,25 @@ void main() {
     expect(find.byType(ServersPage), findsOneWidget);
   });
 
-  testWidgets('the workspace rows stay shut while no server is connected', (
+  testWidgets('the project rows stay shut while no server is connected', (
     tester,
   ) async {
     // Never connected, so no live handle — the row must not open a manager that
     // has no server to talk to.
-    await tester.pumpWidget(wrap(workspace));
+    await tester.pumpWidget(wrap(fleet));
     await tester.pumpAndSettle();
 
-    expect(find.text('Needs a connected server'), findsNWidgets(2));
+    expect(find.text('Needs a connected server'), findsNWidgets(3));
     await tapAndPush(tester, find.text('Projects'));
     expect(find.byType(ProjectsPage), findsNothing);
     expect(find.byType(SettingsPage), findsOneWidget);
   });
 
-  testWidgets('the workspace rows open once a server is connected', (
+  testWidgets('the project rows open once a server is connected', (
     tester,
   ) async {
     await store.connect();
-    await tester.pumpWidget(wrap(workspace));
+    await tester.pumpWidget(wrap(fleet));
     await tester.pumpAndSettle();
 
     expect(find.text('Needs a connected server'), findsNothing);
@@ -188,11 +185,33 @@ void main() {
     expect(find.byType(ProjectsPage), findsOneWidget);
   });
 
+  testWidgets('the Workspaces row opens the workspaces editor', (tester) async {
+    await store.connect();
+    await tester.pumpWidget(wrap(fleet));
+    await tester.pumpAndSettle();
+
+    // With only Main, the caption invites the first one rather than counting.
+    expect(find.text('Group projects to switch between'), findsOneWidget);
+    await tapAndPush(tester, find.text('Workspaces'));
+    expect(find.byType(WorkspacesPage), findsOneWidget);
+  });
+
+  testWidgets('the Workspaces row counts the workspaces once there are two', (
+    tester,
+  ) async {
+    api.workspacesResponse = const [WorkspaceDef(name: 'Work')];
+    await store.connect();
+    await tester.pumpWidget(wrap(fleet));
+    await tester.pumpAndSettle();
+
+    expect(find.text('2 workspaces'), findsOneWidget);
+  });
+
   testWidgets('the theme row names the active theme and opens the picker', (
     tester,
   ) async {
     await store.connect();
-    await tester.pumpWidget(wrap(workspace));
+    await tester.pumpWidget(wrap(fleet));
     await tester.pumpAndSettle();
 
     expect(find.text('Mission Control'), findsOneWidget);
@@ -210,7 +229,7 @@ void main() {
     testWidgets('is absent where there is no window to manage', (tester) async {
       // The phone: no controller in scope, so the section has nothing to say and
       // does not appear. No platform check anywhere in the page.
-      await tester.pumpWidget(wrap(workspace));
+      await tester.pumpWidget(wrap(fleet));
       await tester.pumpAndSettle();
 
       expect(find.text('WINDOW'), findsNothing);
@@ -218,7 +237,7 @@ void main() {
     });
 
     testWidgets('reports both states and their shortcuts', (tester) async {
-      await tester.pumpWidget(wrap(workspace, window: newWindow()));
+      await tester.pumpWidget(wrap(fleet, window: newWindow()));
       await tester.pumpAndSettle();
 
       expect(find.text('WINDOW'), findsOneWidget);
@@ -231,7 +250,7 @@ void main() {
 
     testWidgets('tapping the fullscreen row drives the window', (tester) async {
       final window = newWindow();
-      await tester.pumpWidget(wrap(workspace, window: window));
+      await tester.pumpWidget(wrap(fleet, window: window));
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('Full screen'));
@@ -245,7 +264,7 @@ void main() {
       tester,
     ) async {
       final window = newWindow();
-      await tester.pumpWidget(wrap(workspace, window: window));
+      await tester.pumpWidget(wrap(fleet, window: window));
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('Window frame'));
@@ -257,7 +276,7 @@ void main() {
 
     testWidgets('follows a change made by the F11 shortcut', (tester) async {
       final window = newWindow();
-      await tester.pumpWidget(wrap(workspace, window: window));
+      await tester.pumpWidget(wrap(fleet, window: window));
       await tester.pumpAndSettle();
 
       await window.setFullscreen(true);
@@ -271,7 +290,7 @@ void main() {
     tester,
   ) async {
     await store.connect();
-    await tester.pumpWidget(wrap(workspace));
+    await tester.pumpWidget(wrap(fleet));
     await tester.pumpAndSettle();
 
     await theme.select(ThemeId.lcars);

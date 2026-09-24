@@ -9,7 +9,7 @@ import 'src/rust/frb_generated.dart';
 import 'services/pref_store.dart';
 import 'services/window_service.dart';
 import 'state/commander_store_scope.dart';
-import 'state/workspace_store.dart';
+import 'state/fleet_store.dart';
 import 'theme/theme_controller.dart';
 import 'theme/theme_data.dart';
 import 'theme/tokens.dart';
@@ -30,9 +30,12 @@ Future<void> main() async {
   // Initialise the Rust bridge before any `api` call.
   await RustLib.init();
   final api = RustCommanderApi();
-  final workspace = WorkspaceStore(
+  final fleet = FleetStore(
     api: api,
     listStore: SecureServerListStore(),
+    // The active workspace is per device, so it lives with the other device
+    // preferences rather than on any server.
+    prefs: const SharedPrefStore(),
   );
   // Restore the saved theme *before* the first frame. The connect screen is the
   // first thing a cold start with no servers shows, and it has to arrive already
@@ -52,19 +55,17 @@ Future<void> main() async {
         );
   await window?.load();
   // Fire-and-forget per server: each surfaces its own connect progress as state.
-  await workspace.loadAndConnectAll();
-  runApp(
-    CommanderApp(api: api, workspace: workspace, theme: theme, window: window),
-  );
+  await fleet.loadAndConnectAll();
+  runApp(CommanderApp(api: api, fleet: fleet, theme: theme, window: window));
 }
 
-/// Owns the app's [WorkspaceStore] — the multi-server aggregator. Every saved
+/// Owns the app's [FleetStore] — the multi-server aggregator. Every saved
 /// server is connected at once; the session list groups their sessions by
 /// server. With no servers configured (first run) the home is the add-server
 /// screen; adding the first server flips the home to the [AdaptiveShell].
 class CommanderApp extends StatefulWidget {
   final CommanderApi api;
-  final WorkspaceStore workspace;
+  final FleetStore fleet;
 
   /// The selected theme. Already loaded by `main()`, so the first frame is
   /// painted in the user's chosen theme rather than the default.
@@ -78,7 +79,7 @@ class CommanderApp extends StatefulWidget {
   const CommanderApp({
     super.key,
     required this.api,
-    required this.workspace,
+    required this.fleet,
     required this.theme,
     this.window,
   });
@@ -90,15 +91,15 @@ class CommanderApp extends StatefulWidget {
 class _CommanderAppState extends State<CommanderApp> {
   @override
   void dispose() {
-    widget.workspace.dispose();
+    widget.fleet.dispose();
     widget.window?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return WorkspaceScope(
-      workspace: widget.workspace,
+    return FleetScope(
+      fleet: widget.fleet,
       child: WindowScope(
         controller: widget.window,
         child: ThemeScope(
@@ -111,7 +112,7 @@ class _CommanderAppState extends State<CommanderApp> {
           // midpoint, and the two chromes build different widget types, so the
           // shells re-inflate and page State beneath them is rebuilt: a live
           // terminal attach in the wide shell reopens, and fleet search text
-          // resets. That is the same cost as switching workspace tabs, which
+          // resets. That is the same cost as switching detail tabs, which
           // already re-creates attaches — but it is not "nothing is disposed",
           // and the server-side session is untouched either way.
           child: ListenableBuilder(
@@ -124,12 +125,12 @@ class _CommanderAppState extends State<CommanderApp> {
               // Navigator (so no pushed route can cover it).
               builder: (context, child) => WindowFrame(child: child!),
               home: ListenableBuilder(
-                listenable: widget.workspace,
-                builder: (context, _) => widget.workspace.isEmpty
+                listenable: widget.fleet,
+                builder: (context, _) => widget.fleet.isEmpty
                     // First run: no servers yet. Adding one flips the home below.
                     ? ConnectionPage(
                         api: widget.api,
-                        onSubmit: widget.workspace.addServer,
+                        onSubmit: widget.fleet.addServer,
                       )
                     : const AdaptiveShell(),
               ),

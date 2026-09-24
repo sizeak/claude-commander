@@ -55,7 +55,11 @@ final _safeDirName = RegExp(r'^[A-Za-z0-9._][A-Za-z0-9._-]*$');
 class CloneRepoPage extends StatefulWidget {
   final CommanderStore store;
 
-  const CloneRepoPage({super.key, required this.store});
+  /// The workspace the cloned (or registered-existing) project lands in — the
+  /// app's active one. Null is Main.
+  final String? workspace;
+
+  const CloneRepoPage({super.key, required this.store, this.workspace});
 
   @override
   State<CloneRepoPage> createState() => _CloneRepoPageState();
@@ -120,7 +124,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
   void initState() {
     super.initState();
     // The badge depends on the project list, which may still be loading when
-    // this page opens (the workspace snapshot lands asynchronously). Listening
+    // this page opens (the snapshot lands asynchronously). Listening
     // means the badges fill in when it arrives rather than being permanently
     // absent for anyone who got here quickly.
     _store.addListener(_onStoreChanged);
@@ -300,6 +304,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
           // whitespace-only entry would be refused with a 400, so normalise it
           // to the same thing.
           destName: destName.trim().isEmpty ? null : destName.trim(),
+          workspace: widget.workspace,
         ),
       );
     } catch (e) {
@@ -401,7 +406,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
     if (!mounted) return _Attempt.done;
     if (register != true) return _Attempt.rename;
     try {
-      await _store.ensureProject(dest);
+      await _store.ensureProject(dest, workspace: widget.workspace);
       await _store.refresh();
       if (!mounted) return _Attempt.done;
       Navigator.of(context).pop(true);

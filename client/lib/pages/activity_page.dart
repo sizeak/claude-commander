@@ -3,26 +3,27 @@ import 'package:flutter/material.dart';
 import '../chrome/chrome_forms.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
-import '../state/workspace_store.dart';
+import '../state/fleet_store.dart';
 import '../theme/tokens.dart';
 import '../util/activity_feed.dart';
 import '../util/format.dart';
+import '../widgets/workspace_menu.dart';
 import 'terminal_page.dart';
 
 /// The cross-server Activity timeline — layout-agnostic (no Scaffold, no route),
-/// so it embeds in both the phone bottom-nav and the wide workspace pane. A
+/// so it embeds in both the phone bottom-nav and the wide fleet pane. A
 /// vertical rail runs down the left with a coloured node per event; actionable
 /// "needs you" events float to the top as attention-tinted cards with an Answer
 /// button.
 ///
-/// Reads the [WorkspaceStore] from the enclosing [WorkspaceScope] and rebuilds
+/// Reads the [FleetStore] from the enclosing [FleetScope] and rebuilds
 /// off its change broadcast (it re-emits every child store's ticks), deriving the
 /// feed via [buildActivityFeed]. Tapping an event with a session navigates to
 /// that session's agent terminal, the same route the session list uses.
 class ActivityBody extends StatefulWidget {
   /// Whether the view frames itself with a [ChromeViewRail] — the "Activity"
   /// title + subtitle in Mission Control, the deck's elbow rail in LCARS. The
-  /// phone bottom-nav and the wide workspace pane keep it (true); a push wrapper
+  /// phone bottom-nav and the wide fleet pane keep it (true); a push wrapper
   /// whose own chrome already titles the screen passes false and gets the filter
   /// strip over the timeline alone.
   final bool showHeader;
@@ -38,17 +39,22 @@ class _ActivityBodyState extends State<ActivityBody> {
 
   @override
   Widget build(BuildContext context) {
-    final workspace = WorkspaceScope.of(context)!;
+    final fleet = FleetScope.of(context)!;
     return ListenableBuilder(
-      listenable: workspace,
+      listenable: fleet,
       builder: (context, _) {
-        final servers = workspace.servers;
-        final events = buildActivityFeed(servers);
+        final servers = fleet.servers;
+        // Scoped to the active workspace, like the fleet list beside it.
+        final workspace = fleet.activeWorkspace;
+        final events = buildActivityFeed(
+          servers,
+          where: (store, s) => store.workspaceOfSession(s) == workspace,
+        );
         final filtered = filterActivity(events, _filter);
         final slices = _sliceSpec(needsYouCount(events));
         final timeline = RefreshIndicator(
-          onRefresh: workspace.refreshAll,
-          child: _timeline(workspace, servers, filtered),
+          onRefresh: fleet.refreshAll,
+          child: _timeline(fleet, servers, filtered),
         );
 
         if (!widget.showHeader) {
@@ -65,6 +71,9 @@ class _ActivityBodyState extends State<ActivityBody> {
           ChromeViewRailSpec(
             code: '47-V',
             title: 'Activity',
+            // The feed is scoped too, so it says which workspace it is showing
+            // and switches it, exactly as the Fleet view does.
+            titleMenu: workspaceTitleMenu(fleet),
             subtitle:
                 'across ${servers.length} '
                 'server${servers.length == 1 ? '' : 's'} · live',
@@ -103,7 +112,7 @@ class _ActivityBodyState extends State<ActivityBody> {
   );
 
   Widget _timeline(
-    WorkspaceStore workspace,
+    FleetStore fleet,
     List<CommanderStore> servers,
     List<ActivityEvent> events,
   ) {
@@ -128,7 +137,7 @@ class _ActivityBodyState extends State<ActivityBody> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               for (final e in events)
-                _TimelineItem(event: e, onTap: () => _open(workspace, e)),
+                _TimelineItem(event: e, onTap: () => _open(fleet, e)),
             ],
           ),
         ),
@@ -140,7 +149,7 @@ class _ActivityBodyState extends State<ActivityBody> {
     if (servers.isEmpty) {
       return const _InlineNote(icon: Icons.dns_outlined, text: 'No servers');
     }
-    final loading = servers.any((s) => s.workspace == null && s.error == null);
+    final loading = servers.any((s) => s.snapshot == null && s.error == null);
     if (loading) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 40),
@@ -158,10 +167,10 @@ class _ActivityBodyState extends State<ActivityBody> {
   /// Navigate to the event's session's agent terminal, mirroring the session
   /// list's route (a store-scoped [TerminalPage]). A no-op for server-level
   /// events (no session) or while the owning server is mid-reconnect (no handle).
-  void _open(WorkspaceStore workspace, ActivityEvent event) {
+  void _open(FleetStore fleet, ActivityEvent event) {
     final sid = event.sessionId;
     if (sid == null) return;
-    final store = workspace.serverById(event.serverId);
+    final store = fleet.serverById(event.serverId);
     final session = store?.sessionById(sid);
     final handle = store?.handle;
     if (store == null || session == null || handle == null) return;

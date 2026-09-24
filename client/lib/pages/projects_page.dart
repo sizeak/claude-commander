@@ -19,10 +19,19 @@ import 'clone_repo_page.dart';
 /// checkout are both the server's, so a phone can add a project it has no copy
 /// of. The list is rendered reactively from the [CommanderStore] (the change feed
 /// refreshes it after a mutation).
+///
+/// A project added or cloned here lands in [workspace] — the app's active one —
+/// so it appears in the list the user came from. (A directory scan registers
+/// into Main: the scan route takes no workspace.) Every project is listed
+/// regardless of workspace, each tagged with the one it is in; moving them
+/// between workspaces is the Workspaces page's job.
 class ProjectsPage extends StatefulWidget {
   final CommanderStore store;
 
-  const ProjectsPage({super.key, required this.store});
+  /// Where new projects go (null = Main).
+  final String? workspace;
+
+  const ProjectsPage({super.key, required this.store, this.workspace});
 
   @override
   State<ProjectsPage> createState() => _ProjectsPageState();
@@ -111,7 +120,10 @@ class _ProjectsPageState extends State<ProjectsPage> {
   /// list here already holds a newly cloned project when we come back.
   Future<void> _clone() async {
     await Navigator.of(context).push(
-      MaterialPageRoute<bool>(builder: (_) => CloneRepoPage(store: _store)),
+      MaterialPageRoute<bool>(
+        builder: (_) =>
+            CloneRepoPage(store: _store, workspace: widget.workspace),
+      ),
     );
   }
 
@@ -122,7 +134,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
     );
     if (path == null || path.isEmpty) return;
     await _run(() async {
-      await _store.addProject(path);
+      await _store.addProject(path, workspace: widget.workspace);
       await _store.refresh();
       _snack('Project added');
     });
@@ -295,7 +307,7 @@ class _ProjectTileState extends State<_ProjectTile> {
           overflow: TextOverflow.ellipsis,
         ),
         subtitle: Text(
-          widget.project.repoPath,
+          [widget.project.repoPath, ?widget.project.workspace].join(' · '),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: t.meta(size: 11, color: t.textMuted),
