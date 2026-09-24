@@ -29,6 +29,35 @@ String? resolveStartupWorkspace({
   workspaces: workspaces,
 );
 
+/// Whether `name` is already taken — by a workspace or by Main's label,
+/// trimmed and ignoring case, as a server compares them. `except` is the
+/// workspace being renamed, which may keep (or re-case) its own name.
+bool workspaceNameTaken({
+  required List<MergedWorkspace> workspaces,
+  required String name,
+  MergedWorkspace? except,
+}) => RustLib.instance.api.crateApiWorkspaceWorkspaceNameTaken(
+  workspaces: workspaces,
+  name: name,
+  except: except,
+);
+
+/// The definition list to send one server: `wanted` (what an edit produced
+/// from the merged list) narrowed to what that server accepts, given its `own`
+/// definitions and the Main label it will have (`main_label`: the one being
+/// sent, else its stored one). Keeps the server's own spellings and drops
+/// another server's case-insensitive clash, so servers that disagree never
+/// block an edit on each other.
+List<WorkspaceDef> definitionsForServer({
+  required List<WorkspaceDef> wanted,
+  required List<WorkspaceDef> own,
+  String? mainLabel,
+}) => RustLib.instance.api.crateApiWorkspaceDefinitionsForServer(
+  wanted: wanted,
+  own: own,
+  mainLabel: mainLabel,
+);
+
 /// Why `raw` cannot be a workspace name, or `None` when it can. The message is
 /// the one the server would answer a 400 with.
 String? workspaceNameError({required String raw}) =>

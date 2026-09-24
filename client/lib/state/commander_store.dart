@@ -324,9 +324,10 @@ class CommanderStore extends ChangeNotifier {
   Future<void> removeProject(String id) =>
       _api.removeProject(handle: _requireHandle, id: id);
 
-  /// Scan a server-side directory for git repos and register any it finds.
-  Future<ScanResultDto> scanDirectory(String path) =>
-      _api.scanDirectory(handle: _requireHandle, path: path);
+  /// Scan a server-side directory for git repos and register any it finds,
+  /// each new one tagged with [workspace] (null = Main).
+  Future<ScanResultDto> scanDirectory(String path, {String? workspace}) => _api
+      .scanDirectory(handle: _requireHandle, path: path, workspace: workspace);
 
   /// Register a project by its server-side repo path, or return the id of the
   /// project already registered for it.

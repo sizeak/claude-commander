@@ -20,11 +20,10 @@ import 'clone_repo_page.dart';
 /// of. The list is rendered reactively from the [CommanderStore] (the change feed
 /// refreshes it after a mutation).
 ///
-/// A project added or cloned here lands in [workspace] — the app's active one —
-/// so it appears in the list the user came from. (A directory scan registers
-/// into Main: the scan route takes no workspace.) Every project is listed
-/// regardless of workspace, each tagged with the one it is in; moving them
-/// between workspaces is the Workspaces page's job.
+/// A project added, scanned or cloned here lands in [workspace] — the app's
+/// active one — so it appears in the list the user came from. Every project is
+/// listed regardless of workspace, each tagged with the one it is in; moving
+/// them between workspaces is the Workspaces page's job.
 class ProjectsPage extends StatefulWidget {
   final CommanderStore store;
 
@@ -147,7 +146,10 @@ class _ProjectsPageState extends State<ProjectsPage> {
     );
     if (path == null || path.isEmpty) return;
     await _run(() async {
-      final result = await _store.scanDirectory(path);
+      final result = await _store.scanDirectory(
+        path,
+        workspace: widget.workspace,
+      );
       await _store.refresh();
       _snack('Added ${result.added}, skipped ${result.skipped}');
     });

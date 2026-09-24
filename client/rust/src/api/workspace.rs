@@ -2,8 +2,9 @@
 //! `claude-commander-protocol`.
 //!
 //! The app shows one merged workspace list across every connected server, picks
-//! which one to open on, and checks a typed name before sending it. All three
-//! are rules the TUI applies too, so they are called here rather than
+//! which one to open on, checks a typed name before sending it, and narrows an
+//! edited definition list to what each server accepts. All of these are rules
+//! the TUI applies too, so they are called here rather than
 //! re-implemented in Dart — the drift `api::query` was created to end.
 //!
 //! # Why `#[frb(sync)]`
@@ -26,7 +27,9 @@ use claude_commander_protocol::workspace::{
 };
 pub use claude_commander_viewmodel::workspace::MergedWorkspace;
 use claude_commander_viewmodel::workspace::{
-    merge_workspace_sources, resolve_startup_workspace as vm_resolve_startup, WorkspaceSource,
+    definitions_for_server as vm_definitions_for_server, merge_workspace_sources,
+    resolve_startup_workspace as vm_resolve_startup,
+    workspace_name_taken as vm_workspace_name_taken, WorkspaceSource,
 };
 use flutter_rust_bridge::frb;
 
@@ -82,6 +85,33 @@ pub fn resolve_startup_workspace(
         last.as_deref(),
         &workspaces,
     )
+}
+
+/// Whether `name` is already taken — by a workspace or by Main's label,
+/// trimmed and ignoring case, as a server compares them. `except` is the
+/// workspace being renamed, which may keep (or re-case) its own name.
+#[frb(sync)]
+pub fn workspace_name_taken(
+    workspaces: Vec<MergedWorkspace>,
+    name: String,
+    except: Option<MergedWorkspace>,
+) -> bool {
+    vm_workspace_name_taken(&workspaces, &name, except.as_ref())
+}
+
+/// The definition list to send one server: `wanted` (what an edit produced
+/// from the merged list) narrowed to what that server accepts, given its `own`
+/// definitions and the Main label it will have (`main_label`: the one being
+/// sent, else its stored one). Keeps the server's own spellings and drops
+/// another server's case-insensitive clash, so servers that disagree never
+/// block an edit on each other.
+#[frb(sync)]
+pub fn definitions_for_server(
+    wanted: Vec<WorkspaceDef>,
+    own: Vec<WorkspaceDef>,
+    main_label: Option<String>,
+) -> Vec<WorkspaceDef> {
+    vm_definitions_for_server(&wanted, &own, main_label.as_deref())
 }
 
 /// Why `raw` cannot be a workspace name, or `None` when it can. The message is
@@ -162,6 +192,32 @@ mod tests {
             resolve("Gone", None),
             None,
             "a missing target falls back to Main"
+        );
+    }
+
+    /// Thin adapters: the rules are the viewmodel's (and tested there); these
+    /// pin that the owned arguments reach it unchanged.
+    #[test]
+    fn name_taken_and_per_server_definitions_delegate_to_the_viewmodel() {
+        let merged = merge_workspaces(vec![WorkspaceSourceDto {
+            defs: vec![def("Work", None)],
+            main: Some(def("Home", None)),
+            project_tags: vec![],
+        }]);
+        assert!(workspace_name_taken(merged.clone(), " work ".into(), None));
+        assert!(workspace_name_taken(merged.clone(), "HOME".into(), None));
+        assert!(!workspace_name_taken(
+            merged.clone(),
+            "home".into(),
+            Some(merged[0].clone())
+        ));
+        assert_eq!(
+            definitions_for_server(
+                vec![def("Work", None), def("work", None), def("Play", None)],
+                vec![def("work", None)],
+                Some("play".into()),
+            ),
+            vec![def("work", None)]
         );
     }
 

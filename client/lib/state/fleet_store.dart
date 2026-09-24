@@ -280,19 +280,28 @@ class FleetStore extends ChangeNotifier {
     return failures;
   }
 
+  /// Replace every server's definitions with [defs] — each server getting it
+  /// narrowed to what it accepts (`definitionsForServer`: its own spellings
+  /// kept, another server's case-insensitive clash dropped), so two servers
+  /// that disagree never make an edit fail on both.
   Future<List<WorkspaceEditFailure>> _putDefinitions(
     List<WorkspaceDef> defs, {
     WorkspaceDef? main,
     String? startup,
-  }) => _fanOut(
-    (store) => store.setWorkspaces(
+  }) => _fanOut((store) {
+    final snap = store.snapshot;
+    return store.setWorkspaces(
       SetWorkspacesRequestDto(
-        workspaces: defs,
+        workspaces: _api.definitionsForServer(
+          wanted: defs,
+          own: snap?.workspaces ?? const [],
+          mainLabel: (main ?? snap?.mainWorkspace)?.name,
+        ),
         main: main,
         startupWorkspace: startup,
       ),
-    ),
-  );
+    );
+  });
 
   /// Define a new workspace on every server, after the existing ones.
   Future<List<WorkspaceEditFailure>> createWorkspace(

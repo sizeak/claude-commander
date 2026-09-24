@@ -70,24 +70,19 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// Why [raw] cannot name a workspace other than [except], or null when it
-  /// can. The server's own rule (through the bridge) plus the one only the
-  /// merged list can check: the name must not already be taken, by a workspace
-  /// or by Main's label, ignoring case — `validate_set_workspaces` would refuse
-  /// the list otherwise.
-  String? _nameError(String raw, {String? except, bool main = false}) {
+  /// Why [raw] cannot name a workspace other than [except] (the one being
+  /// renamed), or null when it can. Both halves are the shared rules, through
+  /// the bridge: the server's own name check, and the one only the merged list
+  /// can answer — not already taken by a workspace or Main's label, ignoring
+  /// case (`viewmodel::workspace_name_taken`, which the TUI uses too).
+  String? _nameError(String raw, {MergedWorkspace? except, bool main = false}) {
     final api = _fleet.api;
     final ruleError = main
         ? api.workspaceLabelError(raw)
         : api.workspaceNameError(raw);
     if (ruleError != null) return ruleError;
-    final wanted = raw.trim().toLowerCase();
-    if (except != null && wanted == except.toLowerCase()) return null;
-    for (final w in _fleet.workspaces) {
-      if (main && w.name == null) continue;
-      if ((w.name ?? w.label).toLowerCase() == wanted) {
-        return 'A workspace named "${raw.trim()}" already exists';
-      }
+    if (api.workspaceNameTaken(_fleet.workspaces, raw, except: except)) {
+      return 'A workspace named "${raw.trim()}" already exists';
     }
     return null;
   }
@@ -163,8 +158,7 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
     final to = await _promptName(
       title: from == null ? 'Rename Main' : 'Rename workspace',
       initial: w.label,
-      validate: (raw) =>
-          _nameError(raw, except: from ?? w.label, main: from == null),
+      validate: (raw) => _nameError(raw, except: w, main: from == null),
     );
     if (to == null || to == w.label) return;
     await _edit(

@@ -314,13 +314,17 @@ Future<void> deleteWorkspace({required String handle, required String name}) =>
 Future<void> removeProject({required String handle, required String id}) =>
     RustLib.instance.api.crateApiSimpleRemoveProject(handle: handle, id: id);
 
-/// Scan a server-side directory for git repos, registering any new ones.
+/// Scan a server-side directory for git repos, registering any new ones —
+/// each tagged with `workspace` (the app's active workspace; `None` = Main), as
+/// [`add_project`] tags its one.
 Future<ScanResultDto> scanDirectory({
   required String handle,
   required String path,
+  String? workspace,
 }) => RustLib.instance.api.crateApiSimpleScanDirectory(
   handle: handle,
   path: path,
+  workspace: workspace,
 );
 
 /// Every repo the server-side `gh` user can clone, for the repo picker.

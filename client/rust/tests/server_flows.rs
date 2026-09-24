@@ -423,7 +423,8 @@ fn projects_add_list_branches_and_scan() {
         .expect("repo has a parent dir")
         .to_string_lossy()
         .into_owned();
-    let scan = simple::scan_directory(fx.handle.clone(), parent).expect("scan_directory");
+    let scan =
+        simple::scan_directory(fx.handle.clone(), parent, None).expect("scan_directory");
     assert!(
         scan.added + scan.skipped >= 1,
         "scanning the parent dir should see the repo (added or skipped)"

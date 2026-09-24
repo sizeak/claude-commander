@@ -358,10 +358,16 @@ pub struct ScanResultDto {
     pub skipped: u32,
 }
 
-/// Scan a server-side directory for git repos, registering any new ones.
-pub fn scan_directory(handle: String, path: String) -> Result<ScanResultDto> {
+/// Scan a server-side directory for git repos, registering any new ones —
+/// each tagged with `workspace` (the app's active workspace; `None` = Main), as
+/// [`add_project`] tags its one.
+pub fn scan_directory(
+    handle: String,
+    path: String,
+    workspace: Option<String>,
+) -> Result<ScanResultDto> {
     let client = with_client(&handle)?;
-    let scan = call(client.scan_directory(PathBuf::from(path)))?;
+    let scan = call(client.scan_directory(PathBuf::from(path), workspace))?;
     Ok(ScanResultDto {
         added: scan.added as u32,
         skipped: scan.skipped as u32,

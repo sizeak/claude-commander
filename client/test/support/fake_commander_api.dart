@@ -660,6 +660,21 @@ class FakeCommanderApi implements CommanderApi {
   String? workspaceNameError(String raw) => fakeWorkspaceNameError(raw);
 
   @override
+  bool workspaceNameTaken(
+    List<MergedWorkspace> workspaces,
+    String name, {
+    MergedWorkspace? except,
+  }) => fakeWorkspaceNameTaken(workspaces, name, except: except);
+
+  @override
+  List<WorkspaceDef> definitionsForServer({
+    required List<WorkspaceDef> wanted,
+    required List<WorkspaceDef> own,
+    String? mainLabel,
+  }) =>
+      fakeDefinitionsForServer(wanted: wanted, own: own, mainLabel: mainLabel);
+
+  @override
   String? workspaceLabelError(String raw) => fakeWorkspaceLabelError(raw);
 
   @override
@@ -677,8 +692,9 @@ class FakeCommanderApi implements CommanderApi {
   Future<ScanResultDto> scanDirectory({
     required String handle,
     required String path,
+    String? workspace,
   }) async {
-    _record('scanDirectory', {'path': path});
+    _record('scanDirectory', {'path': path, 'workspace': workspace});
     return scanDirectoryResponse;
   }
 

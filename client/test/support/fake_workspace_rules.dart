@@ -5,13 +5,14 @@ import 'package:claude_commander_client/src/rust/api/workspace.dart';
 /// widget tests.
 ///
 /// `flutter test` loads no native library, so the real merge, startup
-/// resolution and name checks are out of reach — the same split
-/// `fake_diff_layout.dart` documents for the diff engine. These reproduce the
-/// behaviour a widget test leans on (Main first, first-source order, orphan tags
-/// appended; a missing startup target falls back to Main; the reserved and
-/// empty names refused) and nothing more. The rules themselves are pinned by
-/// the viewmodel's and the cdylib's Rust tests; a Dart test that wanted to probe
-/// an edge of them would be testing this file.
+/// resolution, name checks and per-server narrowing are out of reach — the
+/// same split `fake_diff_layout.dart` documents for the diff engine. These
+/// reproduce the behaviour a widget test leans on (Main first, first-source
+/// order, orphan tags appended; a missing startup target falls back to Main;
+/// the reserved and empty names refused; a server keeps its own spellings) and
+/// nothing more. The rules themselves are pinned by the viewmodel's and the
+/// cdylib's Rust tests; a Dart test that wanted to probe an edge of them would
+/// be testing this file.
 
 List<MergedWorkspace> fakeMergeWorkspaces(List<WorkspaceSourceDto> sources) {
   WorkspaceDef? main;
@@ -76,6 +77,36 @@ String? fakeWorkspaceNameError(String raw) {
     return '"$name" is a reserved workspace name';
   }
   return null;
+}
+
+bool fakeWorkspaceNameTaken(
+  List<MergedWorkspace> workspaces,
+  String name, {
+  MergedWorkspace? except,
+}) {
+  final wanted = name.trim().toLowerCase();
+  return workspaces.any((w) => w != except && w.label.toLowerCase() == wanted);
+}
+
+List<WorkspaceDef> fakeDefinitionsForServer({
+  required List<WorkspaceDef> wanted,
+  required List<WorkspaceDef> own,
+  String? mainLabel,
+}) {
+  final claimed = <String>[
+    if (mainLabel != null) mainLabel.toLowerCase(),
+    for (final o in own) o.name.toLowerCase(),
+  ];
+  final out = <WorkspaceDef>[];
+  for (final d in wanted) {
+    if (own.any((o) => o.name == d.name)) {
+      out.add(d);
+    } else if (!claimed.contains(d.name.toLowerCase())) {
+      claimed.add(d.name.toLowerCase());
+      out.add(d);
+    }
+  }
+  return out;
 }
 
 String? fakeWorkspaceColorError(String raw) =>

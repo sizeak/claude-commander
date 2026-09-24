@@ -90,6 +90,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_i_32(dynamic raw);
 
   @protected
+  MergedWorkspace dco_decode_box_autoadd_merged_workspace(dynamic raw);
+
+  @protected
   ProjectId dco_decode_box_autoadd_project_id(dynamic raw);
 
   @protected
@@ -294,6 +297,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
+
+  @protected
+  MergedWorkspace? dco_decode_opt_box_autoadd_merged_workspace(dynamic raw);
 
   @protected
   ProjectId? dco_decode_opt_box_autoadd_project_id(dynamic raw);
@@ -503,6 +509,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
+
+  @protected
+  MergedWorkspace sse_decode_box_autoadd_merged_workspace(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ProjectId sse_decode_box_autoadd_project_id(SseDeserializer deserializer);
@@ -761,6 +772,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
+  MergedWorkspace? sse_decode_opt_box_autoadd_merged_workspace(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ProjectId? sse_decode_opt_box_autoadd_project_id(
     SseDeserializer deserializer,
   );
@@ -1015,6 +1031,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_merged_workspace(
+    MergedWorkspace self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_project_id(
@@ -1357,6 +1379,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_merged_workspace(
+    MergedWorkspace? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_project_id(

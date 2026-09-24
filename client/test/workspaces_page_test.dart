@@ -125,6 +125,34 @@ void main() {
     expect(rowOf('Side'), findsOneWidget);
   });
 
+  testWidgets('servers that disagree on a spelling each keep their own', (
+    tester,
+  ) async {
+    // Created independently while each server was unreachable: "Personal"
+    // here, "personal" there. The merge keeps both (exact names), but no
+    // server accepts both — so each is sent only what it can take.
+    codespaceApi.workspacesResponse = const [WorkspaceDef(name: 'personal')];
+    await fleet.servers.last.refresh();
+    await pumpPage(tester);
+
+    await tester.tap(find.byTooltip('New workspace'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Side');
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(lastPut(laptopApi).workspaces.map((w) => w.name), [
+      'Work',
+      'Personal',
+      'Side',
+    ]);
+    expect(lastPut(codespaceApi).workspaces.map((w) => w.name), [
+      'Work',
+      'personal',
+      'Side',
+    ]);
+  });
+
   testWidgets('a reserved name is refused before anything is sent', (
     tester,
   ) async {

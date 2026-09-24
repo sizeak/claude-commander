@@ -107,6 +107,21 @@ void main() {
     expect(find.textContaining('Added 2, skipped 1'), findsOneWidget);
   });
 
+  testWidgets('a scan lands its repos in the active workspace', (tester) async {
+    await store.connect();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ProjectsPage(store: store, workspace: 'Work'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await chooseAddSource(tester, 'Scan directory');
+    await enterPathAndConfirm(tester, '/srv/repos');
+
+    expect(api.lastCall('scanDirectory')!.args['workspace'], 'Work');
+  });
+
   testWidgets('Clone from GitHub pushes the repo picker', (tester) async {
     api.githubReposResponse = [githubRepo(owner: 'acme', name: 'widget')];
     await pump(tester);

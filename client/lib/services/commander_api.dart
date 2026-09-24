@@ -217,6 +217,24 @@ abstract class CommanderApi {
   /// null when it can. Pure, like [mergeWorkspaces].
   String? workspaceNameError(String raw);
 
+  /// Whether [name] is already taken in [workspaces] — by a workspace or
+  /// Main's label, ignoring case, as a server compares them. [except] is the
+  /// workspace being renamed. Pure, like [mergeWorkspaces].
+  bool workspaceNameTaken(
+    List<MergedWorkspace> workspaces,
+    String name, {
+    MergedWorkspace? except,
+  });
+
+  /// [wanted] narrowed to a definition list one server accepts, given its
+  /// [own] definitions and the Main label it will have. Pure, like
+  /// [mergeWorkspaces].
+  List<WorkspaceDef> definitionsForServer({
+    required List<WorkspaceDef> wanted,
+    required List<WorkspaceDef> own,
+    String? mainLabel,
+  });
+
   /// Why [raw] can't be Main's label, or null. Main may be called "Main".
   String? workspaceLabelError(String raw);
 
@@ -225,9 +243,12 @@ abstract class CommanderApi {
 
   Future<void> removeProject({required String handle, required String id});
 
+  /// Register every repo under a server-side [path], each new one tagged
+  /// with [workspace] (null = Main).
   Future<ScanResultDto> scanDirectory({
     required String handle,
     required String path,
+    String? workspace,
   });
 
   /// Every repo the server-side `gh` user can clone. The list is the *server's*
@@ -639,6 +660,21 @@ class RustCommanderApi implements CommanderApi {
   String? workspaceNameError(String raw) => ws.workspaceNameError(raw: raw);
 
   @override
+  bool workspaceNameTaken(
+    List<MergedWorkspace> workspaces,
+    String name, {
+    MergedWorkspace? except,
+  }) =>
+      ws.workspaceNameTaken(workspaces: workspaces, name: name, except: except);
+
+  @override
+  List<WorkspaceDef> definitionsForServer({
+    required List<WorkspaceDef> wanted,
+    required List<WorkspaceDef> own,
+    String? mainLabel,
+  }) => ws.definitionsForServer(wanted: wanted, own: own, mainLabel: mainLabel);
+
+  @override
   String? workspaceLabelError(String raw) => ws.workspaceLabelError(raw: raw);
 
   @override
@@ -652,7 +688,8 @@ class RustCommanderApi implements CommanderApi {
   Future<ScanResultDto> scanDirectory({
     required String handle,
     required String path,
-  }) => simple.scanDirectory(handle: handle, path: path);
+    String? workspace,
+  }) => simple.scanDirectory(handle: handle, path: path, workspace: workspace);
 
   @override
   Future<List<GithubRepo>> githubRepos({required String handle}) =>
