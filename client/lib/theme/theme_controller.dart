@@ -78,6 +78,20 @@ class ThemeController extends ChangeNotifier {
   ResolvedTheme _resolved;
   CommanderTokens _tokens;
 
+  /// The tail of the persistence queue, or null when it is idle. Every write
+  /// chains onto it, so writes reach the store one at a time in the order they
+  /// were made: [beginRename] fires its write without awaiting it, and a
+  /// [commitRename] or [abortRename] issued while it is in flight must not be
+  /// overtaken by it.
+  ///
+  /// Null rather than a standing `Future.value()` made in the constructor:
+  /// chaining onto a future completed in another zone appears to schedule the
+  /// callback in *that* zone, and with one the picker's widget tests (whose
+  /// controller is built outside `testWidgets`' fake-async zone) hung until
+  /// their 10-minute timeout. Starting an idle queue's write directly keeps
+  /// each write in the caller's zone.
+  Future<void>? _writes;
+
   ThemeController({required PrefStore store, ThemeId? initial})
     : this._(store, ThemePref(themeId: initial ?? ThemeId.missionControl));
 
@@ -245,11 +259,7 @@ class ThemeController extends ChangeNotifier {
     _usual = pref;
     _refresh();
     notifyListeners();
-    // Same reasoning as [load]: the theme has already been applied, so a failed
-    // write costs persistence across relaunch, not this session.
-    try {
-      await _store.write(prefKey, encodeUsualTheme(pref));
-    } catch (_) {}
+    await _persist(prefKey, encodeUsualTheme(pref));
   }
 
   Future<void> _setWorkspace(String key, ThemePref pref) => _setWorkspaces(
@@ -263,9 +273,30 @@ class ThemeController extends ChangeNotifier {
     _workspaces = Map.unmodifiable(next);
     _refresh();
     notifyListeners();
-    try {
-      await _store.write(workspacesPrefKey, encodeWorkspaceThemes(next));
-    } catch (_) {}
+    await _persist(workspacesPrefKey, encodeWorkspaceThemes(next));
+  }
+
+  /// Queues [value] for [key] behind every earlier write (see [_writes]).
+  /// Encoded by the caller, so each write carries the state it was made for.
+  Future<void> _persist(String key, String value) {
+    // Same reasoning as [load]: the theme has already been applied, so a failed
+    // write costs persistence across relaunch, not this session. Swallowed per
+    // write, so one failure never stalls the queue behind it.
+    Future<void> write() async {
+      try {
+        await _store.write(key, value);
+      } catch (_) {}
+    }
+
+    final previous = _writes;
+    final next = previous == null ? write() : previous.then((_) => write());
+    _writes = next;
+    unawaited(
+      next.whenComplete(() {
+        if (identical(_writes, next)) _writes = null;
+      }),
+    );
+    return next;
   }
 }
 

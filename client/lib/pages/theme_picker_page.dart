@@ -28,6 +28,9 @@ const inheritedPresetLabel = 'USUAL';
 /// The workspace scope's "stop pinning a preset" control, for tests.
 const inheritUsualPresetKey = ValueKey('theme-inherit-usual-preset');
 
+/// The inherited preset card's "pin it for this workspace" control, for tests.
+const pinInheritedPresetKey = ValueKey('theme-pin-inherited-preset');
+
 /// The key of [role]'s colour row.
 Key themeRoleRowKey(ThemeRole role) => ValueKey('theme-role:${role.wire}');
 
@@ -170,7 +173,10 @@ class _ThemePickerPageState extends State<ThemePickerPage> {
                     // usual one. Its card says so rather than wearing the
                     // check, and tapping it does nothing: picking it would pin
                     // the preset and, under [resolveTheme], silently drop the
-                    // usual overrides the workspace was showing.
+                    // usual overrides the workspace was showing. Pinning is
+                    // still wanted -- it is how a workspace sheds those
+                    // overrides -- so the card offers it as an explicit,
+                    // labelled button instead.
                     inherited:
                         key != null &&
                         own?.themeId == null &&
@@ -305,7 +311,8 @@ class _ThemeCard extends StatelessWidget {
   final bool selected;
 
   /// Selected only because the workspace inherits the usual preset: marked
-  /// [inheritedPresetLabel] in place of the check, and not tappable.
+  /// [inheritedPresetLabel] in place of the check, and not tappable as a
+  /// whole; a "Pin this preset" button calls [onTap] instead.
   final bool inherited;
   final VoidCallback onTap;
 
@@ -363,6 +370,16 @@ class _ThemeCard extends StatelessWidget {
             Text(_describe(id), style: t.meta(size: 10)),
             const SizedBox(height: 9),
             ThemePreview(id: id),
+            if (inherited)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  key: pinInheritedPresetKey,
+                  icon: const Icon(Icons.push_pin_outlined, size: 16),
+                  label: const Text('Pin this preset'),
+                  onPressed: onTap,
+                ),
+              ),
           ],
         ),
       ),

@@ -16,9 +16,7 @@ release = false
 # Boots a headless server for tests — no host audio — so match the server and
 # build core without its ALSA-linked `audio` feature. Without this, the client
 # cdylib's dev-dep on test-support would drag ALSA into the client build.
-# `test-support` for `git::fixture`, so every repo this harness builds commits
-# without signing, whatever the developer's global git config says.
-claude-commander-core = { path = "../claude-commander-core", default-features = false, features = ["test-support"] }
+claude-commander-core = { path = "../claude-commander-core", default-features = false }
 claude-commander-server = { path = "../claude-commander-server" }
 
 tokio = { workspace = true }

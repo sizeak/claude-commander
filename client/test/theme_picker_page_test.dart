@@ -348,6 +348,28 @@ void main() {
         expect(theme.resolvedFor('Work').overrides, {ThemeRole.primary: _red});
       });
 
+      testWidgets('Pin this preset pins the inherited preset, shedding the '
+          'usual overrides', (tester) async {
+        await theme.setOverride(null, ThemeRole.primary, _red);
+        await pumpTall(tester, wrapFleet());
+        // Offered only on the inherited card.
+        expect(find.byKey(pinInheritedPresetKey), findsOneWidget);
+
+        await tester.tap(find.byKey(pinInheritedPresetKey));
+        await tester.pumpAndSettle();
+        expect(
+          theme.workspaceTheme('Work'),
+          const ThemePref(themeId: ThemeId.missionControl),
+        );
+        expect(theme.resolvedFor('Work').id, ThemeId.missionControl);
+        expect(theme.resolvedFor('Work').overrides, isEmpty);
+        expect(theme.usual.overrides, {ThemeRole.primary: _red});
+        // Now the workspace's own choice: checked, and nothing left to pin.
+        expect(find.byIcon(Icons.check_circle), findsOneWidget);
+        expect(find.text(inheritedPresetLabel), findsNothing);
+        expect(find.byKey(pinInheritedPresetKey), findsNothing);
+      });
+
       testWidgets('Inherit usual preset keeps the workspace overrides', (
         tester,
       ) async {

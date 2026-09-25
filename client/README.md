@@ -138,10 +138,12 @@ written to plain shared preferences.
   the clipboard. With two or more workspaces, each can have its own theme
   (a preset and/or overrides) over the usual one, applied live on a workspace
   switch. In a workspace's scope the picker marks the preset it inherits
-  `USUAL` rather than checking it, and **Inherit usual preset** unpins a
-  preset while keeping the workspace's overrides. All of it is per device (`shared_preferences`), keyed by workspace
-  name: a rename made on this device moves the key, a rename made elsewhere
-  leaves the workspace on the usual theme. See `lib/theme/theme_prefs.dart`.
+  `USUAL` rather than checking it, with a **Pin this preset** button that pins
+  it (shedding the usual overrides); **Inherit usual preset** unpins a preset
+  while keeping the workspace's overrides. All of it is per device
+  (`shared_preferences`), keyed by workspace name: a rename made on this device
+  moves the key, a rename made elsewhere leaves the workspace on the usual
+  theme. See `lib/theme/theme_prefs.dart`.
 - **Window modes** (desktop) — fullscreen, a borderless frame where the app draws
   its own themed window bar, and a window size/position remembered across
   launches. See [Window modes](#window-modes).

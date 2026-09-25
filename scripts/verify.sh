@@ -119,7 +119,18 @@ EOF
 
 lane_fmt() { cc_run_in_shell "" cargo "cargo fmt --all -- --check"; }
 lane_clippy() { cc_run_in_shell "" cargo "cargo clippy --workspace --all-targets -- -D warnings"; }
-lane_build() { cc_run_in_shell "" cargo "cargo build --workspace --all-targets"; }
+lane_build() {
+  cc_run_in_shell "" cargo "cargo build --workspace --all-targets" || return $?
+  # Core's `test-support` must reach the build over dev edges only; see
+  # cc_tree_leaks_test_support. Runs offline in well under a second.
+  local tree
+  tree="$(cc_capture_in_shell "" cargo "$CC_CORE_FEATURE_TREE_CMD")" || return $?
+  if cc_tree_leaks_test_support <<<"$tree"; then
+    cc_error "core's test-support feature is enabled over a normal/build edge:"
+    printf '%s\n' "$tree"
+    return 1
+  fi
+}
 lane_test() { cc_run_in_shell "" cargo "cargo test --workspace"; }
 
 lane_pub_get() {

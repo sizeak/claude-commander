@@ -303,6 +303,21 @@ mod tests {
     use crate::git::fixture::fixture_git_std;
     use tempfile::TempDir;
 
+    /// Run a fixture git in `dir`, asserting it succeeds, so a setup step that
+    /// fails is reported as itself rather than as a confusing later assertion.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = fixture_git_std()
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     fn init_test_repo() -> (TempDir, GitBackend) {
         let temp_dir = TempDir::new().unwrap();
 
@@ -351,30 +366,23 @@ mod tests {
         let repo_path = temp_dir.path();
 
         // Initialize repo with an initial commit (required for worktree add)
-        fixture_git_std()
-            .args(["init"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        fixture_git_std()
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+        git(repo_path, &["init"]);
+        git(repo_path, &["config", "user.email", "test@example.com"]);
+        git(repo_path, &["config", "user.name", "Test"]);
+        git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
 
         // Create a linked worktree
         let wt_path = temp_dir.path().join("my-worktree");
-        fixture_git_std()
-            .args([
+        git(
+            repo_path,
+            &[
                 "worktree",
                 "add",
                 wt_path.to_str().unwrap(),
                 "-b",
                 "wt-branch",
-            ])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+            ],
+        );
         assert!(wt_path.exists(), "worktree should have been created");
 
         // Discover from the worktree path — should resolve to the main repo root
@@ -389,15 +397,6 @@ mod tests {
 
     #[test]
     fn test_detect_main_branch_detached_head_does_not_leak_placeholder() {
-        fn git(dir: &Path, args: &[&str]) {
-            let status = fixture_git_std()
-                .args(args)
-                .current_dir(dir)
-                .status()
-                .unwrap();
-            assert!(status.success(), "git {args:?} failed");
-        }
-
         let temp_dir = TempDir::new().unwrap();
         let repo_path = temp_dir.path();
 

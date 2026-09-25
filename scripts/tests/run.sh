@@ -468,6 +468,24 @@ export_rc=0
 assert_eq "0" "$export_rc" "cc_export_poisoned_git_signing writes the file and exports it"
 rm -rf "$git_tmp"
 
+echo "== cc_tree_leaks_test_support =="
+# Trimmed real `cargo tree` output: the clean shape (as on 26034ee^) and the
+# leak 26034ee introduced through claude-commander-test-support's [dependencies].
+clean_tree='claude-commander-core v0.36.0 (/r/crates/claude-commander-core)
+└── claude-commander-test-support v0.36.0 (/r/crates/claude-commander-test-support) (*)
+├── claude-commander-core feature "audio"
+│   └── claude-commander-core feature "default" (command-line)
+└── claude-commander-core feature "default" (command-line) (*)'
+leaky_tree="$clean_tree
+└── claude-commander-core feature \"test-support\"
+    └── claude-commander-test-support v0.36.0 (/r/crates/claude-commander-test-support) (*)"
+assert_fails "a normal-edge-clean tree is not a leak" cc_tree_leaks_test_support <<<"$clean_tree"
+leak_rc=0
+cc_tree_leaks_test_support <<<"$leaky_tree" || leak_rc=$?
+assert_eq "0" "$leak_rc" "a tree enabling core's test-support is a leak"
+assert_eq "cargo tree --offline --workspace -e normal,build,features -i claude-commander-core" \
+  "$CC_CORE_FEATURE_TREE_CMD" "the guard inspects normal+build edges only, offline"
+
 echo
 printf '%s passed, %s failed\n' "$pass_count" "$fail_count"
 [ "$fail_count" -eq 0 ] || exit 1

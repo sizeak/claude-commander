@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
 import 'package:claude_commander_client/theme/theme_prefs.dart';
@@ -121,6 +123,22 @@ void main() {
           }, failing: ThemeController.workspacesPrefKey),
         );
         await c.load();
+        expect(c.id, ThemeId.lcars);
+      },
+    );
+
+    test(
+      'a failure reading the usual theme keeps the workspace themes',
+      () async {
+        final c = ThemeController(
+          store: _FailingKeyStore({
+            ThemeController.workspacesPrefKey: '{"Work":{"themeId":"lcars"}}',
+          }, failing: ThemeController.prefKey),
+        );
+        await c.load();
+        expect(c.usual, const ThemePref(themeId: ThemeId.missionControl));
+        expect(c.workspaceTheme('Work')!.themeId, ThemeId.lcars);
+        c.setActiveWorkspace('Work');
         expect(c.id, ThemeId.lcars);
       },
     );
@@ -249,6 +267,29 @@ void main() {
       );
     });
 
+    test('persists the committed map even when the store finishes writes out '
+        'of order', () async {
+      // beginRename's write is fire-and-forget, so commitRename's can be issued
+      // while it is still in flight. A store that finishes the later write first
+      // would otherwise end up holding the begin-state map (both keys).
+      final store = _OutOfOrderStore({
+        ThemeController.workspacesPrefKey: '{"Work":{"themeId":"lcars"}}',
+      });
+      final c = ThemeController(store: store);
+      await c.load();
+
+      final pending = c.beginRename('Work', 'Job')!;
+      final committed = c.commitRename(pending);
+      await store.drainNewestFirst();
+      await committed;
+
+      final persisted = decodeWorkspaceThemes(
+        await store.read(ThemeController.workspacesPrefKey),
+      );
+      expect(persisted.keys, ['Job']);
+      expect(persisted['Job']!.themeId, ThemeId.lcars);
+    });
+
     test('an aborted rename puts both keys back as they were', () async {
       final c = ThemeController(store: InMemoryPrefStore());
       await c.selectFor('Work', ThemeId.lcars);
@@ -314,4 +355,36 @@ class _FailingKeyStore extends InMemoryPrefStore {
   @override
   Future<String?> read(String key) =>
       key == failing ? Future.error(StateError('corrupt')) : super.read(key);
+}
+
+/// A store whose writes land only when [drainNewestFirst] completes them, and
+/// then in reverse order of issue -- a platform backend that reorders writes.
+class _OutOfOrderStore extends InMemoryPrefStore {
+  _OutOfOrderStore(super.initial);
+
+  final _inFlight = <void Function()>[];
+
+  @override
+  Future<void> write(String key, String value) {
+    final done = Completer<void>();
+    _inFlight.add(() async {
+      await super.write(key, value);
+      done.complete();
+    });
+    return done.future;
+  }
+
+  /// Completes every write issued so far newest first, then any issued as a
+  /// result, until none is left.
+  Future<void> drainNewestFirst() async {
+    for (;;) {
+      await pumpEventQueue();
+      if (_inFlight.isEmpty) return;
+      final batch = _inFlight.reversed.toList();
+      _inFlight.clear();
+      for (final land in batch) {
+        land();
+      }
+    }
+  }
 }

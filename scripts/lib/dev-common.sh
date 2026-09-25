@@ -422,7 +422,8 @@ cc_have_display() {
 # locked -- and pass whenever it is not, so the dependency never shows up on the
 # machine that introduced it. Signing is switched on here and the signer is
 # `false`, so a fixture that forgets the opt-out (core's `git::fixture` helpers,
-# or `commit.gpgsign false` in the temp repo's own config) fails immediately and
+# test-support's `harness_git`, or `commit.gpgsign false` in the temp repo's own
+# config) fails immediately and
 # every time.
 #
 # A *global* file rather than GIT_CONFIG_COUNT on purpose: env config outranks a
@@ -448,6 +449,27 @@ cc_export_poisoned_git_signing() {
   mkdir -p "$(dirname "$file")"
   cc_poisoned_gitconfig >"$file"
   export GIT_CONFIG_GLOBAL="$file"
+}
+
+# ---------------------------------------------------------------------------
+# Feature leak guard
+# ---------------------------------------------------------------------------
+
+# The `cargo tree` invocation whose output cc_tree_leaks_test_support reads: who
+# enables which of core's features over *normal* and *build* edges only, i.e.
+# what a `cargo build --workspace` of the binaries compiles. Dev edges (the TUI's
+# and core's own `test-support` dev-dependencies) are excluded, as they should be.
+CC_CORE_FEATURE_TREE_CMD="cargo tree --offline --workspace -e normal,build,features -i claude-commander-core"
+
+# cc_tree_leaks_test_support -- read CC_CORE_FEATURE_TREE_CMD's output on stdin
+# and succeed when it shows core's `test-support` feature enabled.
+#
+# That feature switches telemetry off (`telemetry::would_be_enabled`) and compiles
+# `MockBackend` in, so it must only ever arrive through a `[dev-dependencies]`
+# entry. A normal-dependency edge to it -- e.g. from `claude-commander-test-support`,
+# which is itself a normal crate -- unifies it into every workspace build.
+cc_tree_leaks_test_support() {
+  grep -q 'claude-commander-core feature "test-support"'
 }
 
 # ---------------------------------------------------------------------------
