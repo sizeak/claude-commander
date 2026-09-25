@@ -252,6 +252,42 @@ void main() {
       ]);
     });
 
+    test(
+      'the active workspace never reads as Main while a rename lands',
+      () async {
+        // Each server's refresh notifies; the first one to land drops the old
+        // name. The active workspace must follow the rename at once rather than
+        // fall back to Main until the fan-out finishes.
+        final fleet = await twoServers();
+        await fleet.selectWorkspace('Work');
+        final seen = <String?>[];
+        fleet.addListener(() => seen.add(fleet.activeWorkspace));
+        await fleet.renameWorkspace('Work', 'Job');
+        expect(seen, isNotEmpty);
+        expect(
+          seen.where((w) => w != 'Work' && w != 'Job'),
+          isEmpty,
+          reason: '$seen',
+        );
+        expect(fleet.activeWorkspace, 'Job');
+      },
+    );
+
+    test(
+      'a rename every server refuses leaves the active workspace put',
+      () async {
+        final fleet = await twoServers();
+        await fleet.selectWorkspace('Work');
+        for (final fake in fakes.values) {
+          fake.workspaceMutationError = Exception('boom');
+        }
+        final failures = await fleet.renameWorkspace('Work', 'Job');
+        expect(failures, hasLength(2));
+        expect(fleet.activeWorkspace, 'Work');
+        expect(await prefs.read(FleetStore.lastWorkspaceKey), 'Work');
+      },
+    );
+
     test('delete goes to every server and drops back to Main', () async {
       final fleet = await twoServers();
       await fleet.selectWorkspace('Work');

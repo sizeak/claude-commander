@@ -21,6 +21,13 @@ const themeScopeSelectorKey = ValueKey('theme-scope-selector');
 /// The usual-theme segment's label.
 const usualScopeLabel = 'Usual (all workspaces)';
 
+/// The marker on the preset card a workspace inherits from the usual theme,
+/// in place of the check a preset the workspace picked itself carries.
+const inheritedPresetLabel = 'USUAL';
+
+/// The workspace scope's "stop pinning a preset" control, for tests.
+const inheritUsualPresetKey = ValueKey('theme-inherit-usual-preset');
+
 /// The key of [role]'s colour row.
 Key themeRoleRowKey(ThemeRole role) => ValueKey('theme-role:${role.wire}');
 
@@ -143,12 +150,31 @@ class _ThemePickerPageState extends State<ThemePickerPage> {
                 else
                   const SizedBox(height: 10),
               ],
+              if (key != null && own?.themeId != null)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    key: inheritUsualPresetKey,
+                    icon: const Icon(Icons.subdirectory_arrow_left, size: 16),
+                    label: const Text('Inherit usual preset'),
+                    onPressed: () => controller.inheritUsualPreset(key),
+                  ),
+                ),
               for (final id in ThemeId.values)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
                   child: _ThemeCard(
                     id: id,
                     selected: id == resolved.id,
+                    // A workspace without a preset of its own renders the
+                    // usual one. Its card says so rather than wearing the
+                    // check, and tapping it does nothing: picking it would pin
+                    // the preset and, under [resolveTheme], silently drop the
+                    // usual overrides the workspace was showing.
+                    inherited:
+                        key != null &&
+                        own?.themeId == null &&
+                        id == resolved.id,
                     onTap: () => controller.selectFor(key, id),
                   ),
                 ),
@@ -272,15 +298,21 @@ String? _badge(ThemeId id) => switch (id) {
 };
 
 /// One theme's card: its name, badge, mono description, a check mark when
-/// active, and a live preview of the theme itself.
+/// active (or [inheritedPresetLabel] when inherited), and a live preview of the
+/// theme itself.
 class _ThemeCard extends StatelessWidget {
   final ThemeId id;
   final bool selected;
+
+  /// Selected only because the workspace inherits the usual preset: marked
+  /// [inheritedPresetLabel] in place of the check, and not tappable.
+  final bool inherited;
   final VoidCallback onTap;
 
   const _ThemeCard({
     required this.id,
     required this.selected,
+    required this.inherited,
     required this.onTap,
   });
 
@@ -293,7 +325,7 @@ class _ThemeCard extends StatelessWidget {
         // picking one here; only the selected card claims the accent.
         accent: selected ? t.primary : null,
         padding: const EdgeInsets.all(10),
-        onTap: onTap,
+        onTap: inherited ? null : onTap,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -321,7 +353,9 @@ class _ThemeCard extends StatelessWidget {
                   _Badge(label: badge, highlighted: selected),
                 ],
                 const Spacer(),
-                if (selected)
+                if (inherited)
+                  const _Badge(label: inheritedPresetLabel, highlighted: true)
+                else if (selected)
                   Icon(Icons.check_circle, size: 17, color: t.primary),
               ],
             ),

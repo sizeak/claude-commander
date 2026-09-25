@@ -407,6 +407,32 @@ void main() {
       expect(theme.workspaceTheme('Job'), isNull);
     });
 
+    testWidgets('a rename one server refused keeps the theme on both names', (
+      tester,
+    ) async {
+      // Both servers define Personal; the codespace refuses the rename, so it
+      // still does, and the merged list shows Personal and Side side by side.
+      codespaceApi.workspaceMutationError = Exception('boom');
+      await theme.selectFor('Personal', ThemeId.lcars);
+      await pumpPage(tester);
+
+      await openRowMenu(tester, 'Personal');
+      await tester.tap(find.text('Rename'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Side');
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      expect(rowOf('Personal'), findsOneWidget);
+      expect(rowOf('Side'), findsOneWidget);
+      expect(
+        theme.workspaceTheme('Personal')?.themeId,
+        ThemeId.lcars,
+        reason: 'Personal is still defined, so it keeps its theme',
+      );
+      expect(theme.workspaceTheme('Side')?.themeId, ThemeId.lcars);
+    });
+
     testWidgets('deleting a workspace drops its theme', (tester) async {
       await theme.selectFor('Work', ThemeId.lcars);
       await pumpPage(tester);

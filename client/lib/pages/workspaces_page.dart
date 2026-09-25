@@ -183,17 +183,37 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
       validate: (raw) => _nameError(raw, except: w, main: from == null),
     );
     if (to == null || to == w.label) return;
+    final target = to.trim();
+    // The theme moves *before* the fleet renames: the fleet follows the active
+    // workspace to the new name as each server's refresh lands, and the app's
+    // theme follows the fleet, so the new name must already wear the theme or
+    // the app passes through another one (`beginRename`). Main's theme is keyed
+    // by its reserved key, not its label, so relabelling it moves nothing.
     final theme = _theme;
-    await _edit(
-      () => from == null
-          ? _fleet.renameMainWorkspace(to)
-          : _fleet.renameWorkspace(from, to),
-    );
-    // The theme follows the name on this device — once some server took the
-    // rename (a rename every server refused changed nothing). Main's theme is
-    // keyed by its reserved key, not its label, so relabelling it moves nothing.
-    if (from != null && _fleet.workspaces.any((m) => m.name == to.trim())) {
-      await theme?.renameWorkspace(from, to.trim());
+    final pending = from == null ? null : theme?.beginRename(from, target);
+    var accepted = false;
+    var fromGone = false;
+    try {
+      await _edit(
+        () => from == null
+            ? _fleet.renameMainWorkspace(to)
+            : _fleet.renameWorkspace(from, to),
+      );
+      final names = _fleet.workspaces.map((m) => m.name);
+      accepted = names.contains(target);
+      fromGone = !names.contains(from);
+    } finally {
+      // Every server took it: drop the old key. Every server refused (or the
+      // edit threw): the rename changed nothing, so neither may the theme.
+      // Some refused: the old name is still defined there and still listed, so
+      // both keys stay — the new one already has the copy `beginRename` made.
+      if (pending != null) {
+        if (!accepted) {
+          await theme!.abortRename(pending);
+        } else if (fromGone) {
+          await theme!.commitRename(pending);
+        }
+      }
     }
   }
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
@@ -48,7 +50,7 @@ enum ThemeId {
 /// **Per-workspace themes are per device.** They live in [workspacesPrefKey],
 /// keyed by workspace name (Main under [mainWorkspaceThemeKey]); none of it goes
 /// to a server. So a rename made on this device moves the key
-/// ([renameWorkspace]), but a rename made elsewhere — another device, the TUI —
+/// ([beginRename]), but a rename made elsewhere — another device, the TUI —
 /// leaves the old key orphaned and the renamed workspace on the usual theme
 /// until it is themed again here. Accepted: the alternative is putting device
 /// cosmetics on the wire.
@@ -130,16 +132,14 @@ class ThemeController extends ChangeNotifier {
     // Caught, not propagated: `main()` awaits this before `runApp`, so a throwing
     // store — a corrupt preferences file on the Linux backend, say — would turn a
     // cosmetic preference into a failure to launch. The default is a fine answer.
-    String? stored;
-    String? workspaces;
+    // Each key read and decoded in its own try, so a failure on one keeps
+    // what the other read.
     try {
-      stored = await _store.read(prefKey);
-      workspaces = await _store.read(workspacesPrefKey);
-    } catch (_) {
-      return;
-    }
-    _usual = decodeUsualTheme(stored);
-    _workspaces = decodeWorkspaceThemes(workspaces);
+      _usual = decodeUsualTheme(await _store.read(prefKey));
+    } catch (_) {}
+    try {
+      _workspaces = decodeWorkspaceThemes(await _store.read(workspacesPrefKey));
+    } catch (_) {}
     if (_refresh()) notifyListeners();
   }
 
@@ -168,6 +168,15 @@ class ThemeController extends ChangeNotifier {
     return _setWorkspace(key, current.withThemeId(id));
   }
 
+  /// Stops workspace [key] pinning a preset, so it inherits the usual preset
+  /// (and, under [resolveTheme], the usual overrides) again while keeping its
+  /// own overrides. The TUI's `(usual)` preset entry.
+  Future<void> inheritUsualPreset(String key) {
+    final current = _workspaces[key];
+    if (current == null || current.themeId == null) return Future.value();
+    return _setWorkspace(key, current.withThemeId(null));
+  }
+
   /// Overrides [role] with [color] in workspace [key]'s theme (null = the usual
   /// theme), or clears the override when [color] is null.
   Future<void> setOverride(String? key, ThemeRole role, Color? color) {
@@ -182,17 +191,47 @@ class ThemeController extends ChangeNotifier {
     return _setWorkspaces({..._workspaces}..remove(key));
   }
 
-  /// A workspace was renamed on this device: its theme moves with it (and the
-  /// active key too, so the app does not flash the usual theme while the fleet
-  /// catches up). Main is never renamed by name — its key is fixed.
-  Future<void> renameWorkspace(String from, String to) {
-    if (from == to || from == mainWorkspaceThemeKey) return Future.value();
-    if (_activeKey == from) _activeKey = to;
-    final pref = _workspaces[from];
-    if (pref == null) return Future.value();
-    final next = {..._workspaces}
-      ..remove(from)
-      ..[to] = pref;
+  /// The first half of renaming workspace [from] to [to] on this device, run
+  /// **before** the fleet renames it: [to] takes [from]'s theme (or loses any
+  /// stale entry of its own, since the renamed workspace now owns the name),
+  /// while [from] keeps its theme until [commitRename].
+  ///
+  /// The order is the point. The fleet moves its active workspace to [to] as
+  /// the servers' refreshes land, and `CommanderApp` follows it into the
+  /// controller; with [to] already themed, every step resolves to the theme the
+  /// workspace had, so a rename never passes through another theme (and never
+  /// re-inflates the shells when that theme's chrome differs).
+  ///
+  /// Returns null for Main, whose key is fixed and never renamed.
+  PendingThemeRename? beginRename(String from, String to) {
+    if (from == mainWorkspaceThemeKey) return null;
+    final pending = PendingThemeRename._(from, to, _workspaces[to]);
+    if (from != to) {
+      final pref = _workspaces[from];
+      final next = {..._workspaces}..remove(to);
+      if (pref != null) next[to] = pref;
+      unawaited(_setWorkspaces(next));
+    }
+    return pending;
+  }
+
+  /// The rename is complete — no server still defines [PendingThemeRename.from]
+  /// — so drop the old key. After a partial rename, where some server refused
+  /// and still lists the old name, call neither this nor [abortRename]: both
+  /// names are live and each keeps the theme.
+  Future<void> commitRename(PendingThemeRename pending) {
+    if (pending.from == pending.to || !_workspaces.containsKey(pending.from)) {
+      return Future.value();
+    }
+    return _setWorkspaces({..._workspaces}..remove(pending.from));
+  }
+
+  /// Every server refused the rename: put [PendingThemeRename.to] back as it
+  /// was ([PendingThemeRename.from] was never touched).
+  Future<void> abortRename(PendingThemeRename pending) {
+    if (pending.from == pending.to) return Future.value();
+    final next = {..._workspaces}..remove(pending.to);
+    if (pending._previousTo case final pref?) next[pending.to] = pref;
     return _setWorkspaces(next);
   }
 
@@ -228,6 +267,19 @@ class ThemeController extends ChangeNotifier {
       await _store.write(workspacesPrefKey, encodeWorkspaceThemes(next));
     } catch (_) {}
   }
+}
+
+/// A rename [ThemeController.beginRename] has started, to be finished with
+/// [ThemeController.commitRename] or undone with [ThemeController.abortRename]
+/// (or left as it is after a partial rename).
+class PendingThemeRename {
+  final String from;
+  final String to;
+
+  /// [to]'s own entry before the rename, restored if it is aborted.
+  final ThemePref? _previousTo;
+
+  const PendingThemeRename._(this.from, this.to, this._previousTo);
 }
 
 /// Exposes the [ThemeController] to the widget tree, placed above the

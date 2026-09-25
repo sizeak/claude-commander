@@ -188,13 +188,28 @@ class FleetStore extends ChangeNotifier {
   String? get activeWorkspace {
     if (!_activeResolved) {
       _active = _api.resolveStartupWorkspace(
-        startup: _pickedThisRun ? 'last' : startupWorkspace,
-        last: _last,
+        startup: _pickedThisRun ? 'last' : _renamed(startupWorkspace)!,
+        last: _renamed(_last),
         workspaces: workspaces,
       );
       _activeResolved = true;
     }
     return _active;
+  }
+
+  /// A rename [renameWorkspace] is fanning out, if any.
+  ({String from, String to})? _renaming;
+
+  /// [name], or the name it is being renamed to once the merged list has
+  /// dropped it for that name. The servers' refreshes land one at a time and
+  /// each notifies, so without this the active workspace would read as Main
+  /// from the first refresh until the fan-out finished — and the app would
+  /// pass through Main's theme on a rename that changes no colours.
+  String? _renamed(String? name) {
+    final r = _renaming;
+    if (r == null || name != r.from) return name;
+    final names = workspaces.map((w) => w.name);
+    return !names.contains(r.from) && names.contains(r.to) ? r.to : name;
   }
 
   /// The merged entry for [activeWorkspace] (Main when it resolves to none).
@@ -327,17 +342,27 @@ class FleetStore extends ChangeNotifier {
       _putDefinitions(_definitions, startup: startup);
 
   /// Rename a workspace on every server (each rewrites its own projects' tags).
-  /// If it was the active one, the device follows it to the new name.
+  /// If it was the active one, the device follows it to the new name — as each
+  /// server's refresh lands, never by way of Main ([_renamed]).
   Future<List<WorkspaceEditFailure>> renameWorkspace(
     String from,
     String to,
   ) async {
     final target = to.trim();
-    final wasActive = activeWorkspace == from;
-    final failures = await _fanOut(
-      (store) => store.renameWorkspace(from, target),
-    );
-    if (wasActive || _last == from) await _rememberWorkspace(target);
+    final follow = activeWorkspace == from || _last == from;
+    _renaming = (from: from, to: target);
+    _invalidateWorkspaces();
+    final List<WorkspaceEditFailure> failures;
+    try {
+      failures = await _fanOut((store) => store.renameWorkspace(from, target));
+    } finally {
+      _renaming = null;
+      _invalidateWorkspaces();
+    }
+    // Follow only a rename some server took: one they all refused changed
+    // nothing, and following it would strand the device on Main.
+    final accepted = workspaces.any((w) => w.name == target);
+    if (follow && accepted) await _rememberWorkspace(target);
     return failures;
   }
 

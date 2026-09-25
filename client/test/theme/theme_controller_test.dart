@@ -112,6 +112,19 @@ void main() {
       expect(c.workspaceTheme('main')!.overrides, {ThemeRole.danger: _blue});
     });
 
+    test(
+      'a failure reading the workspace themes keeps the usual theme',
+      () async {
+        final c = ThemeController(
+          store: _FailingKeyStore({
+            ThemeController.prefKey: 'lcars',
+          }, failing: ThemeController.workspacesPrefKey),
+        );
+        await c.load();
+        expect(c.id, ThemeId.lcars);
+      },
+    );
+
     test('switching workspace swaps the tokens and notifies', () async {
       final store = InMemoryPrefStore({
         ThemeController.workspacesPrefKey: '{"Work":{"themeId":"lcars"}}',
@@ -207,44 +220,74 @@ void main() {
       );
     });
 
-    test(
-      'renaming a workspace moves its theme, including while active',
-      () async {
-        final store = InMemoryPrefStore();
-        var notifications = 0;
-        final c = ThemeController(store: store)..setActiveWorkspace('Work');
-        await c.selectFor('Work', ThemeId.lcars);
-        c.addListener(() => notifications++);
+    test('a rename copies the theme first and drops the old key on commit, '
+        'without ever changing the rendered theme', () async {
+      // The page runs this around the fleet rename: the copy lands before the
+      // fleet moves the active workspace to the new name, so every step of the
+      // move resolves to the same theme.
+      final store = InMemoryPrefStore();
+      final c = ThemeController(store: store)..setActiveWorkspace('Work');
+      await c.selectFor('Work', ThemeId.lcars);
+      final seen = <ThemeId>[];
+      c.addListener(() => seen.add(c.id));
 
-        await c.renameWorkspace('Work', 'Job');
-        expect(c.workspaceTheme('Work'), isNull);
-        expect(c.workspaceTheme('Job')!.themeId, ThemeId.lcars);
-        // The active key follows the rename, so the app never flashes the usual
-        // theme between the rename and the fleet reporting the new name.
-        expect(c.activeWorkspaceKey, 'Job');
-        expect(c.id, ThemeId.lcars);
-        expect(
-          notifications,
-          1,
-          reason: 'the prefs changed, the theme did not',
-        );
-        expect(
-          decodeWorkspaceThemes(
-            await store.read(ThemeController.workspacesPrefKey),
-          ).keys,
-          ['Job'],
-        );
-      },
-    );
+      final pending = c.beginRename('Work', 'Job')!;
+      expect(c.workspaceTheme('Work')!.themeId, ThemeId.lcars);
+      expect(c.workspaceTheme('Job')!.themeId, ThemeId.lcars);
+      c.setActiveWorkspace('Job'); // the fleet catching up
+      await c.commitRename(pending);
+
+      expect(c.workspaceTheme('Work'), isNull);
+      expect(c.workspaceTheme('Job')!.themeId, ThemeId.lcars);
+      expect(c.id, ThemeId.lcars);
+      expect(seen.where((id) => id != ThemeId.lcars), isEmpty);
+      expect(
+        decodeWorkspaceThemes(
+          await store.read(ThemeController.workspacesPrefKey),
+        ).keys,
+        ['Job'],
+      );
+    });
+
+    test('an aborted rename puts both keys back as they were', () async {
+      final c = ThemeController(store: InMemoryPrefStore());
+      await c.selectFor('Work', ThemeId.lcars);
+      await c.setOverride('Job', ThemeRole.primary, _red);
+
+      final pending = c.beginRename('Work', 'Job')!;
+      await c.abortRename(pending);
+
+      expect(c.workspaceTheme('Work')!.themeId, ThemeId.lcars);
+      expect(c.workspaceTheme('Job')!.overrides, {ThemeRole.primary: _red});
+    });
+
+    test('renaming onto a stale entry drops it even when the old name had '
+        'none', () async {
+      // Left behind by a workspace deleted elsewhere: the renamed workspace now
+      // owns the name, and must not silently wear a theme it never had.
+      final c = ThemeController(store: InMemoryPrefStore());
+      await c.selectFor('Job', ThemeId.lcars);
+
+      final pending = c.beginRename('Work', 'Job')!;
+      await c.commitRename(pending);
+
+      expect(c.workspaceTheme('Job'), isNull);
+    });
 
     test('renaming a workspace with no theme changes nothing', () async {
       final store = InMemoryPrefStore();
       var notifications = 0;
       final c = ThemeController(store: store)
         ..addListener(() => notifications++);
-      await c.renameWorkspace('Work', 'Job');
+      final pending = c.beginRename('Work', 'Job')!;
+      await c.commitRename(pending);
       expect(notifications, 0);
       expect(await store.read(ThemeController.workspacesPrefKey), isNull);
+    });
+
+    test('Main is never renamed by key', () {
+      final c = ThemeController(store: InMemoryPrefStore());
+      expect(c.beginRename(mainWorkspaceThemeKey, 'Home'), isNull);
     });
 
     test(
@@ -260,4 +303,15 @@ void main() {
       },
     );
   });
+}
+
+/// A store whose read of one key throws — a corrupt value on the platform side.
+class _FailingKeyStore extends InMemoryPrefStore {
+  final String failing;
+
+  _FailingKeyStore(super.initial, {required this.failing});
+
+  @override
+  Future<String?> read(String key) =>
+      key == failing ? Future.error(StateError('corrupt')) : super.read(key);
 }

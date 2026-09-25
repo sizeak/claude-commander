@@ -328,6 +328,51 @@ void main() {
         expect(find.text('Reset to usual theme'), findsNothing);
       });
 
+      testWidgets('the inherited preset reads as usual, and tapping it keeps '
+          'the usual overrides', (tester) async {
+        await theme.setOverride(null, ThemeRole.primary, _red);
+        await pumpTall(tester, wrapFleet());
+
+        // Work inherits Mission Control: its card is marked as the usual
+        // theme's, not checked as though Work had picked it.
+        expect(find.byIcon(Icons.check_circle), findsNothing);
+        expect(find.text(inheritedPresetLabel), findsOneWidget);
+
+        await tester.tap(find.text(ThemeId.missionControl.label));
+        await tester.pumpAndSettle();
+        expect(
+          theme.workspaceTheme('Work'),
+          isNull,
+          reason: 'tapping the inherited card must not pin the preset',
+        );
+        expect(theme.resolvedFor('Work').overrides, {ThemeRole.primary: _red});
+      });
+
+      testWidgets('Inherit usual preset keeps the workspace overrides', (
+        tester,
+      ) async {
+        await theme.setOverride(null, ThemeRole.primary, _red);
+        await theme.selectFor('Work', ThemeId.lcars);
+        await theme.setOverride('Work', ThemeRole.danger, _blue);
+        await pumpTall(tester, wrapFleet());
+        expect(find.byIcon(Icons.check_circle), findsOneWidget);
+
+        await tester.tap(find.byKey(inheritUsualPresetKey));
+        await tester.pumpAndSettle();
+        expect(
+          theme.workspaceTheme('Work'),
+          const ThemePref(overrides: {ThemeRole.danger: _blue}),
+        );
+        expect(theme.resolvedFor('Work').id, ThemeId.missionControl);
+        expect(theme.resolvedFor('Work').overrides, {
+          ThemeRole.primary: _red,
+          ThemeRole.danger: _blue,
+        });
+        // Back to inheriting: the choice has nothing left to do.
+        expect(find.byKey(inheritUsualPresetKey), findsNothing);
+        expect(find.text(inheritedPresetLabel), findsOneWidget);
+      });
+
       testWidgets('opens on the scope it was given', (tester) async {
         await pumpTall(
           tester,

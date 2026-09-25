@@ -793,6 +793,21 @@ In the TUI:
   changing it leaves the local definitions as they are (a pinned workspace only
   another server defines is added locally, since the pin needs a definition).
 
+From the CLI:
+
+```sh
+claude-commander list --workspace work        # only sessions in "Work"
+claude-commander list --workspace main        # only Main (or use Main's label)
+claude-commander new fix-login -d ~/src/app --workspace work
+```
+
+`list` adds a `[workspace]` column to each project line once there is more than
+one workspace; `list --json` always carries a `workspace` field (`null` for
+Main).
+`new --workspace` requires `--path`: it applies only when that path registers a
+new project — an existing project keeps its workspace — and an unknown name
+creates the workspace.
+
 ### Workspace themes
 
 Each workspace can have its own TUI theme in the local `config.toml`, under
@@ -838,21 +853,6 @@ name (replacing any leftover table already under that name, which the renamed
 workspace now owns) and deleting one removes it — including a workspace only a
 remote server defines. A hand edit of a workspace's name in
 `config.toml` does not, so rename through the app.
-
-From the CLI:
-
-```sh
-claude-commander list --workspace work        # only sessions in "Work"
-claude-commander list --workspace main        # only Main (or use Main's label)
-claude-commander new fix-login -d ~/src/app --workspace work
-```
-
-`list` adds a `[workspace]` column to each project line once there is more than
-one workspace; `list --json` always carries a `workspace` field (`null` for
-Main).
-`new --workspace` requires `--path`: it applies only when that path registers a
-new project — an existing project keeps its workspace — and an unknown name
-creates the workspace.
 
 ## Session List Sections
 

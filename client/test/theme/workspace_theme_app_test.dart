@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:claude_commander_client/main.dart';
 import 'package:claude_commander_client/pages/session_list_page.dart';
+import 'package:claude_commander_client/pages/workspaces_page.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
@@ -107,5 +108,91 @@ void main() {
     expect(fleet.workspacesVisible, isFalse);
     expect(theme.activeWorkspaceKey, isNull);
     expect(appTokens(tester).chrome, ChromeKind.missionControl);
+  });
+  testWidgets('renaming the active workspace keeps its theme throughout', (
+    tester,
+  ) async {
+    // Work wears LCARS; the usual theme (and so Main, and a name with no entry
+    // yet) is Mission Control. A rename changes no colours, so the app must
+    // never pass through either of the other two on the way — each would swap
+    // the chrome and re-inflate the shells (reopening a wide-shell attach).
+    await theme.selectFor('Work', ThemeId.lcars);
+    await pumpApp(tester);
+    await fleet.selectWorkspace('Work');
+    await tester.pumpAndSettle();
+    expect(appTokens(tester).chrome, ChromeKind.lcars);
+    final shell = tester.state(
+      find.byType(SessionListBody, skipOffstage: false),
+    );
+
+    final seen = <ThemeId>[];
+    void record() => seen.add(theme.id);
+    theme.addListener(record);
+    addTearDown(() => theme.removeListener(record));
+
+    tester
+        .state<NavigatorState>(find.byType(Navigator).first)
+        .push(
+          MaterialPageRoute<void>(builder: (_) => WorkspacesPage(fleet: fleet)),
+        );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(workspaceRowKey('Work')),
+        matching: find.byTooltip('Workspace actions'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Job');
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(fleet.activeWorkspace, 'Job');
+    expect(theme.activeWorkspaceKey, 'Job');
+    expect(theme.workspaceTheme('Job')?.themeId, ThemeId.lcars);
+    expect(theme.workspaceTheme('Work'), isNull);
+    expect(seen.where((id) => id != ThemeId.lcars), isEmpty, reason: '$seen');
+    expect(
+      tester.state(find.byType(SessionListBody, skipOffstage: false)),
+      same(shell),
+      reason: 'a rename changes no colours, so nothing may re-inflate',
+    );
+  });
+
+  testWidgets('a rename every server refuses leaves the theme where it was', (
+    tester,
+  ) async {
+    await theme.selectFor('Work', ThemeId.lcars);
+    await pumpApp(tester);
+    await fleet.selectWorkspace('Work');
+    await tester.pumpAndSettle();
+    api.workspaceMutationError = 'refused';
+
+    tester
+        .state<NavigatorState>(find.byType(Navigator).first)
+        .push(
+          MaterialPageRoute<void>(builder: (_) => WorkspacesPage(fleet: fleet)),
+        );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(workspaceRowKey('Work')),
+        matching: find.byTooltip('Workspace actions'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Job');
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(fleet.activeWorkspace, 'Work');
+    expect(theme.activeWorkspaceKey, 'Work');
+    expect(theme.workspaceTheme('Work')?.themeId, ThemeId.lcars);
+    expect(theme.workspaceTheme('Job'), isNull);
+    expect(theme.tokens.chrome, ChromeKind.lcars);
   });
 }

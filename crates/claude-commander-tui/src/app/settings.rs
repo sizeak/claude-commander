@@ -3587,7 +3587,6 @@ pub(super) fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
-/// Format a ratatui Color for display in the settings modal.
 /// Where `scope`'s rows inherit from when they have no value of their own:
 /// a workspace without a preset of its own layers over the usual theme; the
 /// usual theme, and a workspace with its own preset, over that preset.
@@ -3683,6 +3682,7 @@ pub(super) fn colour_picker_width(area: Rect) -> u16 {
     settings_areas(area).body.width
 }
 
+/// Format a ratatui Color for display in the settings modal.
 fn format_color(color: ratatui::style::Color) -> String {
     use ratatui::style::Color;
     match color {
