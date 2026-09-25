@@ -151,19 +151,23 @@ switching is instant. Projects start in the built-in **Main** workspace, and
 none of the workspace UI appears until you create a second one.
 
 `w` cycles workspaces and `W` opens a picker (type a name that doesn't exist to
-create it). The status bar then shows the active workspace as a coloured chip,
-followed by a `Personal ●2` hint for any other workspace with sessions waiting
-for input; the board header and an attached session's tmux status line name it
+create it). Each workspace can have its own theme, and switching re-themes the
+whole TUI. The status bar then shows the active workspace as a chip in its
+theme's accent, followed by a `Personal ●2` hint (in that workspace's accent)
+for any other workspace with sessions waiting for input; the board header and an attached session's tmux status line name it
 too. The palette and the in-session `Ctrl-Space` switcher still search **every**
 workspace: the active one's sessions rank first, the rest are tagged with their
 workspace, and picking one switches workspace before jumping. New projects,
 clones and scans land in the active workspace. **Settings → Workspaces** creates
 (`n`), renames (`r`), deletes (`d`, which moves its projects back to Main) and
-reorders (`J`/`K`) them, picks each one's accent colour (from the theme's
-swatches, or a typed or pasted hex), moves projects between them (`m`), and
-chooses which workspace opens at startup (`s`). With remote servers,
+reorders (`J`/`K`) them, moves projects between them (`m`), and chooses which
+workspace opens at startup (`s`); `Enter` on a workspace's **Theme** row opens
+**Settings → Theme** scoped to it, where you pick a preset or recolour any role
+from the theme's swatches or a typed or pasted hex, and **Reset to usual theme**
+drops it again. With remote servers,
 workspaces merge by name and every change is sent to each server. See
-[Workspaces](docs/configuration.md#workspaces).
+[Workspaces](docs/configuration.md#workspaces) and
+[Workspace themes](docs/configuration.md#workspace-themes).
 
 ### Status Symbols
 

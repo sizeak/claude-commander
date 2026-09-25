@@ -4,6 +4,7 @@ import '../chrome/chrome_forms.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/fleet_store.dart';
+import '../theme/theme_controller.dart';
 import '../theme/tokens.dart';
 import '../util/activity_feed.dart';
 import '../util/format.dart';
@@ -73,7 +74,7 @@ class _ActivityBodyState extends State<ActivityBody> {
             title: 'Activity',
             // The feed is scoped too, so it says which workspace it is showing
             // and switches it, exactly as the Fleet view does.
-            titleMenu: workspaceTitleMenu(fleet),
+            titleMenu: workspaceTitleMenu(fleet, theme: ThemeScope.of(context)),
             subtitle:
                 'across ${servers.length} '
                 'server${servers.length == 1 ? '' : 's'} · live',

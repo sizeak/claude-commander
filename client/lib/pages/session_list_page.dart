@@ -6,6 +6,7 @@ import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/fleet_store.dart';
 import '../theme/agent_glyphs.dart';
+import '../theme/theme_controller.dart';
 import '../theme/tokens.dart';
 import '../util/error_text.dart';
 import '../util/format.dart';
@@ -226,7 +227,7 @@ class _SessionListBodyState extends State<SessionListBody> {
           ChromeViewRailSpec(
             code: '47-A',
             title: 'Fleet',
-            titleMenu: workspaceTitleMenu(fleet),
+            titleMenu: workspaceTitleMenu(fleet, theme: ThemeScope.of(context)),
             subtitle:
                 '$active active · $total total · ${servers.length} '
                 'server${servers.length == 1 ? '' : 's'}',

@@ -88,6 +88,39 @@ pub fn delete_workspace_def(config: &mut Config, name: &str) -> bool {
     config.workspaces.len() != before
 }
 
+/// Move `from`'s local theme (`[workspace_themes]`) to `to`, replacing any
+/// entry `to` already had — or just dropping that entry when `from` has none.
+/// Returns whether the table changed. Keyed by name only, so it runs whether or not this host
+/// defines `from`: a TUI's local config keeps themes for workspaces that live
+/// on a remote server. `from` must be a valid user workspace name, which
+/// keeps Main's reserved [`MAIN_WORKSPACE_THEME_KEY`](crate::config::MAIN_WORKSPACE_THEME_KEY) out of reach; `to` is
+/// expected to be validated already.
+pub fn rename_workspace_theme(config: &mut Config, from: &str, to: &str) -> bool {
+    if validate_workspace_name(from).is_err() {
+        return false;
+    }
+    if from == to {
+        return false;
+    }
+    // `to` is the renamed workspace's name now, so any entry already under it
+    // (a workspace deleted on another host, a hand edit) is stale and goes —
+    // even when `from` had no theme to bring.
+    let dropped = config.workspace_themes.remove(to).is_some();
+    match config.workspace_themes.remove(from) {
+        Some(theme) => {
+            config.workspace_themes.insert(to.to_string(), theme);
+            true
+        }
+        None => dropped,
+    }
+}
+
+/// Drop `name`'s local theme. Returns whether one was removed. Main's
+/// reserved [`MAIN_WORKSPACE_THEME_KEY`](crate::config::MAIN_WORKSPACE_THEME_KEY) is never removed here.
+pub fn delete_workspace_theme(config: &mut Config, name: &str) -> bool {
+    validate_workspace_name(name).is_ok() && config.workspace_themes.remove(name).is_some()
+}
+
 /// Re-tag every project in `from` to `to` (`None` = Main). Returns how many
 /// projects moved.
 pub fn retag_projects(state: &mut AppState, from: &str, to: Option<&str>) -> usize {
@@ -106,6 +139,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::config::MAIN_WORKSPACE_THEME_KEY;
     use crate::session::Project;
 
     fn state_with(tags: &[Option<&str>]) -> AppState {
@@ -178,6 +212,53 @@ mod tests {
         assert!(c.workspaces.is_empty());
         assert_eq!(c.startup_workspace, StartupWorkspace::Main);
         assert!(!delete_workspace_def(&mut c, "Work"));
+    }
+
+    fn themed(names: &[&str]) -> Config {
+        let mut c = Config::default();
+        for name in names {
+            c.workspace_themes.insert(
+                (*name).to_string(),
+                crate::config::ThemeOverrides::default(),
+            );
+        }
+        c
+    }
+
+    #[test]
+    fn theme_rename_and_delete_leave_mains_key_alone() {
+        let mut c = themed(&["Work", MAIN_WORKSPACE_THEME_KEY]);
+        assert!(rename_workspace_theme(&mut c, "Work", "Job"));
+        assert!(
+            !rename_workspace_theme(&mut c, "Work", "Other"),
+            "nothing left to move or drop"
+        );
+        assert!(!rename_workspace_theme(
+            &mut c,
+            MAIN_WORKSPACE_THEME_KEY,
+            "X"
+        ));
+        assert!(!delete_workspace_theme(&mut c, MAIN_WORKSPACE_THEME_KEY));
+        assert!(delete_workspace_theme(&mut c, "Job"));
+        let keys: Vec<_> = c.workspace_themes.keys().cloned().collect();
+        assert_eq!(keys, [MAIN_WORKSPACE_THEME_KEY]);
+    }
+
+    #[test]
+    fn theme_rename_drops_a_stale_entry_for_the_new_name() {
+        // Left over from a workspace deleted on another host, or a hand edit:
+        // the renamed workspace now owns the name and must not wear it.
+        let mut c = themed(&["Job"]);
+        assert!(rename_workspace_theme(&mut c, "Work", "Job"));
+        assert!(c.workspace_themes.is_empty());
+
+        // And with an entry of its own, `from`'s replaces it.
+        let mut c = themed(&["Work", "Job"]);
+        c.workspace_themes.get_mut("Work").unwrap().preset = Some("basic".into());
+        assert!(rename_workspace_theme(&mut c, "Work", "Job"));
+        let keys: Vec<_> = c.workspace_themes.keys().cloned().collect();
+        assert_eq!(keys, ["Job"]);
+        assert_eq!(c.workspace_themes["Job"].preset.as_deref(), Some("basic"));
     }
 
     #[test]

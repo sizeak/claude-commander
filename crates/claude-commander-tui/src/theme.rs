@@ -7,6 +7,7 @@ use diffgrid::style::{Appearance, Ink, Palette, Rgb, Role};
 use ratatui::style::{Color, Style};
 
 use claude_commander_core::config::theme::{AgentWorkingStyle, ThemeOverrides};
+use claude_commander_core::config::{Config, MAIN_WORKSPACE_THEME_KEY};
 use claude_commander_core::term_caps::ColorMode;
 
 /// All recognised preset names, in display order.
@@ -915,6 +916,17 @@ impl Theme {
         }
     }
 
+    /// One `[theme]`-shaped table on its own: its preset (auto-detected when
+    /// unset, empty or unknown) with its colour overrides on top.
+    pub fn from_overrides(overrides: &ThemeOverrides) -> Self {
+        overrides
+            .preset
+            .as_deref()
+            .and_then(Self::from_preset)
+            .unwrap_or_default()
+            .with_overrides(overrides)
+    }
+
     /// Apply user-supplied overrides on top of this theme.
     ///
     /// Only `Some` fields in `overrides` replace the corresponding color;
@@ -1083,6 +1095,43 @@ impl Theme {
             })
             .collect()
     }
+}
+
+/// The `[workspace_themes]` key for a workspace (`None` = Main, which has no
+/// name and so lives under [`MAIN_WORKSPACE_THEME_KEY`]).
+pub fn workspace_theme_key(workspace: Option<&str>) -> &str {
+    workspace.unwrap_or(MAIN_WORKSPACE_THEME_KEY)
+}
+
+/// Resolve a workspace's theme from the usual `[theme]` and the workspace's
+/// own `[workspace_themes."<name>"]` entry, if it has one:
+///
+/// - no entry: the usual theme (its preset plus its overrides);
+/// - an entry without a `preset`: the usual theme, then the entry's overrides
+///   layered on top;
+/// - an entry with a `preset`: that preset plus *only* the entry's overrides —
+///   the usual overrides were chosen for the usual preset and do not carry.
+pub fn resolve_workspace_theme(usual: &ThemeOverrides, entry: Option<&ThemeOverrides>) -> Theme {
+    match entry {
+        None => Theme::from_overrides(usual),
+        Some(entry) if entry_sets_preset(entry) => Theme::from_overrides(entry),
+        Some(entry) => Theme::from_overrides(usual).with_overrides(entry),
+    }
+}
+
+/// Whether a workspace entry picks its own base preset (and so drops the
+/// usual theme's overrides) rather than layering over the usual theme.
+pub fn entry_sets_preset(entry: &ThemeOverrides) -> bool {
+    entry.preset.as_deref().is_some_and(|p| !p.is_empty())
+}
+
+/// [`resolve_workspace_theme`] for `workspace` (`None` = Main) as `config`
+/// declares it.
+pub fn theme_for_workspace(config: &Config, workspace: Option<&str>) -> Theme {
+    resolve_workspace_theme(
+        &config.theme,
+        config.workspace_themes.get(workspace_theme_key(workspace)),
+    )
 }
 
 /// Build a saturated line fill from a base colour for the review diff view.
@@ -1344,8 +1393,11 @@ mod tests {
             for s in &swatches {
                 assert_eq!(color_to_hex(s.color).as_ref(), Some(&s.hex));
                 assert!(
-                    claude_commander_protocol::workspace::validate_workspace_color(&s.hex).is_ok(),
-                    "{} is a valid workspace colour",
+                    s.hex.len() == 7
+                        && s.hex.starts_with('#')
+                        && s.hex == s.hex.to_ascii_lowercase()
+                        && crate::widgets::parse_hex_color(&s.hex).is_some(),
+                    "{} is a lower-case #rrggbb colour",
                     s.hex
                 );
             }
@@ -1645,6 +1697,107 @@ mod tests {
         // Untouched fields keep the base value
         assert_eq!(themed.border_unfocused, Color::DarkGray);
         assert_eq!(themed.status_stopped, Color::DarkGray);
+    }
+
+    fn rgb_override(r: u8, g: u8, b: u8) -> Option<ColorValue> {
+        Some(ColorValue(Color::Rgb(r, g, b)))
+    }
+
+    #[test]
+    fn a_workspace_without_an_entry_gets_the_usual_theme() {
+        let usual = ThemeOverrides {
+            preset: Some("lcars".into()),
+            text_accent: rgb_override(1, 2, 3),
+            ..Default::default()
+        };
+        let t = resolve_workspace_theme(&usual, None);
+        assert_eq!(t.text_accent, Color::Rgb(1, 2, 3));
+        assert_eq!(t.border_focused, Theme::lcars().border_focused);
+    }
+
+    #[test]
+    fn an_entry_without_a_preset_layers_over_the_usual_theme() {
+        let usual = ThemeOverrides {
+            preset: Some("lcars".into()),
+            text_accent: rgb_override(1, 2, 3),
+            border_focused: rgb_override(4, 5, 6),
+            ..Default::default()
+        };
+        let entry = ThemeOverrides {
+            text_accent: rgb_override(7, 8, 9),
+            ..Default::default()
+        };
+        let t = resolve_workspace_theme(&usual, Some(&entry));
+        assert_eq!(t.text_accent, Color::Rgb(7, 8, 9), "the entry wins");
+        assert_eq!(
+            t.border_focused,
+            Color::Rgb(4, 5, 6),
+            "usual overrides carry"
+        );
+        assert_eq!(
+            t.status_bar_bg,
+            Theme::lcars().status_bar_bg,
+            "usual preset"
+        );
+    }
+
+    #[test]
+    fn an_entry_with_a_preset_takes_only_its_own_overrides() {
+        let usual = ThemeOverrides {
+            preset: Some("lcars".into()),
+            border_focused: rgb_override(4, 5, 6),
+            appearance: Some(claude_commander_core::config::theme::AppearanceValue::Light),
+            ..Default::default()
+        };
+        let entry = ThemeOverrides {
+            preset: Some("basic".into()),
+            text_accent: rgb_override(7, 8, 9),
+            ..Default::default()
+        };
+        let t = resolve_workspace_theme(&usual, Some(&entry));
+        assert_eq!(t.text_accent, Color::Rgb(7, 8, 9));
+        assert_eq!(
+            t.border_focused,
+            Theme::basic().border_focused,
+            "usual overrides do not carry onto a new base"
+        );
+        assert_eq!(t.status_bar_bg, Theme::basic().status_bar_bg);
+        assert_eq!(t.appearance, Theme::basic().appearance);
+    }
+
+    #[test]
+    fn theme_for_workspace_keys_main_and_named_workspaces() {
+        let mut config = Config::default();
+        config.theme.preset = Some("basic".into());
+        config.workspace_themes.insert(
+            MAIN_WORKSPACE_THEME_KEY.to_string(),
+            ThemeOverrides {
+                text_accent: rgb_override(10, 20, 30),
+                ..Default::default()
+            },
+        );
+        config.workspace_themes.insert(
+            "Work".to_string(),
+            ThemeOverrides {
+                preset: Some("lcars".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(workspace_theme_key(None), MAIN_WORKSPACE_THEME_KEY);
+        assert_eq!(workspace_theme_key(Some("Work")), "Work");
+        assert_eq!(
+            theme_for_workspace(&config, None).text_accent,
+            Color::Rgb(10, 20, 30)
+        );
+        assert_eq!(
+            theme_for_workspace(&config, Some("Work")).text_accent,
+            Theme::lcars().text_accent
+        );
+        assert_eq!(
+            theme_for_workspace(&config, Some("Home")).text_accent,
+            Theme::basic().text_accent,
+            "no entry: the usual theme"
+        );
     }
 
     #[test]

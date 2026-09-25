@@ -23,21 +23,12 @@ List<MergedWorkspace> fakeMergeWorkspaces(List<WorkspaceSourceDto> sources) {
     }
   }
   final merged = <MergedWorkspace>[
-    MergedWorkspace(label: main?.name ?? 'Main', color: main?.color),
+    MergedWorkspace(label: main?.name ?? 'Main'),
   ];
   int indexOf(String name) => merged.indexWhere((m) => m.name == name);
   for (final def in sources.expand((s) => s.defs)) {
-    final i = indexOf(def.name);
-    if (i < 0) {
-      merged.add(
-        MergedWorkspace(name: def.name, label: def.name, color: def.color),
-      );
-    } else if (merged[i].color == null && def.color != null) {
-      merged[i] = MergedWorkspace(
-        name: def.name,
-        label: def.name,
-        color: def.color,
-      );
+    if (indexOf(def.name) < 0) {
+      merged.add(MergedWorkspace(name: def.name, label: def.name));
     }
   }
   for (final tag in sources.expand((s) => s.projectTags)) {
@@ -108,8 +99,3 @@ List<WorkspaceDef> fakeDefinitionsForServer({
   }
   return out;
 }
-
-String? fakeWorkspaceColorError(String raw) =>
-    RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(raw.trim())
-    ? null
-    : 'workspace colour "$raw" is not a #rrggbb colour';

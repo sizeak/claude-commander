@@ -238,9 +238,6 @@ abstract class CommanderApi {
   /// Why [raw] can't be Main's label, or null. Main may be called "Main".
   String? workspaceLabelError(String raw);
 
-  /// Why [raw] isn't an accepted `#rrggbb` colour, or null when it is.
-  String? workspaceColorError(String raw);
-
   Future<void> removeProject({required String handle, required String id});
 
   /// Register every repo under a server-side [path], each new one tagged
@@ -676,9 +673,6 @@ class RustCommanderApi implements CommanderApi {
 
   @override
   String? workspaceLabelError(String raw) => ws.workspaceLabelError(raw: raw);
-
-  @override
-  String? workspaceColorError(String raw) => ws.workspaceColorError(raw: raw);
 
   @override
   Future<void> removeProject({required String handle, required String id}) =>

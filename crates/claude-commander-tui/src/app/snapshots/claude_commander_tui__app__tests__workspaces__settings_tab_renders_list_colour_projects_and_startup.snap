@@ -1,6 +1,6 @@
 ---
 source: crates/claude-commander-tui/src/app/tests.rs
-assertion_line: 10984
+assertion_line: 11289
 expression: terminal.backend()
 ---
 " Sessions [Project]:                ┌ Preview · Info · Shell ──────────────────────────────────────────────────────────┐"
@@ -10,7 +10,7 @@ expression: terminal.backend()
 " main-proj [ma│ ────────────────────────────────────────────────────────────────────────────────────── │               │"
 "     1 ● main-│ Startup workspace: Last used  (s: change)                                              │               │"
 "              │                                                                                        │               │"
-"              │     Main •                  │ Colour    ■ #3366ff                                      │               │"
+"              │   ■ Main •                  │ Theme     usual                                          │               │"
 "              │ ▸ ■ Work                    │                                                          │               │"
 "              │                             │ Projects                                                 │               │"
 "              │                             │   work-proj                                              │               │"

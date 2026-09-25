@@ -1,16 +1,17 @@
-//! The workspace colour picker in Settings → Workspaces: a grid of the active
-//! theme's colours (cell 0 is "No colour") and a hex row that takes typed or
-//! pasted `#rrggbb`.
+//! The colour picker behind every Settings → Theme colour row: a grid of the
+//! edited theme's colours (cell 0 clears the row's own value, so it inherits
+//! again) and a hex row that takes typed or pasted `#rrggbb`.
 //!
-//! This module holds the picker's state and its key/paste handling, which are
-//! pure so they can be tested without an `App`. What a pick *means* — saving
-//! through `set_workspace_color` — is the caller's.
+//! This module holds the picker's state, its key/paste handling (pure, so they
+//! can be tested without an `App`) and how it draws. What a pick *means* is the
+//! caller's.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use tui_input::Input;
 
 use crate::theme::{Theme, ThemeSwatch};
-use claude_commander_protocol::workspace::{WorkspaceRejection, validate_workspace_color};
 
 /// The most cells a grid row holds. A narrower pane gets fewer (see
 /// [`ColourPicker::fit_to_width`]).
@@ -26,8 +27,8 @@ pub enum ColourPickerFocus {
     Hex,
 }
 
-/// The open picker. `selected` indexes the grid: 0 is "No colour", `i` is
-/// `swatches[i - 1]`.
+/// The open picker. `selected` indexes the grid: 0 is the "no value" cell
+/// (named by `none_label`), `i` is `swatches[i - 1]`.
 #[derive(Debug, Clone)]
 pub struct ColourPicker {
     pub swatches: Vec<ThemeSwatch>,
@@ -36,10 +37,12 @@ pub struct ColourPicker {
     pub hex: Input,
     /// Why the last Enter on the hex row was refused.
     pub error: Option<String>,
-    /// Cells per grid row. The renderer fits it to the pane on every frame
-    /// ([`Self::fit_to_width`]) and `j`/`k` step by it, so navigation always
-    /// moves by the row width the user is looking at.
+    /// Cells per grid row. Fitted to the pane when the picker opens, on every
+    /// resize and on every frame ([`Self::fit_to_width`]), and `j`/`k` step by
+    /// it, so navigation always moves by the row width the user is looking at.
     pub columns: usize,
+    /// What cell 0 means here, e.g. "Inherit (usual)".
+    pub none_label: String,
 }
 
 /// What a key did to the picker.
@@ -49,28 +52,28 @@ pub enum PickerOutcome {
     Open,
     /// Close without saving.
     Cancel,
-    /// Save this colour (`None` clears it).
+    /// Save this colour (`None` clears the row's own value).
     Pick(Option<String>),
 }
 
-/// Typed or pasted hex, normalised for the protocol's rule: surrounding
-/// whitespace is ignored and the `#` is optional. The rule itself is
-/// [`validate_workspace_color`]'s.
-pub(crate) fn normalize_hex(raw: &str) -> Result<String, WorkspaceRejection> {
+/// Typed or pasted hex, normalised to lower-case `#rrggbb`: surrounding
+/// whitespace is ignored and the `#` is optional.
+pub(crate) fn normalize_hex(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
-    if trimmed.starts_with('#') {
-        validate_workspace_color(trimmed)
+    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if digits.len() == 6 && digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(format!("#{}", digits.to_ascii_lowercase()))
     } else {
-        validate_workspace_color(&format!("#{trimmed}"))
+        Err(format!("\"{trimmed}\" is not a #rrggbb colour"))
     }
 }
 
 impl ColourPicker {
-    /// Open on `current` (the workspace's saved colour): the matching swatch
-    /// is preselected; a colour the theme doesn't have goes in the hex row,
-    /// which then has focus — so Enter keeps it rather than picking the
-    /// grid's "No colour".
-    pub fn open(theme: &Theme, current: Option<&str>) -> Self {
+    /// Open on `current` (the row's own saved colour, if it has one): the
+    /// matching swatch is preselected; a colour the theme doesn't have goes in
+    /// the hex row, which then has focus — so Enter keeps it rather than
+    /// picking the grid's `none_label` cell.
+    pub fn open(theme: &Theme, current: Option<&str>, none_label: impl Into<String>) -> Self {
         let swatches = theme.swatches();
         let current = current.and_then(|c| normalize_hex(c).ok());
         let mut picker = Self {
@@ -80,6 +83,7 @@ impl ColourPicker {
             error: None,
             swatches,
             columns: MAX_GRID_COLUMNS,
+            none_label: none_label.into(),
         };
         if let Some(current) = current {
             match picker.swatches.iter().position(|s| s.hex == current) {
@@ -99,12 +103,12 @@ impl ColourPicker {
         self.columns = usize::from(width / CELL_WIDTH).clamp(1, MAX_GRID_COLUMNS);
     }
 
-    /// Number of grid cells, "No colour" included.
+    /// Number of grid cells, the `none_label` cell included.
     pub fn cells(&self) -> usize {
         self.swatches.len() + 1
     }
 
-    /// The highlighted swatch (`None` on "No colour").
+    /// The highlighted swatch (`None` on the `none_label` cell).
     pub fn selected_swatch(&self) -> Option<&ThemeSwatch> {
         self.selected
             .checked_sub(1)
@@ -168,7 +172,7 @@ impl ColourPicker {
                     self.error = Some(if self.hex.value().trim().is_empty() {
                         "Type a hex colour, or Tab back to the swatches".to_string()
                     } else {
-                        e.to_string()
+                        e
                     });
                     PickerOutcome::Open
                 }
@@ -180,6 +184,100 @@ impl ColourPicker {
                 PickerOutcome::Open
             }
         }
+    }
+
+    /// The footer hint for the picker's current focus.
+    pub fn footer_hint(&self) -> &'static str {
+        match self.focus {
+            ColourPickerFocus::Grid => "←↓↑→/hjkl: move  Enter: pick  Tab/#: hex  Esc: cancel",
+            ColourPickerFocus::Hex => {
+                "Enter: save  type or paste #rrggbb  Tab: swatches  Esc: cancel"
+            }
+        }
+    }
+
+    /// The picker as lines: the swatch grid (cell 0 is `none_label`), the
+    /// highlighted swatch's role and hex, then the hex row with a live
+    /// preview. `columns` must already be fitted to the pane it is drawn in.
+    pub fn lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+        let grid_focused = self.focus == ColourPickerFocus::Grid;
+        let secondary = Style::default().fg(theme.text_secondary);
+        let bracket = if grid_focused {
+            Style::default().fg(theme.text_primary)
+        } else {
+            secondary
+        };
+        let mut lines = Vec::new();
+        let cells: Vec<Option<&ThemeSwatch>> = std::iter::once(None)
+            .chain(self.swatches.iter().map(Some))
+            .collect();
+        let columns = self.columns.max(1);
+        for (row, chunk) in cells.chunks(columns).enumerate() {
+            let mut spans = Vec::with_capacity(chunk.len() * 3);
+            for (col, cell) in chunk.iter().enumerate() {
+                let selected = row * columns + col == self.selected;
+                let (open, close) = if selected { ("[", "]") } else { (" ", " ") };
+                spans.push(Span::styled(open, bracket));
+                spans.push(match cell {
+                    Some(s) => Span::styled("■■", Style::default().fg(s.color)),
+                    None => Span::styled("··", secondary),
+                });
+                spans.push(Span::styled(close, bracket));
+            }
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(match self.selected_swatch() {
+            Some(s) => vec![
+                Span::styled(
+                    format!(" {}", s.role),
+                    Style::default().fg(theme.text_primary),
+                ),
+                Span::styled(format!("  {}", s.hex), secondary),
+            ],
+            None => vec![Span::styled(format!(" {}", self.none_label), secondary)],
+        }));
+        lines.push(Line::from(""));
+
+        let label_style = if grid_focused {
+            Style::default()
+        } else {
+            theme.selection()
+        };
+        let mut hex_spans = vec![Span::styled(format!("{:<10}", "Hex"), label_style)];
+        let preview = self
+            .hex_value()
+            .and_then(|h| crate::widgets::parse_hex_color(&h));
+        hex_spans.push(match preview {
+            Some(c) => Span::styled("■■ ", Style::default().fg(c)),
+            None => Span::raw("   "),
+        });
+        let raw = self.hex.value();
+        let value_style = if !raw.trim().is_empty() && preview.is_none() {
+            Style::default().fg(theme.diff_removed)
+        } else {
+            Style::default().fg(theme.text_accent)
+        };
+        if grid_focused && raw.is_empty() {
+            hex_spans.push(Span::styled(
+                "#rrggbb (Tab or # to type or paste)",
+                secondary,
+            ));
+        } else if grid_focused {
+            hex_spans.push(Span::styled(raw.to_string(), value_style));
+        } else {
+            hex_spans.push(Span::styled(
+                super::input_with_caret(&self.hex),
+                value_style,
+            ));
+        }
+        lines.push(Line::from(hex_spans));
+        if let Some(err) = &self.error {
+            lines.push(Line::from(Span::styled(
+                format!(" {err}"),
+                Style::default().fg(theme.modal_error),
+            )));
+        }
+        lines
     }
 
     /// A bracketed paste: it always replaces the hex row and focuses it,
@@ -203,7 +301,7 @@ mod tests {
     }
 
     fn picker(current: Option<&str>) -> ColourPicker {
-        ColourPicker::open(&Theme::truecolor(), current)
+        ColourPicker::open(&Theme::truecolor(), current, "Inherit (usual)")
     }
 
     fn press(p: &mut ColourPicker, codes: &[KeyCode]) -> PickerOutcome {
@@ -287,7 +385,7 @@ mod tests {
     #[test]
     fn the_grid_fits_its_width_and_navigation_follows() {
         let mut p = picker(None);
-        p.fit_to_width(26); // the detail pane at 80x24
+        p.fit_to_width(26); // a pane 26 columns wide
         assert_eq!(p.columns, 6);
         press(&mut p, &[KeyCode::Down]);
         assert_eq!(p.selected, 6, "j steps by the drawn row width");

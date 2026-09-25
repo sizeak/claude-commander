@@ -24,8 +24,6 @@ pub struct MergedWorkspace {
     /// What to display. Main's comes from the first server that renamed it;
     /// a named workspace's label is its name.
     pub label: String,
-    /// `#rrggbb` accent, if any server defined one.
-    pub color: Option<String>,
 }
 
 impl MergedWorkspace {
@@ -41,7 +39,7 @@ impl MergedWorkspace {
 pub struct WorkspaceSource<'a> {
     /// The server's definitions, in its configured order.
     pub defs: &'a [WorkspaceDef],
-    /// The server's Main label/colour (`None` = default label).
+    /// The server's Main label (`None` = default label).
     pub main: Option<&'a WorkspaceDef>,
     /// Workspace tags on the server's projects, in project order. Tags with no
     /// definition anywhere still get a workspace, so no project can become
@@ -66,45 +64,27 @@ impl<'a> WorkspaceSource<'a> {
 
 /// Merge workspace definitions across servers **by name**.
 ///
-/// - Main is always first. Its label and colour come from the first source
-///   that sets one, else [`MAIN_WORKSPACE_LABEL`].
+/// - Main is always first. Its label comes from the first source that sets
+///   one, else [`MAIN_WORKSPACE_LABEL`].
 /// - Named workspaces follow in the first source's order; names only later
-///   sources define are appended in the order they appear. The first
-///   definition of a name wins, except that a missing colour is filled from a
-///   later source's definition.
-/// - Tags used by projects but defined nowhere are appended last (no colour).
+///   sources define are appended in the order they appear.
+/// - Tags used by projects but defined nowhere are appended last.
 pub fn merge_workspace_sources(sources: &[WorkspaceSource<'_>]) -> Vec<MergedWorkspace> {
     let main = sources.iter().find_map(|s| s.main);
     let mut merged = vec![MergedWorkspace {
         name: None,
         label: main.map_or_else(|| MAIN_WORKSPACE_LABEL.to_string(), |m| m.name.clone()),
-        color: main.and_then(|m| m.color.clone()),
     }];
 
-    for def in sources.iter().flat_map(|s| s.defs) {
-        match merged
-            .iter_mut()
-            .find(|m| m.name.as_deref() == Some(def.name.as_str()))
-        {
-            Some(existing) => {
-                if existing.color.is_none() {
-                    existing.color = def.color.clone();
-                }
-            }
-            None => merged.push(MergedWorkspace {
-                name: Some(def.name.clone()),
-                label: def.name.clone(),
-                color: def.color.clone(),
-            }),
-        }
-    }
-
-    for tag in sources.iter().flat_map(|s| s.project_tags.iter()) {
-        if !merged.iter().any(|m| m.name.as_deref() == Some(*tag)) {
+    let defined = sources
+        .iter()
+        .flat_map(|s| s.defs.iter().map(|d| d.name.as_str()));
+    let tagged = sources.iter().flat_map(|s| s.project_tags.iter().copied());
+    for name in defined.chain(tagged) {
+        if !merged.iter().any(|m| m.name.as_deref() == Some(name)) {
             merged.push(MergedWorkspace {
-                name: Some((*tag).to_string()),
-                label: (*tag).to_string(),
-                color: None,
+                name: Some(name.to_string()),
+                label: name.to_string(),
             });
         }
     }
@@ -379,11 +359,8 @@ mod tests {
 
     use super::*;
 
-    fn def(name: &str, color: Option<&str>) -> WorkspaceDef {
-        WorkspaceDef {
-            name: name.to_string(),
-            color: color.map(str::to_string),
-        }
+    fn def(name: &str) -> WorkspaceDef {
+        WorkspaceDef::named(name)
     }
 
     fn project(name: &str, workspace: Option<&str>) -> ProjectInfo {
@@ -459,20 +436,11 @@ mod tests {
 
     #[test]
     fn merge_keeps_the_first_servers_order_and_appends_extras() {
-        let a = snapshot(
-            vec![],
-            vec![],
-            vec![def("Work", None), def("Play", Some("#00ff00"))],
-            None,
-        );
+        let a = snapshot(vec![], vec![], vec![def("Work"), def("Play")], None);
         let b = snapshot(
             vec![],
             vec![],
-            vec![
-                def("Oss", None),
-                def("Play", Some("#ff0000")),
-                def("Work", Some("#0000ff")),
-            ],
+            vec![def("Oss"), def("Play"), def("Work")],
             None,
         );
         let merged = merge_workspaces([&a, &b]);
@@ -480,20 +448,16 @@ mod tests {
             names(&merged),
             [None, Some("Work"), Some("Play"), Some("Oss")]
         );
-        // First definition wins its colour; a missing one is filled later.
-        assert_eq!(merged[1].color.as_deref(), Some("#0000ff"));
-        assert_eq!(merged[2].color.as_deref(), Some("#00ff00"));
         assert!(workspaces_visible(&merged));
     }
 
     #[test]
     fn mains_label_comes_from_the_first_server_that_sets_one() {
         let old = snapshot(vec![], vec![], vec![], None);
-        let home = snapshot(vec![], vec![], vec![], Some(def("Home", Some("#123456"))));
-        let other = snapshot(vec![], vec![], vec![], Some(def("Base", None)));
+        let home = snapshot(vec![], vec![], vec![], Some(def("Home")));
+        let other = snapshot(vec![], vec![], vec![], Some(def("Base")));
         let merged = merge_workspaces([&old, &home, &other]);
         assert_eq!(merged[0].label, "Home");
-        assert_eq!(merged[0].color.as_deref(), Some("#123456"));
         assert!(merged[0].is_main());
     }
 
@@ -501,8 +465,8 @@ mod tests {
     /// Main "Work" and one that defines a workspace "Work" are two workspaces.
     #[test]
     fn main_never_merges_with_a_workspace_of_the_same_label() {
-        let a = snapshot(vec![], vec![], vec![], Some(def("Work", None)));
-        let b = snapshot(vec![], vec![], vec![def("Work", None)], None);
+        let a = snapshot(vec![], vec![], vec![], Some(def("Work")));
+        let b = snapshot(vec![], vec![], vec![def("Work")], None);
         let merged = merge_workspaces([&a, &b]);
         assert_eq!(names(&merged), [None, Some("Work")]);
     }
@@ -512,7 +476,7 @@ mod tests {
         let s = snapshot(
             vec![project("a", Some("Lost")), project("b", Some("Work"))],
             vec![],
-            vec![def("Work", None)],
+            vec![def("Work")],
             None,
         );
         let merged = merge_workspaces([&s]);
@@ -528,7 +492,7 @@ mod tests {
         let snap = snapshot(
             vec![main_p.clone(), work_p.clone()],
             vec![s1.clone(), s2.clone()],
-            vec![def("Work", None)],
+            vec![def("Work")],
             None,
         );
         let main_projects: Vec<_> = projects_in_workspace(&snap, None)
@@ -555,7 +519,7 @@ mod tests {
         let a = snapshot(
             vec![work_a, main_a],
             vec![wa.clone(), wb.clone(), ma.clone()],
-            vec![def("Work", None)],
+            vec![def("Work")],
             None,
         );
         let mut a_states = BTreeMap::new();
@@ -601,7 +565,7 @@ mod tests {
 
     #[test]
     fn startup_resolves_last_or_pinned_and_falls_back_to_main() {
-        let merged = merge_workspaces([&snapshot(vec![], vec![], vec![def("Work", None)], None)]);
+        let merged = merge_workspaces([&snapshot(vec![], vec![], vec![def("Work")], None)]);
         let last = StartupWorkspace::Last;
         assert_eq!(
             resolve_startup_workspace(&last, Some("Work"), &merged).as_deref(),
@@ -633,7 +597,7 @@ mod tests {
         let merged = merge_workspaces([&snapshot(
             vec![],
             vec![],
-            vec![def("Work", None), def("Play", None)],
+            vec![def("Work"), def("Play")],
             None,
         )]);
         assert_eq!(
@@ -654,7 +618,7 @@ mod tests {
 
     #[test]
     fn effective_workspace_needs_the_request_to_exist() {
-        let merged = merge_workspaces([&snapshot(vec![], vec![], vec![def("Work", None)], None)]);
+        let merged = merge_workspaces([&snapshot(vec![], vec![], vec![def("Work")], None)]);
         assert_eq!(
             effective_workspace(Some("Work"), &merged).as_deref(),
             Some("Work")
@@ -678,8 +642,8 @@ mod tests {
         let merged = merge_workspaces([&snapshot(
             vec![],
             vec![],
-            vec![def("Work", None)],
-            Some(def("Home", None)),
+            vec![def("Work")],
+            Some(def("Home")),
         )]);
         assert!(workspace_name_taken(&merged, "work", None));
         assert!(workspace_name_taken(&merged, " HOME ", None));
@@ -699,37 +663,24 @@ mod tests {
     /// spellings, so B's inconsistency never blocks an edit on A.
     #[test]
     fn definitions_for_a_server_drop_foreign_clashes_but_keep_its_own() {
-        let wanted = vec![
-            def("Work", Some("#111111")),
-            def("work", None),
-            def("Play", None),
-            def("Home", None),
-        ];
+        let wanted = vec![def("Work"), def("work"), def("Play"), def("Home")];
         // Server A defines "Work": B's "work" is dropped for A.
-        let a_own = vec![def("Work", None)];
+        let a_own = vec![def("Work")];
         assert_eq!(
             definitions_for_server(&wanted, &a_own, None),
-            vec![
-                def("Work", Some("#111111")),
-                def("Play", None),
-                def("Home", None)
-            ]
+            vec![def("Work"), def("Play"), def("Home")]
         );
         // Server B defines "work" and labels its Main "home": it keeps its own
         // spelling, and nothing clashing with its Main label is sent.
-        let b_own = vec![def("work", None)];
+        let b_own = vec![def("work")];
         assert_eq!(
             definitions_for_server(&wanted, &b_own, Some("home")),
-            vec![def("work", None), def("Play", None)]
+            vec![def("work"), def("Play")]
         );
         // A server that has neither keeps the first spelling.
         assert_eq!(
             definitions_for_server(&wanted, &[], None),
-            vec![
-                def("Work", Some("#111111")),
-                def("Play", None),
-                def("Home", None)
-            ]
+            vec![def("Work"), def("Play"), def("Home")]
         );
         // The result is always a body the server's own rule accepts.
         for (own, main) in [(&a_own, None), (&b_own, Some("home"))] {
@@ -751,11 +702,11 @@ mod tests {
     /// refuses, which the frontend reports.
     #[test]
     fn a_servers_own_definitions_are_never_dropped() {
-        let wanted = vec![def("Home", None), def("Play", None)];
-        let own = vec![def("Home", None)];
+        let wanted = vec![def("Home"), def("Play")];
+        let own = vec![def("Home")];
         assert_eq!(
             definitions_for_server(&wanted, &own, Some("home")),
-            vec![def("Home", None), def("Play", None)]
+            vec![def("Home"), def("Play")]
         );
     }
 
@@ -764,8 +715,8 @@ mod tests {
         let merged = merge_workspaces([&snapshot(
             vec![],
             vec![],
-            vec![def("Work", None)],
-            Some(def("Home", None)),
+            vec![def("Work")],
+            Some(def("Home")),
         )]);
         assert_eq!(
             find_workspace(&merged, "Work").unwrap().name.as_deref(),

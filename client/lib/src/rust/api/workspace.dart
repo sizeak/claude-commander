@@ -68,21 +68,16 @@ String? workspaceNameError({required String raw}) =>
 String? workspaceLabelError({required String raw}) =>
     RustLib.instance.api.crateApiWorkspaceWorkspaceLabelError(raw: raw);
 
-/// Why `raw` is not an accepted `#rrggbb` colour, or `None` when it is.
-String? workspaceColorError({required String raw}) =>
-    RustLib.instance.api.crateApiWorkspaceWorkspaceColorError(raw: raw);
-
 /// One entry of the merged list. `name` is the identity (`None` = Main); `label`
 /// is what to show, which only differs from `name` for Main.
 class MergedWorkspace {
   final String? name;
   final String label;
-  final String? color;
 
-  const MergedWorkspace({this.name, required this.label, this.color});
+  const MergedWorkspace({this.name, required this.label});
 
   @override
-  int get hashCode => name.hashCode ^ label.hashCode ^ color.hashCode;
+  int get hashCode => name.hashCode ^ label.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -90,12 +85,11 @@ class MergedWorkspace {
       other is MergedWorkspace &&
           runtimeType == other.runtimeType &&
           name == other.name &&
-          label == other.label &&
-          color == other.color;
+          label == other.label;
 }
 
 /// One server's contribution to the merged workspace list: its definitions, its
-/// Main label/colour override, and the tags on its projects (so a tag with no
+/// Main label override, and the tags on its projects (so a tag with no
 /// definition still shows up as a workspace, and its projects stay reachable).
 class WorkspaceSourceDto {
   final List<WorkspaceDef> defs;

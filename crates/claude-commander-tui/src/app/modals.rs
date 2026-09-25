@@ -299,16 +299,11 @@ impl App {
         // in, so the rows drawn and the rows `j`/`k` step through agree —
         // including after a resize.
         if let Modal::Settings(SettingsState {
-            tab: SettingsTab::Workspaces,
-            workspaces_state:
-                WorkspacesState {
-                    editing: Some(WorkspacesEditing::Colour { picker }),
-                    ..
-                },
+            editing: Some(SettingsEditing::Colour { picker }),
             ..
         }) = &mut self.ui_state.modal
         {
-            picker.fit_to_width(super::workspace_settings::colour_picker_width(area));
+            picker.fit_to_width(super::settings::colour_picker_width(area));
         }
 
         match &self.ui_state.modal {
@@ -840,6 +835,21 @@ impl App {
         )));
         lines.push(Line::from(format!(
             "  {:<width$}workspace, and picking one switches workspace first.",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Each workspace can have its own theme, worn while it",
+            "themes",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}is active: edit it in Settings → Theme (\"Theme for\"),",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}or Enter on its Theme row in Settings → Workspaces.",
             "",
             width = key_col_width,
         )));

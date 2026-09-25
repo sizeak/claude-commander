@@ -912,21 +912,19 @@ class SnapshotDto {
 
 /// One user-defined workspace (`[[workspaces]]`). Mirrored rather than wrapped
 /// so the Workspaces settings page can construct the list it sends back to
-/// [`crate::api::simple::set_workspaces`] directly. `color` is `#rrggbb`.
+/// [`crate::api::simple::set_workspaces`] directly.
 class WorkspaceDef {
   final String name;
-  final String? color;
 
-  const WorkspaceDef({required this.name, this.color});
+  const WorkspaceDef({required this.name});
 
   @override
-  int get hashCode => name.hashCode ^ color.hashCode;
+  int get hashCode => name.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is WorkspaceDef &&
           runtimeType == other.runtimeType &&
-          name == other.name &&
-          color == other.color;
+          name == other.name;
 }

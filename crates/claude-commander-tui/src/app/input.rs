@@ -202,15 +202,10 @@ fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> 
             state.paste_into_draft(text);
             None
         }
-        // Settings → Workspaces: a paste over the colour picker is a hex
-        // colour, wherever the picker's focus is.
+        // Settings → Theme: a paste over a colour picker is a hex colour,
+        // wherever the picker's focus is.
         Modal::Settings(SettingsState {
-            workspaces_state:
-                super::WorkspacesState {
-                    editing: Some(super::WorkspacesEditing::Colour { picker }),
-                    ..
-                },
-            tab: super::SettingsTab::Workspaces,
+            editing: Some(super::SettingsEditing::Colour { picker }),
             ..
         }) => {
             picker.paste(&clean);
@@ -592,8 +587,18 @@ impl App {
                     }
                 }
             }
-            InputEvent::Resize(_, _) => {
-                // Terminal will re-render automatically
+            InputEvent::Resize(width, height) => {
+                // The terminal re-renders on its own, but an open colour
+                // picker's row width must follow now: a key queued behind the
+                // resize would otherwise step by the old one.
+                let area = Rect::new(0, 0, width, height);
+                if let Modal::Settings(SettingsState {
+                    editing: Some(super::SettingsEditing::Colour { picker }),
+                    ..
+                }) = &mut self.ui_state.modal
+                {
+                    picker.fit_to_width(super::settings::colour_picker_width(area));
+                }
             }
             InputEvent::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -1839,6 +1844,7 @@ impl App {
                     sections_state: SectionsState::default(),
                     workspaces_state: WorkspacesState::default(),
                     programs_state: ProgramsState::default(),
+                    theme_scope: self.default_theme_scope(),
                     search: None,
                 });
             }

@@ -6,7 +6,11 @@
 //! one set of background loops, and switching between them is a client-side
 //! filter. `None` on a project means the built-in **Main** workspace, which is
 //! never defined by name — it merges across servers by being untagged — so its
-//! display label and colour ride separately ([`SetWorkspacesRequest::main`]).
+//! display label rides separately ([`SetWorkspacesRequest::main`]).
+//!
+//! A workspace's look is not part of this contract: each frontend keeps its own
+//! per-workspace theme locally (the TUI in `config.toml`'s
+//! `[workspace_themes]`, the Flutter app per device), keyed by name.
 //!
 //! The rules live here rather than in core because the server and its clients
 //! must agree on them: the TUI and the Flutter app validate a name before
@@ -38,19 +42,12 @@ pub struct WorkspaceDef {
     /// The workspace's name, which is also its identity: projects are tagged
     /// with it, and servers merge definitions by it (exact match).
     pub name: String,
-    /// Accent colour as `#rrggbb` (lower-case after validation). `None` lets
-    /// each frontend pick its own default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
 }
 
 impl WorkspaceDef {
-    /// A definition with no colour.
+    /// A definition for `name`.
     pub fn named(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            color: None,
-        }
+        Self { name: name.into() }
     }
 }
 
@@ -103,7 +100,7 @@ impl From<StartupWorkspace> for String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetWorkspacesRequest {
     pub workspaces: Vec<WorkspaceDef>,
-    /// Label + colour for the built-in Main workspace. `None` leaves the
+    /// Label for the built-in Main workspace. `None` leaves the
     /// server's current value untouched. Its `name` is a display label only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main: Option<WorkspaceDef>,
@@ -141,7 +138,7 @@ pub struct SetProjectWorkspace {
     pub workspace: Option<String>,
 }
 
-/// Why a workspace name, colour or definition list was refused.
+/// Why a workspace name or definition list was refused.
 ///
 /// Hand-written `Display` rather than `thiserror`: this crate is serde-only,
 /// and the message is part of the 400 body a user sees.
@@ -158,8 +155,6 @@ pub enum WorkspaceRejection {
     /// Two definitions (or a definition and Main's label) share a name,
     /// compared case-insensitively.
     Duplicate { name: String },
-    /// Not a `#rrggbb` colour.
-    BadColor { color: String },
     /// `startup_workspace` names a workspace that is not in the list.
     UnknownStartup { name: String },
 }
@@ -176,9 +171,6 @@ impl fmt::Display for WorkspaceRejection {
             }
             Self::Reserved { name } => write!(f, "\"{name}\" is a reserved workspace name"),
             Self::Duplicate { name } => write!(f, "workspace \"{name}\" is defined twice"),
-            Self::BadColor { color } => {
-                write!(f, "workspace colour \"{color}\" is not a #rrggbb colour")
-            }
             Self::UnknownStartup { name } => {
                 write!(f, "startup workspace \"{name}\" is not a defined workspace")
             }
@@ -219,33 +211,15 @@ pub fn validate_workspace_name(raw: &str) -> Result<String, WorkspaceRejection> 
     Ok(name)
 }
 
-/// Validate a `#rrggbb` colour, returning it lower-cased.
-pub fn validate_workspace_color(raw: &str) -> Result<String, WorkspaceRejection> {
-    let c = raw.trim();
-    let ok = c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit());
-    if ok {
-        Ok(c.to_ascii_lowercase())
-    } else {
-        Err(WorkspaceRejection::BadColor {
-            color: raw.to_string(),
-        })
-    }
-}
-
 /// Validate one definition, returning its normalised form.
 pub fn validate_workspace_def(def: &WorkspaceDef) -> Result<WorkspaceDef, WorkspaceRejection> {
     Ok(WorkspaceDef {
         name: validate_workspace_name(&def.name)?,
-        color: def
-            .color
-            .as_deref()
-            .map(validate_workspace_color)
-            .transpose()?,
     })
 }
 
 /// Validate a whole [`SetWorkspacesRequest`], returning its normalised form:
-/// every name and colour valid, no two names equal case-insensitively (Main's
+/// every name valid, no two names equal case-insensitively (Main's
 /// label included), and a named startup workspace present in the list.
 pub fn validate_set_workspaces(
     req: &SetWorkspacesRequest,
@@ -261,11 +235,6 @@ pub fn validate_set_workspaces(
         .map(|m| {
             Ok::<_, WorkspaceRejection>(WorkspaceDef {
                 name: validate_workspace_label(&m.name)?,
-                color: m
-                    .color
-                    .as_deref()
-                    .map(validate_workspace_color)
-                    .transpose()?,
             })
         })
         .transpose()?;
@@ -304,13 +273,15 @@ pub fn validate_set_workspaces(
 mod tests {
     use super::*;
 
+    /// The definition is just its name; a `color` from a pre-themes build of
+    /// this branch is ignored rather than refused.
     #[test]
-    fn workspace_def_omits_an_absent_colour_and_reads_one_back() {
+    fn workspace_def_is_just_a_name() {
         let json = serde_json::to_string(&WorkspaceDef::named("Work")).unwrap();
         assert_eq!(json, r#"{"name":"Work"}"#);
         let back: WorkspaceDef =
             serde_json::from_str(r##"{"name":"Work","color":"#ff8800"}"##).unwrap();
-        assert_eq!(back.color.as_deref(), Some("#ff8800"));
+        assert_eq!(back, WorkspaceDef::named("Work"));
     }
 
     #[test]
@@ -357,14 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn colours_must_be_hex_triplets() {
-        assert_eq!(validate_workspace_color("#FF8800").unwrap(), "#ff8800");
-        for bad in ["ff8800", "#ff88", "#gg8800", "red", ""] {
-            assert!(validate_workspace_color(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
     fn set_workspaces_rejects_duplicates_including_mains_label() {
         let dup = SetWorkspacesRequest {
             workspaces: vec![WorkspaceDef::named("Work"), WorkspaceDef::named("work")],
@@ -401,18 +364,14 @@ mod tests {
     }
 
     #[test]
-    fn set_workspaces_normalises_names_and_colours() {
+    fn set_workspaces_normalises_names() {
         let req = SetWorkspacesRequest {
-            workspaces: vec![WorkspaceDef {
-                name: " Work ".into(),
-                color: Some("#ABCDEF".into()),
-            }],
+            workspaces: vec![WorkspaceDef::named(" Work ")],
             main: Some(WorkspaceDef::named(" Home ")),
             startup_workspace: Some(StartupWorkspace::Named("Work".into())),
         };
         let ok = validate_set_workspaces(&req).unwrap();
         assert_eq!(ok.workspaces[0].name, "Work");
-        assert_eq!(ok.workspaces[0].color.as_deref(), Some("#abcdef"));
         assert_eq!(ok.main.unwrap().name, "Home");
     }
 

@@ -866,7 +866,7 @@ impl Default for SectionsState {
 pub enum WorkspacesFocus {
     #[default]
     List,
-    /// The right pane: the colour row, then the workspace's projects.
+    /// The right pane: the theme row, then the workspace's projects.
     Detail,
 }
 
@@ -878,7 +878,7 @@ pub struct WorkspacesState {
     /// Index into the merged workspace list.
     pub selected: usize,
     pub focus: WorkspacesFocus,
-    /// Detail-pane row: 0 = colour, 1.. = the workspace's projects.
+    /// Detail-pane row: 0 = theme, 1.. = the workspace's projects.
     pub detail_selected: usize,
     pub editing: Option<WorkspacesEditing>,
 }
@@ -891,10 +891,6 @@ pub enum WorkspacesEditing {
     },
     Renaming {
         value: Input,
-    },
-    /// Enter on the colour row: the swatch grid and hex row.
-    Colour {
-        picker: Box<colour_picker::ColourPicker>,
     },
     /// `m` on a project: pick its target in the left list (`target` indexes
     /// the merged list), Enter to move, Esc to cancel.
@@ -994,10 +990,24 @@ pub struct SettingsState {
     pub workspaces_state: WorkspacesState,
     /// State for the Programs tab (lazily initialised on first tab switch)
     pub programs_state: ProgramsState,
+    /// Which theme the Theme tab edits. Opening settings defaults it to the
+    /// active workspace once there are two or more; the Workspaces tab's
+    /// Theme row sets it to the selected workspace.
+    pub theme_scope: ThemeScope,
     /// Active search filter for the Keybindings tab. `Some` while the search
     /// box is focused (typing filters the shortcut list live); `None` when the
     /// list is browsed normally.
     pub search: Option<Input>,
+}
+
+/// Which theme Settings → Theme edits.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ThemeScope {
+    /// `[theme]`, which every workspace without its own preset inherits.
+    #[default]
+    Usual,
+    /// One workspace's `[workspace_themes."<name>"]` (`None` = Main).
+    Workspace(Option<String>),
 }
 
 /// Kind of a settings row, carrying its typed value.
@@ -1025,6 +1035,10 @@ pub struct SettingsRow {
     pub kind: SettingsRowKind,
     /// Optional color for displaying a swatch next to the value (Theme tab only)
     pub color_swatch: Option<Color>,
+    /// Where an inherited value comes from (`"usual"`, `"preset"`): the row
+    /// has no value of its own, so it is drawn dim with this note. `None` for
+    /// a value set in the scope being edited (Theme tab only).
+    pub inherited_from: Option<&'static str>,
 }
 
 impl SettingsRow {
@@ -1039,6 +1053,7 @@ impl SettingsRow {
             field_key: field_key.into(),
             kind: SettingsRowKind::Text(value.into()),
             color_swatch: None,
+            inherited_from: None,
         }
     }
 
@@ -1049,6 +1064,7 @@ impl SettingsRow {
             field_key: field_key.into(),
             kind: SettingsRowKind::Toggle(on),
             color_swatch: None,
+            inherited_from: None,
         }
     }
 
@@ -1059,6 +1075,7 @@ impl SettingsRow {
             field_key: String::new(),
             kind: SettingsRowKind::Header,
             color_swatch: None,
+            inherited_from: None,
         }
     }
 
@@ -1079,6 +1096,7 @@ impl SettingsRow {
             field_key: field_key.into(),
             kind: SettingsRowKind::Text(value.into()),
             color_swatch: Some(color),
+            inherited_from: None,
         }
     }
 
@@ -1113,6 +1131,10 @@ pub enum SettingsEditing {
     OptionPicker {
         options: Vec<PickerOption>,
         selected: usize,
+    },
+    /// A Theme-tab colour row: the swatch grid and hex row.
+    Colour {
+        picker: Box<colour_picker::ColourPicker>,
     },
 }
 
@@ -1668,6 +1690,11 @@ pub struct AppUiState {
     pub should_quit: bool,
     /// Last known terminal size (updated each render frame)
     pub terminal_size: Rect,
+    /// Whose theme `App::theme` was last built for: `None` for the usual
+    /// `[theme]` (workspace UI hidden), `Some(workspace)` (`Some(None)` = Main)
+    /// once there are workspaces. `refresh_list_items` rebuilds the theme when
+    /// `App::theme_workspace` moves off it.
+    pub theme_workspace: Option<Option<String>>,
     /// Inner rect of the review-diff body pane, recorded each render frame so
     /// mouse events can map a screen position to a diff line. `None` unless the
     /// review view is open.
@@ -1873,6 +1900,7 @@ impl Default for AppUiState {
             enriched_pr_fetch_spawned_at: None,
             review_refresh_in_flight: false,
             terminal_size: Rect::default(),
+            theme_workspace: None,
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             agent_states: BTreeMap::new(),
@@ -2232,13 +2260,9 @@ impl App {
             ));
         }
 
-        let base = config
-            .theme
-            .preset
-            .as_deref()
-            .and_then(Theme::from_preset)
-            .unwrap_or_default();
-        let theme = base.with_overrides(&config.theme);
+        // The usual theme: no workspace is active until the snapshots arrive,
+        // and `refresh_list_items` swaps in the active one's when it is.
+        let theme = Theme::from_overrides(&config.theme);
         let debounce = Duration::from_millis(config.session_number_debounce_ms);
         let commander_enabled_at_init = config.commander_enabled;
 

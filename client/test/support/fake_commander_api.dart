@@ -619,7 +619,7 @@ class FakeCommanderApi implements CommanderApi {
     }
     workspacesResponse = [
       for (final w in workspacesResponse)
-        w.name == from ? WorkspaceDef(name: to, color: w.color) : w,
+        w.name == from ? WorkspaceDef(name: to) : w,
     ];
     if (startupWorkspaceResponse == from) startupWorkspaceResponse = to;
   }
@@ -676,9 +676,6 @@ class FakeCommanderApi implements CommanderApi {
 
   @override
   String? workspaceLabelError(String raw) => fakeWorkspaceLabelError(raw);
-
-  @override
-  String? workspaceColorError(String raw) => fakeWorkspaceColorError(raw);
 
   @override
   Future<void> removeProject({

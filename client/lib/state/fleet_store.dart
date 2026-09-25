@@ -249,7 +249,7 @@ class FleetStore extends ChangeNotifier {
   /// defines — so an orphaned tag heals the first time anything is edited.
   List<WorkspaceDef> get _definitions => [
     for (final w in workspaces)
-      if (w.name case final name?) WorkspaceDef(name: name, color: w.color),
+      if (w.name case final name?) WorkspaceDef(name: name),
   ];
 
   /// Run [op] against every server at once. Best effort: each server's failure
@@ -304,13 +304,8 @@ class FleetStore extends ChangeNotifier {
   });
 
   /// Define a new workspace on every server, after the existing ones.
-  Future<List<WorkspaceEditFailure>> createWorkspace(
-    String name, {
-    String? color,
-  }) => _putDefinitions([
-    ..._definitions,
-    WorkspaceDef(name: name.trim(), color: color),
-  ]);
+  Future<List<WorkspaceEditFailure>> createWorkspace(String name) =>
+      _putDefinitions([..._definitions, WorkspaceDef(name: name.trim())]);
 
   /// Put the user workspaces in [names]' order on every server. Names not
   /// listed keep their relative order after the listed ones.
@@ -323,29 +318,9 @@ class FleetStore extends ChangeNotifier {
     return _putDefinitions(ordered);
   }
 
-  /// Set (or clear, with null) a workspace's colour; [name] null is Main.
-  Future<List<WorkspaceEditFailure>> setWorkspaceColor(
-    String? name,
-    String? color,
-  ) {
-    if (name == null) {
-      return _putDefinitions(
-        _definitions,
-        main: WorkspaceDef(name: workspaces.first.label, color: color),
-      );
-    }
-    return _putDefinitions([
-      for (final d in _definitions)
-        d.name == name ? WorkspaceDef(name: d.name, color: color) : d,
-    ]);
-  }
-
   /// Relabel the built-in Main workspace (display only — Main has no name).
   Future<List<WorkspaceEditFailure>> renameMainWorkspace(String label) =>
-      _putDefinitions(
-        _definitions,
-        main: WorkspaceDef(name: label.trim(), color: workspaces.first.color),
-      );
+      _putDefinitions(_definitions, main: WorkspaceDef(name: label.trim()));
 
   /// Set every server's `startup_workspace`: `last`, `main` or a name.
   Future<List<WorkspaceEditFailure>> setStartupWorkspace(String startup) =>

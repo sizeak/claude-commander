@@ -110,20 +110,23 @@ impl App {
         self.ui_state.project_colors = self.project_color_map();
     }
 
-    /// Rebuild the active theme from the current config's preset + overrides,
-    /// then refresh the derived project-colour cache. Call after any mutation
-    /// of `self.config.theme` (settings apply, config hot-reload): the cache is
-    /// otherwise only rebuilt in `refresh_list_items`, so card border/title
-    /// colours would show the old theme until an unrelated tick refreshed them.
+    /// Rebuild the active theme from the current config — the active
+    /// workspace's theme once there are workspaces to be in
+    /// ([`Self::theme_workspace`]), else the usual `[theme]` — then refresh the
+    /// derived project-colour cache. Call after any mutation of
+    /// `self.config.theme` or `self.config.workspace_themes` (settings apply,
+    /// config hot-reload, a workspace rename or delete): the cache is otherwise
+    /// only rebuilt in `refresh_list_items`, so card border/title colours would
+    /// show the old theme until an unrelated tick refreshed them. A workspace
+    /// *switch* needs no call: `refresh_list_items` notices the change
+    /// ([`Self::sync_workspace_theme`]).
     pub(super) fn reload_theme(&mut self) {
-        let base = self
-            .config
-            .theme
-            .preset
-            .as_deref()
-            .and_then(Theme::from_preset)
-            .unwrap_or_default();
-        self.theme = base.with_overrides(&self.config.theme);
+        let workspace = self.theme_workspace();
+        self.theme = match &workspace {
+            Some(ws) => crate::theme::theme_for_workspace(&self.config, ws.as_deref()),
+            None => Theme::from_overrides(&self.config.theme),
+        };
+        self.ui_state.theme_workspace = workspace;
         self.rebuild_project_colors();
     }
 

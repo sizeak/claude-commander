@@ -423,8 +423,7 @@ fn projects_add_list_branches_and_scan() {
         .expect("repo has a parent dir")
         .to_string_lossy()
         .into_owned();
-    let scan =
-        simple::scan_directory(fx.handle.clone(), parent, None).expect("scan_directory");
+    let scan = simple::scan_directory(fx.handle.clone(), parent, None).expect("scan_directory");
     assert!(
         scan.added + scan.skipped >= 1,
         "scanning the parent dir should see the repo (added or skipped)"
@@ -617,20 +616,8 @@ fn workspaces_define_tag_move_rename_and_delete() {
     simple::set_workspaces(
         fx.handle.clone(),
         SetWorkspacesRequestDto {
-            workspaces: vec![
-                WorkspaceDef {
-                    name: "Work".into(),
-                    color: Some("#FF8800".into()),
-                },
-                WorkspaceDef {
-                    name: "Personal".into(),
-                    color: None,
-                },
-            ],
-            main: Some(WorkspaceDef {
-                name: "Home".into(),
-                color: None,
-            }),
+            workspaces: vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Personal")],
+            main: Some(WorkspaceDef::named("Home")),
             startup_workspace: Some("Work".into()),
         },
     )
@@ -641,11 +628,6 @@ fn workspaces_define_tag_move_rename_and_delete() {
         names,
         ["Work", "Personal"],
         "definition order is display order"
-    );
-    assert_eq!(
-        snap.workspaces[0].color.as_deref(),
-        Some("#ff8800"),
-        "the server normalises the colour"
     );
     assert_eq!(
         snap.main_workspace.as_ref().map(|m| m.name.as_str()),

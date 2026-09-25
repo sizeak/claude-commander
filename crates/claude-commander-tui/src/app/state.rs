@@ -749,6 +749,11 @@ impl App {
     }
 
     pub(super) async fn refresh_list_items(&mut self) {
+        // The active workspace (or whether there are workspaces at all) may
+        // have changed since the theme was built; the rest of this rebuild
+        // then reads the right palette.
+        self.sync_workspace_theme();
+
         // A section list mode needs configured sections; fall back to the
         // project list view if the user removed them (hot-reload). The board
         // uses baked-in defaults, so it is unaffected.

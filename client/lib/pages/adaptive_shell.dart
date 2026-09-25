@@ -9,6 +9,7 @@ import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/fleet_store.dart';
 import '../theme/agent_glyphs.dart';
+import '../theme/theme_controller.dart';
 import '../theme/tokens.dart';
 import '../util/session_filter.dart';
 import '../util/viewport.dart';
@@ -203,7 +204,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             activeCount: active,
             totalCount: total,
             serverCount: fleet.servers.length,
-            titleMenu: workspaceTitleMenu(fleet),
+            titleMenu: workspaceTitleMenu(fleet, theme: ThemeScope.of(context)),
             newSession: ChromeButtonAction(
               icon: Icons.add,
               label: 'New session',

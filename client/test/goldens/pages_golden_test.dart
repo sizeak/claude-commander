@@ -71,9 +71,7 @@ void main() {
     // A second workspace with nothing in it yet: enough to bring the workspace
     // switcher onto the fleet title ("Fleet · Main ▾") and the Workspaces row's
     // count into settings, without scoping any of the sessions above away.
-    api.workspacesResponse = const [
-      WorkspaceDef(name: 'Personal', color: '#6f9fd8'),
-    ];
+    api.workspacesResponse = const [WorkspaceDef(name: 'Personal')];
     store = CommanderStore(api: api, config: testConfig);
     fleet = FleetStore.withStores([store]);
   });
@@ -115,8 +113,16 @@ void main() {
             store: InMemoryPrefStore(),
             service: FakeWindowService(),
           ),
+          // On the golden's own theme, so what the controller resolves (the
+          // workspace switcher's label and dots) agrees with the tokens the
+          // page is painted in.
           child: ThemeScope(
-            controller: ThemeController(store: InMemoryPrefStore()),
+            controller: ThemeController(
+              store: InMemoryPrefStore(),
+              initial: ThemeId.values.firstWhere(
+                (id) => identical(id.tokens, tokens),
+              ),
+            ),
             child: app,
           ),
         ),

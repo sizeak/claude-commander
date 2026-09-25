@@ -74,7 +74,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 199202303;
+  int get rustContentHash => 750374583;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -407,8 +407,6 @@ abstract class RustLibApi extends BaseApi {
     required String handle,
     required String id,
   });
-
-  String? crateApiWorkspaceWorkspaceColorError({required String raw});
 
   String? crateApiWorkspaceWorkspaceLabelError({required String raw});
 
@@ -2691,39 +2689,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  String? crateApiWorkspaceWorkspaceColorError({required String raw}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(raw, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 66)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiWorkspaceWorkspaceColorErrorConstMeta,
-        argValues: [raw],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiWorkspaceWorkspaceColorErrorConstMeta =>
-      const TaskConstMeta(
-        debugName: "workspace_color_error",
-        argNames: ["raw"],
-      );
-
-  @override
   String? crateApiWorkspaceWorkspaceLabelError({required String raw}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(raw, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 67)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 66)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_String,
@@ -2749,7 +2721,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(raw, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 68)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 67)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_String,
@@ -2778,7 +2750,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_list_merged_workspace(workspaces, serializer);
           sse_encode_String(name, serializer);
           sse_encode_opt_box_autoadd_merged_workspace(except, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 69)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 68)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -3432,12 +3404,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   MergedWorkspace dco_decode_merged_workspace(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
     return MergedWorkspace(
       name: dco_decode_opt_String(arr[0]),
       label: dco_decode_String(arr[1]),
-      color: dco_decode_opt_String(arr[2]),
     );
   }
 
@@ -3938,12 +3909,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WorkspaceDef dco_decode_workspace_def(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
-    return WorkspaceDef(
-      name: dco_decode_String(arr[0]),
-      color: dco_decode_opt_String(arr[1]),
-    );
+    if (arr.length != 1)
+      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
+    return WorkspaceDef(name: dco_decode_String(arr[0]));
   }
 
   @protected
@@ -4787,8 +4755,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_name = sse_decode_opt_String(deserializer);
     var var_label = sse_decode_String(deserializer);
-    var var_color = sse_decode_opt_String(deserializer);
-    return MergedWorkspace(name: var_name, label: var_label, color: var_color);
+    return MergedWorkspace(name: var_name, label: var_label);
   }
 
   @protected
@@ -5448,8 +5415,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WorkspaceDef sse_decode_workspace_def(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_name = sse_decode_String(deserializer);
-    var var_color = sse_decode_opt_String(deserializer);
-    return WorkspaceDef(name: var_name, color: var_color);
+    return WorkspaceDef(name: var_name);
   }
 
   @protected
@@ -6259,7 +6225,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_opt_String(self.name, serializer);
     sse_encode_String(self.label, serializer);
-    sse_encode_opt_String(self.color, serializer);
   }
 
   @protected
@@ -6825,7 +6790,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_workspace_def(WorkspaceDef self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.name, serializer);
-    sse_encode_opt_String(self.color, serializer);
   }
 
   @protected

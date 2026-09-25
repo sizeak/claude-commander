@@ -1,13 +1,14 @@
+import 'package:claude_commander_client/chrome/chrome_forms.dart';
+import 'package:claude_commander_client/pages/theme_picker_page.dart';
 import 'package:claude_commander_client/pages/workspaces_page.dart';
 import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/fleet_store.dart';
-import 'package:claude_commander_client/theme/theme_data.dart';
+import 'package:claude_commander_client/theme/theme_controller.dart';
+import 'package:claude_commander_client/theme/theme_prefs.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
-import 'package:claude_commander_client/util/workspace_color.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -38,11 +39,13 @@ void main() {
   late FakeCommanderApi laptopApi;
   late FakeCommanderApi codespaceApi;
   late FleetStore fleet;
+  late ThemeController theme;
 
   setUp(() async {
+    theme = ThemeController(store: InMemoryPrefStore());
     laptopApi = FakeCommanderApi()
       ..workspacesResponse = const [
-        WorkspaceDef(name: 'Work', color: '#ff8800'),
+        WorkspaceDef(name: 'Work'),
         WorkspaceDef(name: 'Personal'),
       ]
       ..projectsResponse = [
@@ -71,7 +74,12 @@ void main() {
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(MaterialApp(home: WorkspacesPage(fleet: fleet)));
+    await tester.pumpWidget(
+      ThemeScope(
+        controller: theme,
+        child: MaterialApp(home: WorkspacesPage(fleet: fleet)),
+      ),
+    );
     await tester.pumpAndSettle();
   }
 
@@ -256,199 +264,6 @@ void main() {
     ]);
   });
 
-  group('colour dialog', () {
-    Future<void> pumpThemed(WidgetTester tester, CommanderTokens tokens) async {
-      tester.view.physicalSize = const Size(360, 1400);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: themeDataFor(tokens),
-          home: WorkspacesPage(fleet: fleet),
-        ),
-      );
-      await tester.pumpAndSettle();
-    }
-
-    Future<void> openColour(WidgetTester tester, String? name) async {
-      await openRowMenu(tester, name);
-      await tester.tap(find.text('Colour'));
-      await tester.pumpAndSettle();
-    }
-
-    String? colourOf(String name) =>
-        lastPut(laptopApi).workspaces.firstWhere((w) => w.name == name).color;
-
-    Finder hexField() => find.byKey(const ValueKey('colour-hex-field'));
-
-    bool saveEnabled(WidgetTester tester) =>
-        tester
-            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Save'))
-            .onPressed !=
-        null;
-
-    // Each theme reuses its primary for one other role; that role's swatch
-    // must be dropped and the shared hex offered once, as Primary.
-    for (final (label, tokens, duplicate, duplicateColor) in [
-      (
-        'Mission Control',
-        missionControlTokens,
-        'Nav',
-        missionControlTokens.nav,
-      ),
-      ('LCARS', lcarsTokens, 'Working', lcarsTokens.working),
-    ]) {
-      testWidgets('offers the $label theme colours, deduplicated', (
-        tester,
-      ) async {
-        final shared = workspaceColorHex(tokens.primary);
-        expect(
-          workspaceColorHex(duplicateColor),
-          shared,
-          reason: '$label must reuse its primary as $duplicate for this test',
-        );
-
-        await pumpThemed(tester, tokens);
-        await openColour(tester, 'Personal');
-
-        Finder tooltipStarting(String prefix) => find.byWidgetPredicate(
-          (w) => w is Tooltip && (w.message ?? '').startsWith(prefix),
-        );
-        expect(
-          tooltipStarting('$duplicate · '),
-          findsNothing,
-          reason: '$duplicate shares Primary\'s hex, so it is not offered',
-        );
-        expect(find.byKey(ValueKey('swatch-$shared')), findsOneWidget);
-        expect(find.byTooltip('Primary · $shared'), findsOneWidget);
-        expect(tooltipStarting('Primary · '), findsOneWidget);
-        // Every offered colour is drawn, once.
-        for (final s in themeSwatches(tokens)) {
-          expect(find.byTooltip('${s.name} · ${s.hex}'), findsOneWidget);
-        }
-        expect(tester.takeException(), isNull);
-      });
-    }
-
-    testWidgets('picking a swatch names it, then Save stores its hex', (
-      tester,
-    ) async {
-      await pumpThemed(tester, missionControlTokens);
-      await openColour(tester, 'Personal');
-
-      final success = workspaceColorHex(missionControlTokens.success);
-      await tester.tap(find.byKey(ValueKey('swatch-$success')));
-      await tester.pumpAndSettle();
-      expect(find.text('Success · $success'), findsOneWidget);
-      expect(tester.widget<TextField>(hexField()).controller!.text, success);
-
-      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
-      await tester.pumpAndSettle();
-      expect(colourOf('Personal'), success);
-    });
-
-    testWidgets('No colour clears it', (tester) async {
-      await pumpThemed(tester, missionControlTokens);
-      await openColour(tester, 'Work');
-      await tester.tap(find.text('No colour'));
-      await tester.pumpAndSettle();
-      expect(colourOf('Work'), isNull);
-    });
-
-    testWidgets('a typed hex, with or without #, is stored lowercase', (
-      tester,
-    ) async {
-      await pumpThemed(tester, missionControlTokens);
-      await openColour(tester, 'Personal');
-
-      await tester.enterText(hexField(), '  12AB9F ');
-      await tester.pumpAndSettle();
-      expect(find.text('Custom · #12ab9f'), findsOneWidget);
-      expect(saveEnabled(tester), isTrue);
-      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
-      await tester.pumpAndSettle();
-      expect(colourOf('Personal'), '#12ab9f');
-    });
-
-    testWidgets('the paste button fills the field from the clipboard', (
-      tester,
-    ) async {
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        (call) async => call.method == 'Clipboard.getData'
-            ? <String, dynamic>{'text': ' #C0FFEE\n'}
-            : null,
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          null,
-        ),
-      );
-      await pumpThemed(tester, missionControlTokens);
-      await openColour(tester, 'Personal');
-
-      await tester.tap(find.byTooltip('Paste'));
-      await tester.pumpAndSettle();
-      expect(tester.widget<TextField>(hexField()).controller!.text, '#C0FFEE');
-      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
-      await tester.pumpAndSettle();
-      expect(colourOf('Personal'), '#c0ffee');
-    });
-
-    testWidgets('an invalid hex shows an error and disables Save', (
-      tester,
-    ) async {
-      await pumpThemed(tester, missionControlTokens);
-      await openColour(tester, 'Personal');
-
-      for (final bad in ['#ff88', '#gg8800', 'red', '#ff88001']) {
-        await tester.enterText(hexField(), bad);
-        await tester.pumpAndSettle();
-        expect(
-          find.textContaining('is not a #rrggbb colour'),
-          findsOneWidget,
-          reason: bad,
-        );
-        expect(saveEnabled(tester), isFalse, reason: bad);
-      }
-
-      // An empty field is not an error yet, but there is nothing to save.
-      await tester.enterText(hexField(), '');
-      await tester.pumpAndSettle();
-      expect(find.textContaining('is not a #rrggbb colour'), findsNothing);
-      expect(saveEnabled(tester), isFalse);
-    });
-
-    testWidgets('the current colour is prefilled and its swatch selected', (
-      tester,
-    ) async {
-      laptopApi.workspacesResponse = [
-        WorkspaceDef(
-          name: 'Work',
-          color: workspaceColorHex(lcarsTokens.nav).toUpperCase(),
-        ),
-        const WorkspaceDef(name: 'Personal', color: '#123456'),
-      ];
-      await fleet.refreshAll();
-      await pumpThemed(tester, lcarsTokens);
-
-      final nav = workspaceColorHex(lcarsTokens.nav);
-      await openColour(tester, 'Work');
-      expect(tester.widget<TextField>(hexField()).controller!.text, nav);
-      expect(find.text('Nav · $nav'), findsOneWidget);
-      expect(saveEnabled(tester), isTrue);
-      await tester.tap(find.text('Cancel'));
-      await tester.pumpAndSettle();
-
-      // A colour that is no theme token is still prefilled, as Custom.
-      await openColour(tester, 'Personal');
-      expect(tester.widget<TextField>(hexField()).controller!.text, '#123456');
-      expect(find.text('Custom · #123456'), findsOneWidget);
-    });
-  });
-
   testWidgets('the startup workspace can be pinned', (tester) async {
     await pumpPage(tester);
 
@@ -498,5 +313,111 @@ void main() {
     expect(find.textContaining("Couldn't update codespace"), findsOneWidget);
     // The server that took it still did.
     expect(laptopApi.countOf('setWorkspaces'), 1);
+  });
+
+  group('themes', () {
+    const red = Color(0xFFFF0000);
+
+    Color? dotOf(WidgetTester tester, String? name) {
+      final dot = tester.widget<Container>(
+        find.descendant(
+          of: rowOf(name),
+          matching: find.byKey(const ValueKey('workspace-dot')),
+        ),
+      );
+      return (dot.decoration as BoxDecoration?)?.color;
+    }
+
+    testWidgets('the row menu offers Theme, not Colour', (tester) async {
+      await pumpPage(tester);
+      await openRowMenu(tester, 'Personal');
+      expect(find.text('Theme'), findsOneWidget);
+      expect(find.text('Colour'), findsNothing);
+    });
+
+    testWidgets('Theme opens the picker scoped to that workspace', (
+      tester,
+    ) async {
+      await pumpPage(tester);
+      await openRowMenu(tester, 'Personal');
+      await tester.tap(find.text('Theme'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ThemePickerPage), findsOneWidget);
+      final scopes = tester
+          .widget<ChromeSegmented>(find.byKey(themeScopeSelectorKey))
+          .spec
+          .segments;
+      expect(scopes.firstWhere((s) => s.label == 'Personal').selected, isTrue);
+      await tester.tap(find.text('LCARS'));
+      await tester.pumpAndSettle();
+      expect(theme.workspaceTheme('Personal')!.themeId, ThemeId.lcars);
+    });
+
+    testWidgets('each row\'s dot is its workspace\'s resolved primary', (
+      tester,
+    ) async {
+      await theme.setOverride('Work', ThemeRole.primary, red);
+      await theme.selectFor('Personal', ThemeId.lcars);
+      await pumpPage(tester);
+      expect(dotOf(tester, 'Work'), red);
+      expect(dotOf(tester, 'Personal'), lcarsTokens.primary);
+      expect(dotOf(tester, null), missionControlTokens.primary);
+      expect(
+        find.descendant(
+          of: rowOf('Work'),
+          matching: find.text('1 project · own theme'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('own theme'), findsNWidgets(2));
+    });
+
+    testWidgets('renaming a workspace here moves its theme', (tester) async {
+      await theme.selectFor('Work', ThemeId.lcars);
+      await pumpPage(tester);
+
+      await openRowMenu(tester, 'Work');
+      await tester.tap(find.text('Rename'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Job');
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      expect(theme.workspaceTheme('Work'), isNull);
+      expect(theme.workspaceTheme('Job')!.themeId, ThemeId.lcars);
+    });
+
+    testWidgets('a rename every server refused leaves the theme alone', (
+      tester,
+    ) async {
+      laptopApi.workspaceMutationError = Exception('boom');
+      codespaceApi.workspaceMutationError = Exception('boom');
+      await theme.selectFor('Work', ThemeId.lcars);
+      await pumpPage(tester);
+
+      await openRowMenu(tester, 'Work');
+      await tester.tap(find.text('Rename'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Job');
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      expect(theme.workspaceTheme('Work'), isNotNull);
+      expect(theme.workspaceTheme('Job'), isNull);
+    });
+
+    testWidgets('deleting a workspace drops its theme', (tester) async {
+      await theme.selectFor('Work', ThemeId.lcars);
+      await pumpPage(tester);
+
+      await openRowMenu(tester, 'Work');
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      expect(theme.workspaceTheme('Work'), isNull);
+    });
   });
 }

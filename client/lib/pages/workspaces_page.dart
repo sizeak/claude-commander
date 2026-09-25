@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../chrome/chrome.dart';
 import '../chrome/chrome_forms.dart';
@@ -7,16 +6,18 @@ import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/workspace.dart';
 import '../state/commander_store.dart';
 import '../state/fleet_store.dart';
+import '../theme/theme_controller.dart';
+import '../theme/theme_prefs.dart';
 import '../theme/tokens.dart';
-import '../util/workspace_color.dart';
+import 'theme_picker_page.dart';
 
 /// The key of a workspace's row on [WorkspacesPage] ([name] null = Main), so a
 /// test can find one row among several that share text.
 Key workspaceRowKey(String? name) => ValueKey('workspace-row:${name ?? ''}');
 
-/// Settings → PROJECTS → Workspaces: create, rename, delete, reorder and colour
-/// the workspaces, pick the one the app opens on, and move projects between
-/// them.
+/// Settings → PROJECTS → Workspaces: create, rename, delete and reorder the
+/// workspaces, theme each one, pick the one the app opens on, and move projects
+/// between them.
 ///
 /// Every edit to the list goes to **every** connected server at once
 /// ([FleetStore]'s fan-out), because each server stores the definitions for its
@@ -28,6 +29,11 @@ Key workspaceRowKey(String? name) => ValueKey('workspace-row:${name ?? ''}');
 ///
 /// The page owns no workspace state: it renders [FleetStore.workspaces] and
 /// re-renders when the fan-out's refreshes land.
+///
+/// Themes are the exception to "every server": they are this device's
+/// ([ThemeController]). A row's Theme action opens the picker scoped to that
+/// workspace, its dot is the workspace's resolved primary, and a rename or
+/// delete made here moves or drops the theme with it.
 class WorkspacesPage extends StatefulWidget {
   final FleetStore fleet;
 
@@ -38,12 +44,17 @@ class WorkspacesPage extends StatefulWidget {
 }
 
 /// What a workspace row's action sheet offers.
-enum _RowAction { rename, colour, moveUp, moveDown, delete }
+enum _RowAction { rename, theme, moveUp, moveDown, delete }
 
 class _WorkspacesPageState extends State<WorkspacesPage> {
   bool _busy = false;
 
   FleetStore get _fleet => widget.fleet;
+
+  /// The device's themes, or null in a host without a [ThemeScope]. A lookup
+  /// without a dependency, for the event handlers; [build] depends on it.
+  ThemeController? get _theme =>
+      context.getInheritedWidgetOfExactType<ThemeScope>()?.controller;
 
   /// The user workspaces' names in display order (Main excluded — it has no
   /// name and always leads).
@@ -125,7 +136,11 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               tile(Icons.edit_outlined, 'Rename', _RowAction.rename),
-              tile(Icons.palette_outlined, 'Colour', _RowAction.colour),
+              // Only with a theme controller to edit, and only once there is a
+              // second workspace: with Main alone the usual theme is what
+              // applies, so a Main theme would change nothing.
+              if (_theme != null && _fleet.workspacesVisible)
+                tile(Icons.palette_outlined, 'Theme', _RowAction.theme),
               // Main always leads and cannot be deleted: it is where untagged
               // projects live, on every server.
               if (index > 0)
@@ -143,8 +158,14 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
     switch (action) {
       case _RowAction.rename:
         await _rename(w);
-      case _RowAction.colour:
-        await _recolour(w);
+      case _RowAction.theme:
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThemePickerPage(
+              initialScope: ThemeEditScope.workspace(workspaceThemeKey(w.name)),
+            ),
+          ),
+        );
       case _RowAction.moveUp:
         await _move(names, index, index - 1);
       case _RowAction.moveDown:
@@ -162,23 +183,18 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
       validate: (raw) => _nameError(raw, except: w, main: from == null),
     );
     if (to == null || to == w.label) return;
+    final theme = _theme;
     await _edit(
       () => from == null
           ? _fleet.renameMainWorkspace(to)
           : _fleet.renameWorkspace(from, to),
     );
-  }
-
-  Future<void> _recolour(MergedWorkspace w) async {
-    final choice = await showDialog<_ColourChoice>(
-      context: context,
-      builder: (_) => _ColourDialog(
-        current: w.color,
-        validate: _fleet.api.workspaceColorError,
-      ),
-    );
-    if (choice == null) return;
-    await _edit(() => _fleet.setWorkspaceColor(w.name, choice.hex));
+    // The theme follows the name on this device — once some server took the
+    // rename (a rename every server refused changed nothing). Main's theme is
+    // keyed by its reserved key, not its label, so relabelling it moves nothing.
+    if (from != null && _fleet.workspaces.any((m) => m.name == to.trim())) {
+      await theme?.renameWorkspace(from, to.trim());
+    }
   }
 
   Future<void> _move(List<String> names, int from, int to) async {
@@ -214,8 +230,12 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
         ],
       ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true || !mounted) return;
+    final theme = _theme;
     await _edit(() => _fleet.deleteWorkspace(name));
+    if (!_fleet.workspaces.any((m) => m.name == name)) {
+      await theme?.forgetWorkspace(name);
+    }
   }
 
   /// The startup choice's display form: `last` reads as "Last used", `main` as
@@ -287,8 +307,9 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = ThemeScope.of(context);
     return ListenableBuilder(
-      listenable: _fleet,
+      listenable: Listenable.merge([_fleet, ?theme]),
       builder: (context, _) {
         final workspaces = _fleet.workspaces;
         final labels = {for (final w in workspaces) w.name: w.label};
@@ -312,8 +333,8 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
                 _Row(
                   key: workspaceRowKey(w.name),
                   label: w.label,
-                  caption: _workspaceCaption(w),
-                  color: parseWorkspaceColor(w.color),
+                  caption: _workspaceCaption(w, theme),
+                  color: theme?.tokensFor(workspaceThemeKey(w.name)).primary,
                   trailingTooltip: 'Workspace actions',
                   onTap: _busy ? null : () => _rowActions(w),
                 ),
@@ -338,12 +359,9 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
                   caption:
                       '${store.config.name} · '
                       '${labels[project.workspace] ?? project.workspace ?? ''}',
-                  color: parseWorkspaceColor(
-                    workspaces
-                        .where((w) => w.name == project.workspace)
-                        .firstOrNull
-                        ?.color,
-                  ),
+                  color: theme
+                      ?.tokensFor(workspaceThemeKey(project.workspace))
+                      .primary,
                   onTap: _busy || store.handle == null
                       ? null
                       : () => _moveProject(store, project),
@@ -355,23 +373,32 @@ class _WorkspacesPageState extends State<WorkspacesPage> {
     );
   }
 
-  /// How many projects (across every server) a workspace holds.
-  String _workspaceCaption(MergedWorkspace w) {
+  /// How many projects (across every server) a workspace holds, and whether
+  /// it has a theme of its own on this device.
+  String _workspaceCaption(MergedWorkspace w, ThemeController? theme) {
     var count = 0;
     for (final store in _fleet.servers) {
       count += store.projectsIn(w.name).length;
     }
     final noun = count == 1 ? 'project' : 'projects';
-    return w.name == null ? '$count $noun · built in' : '$count $noun';
+    final themed = theme?.workspaceTheme(workspaceThemeKey(w.name)) != null
+        ? ' · own theme'
+        : '';
+    return w.name == null
+        ? '$count $noun · built in$themed'
+        : '$count $noun$themed';
   }
 }
 
-/// One row: an optional colour dot, a label, a mono caption, and a trailing
+/// One row: a dot (a workspace's resolved primary, or hollow), a label, a mono
+/// caption, and a trailing
 /// affordance. Built on [ChromePanel] so each theme frames it its own way, as
 /// the settings rows are.
 class _Row extends StatelessWidget {
   final String label;
   final String caption;
+
+  /// The dot's fill. Null draws it hollow.
   final Color? color;
 
   /// When set, the trailing affordance is an overflow button with this tooltip
@@ -396,12 +423,12 @@ class _Row extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 6),
       child: ChromePanel(
         ChromePanelSpec(
-          accent: color,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
           onTap: onTap,
           child: Row(
             children: [
               Container(
+                key: const ValueKey('workspace-dot'),
                 width: 10,
                 height: 10,
                 decoration: BoxDecoration(
@@ -519,200 +546,6 @@ class _NameDialogState extends State<_NameDialog> {
           child: const Text('Cancel'),
         ),
         FilledButton(onPressed: _submit, child: const Text('OK')),
-      ],
-    );
-  }
-}
-
-/// A colour pick: a `#rrggbb` hex, or null to clear the colour.
-class _ColourChoice {
-  final String? hex;
-  const _ColourChoice(this.hex);
-}
-
-/// The active theme's colours as swatches, a hex field (typed or pasted), and
-/// "No colour". Pops a [_ColourChoice], or null on dismiss.
-///
-/// The field is the single source of truth: tapping a swatch writes its hex
-/// into it, and the swatch whose hex the field holds is the selected one — so
-/// a pasted hex that happens to be a theme colour selects that swatch too.
-class _ColourDialog extends StatefulWidget {
-  final String? current;
-
-  /// Why a normalised `#rrggbb` is refused, or null — the wire rule, through
-  /// the bridge ([CommanderApi.workspaceColorError]), so a fake can stand in
-  /// under `flutter test`.
-  final String? Function(String hex) validate;
-
-  const _ColourDialog({required this.current, required this.validate});
-
-  @override
-  State<_ColourDialog> createState() => _ColourDialogState();
-}
-
-class _ColourDialogState extends State<_ColourDialog> {
-  late final _controller = TextEditingController(
-    text: normalizeWorkspaceColorInput(widget.current ?? ''),
-  );
-
-  /// The swatch the pointer is over, shown in the caption ahead of the
-  /// selection so a desktop user can read a colour's name before picking it.
-  WorkspaceSwatch? _hovered;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  String get _hex => normalizeWorkspaceColorInput(_controller.text);
-
-  /// Null for an empty field: nothing typed is not a mistake, just nothing to
-  /// save.
-  String? get _error => _hex.isEmpty ? null : widget.validate(_hex);
-
-  bool get _valid => _hex.isNotEmpty && _error == null;
-
-  void _set(String text) {
-    _controller.value = TextEditingValue(
-      text: text,
-      selection: TextSelection.collapsed(offset: text.length),
-    );
-    setState(() {});
-  }
-
-  Future<void> _paste() async {
-    final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
-    if (text == null || !mounted) return;
-    _set(text.trim());
-  }
-
-  void _save() {
-    if (!_valid) return;
-    Navigator.of(context).pop(_ColourChoice(_hex));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CommanderTokens.of(context);
-    final swatches = themeSwatches(t);
-    final valid = _valid;
-    final selected = valid
-        ? swatches.where((s) => s.hex == _hex).firstOrNull
-        : null;
-    final shown = _hovered ?? selected;
-    final caption = shown != null
-        ? '${shown.name} · ${shown.hex}'
-        : valid
-        ? 'Custom · $_hex'
-        : '';
-    final preview = valid ? parseWorkspaceColor(_hex) : null;
-
-    return AlertDialog(
-      title: const Text('Colour'),
-      content: SizedBox(
-        width: 320,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  for (final s in swatches)
-                    Tooltip(
-                      message: '${s.name} · ${s.hex}',
-                      child: MouseRegion(
-                        onEnter: (_) => setState(() => _hovered = s),
-                        onExit: (_) => setState(() => _hovered = null),
-                        child: InkResponse(
-                          key: ValueKey('swatch-${s.hex}'),
-                          onTap: () => _set(s.hex),
-                          child: Container(
-                            width: 32,
-                            height: 32,
-                            decoration: BoxDecoration(
-                              color: parseWorkspaceColor(s.hex),
-                              shape: BoxShape.circle,
-                              border: s == selected
-                                  ? Border.all(color: t.textBright, width: 2)
-                                  : null,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(
-                caption,
-                key: const ValueKey('colour-caption'),
-                style: t.meta(size: 11, color: t.textMuted),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Container(
-                      key: const ValueKey('colour-preview'),
-                      width: 28,
-                      height: 28,
-                      decoration: BoxDecoration(
-                        color: preview,
-                        shape: BoxShape.circle,
-                        border: preview == null
-                            ? Border.all(color: t.textFaint, width: 1)
-                            : null,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextField(
-                      key: const ValueKey('colour-hex-field'),
-                      controller: _controller,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      style: TextStyle(fontFamily: t.mono),
-                      decoration: InputDecoration(
-                        labelText: 'Hex',
-                        hintText: '#rrggbb',
-                        errorText: _error,
-                        errorMaxLines: 2,
-                        suffixIcon: IconButton(
-                          tooltip: 'Paste',
-                          icon: const Icon(Icons.content_paste),
-                          onPressed: _paste,
-                        ),
-                      ),
-                      onChanged: (_) => setState(() {}),
-                      onSubmitted: (_) => _save(),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(const _ColourChoice(null)),
-          child: const Text('No colour'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: valid ? _save : null,
-          child: const Text('Save'),
-        ),
       ],
     );
   }

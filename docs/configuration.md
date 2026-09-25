@@ -230,16 +230,15 @@ dim_unfocused_opacity = 0.4
 
 # Workspaces: named groups of projects (see "Workspaces" below). Array order is
 # display order; the built-in Main workspace (untagged projects) is implicit and
-# never listed. `color` is optional, as `#rrggbb`.
+# never listed.
 #
 # [[workspaces]]
 # name = "Work"
-# color = "#e5a50a"
 #
 # [[workspaces]]
 # name = "Personal"
 #
-# Label and colour for the built-in Main workspace (default label "Main").
+# Label for the built-in Main workspace (default label "Main").
 #
 # [main_workspace]
 # name = "Home"
@@ -248,6 +247,18 @@ dim_unfocused_opacity = 0.4
 # active), "main", or a workspace name (falls back to Main if it no longer
 # exists).
 # startup_workspace = "last"
+#
+# Per-workspace TUI themes, keyed by workspace name; the built-in Main
+# workspace's key is always "main", whatever its label (see "Workspace themes"
+# below). Each table takes the same keys as [theme]. Without `preset` it layers
+# its colours over your usual [theme]; with `preset` it starts from that preset
+# and only its own colours apply.
+#
+# [workspace_themes."Work"]
+# text_accent = "#e5a50a"
+#
+# [workspace_themes.main]
+# preset = "basic"
 
 # Interval in milliseconds for syncing state file changes from other instances (0 = disabled)
 state_sync_interval_ms = 2000
@@ -691,6 +702,14 @@ Accent** (`,` key).
 
 Individual color overrides (e.g. `border_focused = "#ff6600"`) still apply on top of the chosen preset.
 
+In **Settings ▸ Theme** (`,` key) every colour row opens a swatch picker: the
+current theme's colours in a grid (arrows or `h`/`j`/`k`/`l`, `Enter` to pick), plus
+a hex row that takes a typed or pasted `#rrggbb` (`Tab` or `#` to reach it). The
+first cell, **Inherit**, clears the row's own value so it falls back to the preset
+again. A row with no value of its own shows the inherited one dim, marked
+`(preset)`. The picker writes `#rrggbb`; a named (`"red"`) or indexed (`117`) value
+still works when written in `config.toml` by hand.
+
 ### Light terminals
 
 Every preset above is designed for a **dark** terminal background. On a light one, declare it:
@@ -719,8 +738,7 @@ which projects and sessions a frontend shows. A project with no label is in the
 built-in **Main** workspace, which can be relabelled (`[main_workspace]`) but not
 deleted. Workspace UI stays hidden until a second workspace exists.
 
-- Definitions live in `config.toml` as `[[workspaces]]` (`name`, optional
-  `color` as `#rrggbb`); a project's workspace is stored with the project in
+- Definitions live in `config.toml` as `[[workspaces]]` (`name`); a project's workspace is stored with the project in
   `state.json`. Names are trimmed, at most 40 characters, contain no control
   characters, and may not be `last` or `main` (any case) — those are the
   non-name values of `startup_workspace`.
@@ -756,8 +774,9 @@ In the TUI:
   first row and clears a board project filter. The palette and the in-session
   `Ctrl-Space` switcher search every workspace — the active one's sessions
   first, the rest tagged — and picking a session elsewhere switches there first.
-- The status bar shows a chip in the workspace's `color` and `Label ●N` hints
-  for other workspaces with sessions waiting; the board header and an attached
+- The status bar shows a chip naming the workspace and `Label ●N` hints
+  for other workspaces with sessions waiting, each in its workspace's theme
+  accent (see [Workspace themes](#workspace-themes)); the board header and an attached
   session's tmux status line carry the name. All of it is hidden while there is
   only one workspace.
 - New projects, clones and directory scans go into the active workspace (in
@@ -767,16 +786,58 @@ In the TUI:
   (`last_workspace`) and applied at startup when `startup_workspace = "last"`.
 - **Settings → Workspaces** edits everything above: `n` new, `r` rename
   (Main's label included), `d` delete (not Main), `J`/`K` reorder, `s` cycle
-  the startup workspace, and `→`/`Enter` into a workspace's details to set its
-  colour or move a listed project with `m`. `Enter` on the colour row opens a
-  picker: a grid of the active theme's colours (arrows or `h`/`j`/`k`/`l`,
-  `Enter` to pick; the first cell, "No colour", removes it) and a hex row
-  (`Tab` or `#`) that takes a typed or pasted `#rrggbb` (the `#` is optional).
-  Either way the colour is saved as `#rrggbb`; `Esc` cancels. Every change is sent to each connected server at once; a server that
+  the startup workspace, and `→`/`Enter` into a workspace's details, where
+  `Enter` on **Theme** edits its theme and `m` moves a listed project. Every change is sent to each connected server at once; a server that
   refuses or can't be reached is named in a status message, and the rest
   still apply it. `startup_workspace` is saved to the local config only, and
   changing it leaves the local definitions as they are (a pinned workspace only
   another server defines is added locally, since the pin needs a definition).
+
+### Workspace themes
+
+Each workspace can have its own TUI theme in the local `config.toml`, under
+`[workspace_themes."<name>"]`. The table takes the same keys as `[theme]`:
+
+- no table for a workspace → it uses your usual `[theme]`;
+- a table without `preset` → the usual theme, with the table's colours on top;
+- a table with `preset` → that preset plus only the table's own colours (the
+  usual `[theme]` overrides do not carry over).
+
+The built-in Main workspace has no name of its own (its label can change), so
+its theme is always keyed **`main`** — `[workspace_themes.main]`. No user
+workspace can be called `main` (in any case), so the key cannot collide.
+
+Switching workspace re-themes the whole TUI at once, and a config hot reload
+rebuilds the active workspace's theme. The status-bar chip naming the active
+workspace is drawn in its theme's `text_accent` (with black or white text,
+whichever reads), and each `Label ●N` hint for another workspace in *that*
+workspace's `text_accent`, as are the swatches in **Settings ▸ Workspaces**. While
+there is only one workspace the usual `[theme]` is the one worn and edited, and a
+leftover `[workspace_themes.main]` is ignored until a second workspace exists.
+
+To edit one in the app, open **Settings ▸ Theme**. Once there are two or more
+workspaces its first row, **Theme for**, picks what the tab edits: a workspace
+(the active one by default) or **Usual theme (all workspaces)**, i.e. `[theme]`.
+In a workspace's scope:
+
+- **Reset to usual theme** removes the workspace's table;
+- **Preset** is `(usual)` to layer over the usual theme, or a preset to start a
+  new base from;
+- every colour row opens the swatch picker, whose **Inherit** cell clears the
+  workspace's own value. Inherited rows are shown dim, marked `(usual)` when
+  they come from the usual theme and `(preset)` when the workspace has a preset
+  of its own. A table left with nothing in it is removed.
+
+**Settings ▸ Workspaces** shows each workspace's **Theme** as `usual` or
+`customised`; `Enter` on it opens the Theme tab scoped to that workspace.
+
+Themes are local to the machine running the TUI: they are not sent to servers,
+a server's `GET /config` leaves them out, and they cannot be set through the
+server's config API. Renaming a workspace in the app moves its table to the new
+name (replacing any leftover table already under that name, which the renamed
+workspace now owns) and deleting one removes it — including a workspace only a
+remote server defines. A hand edit of a workspace's name in
+`config.toml` does not, so rename through the app.
 
 From the CLI:
 

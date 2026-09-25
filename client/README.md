@@ -133,6 +133,13 @@ written to plain shared preferences.
 - **Cascade / push-stack** — triggered from the session detail view with their
   operation outcome reported (`cascadeMerge`/`pushStack`); a paused cascade shows
   a global resume/abandon banner (`cascadeResume`/`cascadeAbandon`).
+- **Themes** — Mission Control or LCARS, plus per-role colour overrides
+  (primary, working, attention, …) picked from theme swatches, a hex field or
+  the clipboard. With two or more workspaces, each can have its own theme
+  (a preset and/or overrides) over the usual one, applied live on a workspace
+  switch. All of it is per device (`shared_preferences`), keyed by workspace
+  name: a rename made on this device moves the key, a rename made elsewhere
+  leaves the workspace on the usual theme. See `lib/theme/theme_prefs.dart`.
 - **Window modes** (desktop) — fullscreen, a borderless frame where the app draws
   its own themed window bar, and a window size/position remembered across
   launches. See [Window modes](#window-modes).

@@ -12,6 +12,7 @@ import 'state/commander_store_scope.dart';
 import 'state/fleet_store.dart';
 import 'theme/theme_controller.dart';
 import 'theme/theme_data.dart';
+import 'theme/theme_prefs.dart';
 import 'theme/tokens.dart';
 import 'window/window_controller.dart';
 import 'window/window_frame.dart';
@@ -90,7 +91,29 @@ class CommanderApp extends StatefulWidget {
 
 class _CommanderAppState extends State<CommanderApp> {
   @override
+  void initState() {
+    super.initState();
+    widget.fleet.addListener(_syncWorkspaceTheme);
+    _syncWorkspaceTheme();
+  }
+
+  /// Keeps the theme on the active workspace's. With only Main there is no
+  /// scope selector to edit a workspace theme from, so the usual theme applies
+  /// — a theme left on Main from when there were more must not stick.
+  ///
+  /// Cheap on every fleet notification: [ThemeController.setActiveWorkspace]
+  /// only notifies (and so only rebuilds the app) when the resolved theme
+  /// actually changes.
+  void _syncWorkspaceTheme() {
+    final fleet = widget.fleet;
+    widget.theme.setActiveWorkspace(
+      fleet.workspacesVisible ? workspaceThemeKey(fleet.activeWorkspace) : null,
+    );
+  }
+
+  @override
   void dispose() {
+    widget.fleet.removeListener(_syncWorkspaceTheme);
     widget.fleet.dispose();
     widget.window?.dispose();
     super.dispose();
@@ -106,7 +129,10 @@ class _CommanderAppState extends State<CommanderApp> {
           controller: widget.theme,
           // Rebuilds the whole app on a theme change, which is the whole
           // switching mechanism: MaterialApp wraps an AnimatedTheme, so colours
-          // crossfade rather than snap.
+          // crossfade rather than snap. A workspace switch goes through the same
+          // path ([_syncWorkspaceTheme]): between two themes on the same chrome
+          // only colours move and every State below survives; only a chrome
+          // change pays the cost described next (`workspace_theme_app_test`).
           //
           // Structure does *not* crossfade. `tokens.chrome` swaps at the lerp
           // midpoint, and the two chromes build different widget types, so the

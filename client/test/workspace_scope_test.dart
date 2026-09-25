@@ -56,9 +56,7 @@ void main() {
   /// Main project (one session).
   void seedTwoWorkspaces() {
     api
-      ..workspacesResponse = const [
-        WorkspaceDef(name: 'Work', color: '#ff8800'),
-      ]
+      ..workspacesResponse = const [WorkspaceDef(name: 'Work')]
       ..projectsResponse = [
         projectInfo(id: _workProject, name: 'work-repo', workspace: 'Work'),
         projectInfo(id: _mainProject, name: 'main-repo'),

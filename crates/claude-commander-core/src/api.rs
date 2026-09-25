@@ -13,8 +13,7 @@ use claude_commander_protocol::github::{
     validate_dest_name, validate_repo_slug,
 };
 use claude_commander_protocol::workspace::{
-    SetWorkspacesRequest, WorkspaceDef, WorkspaceRejection, validate_set_workspaces,
-    validate_workspace_label,
+    SetWorkspacesRequest, WorkspaceRejection, validate_set_workspaces, validate_workspace_label,
 };
 use futures::StreamExt;
 use tracing::{debug, info, warn};
@@ -281,7 +280,7 @@ impl CommanderService {
     // -- Workspaces --
 
     /// Replace the workspace definitions (order = display order), and — when
-    /// given — Main's label/colour and the startup choice. Never re-tags a
+    /// given — Main's label and the startup choice. Never re-tags a
     /// project: [`Self::rename_workspace`] and [`Self::delete_workspace`] do
     /// that, because a replace cannot tell a rename from a delete + create.
     /// Validated against the protocol's rules first, so nothing is written for
@@ -289,7 +288,7 @@ impl CommanderService {
     ///
     /// `main: None` leaves Main's label alone, so names are checked against
     /// the label this server already stores — otherwise a replace that omits
-    /// `main` (every create/reorder/colour edit, and any older client) could
+    /// `main` (every create/reorder edit, and any older client) could
     /// define a workspace named like Main, which a rename is refused for.
     pub fn set_workspace_defs(&self, req: SetWorkspacesRequest) -> Result<()> {
         let touches_main = req.main.is_some();
@@ -299,7 +298,6 @@ impl CommanderService {
             main: req.main.or_else(|| {
                 self.read_config()
                     .main_workspace
-                    .map(|m| WorkspaceDef::named(m.name))
                     .filter(|m| validate_workspace_label(&m.name).is_ok())
             }),
             ..req
@@ -309,7 +307,6 @@ impl CommanderService {
                 WorkspaceRejection::Reserved { name }
                 | WorkspaceRejection::Duplicate { name }
                 | WorkspaceRejection::UnknownStartup { name } => name.clone(),
-                WorkspaceRejection::BadColor { color } => color.clone(),
                 _ => "workspaces".to_string(),
             };
             workspace::workspace_rejected(&name, e)
@@ -330,15 +327,22 @@ impl CommanderService {
         })
     }
 
-    /// Rename workspace `from` to `to`: the definition, a startup pin on it, and
-    /// every project tagged with it, in that order. Returns `false` (touching
-    /// nothing) when this host neither defines `from` nor tags a project with
-    /// it — so a rename sent eagerly to every server is a harmless no-op on the
-    /// ones that never had the workspace.
+    /// Rename workspace `from` to `to`: the definition, a startup pin on it,
+    /// this host's local theme for it (`[workspace_themes]`), and every project
+    /// tagged with it, in that order. Returns `false` when this host neither
+    /// defines `from` nor tags a project with it — so a rename sent eagerly to
+    /// every server is a harmless no-op on the ones that never had the
+    /// workspace. The theme moves even then: it is local config, and the TUI
+    /// keeps themes for workspaces that live only on a remote server.
     pub async fn rename_workspace(&self, from: &str, to: &str) -> Result<bool> {
         let renamed_def = self
             .config_store
-            .mutate(|c| workspace::rename_workspace_def(c, from, to))?
+            .mutate(|c| {
+                let renamed = workspace::rename_workspace_def(c, from, to)?;
+                // `to` is valid and unclaimed once the def rename accepted it.
+                workspace::rename_workspace_theme(c, from, to.trim());
+                Ok(renamed)
+            })?
             .map_err(|e| workspace::workspace_rejected(to, e))?;
         let to = claude_commander_protocol::workspace::validate_workspace_name(to)
             .map_err(|e| workspace::workspace_rejected(to, e))?;
@@ -361,12 +365,14 @@ impl CommanderService {
     }
 
     /// Delete workspace `name`: drop its definition (a startup pin on it
-    /// becomes Main) and move its projects to Main. Returns `false` when there
-    /// was nothing to delete. Main itself has no name and cannot be deleted.
+    /// becomes Main) and its local theme, and move its projects to Main.
+    /// Returns `false` when there was no definition or tag to delete (a theme
+    /// alone is still dropped). Main itself has no name and cannot be deleted.
     pub async fn delete_workspace(&self, name: &str) -> Result<bool> {
-        let removed_def = self
-            .config_store
-            .mutate(|c| workspace::delete_workspace_def(c, name))?;
+        let removed_def = self.config_store.mutate(|c| {
+            workspace::delete_workspace_theme(c, name);
+            workspace::delete_workspace_def(c, name)
+        })?;
         let owned = name.to_string();
         let moved = self
             .store
@@ -4766,15 +4772,103 @@ mod tests {
         assert!(!svc.delete_workspace("Work").await.unwrap(), "idempotent");
     }
 
+    fn seed_workspace_themes(svc: &CommanderService, names: &[&str]) {
+        svc.config_store
+            .mutate(|c| {
+                for (i, name) in names.iter().enumerate() {
+                    c.workspace_themes.insert(
+                        (*name).to_string(),
+                        crate::config::ThemeOverrides {
+                            preset: Some(format!("p{i}")),
+                            ..Default::default()
+                        },
+                    );
+                }
+            })
+            .unwrap();
+    }
+
+    fn theme_keys(svc: &CommanderService) -> Vec<String> {
+        svc.read_config().workspace_themes.into_keys().collect()
+    }
+
+    /// Renaming a workspace carries its local theme to the new name, and Main's
+    /// entry is untouched.
+    #[tokio::test]
+    async fn rename_workspace_moves_its_local_theme() {
+        use crate::config::MAIN_WORKSPACE_THEME_KEY;
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        seed_workspace_themes(&svc, &["Work", MAIN_WORKSPACE_THEME_KEY]);
+        let before = svc.read_config().workspace_themes["Work"].clone();
+
+        assert!(svc.rename_workspace("Work", "Job").await.unwrap());
+        assert_eq!(theme_keys(&svc), ["Job", MAIN_WORKSPACE_THEME_KEY]);
+        assert_eq!(svc.read_config().workspace_themes["Job"], before);
+
+        // A refused rename moves nothing.
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Job"), WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        assert!(svc.rename_workspace("Job", "play").await.is_err());
+        assert_eq!(theme_keys(&svc), ["Job", MAIN_WORKSPACE_THEME_KEY]);
+    }
+
+    /// The theme is local config, so it follows a rename even on a host that
+    /// has neither the definition nor a tagged project — the TUI's local
+    /// service, say, when the workspace lives only on a remote server.
+    #[tokio::test]
+    async fn rename_workspace_moves_a_theme_this_host_has_no_definition_for() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_workspace_themes(&svc, &["Remote"]);
+        svc.rename_workspace("Remote", "Elsewhere").await.unwrap();
+        assert_eq!(theme_keys(&svc), ["Elsewhere"]);
+    }
+
+    /// Deleting a workspace drops its theme; Main's reserved key cannot be
+    /// renamed or deleted through the workspace paths.
+    #[tokio::test]
+    async fn delete_workspace_removes_its_local_theme_but_never_mains() {
+        use crate::config::MAIN_WORKSPACE_THEME_KEY;
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        seed_workspace_themes(&svc, &["Work", "Orphan", MAIN_WORKSPACE_THEME_KEY]);
+
+        assert!(svc.delete_workspace("Work").await.unwrap());
+        assert_eq!(theme_keys(&svc), ["Orphan", MAIN_WORKSPACE_THEME_KEY]);
+        // No definition here, but the local theme still goes.
+        svc.delete_workspace("Orphan").await.unwrap();
+        assert_eq!(theme_keys(&svc), [MAIN_WORKSPACE_THEME_KEY]);
+
+        let _ = svc.delete_workspace(MAIN_WORKSPACE_THEME_KEY).await;
+        let _ = svc
+            .rename_workspace(MAIN_WORKSPACE_THEME_KEY, "Stolen")
+            .await;
+        assert_eq!(theme_keys(&svc), [MAIN_WORKSPACE_THEME_KEY]);
+    }
+
     #[tokio::test]
     async fn set_workspace_defs_validates_and_leaves_unset_fields_alone() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         svc.set_workspace_defs(SetWorkspacesRequest {
-            workspaces: vec![WorkspaceDef {
-                name: "Work".into(),
-                color: Some("#ABCDEF".into()),
-            }],
+            workspaces: vec![WorkspaceDef::named("Work")],
             main: Some(WorkspaceDef::named("Home")),
             startup_workspace: Some(StartupWorkspace::Main),
         })
@@ -4806,8 +4900,8 @@ mod tests {
     }
 
     /// `main: None` means "leave Main's label alone", not "there is no Main
-    /// label": a replace from a client that sends no `main` (every create,
-    /// reorder and colour edit, and any older client) must still be refused
+    /// label": a replace from a client that sends no `main` (every create
+    /// and reorder, and any older client) must still be refused
     /// when a name clashes with the label this server stores.
     #[tokio::test]
     async fn set_workspace_defs_checks_names_against_the_stored_main_label() {

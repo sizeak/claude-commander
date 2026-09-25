@@ -346,7 +346,7 @@ pub struct Snapshot {
     /// FLUTTER: mirror this field.
     #[serde(default)]
     pub workspaces: Vec<WorkspaceDef>,
-    /// Label + colour of this server's built-in Main workspace; `None` means
+    /// Label of this server's built-in Main workspace; `None` means
     /// the default label ([`MAIN_WORKSPACE_LABEL`](crate::workspace::MAIN_WORKSPACE_LABEL)).
     ///
     /// FLUTTER: mirror this field.
@@ -689,10 +689,7 @@ mod tests {
                 tmux_ok: true,
                 version: "0.0.0".to_string(),
             },
-            workspaces: vec![WorkspaceDef {
-                name: "Work".to_string(),
-                color: Some("#ff8800".to_string()),
-            }],
+            workspaces: vec![WorkspaceDef::named("Work")],
             main_workspace: Some(WorkspaceDef::named("Home")),
             startup_workspace: StartupWorkspace::Named("Work".to_string()),
         };
@@ -763,7 +760,7 @@ mod tests {
             }],
             "sessions": [],
             "server": {"gh_available": false, "tmux_ok": false, "version": "x"},
-            "workspaces": [{"name": "Work", "color": "#ff8800"}],
+            "workspaces": [{"name": "Work"}],
             "main_workspace": {"name": "Home"},
             "startup_workspace": "last"
         }"##;

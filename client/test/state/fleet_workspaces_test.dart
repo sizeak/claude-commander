@@ -47,9 +47,7 @@ void main() {
     final fleet = build(stored: stored);
     await fleet.loadWorkspacePref();
     fakes[a.id]!
-      ..workspacesResponse = const [
-        WorkspaceDef(name: 'Work', color: '#ff8800'),
-      ]
+      ..workspacesResponse = const [WorkspaceDef(name: 'Work')]
       ..projectsResponse = [
         projectInfo(id: _pa, name: 'work-repo', workspace: 'Work'),
         projectInfo(id: _pb, name: 'main-repo'),
@@ -92,7 +90,6 @@ void main() {
       final fleet = await twoServers();
       expect(fleet.workspaces.map((w) => w.name), [null, 'Work', 'Personal']);
       expect(fleet.workspaces.first.label, 'Main');
-      expect(fleet.workspaces[1].color, '#ff8800');
       expect(fleet.workspacesVisible, isTrue);
     },
   );
@@ -213,14 +210,13 @@ void main() {
   group('edits fan out to every server', () {
     test('creating a workspace sends the whole merged list to each', () async {
       final fleet = await twoServers();
-      final failures = await fleet.createWorkspace('Side', color: '#00aaff');
+      final failures = await fleet.createWorkspace('Side');
       expect(failures, isEmpty);
       for (final fake in fakes.values) {
         final req =
             fake.lastCall('setWorkspaces')!.args['request']!
                 as SetWorkspacesRequestDto;
         expect(req.workspaces.map((w) => w.name), ['Work', 'Personal', 'Side']);
-        expect(req.workspaces.last.color, '#00aaff');
         // Main and the startup choice are left alone unless edited.
         expect(req.main, isNull);
         expect(req.startupWorkspace, isNull);
@@ -271,7 +267,7 @@ void main() {
       ]);
     });
 
-    test('reorder, recolour, relabel Main and pin the startup', () async {
+    test('reorder, relabel Main and pin the startup', () async {
       final fleet = await twoServers();
       await fleet.reorderWorkspaces(['Personal', 'Work']);
       expect(
@@ -280,12 +276,6 @@ void main() {
             .workspaces
             .map((w) => w.name),
         ['Personal', 'Work'],
-      );
-
-      await fleet.setWorkspaceColor('Personal', '#123456');
-      expect(
-        fleet.workspaces.firstWhere((w) => w.name == 'Personal').color,
-        '#123456',
       );
 
       await fleet.renameMainWorkspace('Home');

@@ -9,7 +9,7 @@
 //! Flutter client; this module only holds the TUI's state and wiring.
 //!
 //! Definitions are **propagated eagerly** to every backend (create, rename,
-//! delete, reorder, colour), best effort: each backend gets the change, and the
+//! delete, reorder), best effort: each backend gets the change, and the
 //! ones that refuse or cannot be reached are named in a toast. Moving a project
 //! writes its tag to the owning backend only, which defines the workspace there
 //! if it has to (core's self-heal).
@@ -20,8 +20,7 @@ use super::*;
 use claude_commander_core::api::Snapshot;
 use claude_commander_protocol::workspace::{
     MAIN_WORKSPACE_LABEL, SetWorkspacesRequest, StartupWorkspace, WorkspaceDef, WorkspaceRejection,
-    validate_set_workspaces, validate_workspace_color, validate_workspace_label,
-    validate_workspace_name,
+    validate_set_workspaces, validate_workspace_label, validate_workspace_name,
 };
 use claude_commander_viewmodel::workspace::{self as vm, MergedWorkspace};
 
@@ -79,7 +78,7 @@ impl WorkspaceFilter {
 
 /// The definitions a merged list stands for, as a `PUT /config/workspaces`
 /// body — the *wanted* list, which [`App::apply_workspace_op`] narrows per
-/// backend with [`vm::definitions_for_server`]. Main's label/colour are sent
+/// backend with [`vm::definitions_for_server`]. Main's label is sent
 /// only with `touch_main` (an edit of Main): `main: None` means "leave the
 /// server's value alone", and pushing a merged label onto a server that never
 /// asked for it could clash with one of its own definitions.
@@ -90,19 +89,11 @@ pub(crate) fn set_request_for(
     let main = touch_main
         .then(|| merged.iter().find(|w| w.is_main()))
         .flatten()
-        .map(|m| WorkspaceDef {
-            name: m.label.clone(),
-            color: m.color.clone(),
-        });
+        .map(|m| WorkspaceDef::named(m.label.clone()));
     SetWorkspacesRequest {
         workspaces: merged
             .iter()
-            .filter_map(|w| {
-                w.name.as_ref().map(|name| WorkspaceDef {
-                    name: name.clone(),
-                    color: w.color.clone(),
-                })
-            })
+            .filter_map(|w| w.name.clone().map(WorkspaceDef::named))
             .collect(),
         main,
         startup_workspace: None,
@@ -127,15 +118,10 @@ pub(crate) fn set_request_for_backend(
     }
 }
 
-/// A `#rrggbb` accent as a terminal colour.
-pub(crate) fn workspace_color(color: Option<&str>) -> Option<Color> {
-    crate::widgets::parse_hex_color(color?)
-}
-
 /// A change to the workspace definitions, sent to every backend.
 #[derive(Debug, Clone)]
 pub(crate) enum WorkspaceOp {
-    /// Replace the definition list (create, reorder, colour, Main's label).
+    /// Replace the definition list (create, reorder, Main's label).
     Set(SetWorkspacesRequest),
     Rename {
         from: String,
@@ -179,6 +165,73 @@ impl App {
         }
         let active = vm::effective_workspace(self.ui_state.active_workspace.as_deref(), &merged);
         merged.into_iter().find(|w| w.name == active)
+    }
+
+    /// Whose theme the UI wears: `Some(active)` (`Some(None)` = Main) once
+    /// there are workspaces to be in, `None` — the usual `[theme]` — while
+    /// there is only one. With a single workspace the Theme tab edits the
+    /// usual theme, so a leftover `[workspace_themes.main]` is not worn then.
+    pub(super) fn theme_workspace(&self) -> Option<Option<String>> {
+        self.visible_active_workspace().map(|w| w.name)
+    }
+
+    /// `workspace`'s resolved theme (`None` = Main), as it would be worn.
+    /// While there is only one workspace that is the usual theme, whatever
+    /// `[workspace_themes.main]` says ([`Self::theme_workspace`]).
+    pub(super) fn workspace_theme(&self, workspace: Option<&str>) -> Theme {
+        if self.theme_workspace().is_none() {
+            return Theme::from_overrides(&self.config.theme);
+        }
+        crate::theme::theme_for_workspace(&self.config, workspace)
+    }
+
+    /// The accent `workspace` is drawn in outside itself — its status-bar
+    /// chip, its waiting hint, its Settings swatch: its theme's `text_accent`.
+    pub(super) fn workspace_accent(&self, workspace: Option<&str>) -> Color {
+        self.workspace_theme(workspace).text_accent
+    }
+
+    /// Whether `workspace` (`None` = Main) wears a theme of its own on this
+    /// host, rather than the usual one. Never while there is only one
+    /// workspace: a leftover Main entry is not worn then, and the Theme tab
+    /// (where Enter on the Workspaces tab's row leads) edits the usual theme.
+    pub(super) fn workspace_theme_customised(&self, workspace: Option<&str>) -> bool {
+        self.theme_workspace().is_some()
+            && self
+                .config
+                .workspace_themes
+                .get(crate::theme::workspace_theme_key(workspace))
+                .is_some_and(|entry| *entry != Default::default())
+    }
+
+    /// The scope the Theme tab opens on: the active workspace once there are
+    /// workspaces, else the usual theme.
+    pub(super) fn default_theme_scope(&self) -> ThemeScope {
+        self.visible_active_workspace()
+            .map_or(ThemeScope::Usual, |w| ThemeScope::Workspace(w.name))
+    }
+
+    /// `scope` as the Theme tab can honour it: with one workspace there is only
+    /// the usual theme, and a workspace that has since gone falls back to it.
+    pub(super) fn effective_theme_scope(&self, scope: &ThemeScope) -> ThemeScope {
+        let merged = self.merged_workspaces();
+        match scope {
+            ThemeScope::Workspace(name)
+                if vm::workspaces_visible(&merged) && merged.iter().any(|w| &w.name == name) =>
+            {
+                scope.clone()
+            }
+            _ => ThemeScope::Usual,
+        }
+    }
+
+    /// Rebuild the theme if the workspace it was built for is no longer the
+    /// one being shown — a switch, a startup pick taking effect once the
+    /// snapshots arrive, a rename, or a second workspace appearing.
+    pub(super) fn sync_workspace_theme(&mut self) {
+        if self.theme_workspace() != self.ui_state.theme_workspace {
+            self.reload_theme();
+        }
     }
 
     /// Pick the startup workspace from the local config and `tui.json`.
@@ -303,7 +356,6 @@ impl App {
         merged.push(MergedWorkspace {
             name: Some(name.clone()),
             label: name.clone(),
-            color: None,
         });
         self.apply_workspace_op(WorkspaceOp::Set(set_request_for(&merged, false)))
             .await;
@@ -461,8 +513,10 @@ impl App {
         for id in applied {
             self.refresh_backend_view(id).await;
         }
-        // The local backend's config changed underneath the cached copy.
+        // The local backend's config changed underneath the cached copy — a
+        // rename or delete also moved or dropped a `[workspace_themes]` entry.
         self.config = self.service.read_config();
+        self.reload_theme();
         self.refresh_list_items().await;
         if !reasons.is_empty() {
             self.toast(format!(
@@ -563,33 +617,6 @@ impl App {
         Some(other)
     }
 
-    /// Set (or, with an empty `raw`, clear) a workspace's accent colour.
-    pub(super) async fn set_workspace_color(&mut self, target: Option<String>, raw: &str) {
-        let color = if raw.trim().is_empty() {
-            None
-        } else {
-            match validate_workspace_color(raw) {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    self.toast(format!("Colour not saved: {e}"));
-                    return;
-                }
-            }
-        };
-        let merged: Vec<MergedWorkspace> = self
-            .merged_workspaces()
-            .into_iter()
-            .map(|mut w| {
-                if w.name == target {
-                    w.color = color.clone();
-                }
-                w
-            })
-            .collect();
-        self.apply_workspace_op(WorkspaceOp::Set(set_request_for(&merged, target.is_none())))
-            .await;
-    }
-
     /// Change `startup_workspace` in the local config — the one this TUI
     /// honours. Other servers keep theirs (each client reads its own). Sent
     /// through the local backend with the local server's *own* definitions, so
@@ -629,15 +656,13 @@ impl App {
         let Some(current) = merged.iter().find(|w| w.name == active) else {
             return Vec::new();
         };
-        let chip_style = match workspace_color(current.color.as_deref()) {
-            Some(bg) => Style::default()
-                .bg(bg)
-                .fg(contrasting_fg(bg))
-                .add_modifier(Modifier::BOLD),
-            None => base
-                .fg(self.theme.status_bar_accent)
-                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
-        };
+        // The chip wears the active workspace's accent, so it names the theme
+        // the whole UI has just changed into.
+        let accent = self.theme.text_accent;
+        let chip_style = base
+            .bg(accent)
+            .fg(contrasting_fg(accent))
+            .add_modifier(Modifier::BOLD);
         let mut spans = vec![Span::styled(format!(" {} ", current.label), chip_style)];
         let counts = vm::waiting_counts(
             &merged,
@@ -650,7 +675,11 @@ impl App {
                 .iter()
                 .find(|w| w.name == waiting.name)
                 .map_or(MAIN_WORKSPACE_LABEL, |w| w.label.as_str());
-            spans.push(Span::styled(format!(" {label} "), base));
+            // Each hint in *its* workspace's accent, as its chip would be.
+            spans.push(Span::styled(
+                format!(" {label} "),
+                base.fg(self.workspace_accent(waiting.name.as_deref())),
+            ));
             spans.push(Span::styled(
                 format!("\u{25cf}{}", waiting.waiting),
                 base.fg(self.theme.agent_waiting),
@@ -668,17 +697,24 @@ impl App {
     }
 }
 
-/// Black or white, whichever reads on `bg`.
-fn contrasting_fg(bg: Color) -> Color {
-    match bg {
-        Color::Rgb(r, g, b) => {
-            let luma = 299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b);
-            if luma > 128_000 {
-                Color::Black
-            } else {
-                Color::White
-            }
-        }
-        _ => Color::Black,
+/// Black or white, whichever reads on `bg`. Named and indexed colours are
+/// judged by their standard xterm value; `Reset` (the terminal's own
+/// background, unknown) gets black.
+pub(crate) fn contrasting_fg(bg: Color) -> Color {
+    let Some((r, g, b)) = crate::theme::color_to_hex(bg)
+        .as_deref()
+        .and_then(crate::widgets::parse_hex_color)
+        .and_then(|c| match c {
+            Color::Rgb(r, g, b) => Some((r, g, b)),
+            _ => None,
+        })
+    else {
+        return Color::Black;
+    };
+    let luma = 299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b);
+    if luma > 128_000 {
+        Color::Black
+    } else {
+        Color::White
     }
 }

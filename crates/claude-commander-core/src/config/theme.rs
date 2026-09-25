@@ -305,7 +305,7 @@ impl fmt::Display for AppearanceValue {
 /// The `project_colors: Vec<(Color, Color)>` field from `Theme` is
 /// intentionally omitted — paired-tuple arrays are awkward in TOML and
 /// the feature has minimal user demand.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeOverrides {
     /// Force a base palette: "basic", "indexed", or "truecolor".

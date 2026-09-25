@@ -537,7 +537,7 @@ mod tests {
         std::fs::write(
             &config_path,
             "startup_workspace = \"Work\"\n\
-             [[workspaces]]\nname = \"Work\"\ncolor = \"#ff8800\"\n\
+             [[workspaces]]\nname = \"Work\"\n\
              [[workspaces]]\nname = \"Play\"\n\
              [main_workspace]\nname = \"Home\"\n",
         )
@@ -550,13 +550,7 @@ mod tests {
         let reloaded = Config::load_from_path(&config_path).unwrap();
         assert_eq!(
             reloaded.workspaces,
-            vec![
-                WorkspaceDef {
-                    name: "Work".into(),
-                    color: Some("#ff8800".into())
-                },
-                WorkspaceDef::named("Play"),
-            ]
+            vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")]
         );
         assert_eq!(reloaded.main_workspace, Some(WorkspaceDef::named("Home")));
         assert_eq!(
@@ -564,6 +558,79 @@ mod tests {
             StartupWorkspace::Named("Work".into())
         );
         assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
+    }
+
+    /// `[workspace_themes."<name>"]` (and Main's reserved key) must survive an
+    /// unrelated settings edit, like every other table core models — this is
+    /// the whole-`Config` re-serialisation that once deleted `[server]`.
+    #[test]
+    fn mutate_preserves_the_workspace_themes_table() {
+        use crate::config::MAIN_WORKSPACE_THEME_KEY;
+        use crate::config::theme::ColorValue;
+        use ratatui_core::style::Color;
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[theme]\npreset = \"indexed\"\n\
+             [workspace_themes.\"Side Gig\"]\npreset = \"basic\"\ntext_accent = \"#ff8800\"\n\
+             [workspace_themes.main]\nborder_focused = \"red\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        let store = ConfigStore::with_path(config, config_path.clone());
+        store.mutate(|c| c.ui_refresh_fps = 30).unwrap();
+
+        let reloaded = Config::load_from_path(&config_path).unwrap();
+        assert_eq!(
+            reloaded.workspace_themes.len(),
+            2,
+            "{:?}",
+            reloaded.workspace_themes
+        );
+        let side = &reloaded.workspace_themes["Side Gig"];
+        assert_eq!(side.preset.as_deref(), Some("basic"));
+        assert_eq!(
+            side.text_accent,
+            Some(ColorValue(Color::Rgb(0xff, 0x88, 0x00)))
+        );
+        assert_eq!(
+            reloaded.workspace_themes[MAIN_WORKSPACE_THEME_KEY].border_focused,
+            Some(ColorValue(Color::Red))
+        );
+        assert_eq!(reloaded.theme.preset.as_deref(), Some("indexed"));
+        assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
+    }
+
+    /// No per-workspace themes → no `[workspace_themes]` table written, and an
+    /// absent table loads empty.
+    #[test]
+    fn workspace_themes_round_trip_and_stay_absent_when_empty() {
+        let empty = toml::to_string(&Config::default()).unwrap();
+        assert!(!empty.contains("workspace_themes"), "{empty}");
+
+        let mut config = Config::default();
+        config.workspace_themes.insert(
+            "Work".into(),
+            crate::config::ThemeOverrides {
+                preset: Some("truecolor".into()),
+                ..Default::default()
+            },
+        );
+        let text = toml::to_string(&config).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.workspace_themes, config.workspace_themes);
+    }
+
+    /// Main's theme key must be one no user workspace can be called, or a
+    /// workspace named like it would share Main's theme.
+    #[test]
+    fn mains_theme_key_is_a_reserved_workspace_name() {
+        use claude_commander_protocol::workspace::validate_workspace_name;
+        let key = crate::config::MAIN_WORKSPACE_THEME_KEY;
+        assert!(validate_workspace_name(key).is_err());
+        assert!(validate_workspace_name(&key.to_uppercase()).is_err());
     }
 
     /// Absent workspace keys load as "only Main, open on the last one".

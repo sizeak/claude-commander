@@ -152,11 +152,10 @@ pub struct _BranchInfo {
 
 /// One user-defined workspace (`[[workspaces]]`). Mirrored rather than wrapped
 /// so the Workspaces settings page can construct the list it sends back to
-/// [`crate::api::simple::set_workspaces`] directly. `color` is `#rrggbb`.
+/// [`crate::api::simple::set_workspaces`] directly.
 #[frb(mirror(WorkspaceDef))]
 pub struct _WorkspaceDef {
     pub name: String,
-    pub color: Option<String>,
 }
 
 #[frb(mirror(OperationKind))]
@@ -764,17 +763,13 @@ mod tests {
                 tmux_ok: true,
                 version: "0.0.0".into(),
             },
-            workspaces: vec![WorkspaceDef {
-                name: "Work".into(),
-                color: Some("#ff8800".into()),
-            }],
+            workspaces: vec![WorkspaceDef::named("Work")],
             main_workspace: Some(WorkspaceDef::named("Home")),
             startup_workspace: StartupWorkspace::Named("Work".into()),
         };
         let dto: SnapshotDto = snap.into();
         assert_eq!(dto.projects[0].workspace.as_deref(), Some("Work"));
         assert_eq!(dto.workspaces.len(), 1);
-        assert_eq!(dto.workspaces[0].color.as_deref(), Some("#ff8800"));
         assert_eq!(dto.main_workspace.map(|m| m.name).as_deref(), Some("Home"));
         assert_eq!(dto.startup_workspace, "Work");
     }

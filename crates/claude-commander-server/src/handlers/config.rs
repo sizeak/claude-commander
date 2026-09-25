@@ -47,8 +47,15 @@ use crate::state::AppState;
 /// `GET /config` → `read_config`, with credential fields cleared: the caller
 /// proved it holds THIS server's token — not the remote-server tokens, STT
 /// API key, or telemetry credential the shared config file may also contain.
+///
+/// `[workspace_themes]` is left out too. It is not a secret, but it is this
+/// host's own cosmetics, which the workspace design keeps off the wire (every
+/// client themes its workspaces for itself), and no client reads it; like
+/// `[theme]` it cannot be set here either (`ConfigPatch` has no such field).
 pub async fn read(State(state): State<AppState>) -> Json<Config> {
-    Json(state.service.read_config().with_secrets_redacted())
+    let mut config = state.service.read_config().with_secrets_redacted();
+    config.workspace_themes.clear();
+    Json(config)
 }
 
 /// Partial config update: every field is optional, and only the fields below —
@@ -176,7 +183,7 @@ pub async fn put_programs(
 
 /// `PUT /config/workspaces` → replace the workspace definitions (plus, when
 /// given, Main's label and the startup choice) → 204. Never re-tags a project;
-/// a refused name/colour/duplicate is a 400. Like `programs`, workspaces have
+/// a refused name or duplicate is a 400. Like `programs`, workspaces have
 /// their own route rather than a `ConfigPatch` field.
 pub async fn put_workspaces(
     State(state): State<AppState>,
@@ -310,6 +317,38 @@ mod tests {
         assert!(text.contains("http://other:7878"));
     }
 
+    /// Workspace themes are the host's own cosmetics and never go on the wire
+    /// (docs/configuration.md): `GET /config` leaves `[workspace_themes]` out,
+    /// just as `ConfigPatch` refuses to set it.
+    #[tokio::test]
+    async fn read_config_leaves_out_workspace_themes() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        state
+            .service
+            .update_config({
+                let mut c = state.service.read_config();
+                c.workspace_themes.insert(
+                    "Work".into(),
+                    claude_commander_core::config::ThemeOverrides {
+                        preset: Some("basic".into()),
+                        ..Default::default()
+                    },
+                );
+                c
+            })
+            .unwrap();
+
+        let (status, body) = do_get(router(state.clone()), "/config").await;
+        assert_eq!(status, 200);
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("workspace_themes"), "{text}");
+        assert!(
+            !state.service.read_config().workspace_themes.is_empty(),
+            "only the response omits them"
+        );
+    }
+
     /// An allow-listed field updates and persists; nothing else changes.
     #[tokio::test]
     async fn patch_updates_allowed_field() {
@@ -371,6 +410,25 @@ mod tests {
             "patching [server] must be a 4xx, got {status}"
         );
         assert_eq!(state.service.read_config().server, before.server);
+    }
+
+    /// Per-workspace themes are local TUI config, never remotely writable:
+    /// `ConfigPatch` has no `workspace_themes` field, so naming it is a 4xx.
+    #[tokio::test]
+    async fn patch_rejects_workspace_themes() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({ "workspace_themes": { "Work": { "preset": "basic" } } }),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "patching [workspace_themes] must be a 4xx, got {status}"
+        );
+        assert!(state.service.read_config().workspace_themes.is_empty());
     }
 
     /// A sensitive path field cannot be changed: `deny_unknown_fields` rejects a
@@ -488,7 +546,7 @@ mod tests {
             "PUT",
             "/config/workspaces",
             serde_json::json!({
-                "workspaces": [{"name": "Work", "color": "#FF8800"}, {"name": "Play"}],
+                "workspaces": [{"name": "Work"}, {"name": "Play"}],
                 "main": {"name": "Home"},
                 "startup_workspace": "Work"
             }),
@@ -498,7 +556,6 @@ mod tests {
         let snap = state.service.snapshot().await.unwrap();
         let names: Vec<_> = snap.workspaces.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["Work", "Play"]);
-        assert_eq!(snap.workspaces[0].color.as_deref(), Some("#ff8800"));
         assert_eq!(snap.main_workspace.unwrap().name, "Home");
     }
 

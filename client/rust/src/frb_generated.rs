@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 199202303;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 750374583;
 
 // Section: executor
 
@@ -2492,37 +2492,6 @@ fn wire__crate__api__simple__toggle_keep_alive_impl(
         },
     )
 }
-fn wire__crate__api__workspace__workspace_color_error_impl(
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "workspace_color_error",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_raw = <String>::sse_decode(&mut deserializer);
-            deserializer.end();
-            transform_result_sse::<_, ()>((move || {
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::workspace::workspace_color_error(api_raw))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
 fn wire__crate__api__workspace__workspace_label_error_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -2661,7 +2630,6 @@ const _: fn() = || {
         let MergedWorkspace = None::<crate::api::workspace::MergedWorkspace>.unwrap();
         let _: Option<String> = MergedWorkspace.name;
         let _: String = MergedWorkspace.label;
-        let _: Option<String> = MergedWorkspace.color;
     }
     {
         let ProgramInfo = None::<crate::api::mirrors::ProgramInfo>.unwrap();
@@ -2722,7 +2690,6 @@ const _: fn() = || {
     {
         let WorkspaceDef = None::<crate::api::mirrors::WorkspaceDef>.unwrap();
         let _: String = WorkspaceDef.name;
-        let _: Option<String> = WorkspaceDef.color;
     }
 };
 
@@ -3536,11 +3503,9 @@ impl SseDecode for crate::api::workspace::MergedWorkspace {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_name = <Option<String>>::sse_decode(deserializer);
         let mut var_label = <String>::sse_decode(deserializer);
-        let mut var_color = <Option<String>>::sse_decode(deserializer);
         return crate::api::workspace::MergedWorkspace {
             name: var_name,
             label: var_label,
-            color: var_color,
         };
     }
 }
@@ -4293,11 +4258,7 @@ impl SseDecode for crate::api::mirrors::WorkspaceDef {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_name = <String>::sse_decode(deserializer);
-        let mut var_color = <Option<String>>::sse_decode(deserializer);
-        return crate::api::mirrors::WorkspaceDef {
-            name: var_name,
-            color: var_color,
-        };
+        return crate::api::mirrors::WorkspaceDef { name: var_name };
     }
 }
 
@@ -4419,10 +4380,9 @@ fn pde_ffi_dispatcher_sync_impl(
             wire__crate__api__workspace__resolve_startup_workspace_impl(ptr, rust_vec_len, data_len)
         }
         54 => wire__crate__api__query__session_score_impl(ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__workspace__workspace_color_error_impl(ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__workspace__workspace_label_error_impl(ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__workspace__workspace_name_error_impl(ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__workspace__workspace_name_taken_impl(ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__workspace__workspace_label_error_impl(ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__workspace__workspace_name_error_impl(ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__workspace__workspace_name_taken_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -5077,7 +5037,6 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::workspace::MergedW
         [
             self.0.name.into_into_dart().into_dart(),
             self.0.label.into_into_dart().into_dart(),
-            self.0.color.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5841,11 +5800,7 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::terminal::TerminalEventKind>
 // Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::WorkspaceDef> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.0.name.into_into_dart().into_dart(),
-            self.0.color.into_into_dart().into_dart(),
-        ]
-        .into_dart()
+        [self.0.name.into_into_dart().into_dart()].into_dart()
     }
 }
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
@@ -6542,7 +6497,6 @@ impl SseEncode for crate::api::workspace::MergedWorkspace {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Option<String>>::sse_encode(self.name, serializer);
         <String>::sse_encode(self.label, serializer);
-        <Option<String>>::sse_encode(self.color, serializer);
     }
 }
 
@@ -7170,7 +7124,6 @@ impl SseEncode for crate::api::mirrors::WorkspaceDef {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.name, serializer);
-        <Option<String>>::sse_encode(self.color, serializer);
     }
 }
 
