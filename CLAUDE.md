@@ -34,6 +34,8 @@ Both scripts resolve their own toolchain: they use the tool already on PATH, els
 
 `verify.sh` exports `DO_NOT_TRACK=1` for its whole run — the same backstop `ci.yml` sets workflow-wide, because `cfg!(test)` only suppresses core's *own* unit tests and downstream crates' `cargo test`/`cargo run` would otherwise report to the live endpoint. A verification sweep is not usage. `dev-run.sh` deliberately does *not* set it for its non-isolated targets, which are genuine usage; `--isolated` does.
 
+It also points `GIT_CONFIG_GLOBAL` at a poisoned config (`cc_poisoned_gitconfig`: signing on, signer `false`), as do ci.yml's two test steps, so a test fixture that would sign a commit — and hang on a developer's locked 1Password signer — fails at once instead. Fixtures opt out through core's `git::fixture` helpers (`fixture_git`/`fixture_git_std`, `-c commit.gpgsign=false`), or `disable_signing_in_repo` when the code under test is what commits; never by disabling signing in production code.
+
 Shared logic lives in `scripts/lib/dev-common.sh`; its pure helpers are covered by `scripts/tests/run.sh` (plain bash assertions, no framework), which runs as the `selftest` lane. When you add a lane, add it to `cc_lanes_for_tier`, `cc_exit_code_for_lane` and `cc_lane_description` — the self-tests assert every lane has a distinct code that doesn't collide with the reserved statuses.
 
 ## Verification discipline

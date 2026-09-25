@@ -577,6 +577,7 @@ fn image_mime_for_path(path: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::fixture::fixture_git;
 
     #[test]
     fn parses_empty_to_empty() {
@@ -1035,7 +1036,7 @@ index 0000000..2222222
     use tempfile::TempDir;
 
     async fn git(dir: &Path, args: &[&str]) {
-        let status = git_command()
+        let status = fixture_git()
             .current_dir(dir)
             .args(args)
             .stdin(Stdio::null())
@@ -1048,7 +1049,7 @@ index 0000000..2222222
     }
 
     async fn git_capture(dir: &Path, args: &[&str]) -> String {
-        let out = git_command()
+        let out = fixture_git()
             .current_dir(dir)
             .args(args)
             .stdin(Stdio::null())
@@ -1066,9 +1067,6 @@ index 0000000..2222222
         git(p, &["init", "-q"]).await;
         git(p, &["config", "user.email", "test@example.com"]).await;
         git(p, &["config", "user.name", "Test"]).await;
-        // Disable signing so commits don't contend on the gpg-agent and fail
-        // when the suite runs in parallel under a global commit.gpgsign=true.
-        git(p, &["config", "commit.gpgsign", "false"]).await;
         tmp
     }
 
@@ -1136,7 +1134,7 @@ index 0000000..2222222
     /// Whether `git lfs` is installed, so LFS-dependent tests can skip cleanly
     /// (mirrors the tmux-guarded integration tests).
     async fn git_lfs_available() -> bool {
-        git_command()
+        fixture_git()
             .args(["lfs", "version"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

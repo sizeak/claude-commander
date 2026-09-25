@@ -300,7 +300,7 @@ impl GitBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::git_command_std;
+    use crate::git::fixture::fixture_git_std;
     use tempfile::TempDir;
 
     fn init_test_repo() -> (TempDir, GitBackend) {
@@ -351,12 +351,12 @@ mod tests {
         let repo_path = temp_dir.path();
 
         // Initialize repo with an initial commit (required for worktree add)
-        git_command_std()
+        fixture_git_std()
             .args(["init"])
             .current_dir(repo_path)
             .output()
             .unwrap();
-        git_command_std()
+        fixture_git_std()
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(repo_path)
             .output()
@@ -364,7 +364,7 @@ mod tests {
 
         // Create a linked worktree
         let wt_path = temp_dir.path().join("my-worktree");
-        git_command_std()
+        fixture_git_std()
             .args([
                 "worktree",
                 "add",
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn test_detect_main_branch_detached_head_does_not_leak_placeholder() {
         fn git(dir: &Path, args: &[&str]) {
-            let status = git_command_std()
+            let status = fixture_git_std()
                 .args(args)
                 .current_dir(dir)
                 .status()
@@ -406,7 +406,6 @@ mod tests {
         git(repo_path, &["init", "-b", "trunk"]);
         git(repo_path, &["config", "user.email", "test@example.com"]);
         git(repo_path, &["config", "user.name", "Test"]);
-        git(repo_path, &["config", "commit.gpgsign", "false"]);
         git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
         git(repo_path, &["checkout", "--detach", "HEAD"]);
 

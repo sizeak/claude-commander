@@ -519,7 +519,7 @@ mod decision_tests {
 #[cfg(test)]
 mod executor_tests {
     use super::*;
-    use crate::git::git_command_std;
+    use crate::git::fixture::fixture_git_std;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
@@ -527,7 +527,7 @@ mod executor_tests {
     /// The auto-pull executor uses async tokio commands; tests stay
     /// synchronous so we don't need a runtime for setup.
     fn git(dir: &Path, args: &[&str]) {
-        let out = git_command_std()
+        let out = fixture_git_std()
             .current_dir(dir)
             .args(args)
             .output()
@@ -543,7 +543,7 @@ mod executor_tests {
     }
 
     fn git_capture(dir: &Path, args: &[&str]) -> String {
-        let out = git_command_std()
+        let out = fixture_git_std()
             .current_dir(dir)
             .args(args)
             .output()
@@ -569,7 +569,6 @@ mod executor_tests {
         git(tmp.path(), &["init", "-b", "main", "seed"]);
         git(&seed, &["config", "user.email", "t@t"]);
         git(&seed, &["config", "user.name", "t"]);
-        git(&seed, &["config", "commit.gpgsign", "false"]);
         std::fs::write(seed.join("README"), "v1\n").unwrap();
         git(&seed, &["add", "README"]);
         git(&seed, &["commit", "-m", "initial"]);
@@ -586,7 +585,6 @@ mod executor_tests {
         );
         git(&local, &["config", "user.email", "t@t"]);
         git(&local, &["config", "user.name", "t"]);
-        git(&local, &["config", "commit.gpgsign", "false"]);
 
         (tmp, remote, local)
     }
@@ -603,7 +601,6 @@ mod executor_tests {
         );
         git(&work, &["config", "user.email", "t@t"]);
         git(&work, &["config", "user.name", "t"]);
-        git(&work, &["config", "commit.gpgsign", "false"]);
         std::fs::write(work.join("README"), "v2\n").unwrap();
         git(&work, &["add", "README"]);
         git(&work, &["commit", "-m", "second"]);
@@ -692,7 +689,6 @@ mod executor_tests {
         git(tmp.path(), &["init", "-b", "main", "solo"]);
         git(&local, &["config", "user.email", "t@t"]);
         git(&local, &["config", "user.name", "t"]);
-        git(&local, &["config", "commit.gpgsign", "false"]);
         std::fs::write(local.join("f"), "x\n").unwrap();
         git(&local, &["add", "f"]);
         git(&local, &["commit", "-m", "c"]);

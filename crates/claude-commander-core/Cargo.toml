@@ -196,6 +196,10 @@ clipboard = ["dep:arboard"]
 test-support = []
 
 [dev-dependencies]
+# Itself, with `test-support`: `tests/` is a separate crate, so `cfg(test)` does
+# not reach core from there, and its fixtures need `git::fixture` (git that never
+# signs, whatever the developer's global config says).
+claude-commander-core = { path = ".", default-features = false, features = ["test-support"] }
 # Property-based testing
 proptest = "1.11"
 # Async test utilities

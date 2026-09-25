@@ -680,19 +680,22 @@ pub async fn run_git_push(worktree_path: &Path, branch: &str) -> std::result::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::fixture::{disable_signing_in_repo, fixture_git_std};
 
     fn init_repo_with_main(repo: &Path, main: &str) {
         run(repo, &["init", "-q", "-b", main]);
         run(repo, &["config", "user.email", "test@example.com"]);
         run(repo, &["config", "user.name", "Test"]);
-        run(repo, &["config", "commit.gpgsign", "false"]);
+        // `run_git_merge` is production code and commits (`--no-ff`); it cannot
+        // take `-c`, so opt the repo itself out of the developer's signing.
+        disable_signing_in_repo(repo);
         std::fs::write(repo.join("README.md"), "initial\n").unwrap();
         run(repo, &["add", "."]);
         run(repo, &["commit", "-q", "-m", "initial"]);
     }
 
     fn run(cwd: &Path, args: &[&str]) {
-        let out = git_command_std()
+        let out = fixture_git_std()
             .current_dir(cwd)
             .args(args)
             .output()

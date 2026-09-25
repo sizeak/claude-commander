@@ -10993,9 +10993,8 @@ mod workspaces {
             &["config", "user.name", "t"],
             &["commit", "--allow-empty", "-m", "initial"],
         ] {
-            let status = claude_commander_core::git::git_command_std()
+            let status = claude_commander_core::git::fixture::fixture_git_std()
                 .current_dir(&repo)
-                .args(["-c", "commit.gpgsign=false"])
                 .args(args)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

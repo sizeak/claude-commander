@@ -12,6 +12,7 @@ use claude_commander_core::SessionStatus;
 use claude_commander_core::commander::{self, COMMANDER_TMUX_NAME};
 use claude_commander_core::config::{AppState, Config, ConfigStore, StateStore};
 use claude_commander_core::git::GitBackend;
+use claude_commander_core::git::fixture::fixture_git;
 use claude_commander_core::session::SessionManager;
 use claude_commander_core::tmux::TmuxExecutor;
 
@@ -139,7 +140,7 @@ async fn create_test_repo() -> (TempDir, PathBuf) {
     let repo_path = temp_dir.path().to_path_buf();
 
     // Initialize git repo
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["init"])
         .output()
@@ -147,14 +148,14 @@ async fn create_test_repo() -> (TempDir, PathBuf) {
         .unwrap();
 
     // Configure git user for commits
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["config", "user.email", "test@test.com"])
         .output()
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["config", "user.name", "Test User"])
         .output()
@@ -167,14 +168,14 @@ async fn create_test_repo() -> (TempDir, PathBuf) {
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["add", "README.md"])
         .output()
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["commit", "-m", "Initial commit"])
         .output()
@@ -200,7 +201,7 @@ async fn init_repo_at(path: &std::path::Path) {
 
 /// Run a git command in `dir`, asserting it succeeds.
 async fn run_git(dir: &std::path::Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
+    let output = fixture_git()
         .current_dir(dir)
         .args(args)
         .output()
@@ -216,7 +217,7 @@ async fn run_git(dir: &std::path::Path, args: &[&str]) {
 
 /// Run a git command in `dir` and return its trimmed stdout.
 async fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
-    let output = tokio::process::Command::new("git")
+    let output = fixture_git()
         .current_dir(dir)
         .args(args)
         .output()
@@ -808,7 +809,7 @@ async fn test_sync_worktrees_imports_external() {
 
     // Create an external worktree via git CLI (simulating Claude Code /worktree or manual creation)
     let external_wt_path = worktrees_dir.path().join("external-feature");
-    let output = tokio::process::Command::new("git")
+    let output = fixture_git()
         .current_dir(&repo_path)
         .args([
             "worktree",
@@ -857,7 +858,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
     let bare_dir = TempDir::new().unwrap();
     let bare_path = bare_dir.path().to_path_buf();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&bare_path)
         .args(["init", "--bare"])
         .output()
@@ -868,7 +869,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
     let work_dir = TempDir::new().unwrap();
     let work_path = work_dir.path().to_path_buf();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["init"])
         .output()
@@ -880,7 +881,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
         vec!["config", "user.email", "test@test.com"],
         vec!["config", "user.name", "Test User"],
     ] {
-        tokio::process::Command::new("git")
+        fixture_git()
             .current_dir(&work_path)
             .args(&args)
             .output()
@@ -889,7 +890,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
     }
 
     // Add remote
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["remote", "add", "origin", bare_path.to_str().unwrap()])
         .output()
@@ -901,21 +902,21 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["add", "README.md"])
         .output()
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["commit", "-m", "Initial commit"])
         .output()
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["push", "-u", "origin", "HEAD"])
         .output()
@@ -930,7 +931,7 @@ async fn test_detect_main_branch_with_remote() {
     let (_bare_dir, _bare_path, _work_dir, work_path) = create_test_repo_with_remote().await;
 
     // Set origin/HEAD so remote_default_branch() can resolve it
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["remote", "set-head", "origin", "--auto"])
         .output()
@@ -1445,7 +1446,7 @@ async fn test_commander_session_lifecycle() {
 
 /// Helper to check if git-lfs is available.
 async fn git_lfs_available() -> bool {
-    tokio::process::Command::new("git")
+    fixture_git()
         .args(["lfs", "version"])
         .output()
         .await
@@ -1575,7 +1576,7 @@ async fn test_failed_finalize_removes_created_worktree() {
 
     // …and unregistered from git, so retrying the same title succeeds once
     // tmux works again.
-    let out = tokio::process::Command::new("git")
+    let out = fixture_git()
         .arg("-C")
         .arg(&repo_path)
         .args(["worktree", "list"])

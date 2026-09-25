@@ -212,6 +212,7 @@ async fn run_bounded(cmd: Command, program: &str, timeout: Duration) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::fixture::fixture_git_std;
 
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -224,7 +225,7 @@ mod tests {
 
     /// Run a git command to completion, asserting it succeeded.
     fn git(dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = fixture_git_std()
             .current_dir(dir)
             .args(args)
             .output()
@@ -244,7 +245,6 @@ mod tests {
         git(tmp.path(), &["init", "-b", "main", "seed"]);
         git(&seed, &["config", "user.email", "t@t"]);
         git(&seed, &["config", "user.name", "t"]);
-        git(&seed, &["config", "commit.gpgsign", "false"]);
         std::fs::write(seed.join("README"), "v1\n").unwrap();
         git(&seed, &["add", "README"]);
         git(&seed, &["commit", "-m", "initial"]);

@@ -16,6 +16,8 @@
 #     otherwise re-enter the nix dev shell that provides it.
 #   * The lane runner (cc_lane, cc_print_summary), which gives verify.sh its
 #     run-everything / distinct-exit-code behaviour.
+#   * The git signing poison (cc_poisoned_gitconfig), which verify.sh runs every
+#     lane under so a test fixture that would sign a commit fails loudly.
 
 # ---------------------------------------------------------------------------
 # Paths and reserved exit codes
@@ -405,6 +407,47 @@ cc_usage_from_header() {
 # cc_have_display -- true when a GUI target can actually open a window.
 cc_have_display() {
   [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]
+}
+
+# ---------------------------------------------------------------------------
+# Git signing poison
+# ---------------------------------------------------------------------------
+
+# cc_poisoned_gitconfig -- print a global git config under which any attempt to
+# sign a commit or an annotated tag fails at once.
+#
+# Test fixtures commit into temp repos. Left to inherit the developer's global
+# config, a `commit.gpgsign=true` routed through 1Password's op-ssh-sign makes
+# each of them hang for about a minute and then fail whenever the vault is
+# locked -- and pass whenever it is not, so the dependency never shows up on the
+# machine that introduced it. Signing is switched on here and the signer is
+# `false`, so a fixture that forgets the opt-out (core's `git::fixture` helpers,
+# or `commit.gpgsign false` in the temp repo's own config) fails immediately and
+# every time.
+#
+# A *global* file rather than GIT_CONFIG_COUNT on purpose: env config outranks a
+# repo's local config, and a test that drives production code which commits (it
+# cannot add `-c` to a command it does not build) opts out through exactly that
+# local config -- which is also what beats a real developer's global file. Using
+# the global slot also drops the rest of the developer's global config for the
+# run, which is the state CI's runners are in anyway.
+cc_poisoned_gitconfig() {
+  printf '%s\n' \
+    '# Written by scripts/lib/dev-common.sh (cc_poisoned_gitconfig).' \
+    '[commit]' '	gpgsign = true' \
+    '[tag]' '	gpgsign = true' \
+    '[gpg]' '	format = ssh' \
+    '[gpg "ssh"]' '	program = false'
+}
+
+# cc_export_poisoned_git_signing <file> -- write cc_poisoned_gitconfig to <file>
+# and point GIT_CONFIG_GLOBAL at it for the rest of this process and its children
+# (it survives `nix develop -c`, like DO_NOT_TRACK).
+cc_export_poisoned_git_signing() {
+  local file="$1"
+  mkdir -p "$(dirname "$file")"
+  cc_poisoned_gitconfig >"$file"
+  export GIT_CONFIG_GLOBAL="$file"
 }
 
 # ---------------------------------------------------------------------------

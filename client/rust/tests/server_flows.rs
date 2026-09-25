@@ -449,7 +449,6 @@ async fn seed_bare_repo(dir: &TempDir) -> PathBuf {
     run_git(&seed, &["init", "-b", "main"]).await;
     run_git(&seed, &["config", "user.email", "t@t.t"]).await;
     run_git(&seed, &["config", "user.name", "t"]).await;
-    run_git(&seed, &["config", "commit.gpgsign", "false"]).await;
     tokio::fs::write(seed.join("README"), "v1\n").await.unwrap();
     run_git(&seed, &["add", "."]).await;
     run_git(&seed, &["commit", "-m", "initial"]).await;

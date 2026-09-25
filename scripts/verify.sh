@@ -61,6 +61,15 @@ export DO_NOT_TRACK=1
 # regions, never styles. Pinning it would imply an assertion depends on it.
 export TERM=xterm-256color
 
+# And not the developer's git signing either. Test fixtures commit into temp
+# repos; one that inherits `commit.gpgsign=true` hangs on a locked 1Password
+# signer and passes on an unlocked one. So every lane runs under a global git
+# config where signing is on and the signer is `false` (cc_poisoned_gitconfig
+# says why a global file and not GIT_CONFIG_COUNT): a fixture that forgets the
+# opt-out fails here, at once, on every machine. ci.yml's test steps use the same
+# file. Under target/, like the logs, so it outlives the run for a re-run by hand.
+cc_export_poisoned_git_signing "$CC_REPO_ROOT/target/verify-gitconfig"
+
 FORCE_E2E=0
 GOLDENS_UPDATE=0
 

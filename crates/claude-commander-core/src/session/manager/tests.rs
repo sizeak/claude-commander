@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::{AppState, Config, ConfigStore, StateStore};
-use crate::git::git_command_std;
+use crate::git::fixture::fixture_git_std;
 use claude_commander_protocol::github::canonical_repo_slug;
 use tempfile::TempDir;
 
@@ -393,7 +393,7 @@ async fn delete_session_mutates_state_once_removal_first() {
 
 /// Run a git command in `dir`, panicking with its output on failure.
 fn git(dir: &std::path::Path, args: &[&str]) {
-    let out = git_command_std()
+    let out = fixture_git_std()
         .current_dir(dir)
         .args(args)
         .output()
@@ -408,12 +408,11 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
-/// Give a fresh repo the local identity/signing config the test harness needs,
-/// so a developer's global `commit.gpgsign` can't fail the fixture's commits.
+/// Give a fresh repo the local identity the test harness needs. (Signing is
+/// already off: [`git`] runs through [`fixture_git_std`].)
 fn git_identity(dir: &std::path::Path) {
     git(dir, &["config", "user.email", "t@t"]);
     git(dir, &["config", "user.name", "t"]);
-    git(dir, &["config", "commit.gpgsign", "false"]);
 }
 
 /// A bare "remote" plus a clone of it, both inside one `TempDir`. Mirrors the

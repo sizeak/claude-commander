@@ -72,6 +72,11 @@ trap cleanup EXIT
 git init -q "$REPO"
 git -C "$REPO" config user.email "e2e@test.local"
 git -C "$REPO" config user.name "E2E"
+# Repo-local, not `-c`: the server under test also runs git in this repo and its
+# worktrees, and a developer's global commit.gpgsign (say via a locked 1Password
+# op-ssh-sign) must reach neither that nor the fixture commit below.
+git -C "$REPO" config commit.gpgsign false
+git -C "$REPO" config tag.gpgsign false
 echo "# e2e" > "$REPO/README.md"
 git -C "$REPO" add README.md
 git -C "$REPO" commit -q -m "Initial commit"

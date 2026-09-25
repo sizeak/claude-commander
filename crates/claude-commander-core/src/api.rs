@@ -3416,7 +3416,8 @@ mod tests {
     use claude_commander_protocol::workspace::{StartupWorkspace, WorkspaceDef};
 
     use crate::comment::CommentSide;
-    use crate::git::{PrState, git_command_std};
+    use crate::git::PrState;
+    use crate::git::fixture::{fixture_git, fixture_git_std};
     use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
     use std::path::PathBuf;
 
@@ -3930,7 +3931,7 @@ mod tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = async |args: &[&str]| {
-            git_command()
+            fixture_git()
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -3940,7 +3941,6 @@ mod tests {
         git(&["init", "-q", "-b", "main"]).await;
         git(&["config", "user.email", "t@example.com"]).await;
         git(&["config", "user.name", "T"]).await;
-        git(&["config", "commit.gpgsign", "false"]).await;
         std::fs::write(repo.join("changed.txt"), "one\n").unwrap();
         std::fs::write(repo.join("reverted.txt"), "stable\n").unwrap();
         git(&["add", "."]).await;
@@ -4073,7 +4073,7 @@ mod tests {
         // working-tree-vs-HEAD, in which `changed.txt` no longer appears at all —
         // exactly the false-orphan trap the guard exists for.
         let git = async |args: &[&str]| {
-            git_command()
+            fixture_git()
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -4145,7 +4145,7 @@ mod tests {
 
         // Now degrade: commit the work and point at an unresolvable base, so the
         // composed diff no longer contains `changed.txt` at all.
-        git_command()
+        fixture_git()
             .current_dir(&repo)
             .args(["commit", "-qam", "work"])
             .output()
@@ -4608,12 +4608,12 @@ mod tests {
         assert!(s.pr_base_branch.is_none());
     }
 
-    /// Run `git` in `dir`, panicking on failure. GPG signing is forced off so
-    /// the repo's `commit.gpgsign` policy can't break isolated tests.
+    /// Run `git` in `dir`, panicking on failure. Signing is forced off by
+    /// [`fixture_git_std`], so the developer's policy can't break isolated tests.
     fn run_git(dir: &Path, args: &[&str]) {
-        let status = git_command_std()
+        let status = fixture_git_std()
             .current_dir(dir)
-            .args(["-c", "commit.gpgsign=false", "-c", "gc.auto=0"])
+            .args(["-c", "gc.auto=0"])
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

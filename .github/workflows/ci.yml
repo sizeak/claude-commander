@@ -209,7 +209,16 @@ jobs:
       - name: Build
         run: nix develop -c cargo build --workspace --all-targets
 
+      # The same global git config scripts/verify.sh runs under: signing on, the
+      # signer `false`. A test fixture that would sign a commit (and so hang on a
+      # developer's locked 1Password signer) fails here instead of passing on a
+      # runner that has no signing configured. See cc_poisoned_gitconfig.
+      - name: Poison Git Signing
+        run: bash -c 'source scripts/lib/dev-common.sh && cc_poisoned_gitconfig' > "$RUNNER_TEMP/poisoned-gitconfig"
+
       - name: Run Tests
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/poisoned-gitconfig
         run: nix develop -c cargo test --workspace
 
   packaging:
@@ -355,7 +364,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # See the Build & Test job's step of the same name.
+      - name: Poison Git Signing
+        run: bash -c 'source scripts/lib/dev-common.sh && cc_poisoned_gitconfig' > "$RUNNER_TEMP/poisoned-gitconfig"
+
       - name: Run cdylib Integration Tests
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/poisoned-gitconfig
         run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test'
 
       # DISABLED for this PR: the headless Linux GUI e2e (flutter test

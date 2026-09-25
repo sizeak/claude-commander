@@ -22,6 +22,7 @@ use std::sync::Arc;
 use claude_commander_core::api::CommanderService;
 use claude_commander_core::config::storage::AppState as CoreState;
 use claude_commander_core::config::{Config, ConfigStore, StateStore};
+use claude_commander_core::git::fixture::{disable_signing_in_repo, fixture_git};
 use claude_commander_core::telemetry::FrontendInfo;
 use claude_commander_server::{AppState, AuthConfig, build_router};
 use tempfile::TempDir;
@@ -38,9 +39,10 @@ pub async fn tmux_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Run a git command in `dir`, asserting it succeeds.
+/// Run a git command in `dir`, asserting it succeeds. Never signs: it goes
+/// through core's `git::fixture`, so the developer's signing setup is irrelevant.
 pub async fn run_git(dir: &Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
+    let output = fixture_git()
         .current_dir(dir)
         .args(args)
         .output()
@@ -61,6 +63,9 @@ pub async fn create_test_repo() -> (TempDir, PathBuf) {
     run_git(&repo_path, &["init"]).await;
     run_git(&repo_path, &["config", "user.email", "test@test.com"]).await;
     run_git(&repo_path, &["config", "user.name", "Test User"]).await;
+    // Tests drive production code that commits in this repo and its worktrees
+    // (cascade's `merge --no-ff`), which `run_git`'s `-c` cannot reach.
+    disable_signing_in_repo(&repo_path);
     tokio::fs::write(repo_path.join("README.md"), "# Test Repository\n")
         .await
         .unwrap();

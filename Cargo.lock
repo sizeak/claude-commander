@@ -802,6 +802,7 @@ dependencies = [
  "arboard",
  "async-trait",
  "chrono",
+ "claude-commander-core",
  "claude-commander-protocol",
  "claude-commander-viewmodel",
  "cpal",
