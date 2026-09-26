@@ -1383,6 +1383,17 @@ const CURRENT_SUFFIX: &str = " — current base";
 
 // ---- List-view item builders (revived from main; reuse board.rs helpers) ----
 
+/// Whether `hide_empty_sections` drops the section `name` holding `count`
+/// sessions. In Progress is exempt while some project has no sessions at all:
+/// it is the only section that lists such a project, so hiding it would make
+/// the project unreachable — the usual state of a freshly populated workspace.
+fn hides_empty_section(snapshot: &Snapshot, name: &str, count: usize, hide_empty: bool) -> bool {
+    hide_empty
+        && count == 0
+        && !(name == claude_commander_core::session::IN_PROGRESS
+            && snapshot.projects.iter().any(|p| p.session_ids.is_empty()))
+}
+
 pub(super) fn build_project_grouped_items(
     snapshot: &Snapshot,
     agent_states: &BTreeMap<SessionId, AgentState>,
@@ -1442,7 +1453,12 @@ pub(super) fn build_section_grouped_items(
     let mut items = Vec::new();
     let mut first_section = true;
     for group in groups.iter() {
-        if hide_empty_sections && group.sessions.is_empty() {
+        if hides_empty_section(
+            snapshot,
+            &group.name,
+            group.sessions.len(),
+            hide_empty_sections,
+        ) {
             continue;
         }
         if !first_section {
@@ -1670,7 +1686,7 @@ pub(super) fn build_stacked_section_items(
             })
             .unwrap_or(0);
 
-        if hide_empty_sections && total_count == 0 {
+        if hides_empty_section(snapshot, section_name, total_count, hide_empty_sections) {
             continue;
         }
         if !first_section {
@@ -2786,6 +2802,67 @@ mod stack_order_tests {
             })
             .collect();
         assert_eq!(headers, vec!["Review"]);
+    }
+
+    /// A project with no sessions is listed only under In Progress, so hiding
+    /// an In Progress that holds no sessions made it unreachable. That is the
+    /// normal case for a workspace whose projects are all new: every session
+    /// is elsewhere, the In Progress count is zero, and the project vanished.
+    #[test]
+    fn hide_empty_sections_keeps_in_progress_for_a_project_without_sessions() {
+        let mut state = claude_commander_core::config::AppState::default();
+        let project =
+            claude_commander_core::session::Project::new("empty", PathBuf::from("/tmp"), "main");
+        let project_id = project.id;
+        state.projects.insert(project_id, project);
+        let snapshot = snapshot_from_state(&state);
+        let sections = vec![section_named("Open"), section_named("Review")];
+
+        for (view, items) in [
+            (
+                "grouped",
+                super::build_section_grouped_items(
+                    &snapshot,
+                    &sections,
+                    None,
+                    &BTreeMap::new(),
+                    &std::collections::HashSet::new(),
+                    true,
+                ),
+            ),
+            (
+                "stacked",
+                build_stacked_section_items(
+                    &snapshot,
+                    &sections,
+                    None,
+                    &BTreeMap::new(),
+                    &std::collections::HashSet::new(),
+                    true,
+                ),
+            ),
+        ] {
+            let headers: Vec<_> = items
+                .iter()
+                .filter_map(|i| match i {
+                    SessionListItem::SectionHeader { name, count, .. } => {
+                        Some((name.as_str(), *count))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                headers,
+                vec![(claude_commander_core::session::IN_PROGRESS, 0)],
+                "{view}: only In Progress, with no sessions counted",
+            );
+            assert!(
+                items
+                    .iter()
+                    .any(|i| matches!(i, SessionListItem::Project { id, .. } if *id == project_id)),
+                "{view}: the session-less project must still be listed",
+            );
+        }
     }
 
     #[test]
