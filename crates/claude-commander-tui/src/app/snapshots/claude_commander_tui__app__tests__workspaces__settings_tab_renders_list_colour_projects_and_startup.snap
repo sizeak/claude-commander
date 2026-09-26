@@ -1,0 +1,29 @@
+---
+source: crates/claude-commander-tui/src/app/tests.rs
+assertion_line: 11289
+expression: terminal.backend()
+---
+" Sessions [Project]:                ┌ Preview · Info · Shell ──────────────────────────────────────────────────────────┐"
+" Recent                             │                                                                                  │"
+"     1 ● main-┌ Settings ──────────────────────────────────────────────────────────────────────────────┐               │"
+"  ────────────│ General  Voice  Keybindings  Theme  Sections  Workspaces  Programs  Server             │               │"
+" main-proj [ma│ ────────────────────────────────────────────────────────────────────────────────────── │               │"
+"     1 ● main-│ Startup workspace: Last used  (s: change)                                              │               │"
+"              │                                                                                        │               │"
+"              │   ■ Main •                  │ Theme     usual                                          │               │"
+"              │ ▸ ■ Work                    │                                                          │               │"
+"              │                             │ Projects                                                 │               │"
+"              │                             │   work-proj                                              │               │"
+"              │                             │                                                          │               │"
+"              │                             │                                                          │               │"
+"              │                             │                                                          │               │"
+"              │                             │                                                          │               │"
+"              │                             │                                                          │               │"
+"              │                             │                                                          │               │"
+"              │                             │                                                          │               │"
+"              │                                                                                        │               │"
+"              │ n: new  r: rename  d: delete  J/K: reorder  s: startup  →: details  Tab: switch tab    │               │"
+"              └────────────────────────────────────────────────────────────────────────────────────────┘               │"
+"                                    │                                                                                  │"
+"                                    └──────────────────────────────────────────────────────────────────────────────────┘"
+"  Main  │ Sessions: 1 │ [n]ew session │ s[t]acked │ [N]ew project                                                ? help "

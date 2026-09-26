@@ -8,7 +8,7 @@ import 'package:claude_commander_client/pages/settings_page.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
@@ -26,15 +26,15 @@ import 'support/insets.dart';
 void main() {
   late FakeCommanderApi api;
   late CommanderStore store;
-  late WorkspaceStore workspace;
+  late FleetStore fleet;
 
   setUp(() {
     api = FakeCommanderApi();
     store = CommanderStore(api: api, config: testConfig);
-    workspace = WorkspaceStore.withStores([store]);
+    fleet = FleetStore.withStores([store]);
   });
 
-  tearDown(() => workspace.dispose());
+  tearDown(() => fleet.dispose());
 
   /// The shell under the scopes `main()` gives it. Themeless falls back to
   /// Mission Control tokens, which is how the shell's own tests pump it; passing
@@ -49,8 +49,8 @@ void main() {
   /// so it changes no geometry for the tests that do not.
   Widget wrap({CommanderTokens? tokens, double? textScale}) => RepaintBoundary(
     key: inkBoundary,
-    child: WorkspaceScope(
-      workspace: workspace,
+    child: FleetScope(
+      fleet: fleet,
       child: WindowScope(
         controller: null,
         child: ThemeScope(

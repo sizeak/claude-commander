@@ -215,6 +215,7 @@ mod tests {
     use std::process::Stdio;
 
     use super::*;
+    use crate::git::fixture::fixture_git;
 
     #[test]
     fn test_parse_nul_separated_with_dir_flag() {
@@ -234,7 +235,7 @@ mod tests {
 
     /// Helper to run a git command in a directory
     async fn git(dir: &Path, args: &[&str]) {
-        let output = git_command()
+        let output = fixture_git()
             .current_dir(dir)
             .args(args)
             .stdin(Stdio::null())
@@ -260,7 +261,7 @@ mod tests {
         let placeholder = dir.join(".gitkeep");
         tokio::fs::write(&placeholder, "").await.unwrap();
         git(dir, &["add", ".gitkeep"]).await;
-        git(dir, &["-c", "commit.gpgsign=false", "commit", "-m", "init"]).await;
+        git(dir, &["commit", "-m", "init"]).await;
     }
 
     #[tokio::test]
@@ -343,11 +344,7 @@ mod tests {
             &["add", ".gitignore", ".worktreeinclude", "src/main.rs"],
         )
         .await;
-        git(
-            &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "add files"],
-        )
-        .await;
+        git(&repo, &["commit", "-m", "add files"]).await;
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
@@ -399,11 +396,7 @@ mod tests {
             .unwrap();
 
         git(&repo, &["add", ".gitignore", ".worktreeinclude"]).await;
-        git(
-            &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "add files"],
-        )
-        .await;
+        git(&repo, &["commit", "-m", "add files"]).await;
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
@@ -445,11 +438,7 @@ mod tests {
         symlink("/etc/passwd", build.join("sneaky_link")).unwrap();
 
         git(&repo, &["add", ".gitignore", ".worktreeinclude"]).await;
-        git(
-            &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "add files"],
-        )
-        .await;
+        git(&repo, &["commit", "-m", "add files"]).await;
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
@@ -485,11 +474,7 @@ mod tests {
             .await
             .unwrap();
         git(&repo, &["add", ".gitignore"]).await;
-        git(
-            &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "gitignore"],
-        )
-        .await;
+        git(&repo, &["commit", "-m", "gitignore"]).await;
 
         // Deliberately DO NOT create .worktreeinclude in the source repo —
         // simulating a stale main worktree that doesn't yet have it.

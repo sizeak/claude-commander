@@ -170,6 +170,11 @@ pub struct CloneRequest {
     /// same safety rules as a derived one.
     #[serde(default)]
     pub dest_name: Option<String>,
+    /// Workspace to tag the cloned project with once it is registered (`None`
+    /// = Main). Additive: an older client omits it, and it is skipped on the
+    /// way out when absent so an older server sees exactly the old body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// Identifier for an in-flight clone.
@@ -1369,12 +1374,17 @@ mod tests {
         let minimal: CloneRequest =
             serde_json::from_str(r#"{"source":{"kind":"github","full_name":"o/r"}}"#).unwrap();
         assert!(minimal.dest_name.is_none());
+        assert!(
+            minimal.workspace.is_none(),
+            "an older client's clone lands in Main"
+        );
 
         let req = CloneRequest {
             source: CloneSource::Url {
                 url: "https://example.com/o/r.git".to_string(),
             },
             dest_name: Some("mine".to_string()),
+            workspace: Some("Work".to_string()),
         };
         let back: CloneRequest =
             serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();

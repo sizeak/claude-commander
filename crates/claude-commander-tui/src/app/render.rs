@@ -110,20 +110,23 @@ impl App {
         self.ui_state.project_colors = self.project_color_map();
     }
 
-    /// Rebuild the active theme from the current config's preset + overrides,
-    /// then refresh the derived project-colour cache. Call after any mutation
-    /// of `self.config.theme` (settings apply, config hot-reload): the cache is
-    /// otherwise only rebuilt in `refresh_list_items`, so card border/title
-    /// colours would show the old theme until an unrelated tick refreshed them.
+    /// Rebuild the active theme from the current config — the active
+    /// workspace's theme once there are workspaces to be in
+    /// ([`Self::theme_workspace`]), else the usual `[theme]` — then refresh the
+    /// derived project-colour cache. Call after any mutation of
+    /// `self.config.theme` or `self.config.workspace_themes` (settings apply,
+    /// config hot-reload, a workspace rename or delete): the cache is otherwise
+    /// only rebuilt in `refresh_list_items`, so card border/title colours would
+    /// show the old theme until an unrelated tick refreshed them. A workspace
+    /// *switch* needs no call: `refresh_list_items` notices the change
+    /// ([`Self::sync_workspace_theme`]).
     pub(super) fn reload_theme(&mut self) {
-        let base = self
-            .config
-            .theme
-            .preset
-            .as_deref()
-            .and_then(Theme::from_preset)
-            .unwrap_or_default();
-        self.theme = base.with_overrides(&self.config.theme);
+        let workspace = self.theme_workspace();
+        self.theme = match &workspace {
+            Some(ws) => crate::theme::theme_for_workspace(&self.config, ws.as_deref()),
+            None => Theme::from_overrides(&self.config.theme),
+        };
+        self.ui_state.theme_workspace = workspace;
         self.rebuild_project_colors();
     }
 
@@ -232,7 +235,11 @@ impl App {
         let sessions = self.ui_state.board.worktree_count();
         let projects = self.ui_state.board.projects.len();
 
-        let title_text = " Claude Commander";
+        // Name the workspace once there is more than one to be in.
+        let title_text = match self.visible_active_workspace() {
+            Some(ws) => format!(" Claude Commander \u{00b7} {}", ws.label),
+            None => " Claude Commander".to_string(),
+        };
         // When a project filter is active, name it and how to clear it; the
         // session count then reflects the filtered card count.
         let counts_text = match self.ui_state.board_filter.and_then(|pid| {
@@ -677,11 +684,13 @@ impl App {
         let restart_needed = self.service.restart_required();
 
         // Count sessions across every backend's snapshot so the bar is correct
-        // in the list views too (the board is only built in board view).
+        // in the list views too (the board is only built in board view) —
+        // within the active workspace, like the views themselves.
+        let filter = self.workspace_filter();
         let session_count: usize = self
             .backends
             .iter()
-            .map(|h| h.view.snapshot.sessions.len())
+            .map(|h| filter.scope(&h.view.snapshot).sessions.len())
             .sum();
 
         let sessions_span = Span::styled(
@@ -725,7 +734,10 @@ impl App {
                         1..1,
                         [
                             Span::styled(" \u{2502} ", base_style),
-                            Span::styled(label, base_style.fg(self.theme.status_running)),
+                            Span::styled(
+                                label,
+                                base_style.fg(self.theme.on_status_bar(self.theme.status_running)),
+                            ),
                         ],
                     );
                     true
@@ -747,9 +759,22 @@ impl App {
                 at..at,
                 [
                     Span::styled(" \u{2502} ", base_style),
-                    Span::styled(label, base_style.fg(colour)),
+                    Span::styled(label, base_style.fg(self.theme.on_status_bar(colour))),
                 ],
             );
+        }
+
+        // The workspace chip and the other workspaces' waiting hints lead the
+        // bar, ahead of everything spliced above (whose indices assume the
+        // session count is first, so this goes in last). Absent until a second
+        // workspace exists.
+        let workspace_spans = self.workspace_status_spans(base_style);
+        if !workspace_spans.is_empty() {
+            let mut lead = vec![Span::styled(" ", base_style)];
+            lead.extend(workspace_spans);
+            // `Sessions` leads with its own space, so the separator doesn't.
+            lead.push(Span::styled(" \u{2502}", base_style));
+            left_spans.splice(0..0, lead);
         }
 
         // A trailing separator visually detaches the buttons from the status.

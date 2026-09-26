@@ -11,6 +11,10 @@ mod bounded;
 mod clone;
 mod clone_jobs;
 mod diff;
+// Test scaffolding: `git` that never signs, for fixtures. Gated so no release
+// build can reach it -- production commits keep the operator's signing policy.
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
 mod github;
 // Public as a module rather than glob-re-exported like its siblings: the TUI
 // kicks off a background `git lfs pull`, and `git::lfs::pull` says what it does

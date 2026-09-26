@@ -6,7 +6,7 @@ import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:claude_commander_client/util/session_filter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge.dart';
@@ -18,7 +18,7 @@ import 'support/fixtures.dart';
 void main() {
   late FakeCommanderApi api;
   late CommanderStore store;
-  late WorkspaceStore workspace;
+  late FleetStore fleet;
 
   setUp(() {
     // The page filters and ranks inside `build`, and the real scorer is in the
@@ -37,16 +37,16 @@ void main() {
 
     api = FakeCommanderApi();
     store = CommanderStore(api: api, config: testConfig);
-    workspace = WorkspaceStore.withStores([store]);
+    fleet = FleetStore.withStores([store]);
   });
 
-  tearDown(() => workspace.dispose());
+  tearDown(() => fleet.dispose());
 
   // Host the layout-agnostic [SessionListBody] directly (the phone/wide shells
   // that embed it are tested separately): a Scaffold + Builder so row taps can
   // push the detail route via the shared [openSessionDetail] helper.
-  Widget wrap() => WorkspaceScope(
-    workspace: workspace,
+  Widget wrap() => FleetScope(
+    fleet: fleet,
     child: MaterialApp(
       home: Scaffold(
         body: Builder(
@@ -104,7 +104,7 @@ void main() {
   });
 
   testWidgets('renders the error state and offers retry', (tester) async {
-    api.workspaceSnapshotError = Exception('boom');
+    api.snapshotError = Exception('boom');
     unawaited(store.connect());
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
@@ -121,7 +121,7 @@ void main() {
   testWidgets('an unreachable server shows one line, not a Rust backtrace', (
     tester,
   ) async {
-    api.workspaceSnapshotError = AnyhowException(
+    api.snapshotError = AnyhowException(
       'backend unavailable: could not connect to server\n'
       '\n'
       'Stack backtrace:\n'
@@ -256,14 +256,14 @@ void main() {
           token: 't',
         ),
       );
-      final ws = WorkspaceStore.withStores([storeA, storeB]);
+      final ws = FleetStore.withStores([storeA, storeB]);
       addTearDown(ws.dispose);
       unawaited(storeA.connect());
       unawaited(storeB.connect());
 
       await tester.pumpWidget(
-        WorkspaceScope(
-          workspace: ws,
+        FleetScope(
+          fleet: ws,
           child: MaterialApp(
             home: Scaffold(body: SessionListBody(onSelect: (_, _) {})),
           ),
@@ -308,14 +308,14 @@ void main() {
         token: 't',
       ),
     );
-    final ws = WorkspaceStore.withStores([storeA, storeB]);
+    final ws = FleetStore.withStores([storeA, storeB]);
     addTearDown(ws.dispose);
     unawaited(storeA.connect());
     unawaited(storeB.connect());
 
     await tester.pumpWidget(
-      WorkspaceScope(
-        workspace: ws,
+      FleetScope(
+        fleet: ws,
         child: MaterialApp(
           home: Scaffold(body: SessionListBody(onSelect: (_, _) {})),
         ),
@@ -351,8 +351,8 @@ void main() {
     // trailing Text used to throw "Trailing widget consumes the entire tile
     // width" for a long program string.
     await tester.pumpWidget(
-      WorkspaceScope(
-        workspace: workspace,
+      FleetScope(
+        fleet: fleet,
         child: MaterialApp(
           home: Scaffold(
             body: SizedBox(
@@ -598,14 +598,14 @@ void main() {
     api.createSessionResponse = 'created-1';
     await store.connect();
     await tester.pumpWidget(
-      WorkspaceScope(
-        workspace: workspace,
+      FleetScope(
+        fleet: fleet,
         child: MaterialApp(
           home: Builder(
             builder: (context) => Scaffold(
               body: SessionListBody(onSelect: (_, _) {}),
               floatingActionButton: FloatingActionButton(
-                onPressed: () => openCreateSession(context, workspace),
+                onPressed: () => openCreateSession(context, fleet),
                 child: const Icon(Icons.add),
               ),
             ),
@@ -629,7 +629,7 @@ void main() {
         projectName: 'other-repo',
       ),
     ];
-    final before = api.countOf('workspaceSnapshot');
+    final before = api.countOf('snapshot');
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Title'),
       'Just created',
@@ -640,7 +640,7 @@ void main() {
     // No change-feed tick has fired: without an explicit refetch the list would
     // still be showing the pre-create snapshot, and the session the user just
     // made would look lost until the next poll.
-    expect(api.countOf('workspaceSnapshot'), greaterThan(before));
+    expect(api.countOf('snapshot'), greaterThan(before));
     expect(find.text('Just created'), findsOneWidget);
   });
 

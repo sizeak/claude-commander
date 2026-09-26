@@ -538,6 +538,8 @@ mod tests {
             agent_state: None,
             unread: false,
             last_attached_at: None,
+            workspace: None,
+            other_workspace: None,
         })
     }
 

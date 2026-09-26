@@ -7,7 +7,7 @@ import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/simple.dart' show ScanResultDto;
 
-/// One project paired with the sessions that belong to it, in the workspace's
+/// One project paired with the sessions that belong to it, in the snapshot's
 /// project order. Used by the grouped session view.
 class ProjectSessions {
   final ProjectInfoDto project;
@@ -21,7 +21,7 @@ class ProjectSessions {
 /// it — so a handle can never be abandoned in the cdylib registry.
 ///
 /// State is refreshed off the poller's change feed rather than a wall-clock
-/// timer: every generation bump re-fetches the workspace snapshot and agent
+/// timer: every generation bump re-fetches the snapshot and agent
 /// states (mirroring the TUI), and every connection-feed event updates
 /// [connection]. Widgets listen via `ListenableBuilder`.
 class CommanderStore extends ChangeNotifier {
@@ -53,8 +53,8 @@ class CommanderStore extends ChangeNotifier {
   /// back to an older edit than the one on disk.
   int _connectEpoch = 0;
 
-  WorkspaceSnapshotDto? _workspace;
-  WorkspaceSnapshotDto? get workspace => _workspace;
+  SnapshotDto? _snapshot;
+  SnapshotDto? get snapshot => _snapshot;
 
   final Map<String, AgentState> _agentStates = {};
   bool _commanderRunning = false;
@@ -91,11 +91,11 @@ class CommanderStore extends ChangeNotifier {
 
   // --- convenience getters the pages render from ---------------------------
 
-  List<SessionInfo> get sessions => _workspace?.sessions ?? const [];
+  List<SessionInfo> get sessions => _snapshot?.sessions ?? const [];
 
-  /// Sessions grouped under their project, in the workspace's project order.
+  /// Sessions grouped under their project, in the snapshot's project order.
   List<ProjectSessions> get sessionsByProject {
-    final ws = _workspace;
+    final ws = _snapshot;
     if (ws == null) return const [];
     final byProject = <ProjectId, List<SessionInfo>>{};
     for (final s in ws.sessions) {
@@ -107,17 +107,56 @@ class CommanderStore extends ChangeNotifier {
     ];
   }
 
-  List<OperationStatusDto> get operations => _workspace?.operations ?? const [];
+  List<OperationStatusDto> get operations => _snapshot?.operations ?? const [];
 
   List<SessionId> get pendingCommentSessions =>
-      _workspace?.pendingCommentSessions ?? const [];
+      _snapshot?.pendingCommentSessions ?? const [];
 
   /// The session whose cascade is currently paused awaiting a decision, or null
   /// when no cascade is paused. Drives the resume/abandon banner.
-  SessionId? get cascadePaused => _workspace?.cascadePaused;
+  SessionId? get cascadePaused => _snapshot?.cascadePaused;
 
-  /// The projects known to the server, in workspace order.
-  List<ProjectInfoDto> get projects => _workspace?.projects ?? const [];
+  /// The projects known to the server, in snapshot order.
+  List<ProjectInfoDto> get projects => _snapshot?.projects ?? const [];
+
+  // --- workspace scoping ---------------------------------------------------
+  //
+  // A workspace is a label on a project (`ProjectInfoDto.workspace`, null =
+  // Main), and a session belongs to its project's workspace. Membership is plain
+  // equality of the two names — `viewmodel::workspace::in_workspace` — so it is
+  // compared here rather than bridged per row.
+
+  /// The workspace [projectId] is tagged with, or null for Main — including for
+  /// a project this snapshot does not know, which reads as Main like it does in
+  /// `viewmodel::workspace::project_workspace`.
+  String? workspaceOfProject(ProjectId projectId) {
+    for (final p in projects) {
+      if (p.id == projectId) return p.workspace;
+    }
+    return null;
+  }
+
+  /// The workspace a session belongs to (its project's), or null for Main.
+  String? workspaceOfSession(SessionInfo session) =>
+      workspaceOfProject(session.projectId);
+
+  /// The projects in [workspace] (null = Main), in snapshot order.
+  List<ProjectInfoDto> projectsIn(String? workspace) => [
+    for (final p in projects)
+      if (p.workspace == workspace) p,
+  ];
+
+  /// The sessions in [workspace] (null = Main), in snapshot order.
+  List<SessionInfo> sessionsIn(String? workspace) => [
+    for (final s in sessions)
+      if (workspaceOfSession(s) == workspace) s,
+  ];
+
+  /// [sessionsByProject] limited to the projects in [workspace].
+  List<ProjectSessions> sessionsByProjectIn(String? workspace) => [
+    for (final g in sessionsByProject)
+      if (g.project.workspace == workspace) g,
+  ];
 
   /// The agent state for a session id (the [SessionInfo.id] string form), or
   /// [AgentState.unknown] if the snapshot has no entry for it.
@@ -206,7 +245,7 @@ class CommanderStore extends ChangeNotifier {
     // handle is already released above, so bailing leaks nothing.
     if (_disposed || epoch != _connectEpoch) return;
     _config = next;
-    _workspace = null;
+    _snapshot = null;
     _agentStates.clear();
     _commanderRunning = false;
     _connection = const ConnectionStateDto(
@@ -218,7 +257,7 @@ class CommanderStore extends ChangeNotifier {
   }
 
   /// Update the stored config (name/URL/token) synchronously, ahead of a
-  /// [reconnect]. Lets the workspace persist the edited config immediately —
+  /// [reconnect]. Lets the fleet persist the edited config immediately —
   /// `reconnect` only assigns `_config` after several awaits, so a concurrent
   /// save would otherwise write the pre-edit config back to disk.
   void applyConfig(ServerConfig config) {
@@ -276,17 +315,19 @@ class CommanderStore extends ChangeNotifier {
   /// Abandon a paused cascade, leaving the stack where it stopped.
   Future<void> cascadeAbandon() => _api.cascadeAbandon(handle: _requireHandle);
 
-  /// Register a new project by its server-side repo path; returns its new id.
-  Future<String> addProject(String path) =>
-      _api.addProject(handle: _requireHandle, path: path);
+  /// Register a new project by its server-side repo path, tagged with
+  /// [workspace] (null = Main); returns its new id.
+  Future<String> addProject(String path, {String? workspace}) =>
+      _api.addProject(handle: _requireHandle, path: path, workspace: workspace);
 
   /// Deregister a project by id (does not touch the repo on disk).
   Future<void> removeProject(String id) =>
       _api.removeProject(handle: _requireHandle, id: id);
 
-  /// Scan a server-side directory for git repos and register any it finds.
-  Future<ScanResultDto> scanDirectory(String path) =>
-      _api.scanDirectory(handle: _requireHandle, path: path);
+  /// Scan a server-side directory for git repos and register any it finds,
+  /// each new one tagged with [workspace] (null = Main).
+  Future<ScanResultDto> scanDirectory(String path, {String? workspace}) => _api
+      .scanDirectory(handle: _requireHandle, path: path, workspace: workspace);
 
   /// Register a project by its server-side repo path, or return the id of the
   /// project already registered for it.
@@ -295,8 +336,32 @@ class CommanderStore extends ChangeNotifier {
   /// than `POST /projects`. The dedupe stays on the server, which is the only
   /// side that can resolve a path to a repository root — so this never compares
   /// paths itself, and there is no second copy of the rule to drift.
-  Future<String> ensureProject(String path) =>
-      _api.ensureProject(handle: _requireHandle, path: path);
+  ///
+  /// [workspace] tags the project only if this call newly registers it.
+  Future<String> ensureProject(String path, {String? workspace}) => _api
+      .ensureProject(handle: _requireHandle, path: path, workspace: workspace);
+
+  /// Replace this server's workspace definitions (see
+  /// [CommanderApi.setWorkspaces]). Fleet-wide edits go through
+  /// `FleetStore`, which sends the same request to every server.
+  Future<void> setWorkspaces(SetWorkspacesRequestDto request) =>
+      _api.setWorkspaces(handle: _requireHandle, request: request);
+
+  /// Rename a workspace on this server, rewriting its projects' tags.
+  Future<void> renameWorkspace(String from, String to) =>
+      _api.renameWorkspace(handle: _requireHandle, from: from, to: to);
+
+  /// Delete a workspace on this server, moving its projects to Main.
+  Future<void> deleteWorkspace(String name) =>
+      _api.deleteWorkspace(handle: _requireHandle, name: name);
+
+  /// Move a project to [workspace] (null = Main) on this server.
+  Future<void> setProjectWorkspace(String projectId, String? workspace) =>
+      _api.setProjectWorkspace(
+        handle: _requireHandle,
+        projectId: projectId,
+        workspace: workspace,
+      );
 
   /// Every repo the server-side `gh` user can clone, for the repo picker.
   /// Throws when the server has no `gh`, or when listing outruns the client's
@@ -384,9 +449,9 @@ class CommanderStore extends ChangeNotifier {
     }
     _refreshing = true;
     try {
-      final ws = await _api.workspaceSnapshot(handle: h);
+      final ws = await _api.snapshot(handle: h);
       final states = await _api.agentStates(handle: h, fresh: false);
-      _workspace = ws;
+      _snapshot = ws;
       _agentStates
         ..clear()
         ..addEntries(

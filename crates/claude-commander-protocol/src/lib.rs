@@ -21,4 +21,5 @@ pub mod github;
 pub mod paste;
 pub mod pr;
 pub mod session;
+pub mod workspace;
 pub mod ws;

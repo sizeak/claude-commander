@@ -69,7 +69,7 @@ void main() {
   });
 
   test(
-    'connect() acquires the handle and populates workspace + agent states',
+    'connect() acquires the handle and populates the snapshot + agent states',
     () async {
       api.connectServerResponse = 'handle-1';
       api.listSessionsResponse = [sessionInfo(id: id, title: 'Alpha')];
@@ -101,14 +101,14 @@ void main() {
 
       var notifications = 0;
       store.addListener(() => notifications++);
-      final refetchesBefore = api.countOf('workspaceSnapshot');
+      final refetchesBefore = api.countOf('snapshot');
 
       // The server state moved: the next snapshot has a new title.
       api.listSessionsResponse = [sessionInfo(id: id, title: 'After')];
       api.emitChange();
       await pumpEventQueue();
 
-      expect(api.countOf('workspaceSnapshot'), greaterThan(refetchesBefore));
+      expect(api.countOf('snapshot'), greaterThan(refetchesBefore));
       expect(store.sessions.single.title, 'After');
       expect(notifications, greaterThan(0));
     },
@@ -128,14 +128,14 @@ void main() {
         if (!gate.isCompleted) gate.complete();
       });
       var armed = false;
-      api.onWorkspaceSnapshot = () {
+      api.onSnapshot = () {
         if (armed) return;
         armed = true;
         api.emitChange(); // queues a follow-up refresh
-        api.workspaceSnapshotGate = gate; // which will park
+        api.snapshotGate = gate; // which will park
       };
 
-      final before = api.countOf('workspaceSnapshot');
+      final before = api.countOf('snapshot');
       var done = false;
       unawaited(store.refresh().then((_) => done = true));
       await pumpEventQueue();
@@ -146,7 +146,7 @@ void main() {
       // spinner waiting on them (e.g. the Edit server form's Save).
       expect(done, isTrue);
       // The follow-up did still fire — it's parked on the gate, not skipped.
-      expect(api.countOf('workspaceSnapshot'), before + 2);
+      expect(api.countOf('snapshot'), before + 2);
     },
   );
 
@@ -211,7 +211,7 @@ void main() {
       addTearDown(store.dispose);
       await store.connect();
 
-      // Edit #1 (the real flow: WorkspaceStore.updateServer applies the config,
+      // Edit #1 (the real flow: FleetStore.updateServer applies the config,
       // persists, then reconnects). Its reconnect parks while releasing handle-1.
       final gate = Completer<void>();
       api.disconnectGate = gate;

@@ -18,7 +18,7 @@ enum _ManageAction { rename, section, keepAlive }
 /// Detail view for a single session, layout-agnostic (no Scaffold, no route).
 /// Live status and agent state come straight from the [CommanderStore] (refreshed
 /// off the change feed — no local timer); the pane snapshot and diff stat, which
-/// the workspace snapshot doesn't carry, are fetched on demand and re-fetched
+/// the snapshot doesn't carry, are fetched on demand and re-fetched
 /// whenever the store ticks.
 ///
 /// The narrow [SessionDetailPage] wraps this in a Scaffold and pushes

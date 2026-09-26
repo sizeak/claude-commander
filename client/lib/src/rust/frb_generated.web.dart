@@ -13,6 +13,7 @@ import 'api/registry.dart';
 import 'api/review.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
+import 'api/workspace.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'frb_generated.dart';
@@ -91,6 +92,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_i_32(dynamic raw);
 
   @protected
+  MergedWorkspace dco_decode_box_autoadd_merged_workspace(dynamic raw);
+
+  @protected
   ProjectId dco_decode_box_autoadd_project_id(dynamic raw);
 
   @protected
@@ -115,7 +119,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SessionId dco_decode_box_autoadd_session_id(dynamic raw);
 
   @protected
+  SetWorkspacesRequestDto dco_decode_box_autoadd_set_workspaces_request_dto(
+    dynamic raw,
+  );
+
+  @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  WorkspaceDef dco_decode_box_autoadd_workspace_def(dynamic raw);
 
   @protected
   BranchInfo dco_decode_branch_info(dynamic raw);
@@ -217,6 +229,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<GithubRepo> dco_decode_list_github_repo(dynamic raw);
 
   @protected
+  List<MergedWorkspace> dco_decode_list_merged_workspace(dynamic raw);
+
+  @protected
   List<OperationStatusDto> dco_decode_list_operation_status_dto(dynamic raw);
 
   @protected
@@ -250,6 +265,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SessionInfo> dco_decode_list_session_info(dynamic raw);
 
   @protected
+  List<WorkspaceDef> dco_decode_list_workspace_def(dynamic raw);
+
+  @protected
+  List<WorkspaceSourceDto> dco_decode_list_workspace_source_dto(dynamic raw);
+
+  @protected
+  MergedWorkspace dco_decode_merged_workspace(dynamic raw);
+
+  @protected
   OperationKind dco_decode_operation_kind(dynamic raw);
 
   @protected
@@ -277,6 +301,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
 
   @protected
+  MergedWorkspace? dco_decode_opt_box_autoadd_merged_workspace(dynamic raw);
+
+  @protected
   ProjectId? dco_decode_opt_box_autoadd_project_id(dynamic raw);
 
   @protected
@@ -301,6 +328,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  WorkspaceDef? dco_decode_opt_box_autoadd_workspace_def(dynamic raw);
 
   @protected
   PrState dco_decode_pr_state(dynamic raw);
@@ -375,6 +405,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SessionStatus dco_decode_session_status(dynamic raw);
 
   @protected
+  SetWorkspacesRequestDto dco_decode_set_workspaces_request_dto(dynamic raw);
+
+  @protected
+  SnapshotDto dco_decode_snapshot_dto(dynamic raw);
+
+  @protected
   TerminalEvent dco_decode_terminal_event(dynamic raw);
 
   @protected
@@ -396,7 +432,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
-  WorkspaceSnapshotDto dco_decode_workspace_snapshot_dto(dynamic raw);
+  WorkspaceDef dco_decode_workspace_def(dynamic raw);
+
+  @protected
+  WorkspaceSourceDto dco_decode_workspace_source_dto(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
@@ -474,6 +513,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
+  MergedWorkspace sse_decode_box_autoadd_merged_workspace(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ProjectId sse_decode_box_autoadd_project_id(SseDeserializer deserializer);
 
   @protected
@@ -510,7 +554,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SessionId sse_decode_box_autoadd_session_id(SseDeserializer deserializer);
 
   @protected
+  SetWorkspacesRequestDto sse_decode_box_autoadd_set_workspaces_request_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  WorkspaceDef sse_decode_box_autoadd_workspace_def(
+    SseDeserializer deserializer,
+  );
 
   @protected
   BranchInfo sse_decode_branch_info(SseDeserializer deserializer);
@@ -620,6 +674,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<GithubRepo> sse_decode_list_github_repo(SseDeserializer deserializer);
 
   @protected
+  List<MergedWorkspace> sse_decode_list_merged_workspace(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<OperationStatusDto> sse_decode_list_operation_status_dto(
     SseDeserializer deserializer,
   );
@@ -665,6 +724,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SessionInfo> sse_decode_list_session_info(SseDeserializer deserializer);
 
   @protected
+  List<WorkspaceDef> sse_decode_list_workspace_def(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<WorkspaceSourceDto> sse_decode_list_workspace_source_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  MergedWorkspace sse_decode_merged_workspace(SseDeserializer deserializer);
+
+  @protected
   OperationKind sse_decode_operation_kind(SseDeserializer deserializer);
 
   @protected
@@ -700,6 +772,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
+
+  @protected
+  MergedWorkspace? sse_decode_opt_box_autoadd_merged_workspace(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ProjectId? sse_decode_opt_box_autoadd_project_id(
@@ -738,6 +815,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  WorkspaceDef? sse_decode_opt_box_autoadd_workspace_def(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PrState sse_decode_pr_state(SseDeserializer deserializer);
@@ -818,6 +900,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SessionStatus sse_decode_session_status(SseDeserializer deserializer);
 
   @protected
+  SetWorkspacesRequestDto sse_decode_set_workspaces_request_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SnapshotDto sse_decode_snapshot_dto(SseDeserializer deserializer);
+
+  @protected
   TerminalEvent sse_decode_terminal_event(SseDeserializer deserializer);
 
   @protected
@@ -841,7 +931,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
-  WorkspaceSnapshotDto sse_decode_workspace_snapshot_dto(
+  WorkspaceDef sse_decode_workspace_def(SseDeserializer deserializer);
+
+  @protected
+  WorkspaceSourceDto sse_decode_workspace_source_dto(
     SseDeserializer deserializer,
   );
 
@@ -942,6 +1035,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_merged_workspace(
+    MergedWorkspace self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_project_id(
     ProjectId self,
     SseSerializer serializer,
@@ -990,7 +1089,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_set_workspaces_request_dto(
+    SetWorkspacesRequestDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_workspace_def(
+    WorkspaceDef self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_branch_info(BranchInfo self, SseSerializer serializer);
@@ -1140,6 +1251,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_merged_workspace(
+    List<MergedWorkspace> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_operation_status_dto(
     List<OperationStatusDto> self,
     SseSerializer serializer,
@@ -1203,6 +1320,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_workspace_def(
+    List<WorkspaceDef> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_workspace_source_dto(
+    List<WorkspaceSourceDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_merged_workspace(
+    MergedWorkspace self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_operation_kind(OperationKind self, SseSerializer serializer);
 
   @protected
@@ -1248,6 +1383,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_merged_workspace(
+    MergedWorkspace? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_project_id(
     ProjectId? self,
     SseSerializer serializer,
@@ -1291,6 +1432,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_workspace_def(
+    WorkspaceDef? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_pr_state(PrState self, SseSerializer serializer);
@@ -1398,6 +1545,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_session_status(SessionStatus self, SseSerializer serializer);
 
   @protected
+  void sse_encode_set_workspaces_request_dto(
+    SetWorkspacesRequestDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_snapshot_dto(SnapshotDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_terminal_event(TerminalEvent self, SseSerializer serializer);
 
   @protected
@@ -1422,8 +1578,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
-  void sse_encode_workspace_snapshot_dto(
-    WorkspaceSnapshotDto self,
+  void sse_encode_workspace_def(WorkspaceDef self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_workspace_source_dto(
+    WorkspaceSourceDto self,
     SseSerializer serializer,
   );
 }

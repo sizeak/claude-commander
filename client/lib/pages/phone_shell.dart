@@ -38,7 +38,7 @@ class _PhoneShellState extends State<PhoneShell> {
 
   @override
   Widget build(BuildContext context) {
-    final workspace = WorkspaceScope.of(context)!;
+    final fleet = FleetScope.of(context)!;
     return ChromeShell(
       ChromeShellSpec(
         items: [
@@ -58,7 +58,7 @@ class _PhoneShellState extends State<PhoneShell> {
         centreAction: ChromeButtonAction(
           icon: Icons.add,
           label: 'New session',
-          onPressed: () => openCreateSession(context, workspace),
+          onPressed: () => openCreateSession(context, fleet),
         ),
         // A shell action, not the Fleet view's: both tabs reach the same one.
         settings: ChromeButtonAction(

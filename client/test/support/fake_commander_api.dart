@@ -7,9 +7,11 @@ import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/src/rust/api/review.dart';
 import 'package:claude_commander_client/src/rust/api/simple.dart'
     show ScanResultDto;
+import 'package:claude_commander_client/src/rust/api/workspace.dart';
 import 'package:uuid/uuid.dart';
 
 import 'fake_diff_layout.dart';
+import 'fake_workspace_rules.dart';
 
 /// One recorded call: the method name plus its positional arg values, so tests
 /// can assert both that a method fired and what it was passed.
@@ -43,7 +45,7 @@ class FakeCommanderApi implements CommanderApi {
   /// a `reconnect` inside its teardown window (old handle released, new config
   /// not yet adopted) and run a second reconnect past it.
   Completer<void>? disconnectGate;
-  Object? workspaceSnapshotError;
+  Object? snapshotError;
   bool healthResponse = true;
   bool healthTmuxResponse = true;
   List<SessionInfo> listSessionsResponse = const [];
@@ -141,7 +143,7 @@ class FakeCommanderApi implements CommanderApi {
   /// rows the fake layout does not produce (side by side, gaps, emphasis).
   DiffLayoutDto? diffRowsResponse;
 
-  /// The session whose cascade is paused, surfaced in the workspace snapshot.
+  /// The session whose cascade is paused, surfaced in the snapshot.
   /// Null (the default) means no cascade is paused.
   SessionId? cascadePausedResponse;
 
@@ -150,12 +152,46 @@ class FakeCommanderApi implements CommanderApi {
   /// have no sessions (e.g. the projects manager).
   List<ProjectInfoDto>? projectsResponse;
 
-  /// The default workspace snapshot echoes [listSessionsResponse] so a test that
+  /// The server's workspace definitions, as the snapshot reports them. The
+  /// workspace mutations below write through to these (and to
+  /// [projectWorkspaceTags]), like the real server would, so a test sees its
+  /// own edit come back on the next snapshot.
+  List<WorkspaceDef> workspacesResponse = const [];
+  WorkspaceDef? mainWorkspaceResponse;
+  String startupWorkspaceResponse = 'last';
+
+  /// Per-project workspace tags keyed by project uuid, overriding whatever the
+  /// project carries (`null` value = Main). Written by [setProjectWorkspace],
+  /// [renameWorkspace] and [deleteWorkspace].
+  final Map<String, String?> projectWorkspaceTags = {};
+
+  /// When set, every workspace mutation throws it (and changes nothing) — the
+  /// "one server refused" path of the eager fan-out.
+  Object? workspaceMutationError;
+
+  String? _tagOf(ProjectInfoDto p) {
+    final id = p.id.field0.uuid;
+    return projectWorkspaceTags.containsKey(id)
+        ? projectWorkspaceTags[id]
+        : p.workspace;
+  }
+
+  ProjectInfoDto _tagged(ProjectInfoDto p) => ProjectInfoDto(
+    id: p.id,
+    name: p.name,
+    repoPath: p.repoPath,
+    mainBranch: p.mainBranch,
+    sessionIds: p.sessionIds,
+    originUrl: p.originUrl,
+    workspace: _tagOf(p),
+  );
+
+  /// The default snapshot echoes [listSessionsResponse] so a test that
   /// only sets sessions gets a coherent snapshot for free. It synthesizes one
   /// project per distinct session `projectId` (in first-seen order) so grouped
   /// views — which read `sessionsByProject` — have projects to group under, as a
   /// real server snapshot always would.
-  WorkspaceSnapshotDto get workspaceSnapshotResponse {
+  SnapshotDto get snapshotResponse {
     final projects = <String, ProjectInfoDto>{};
     for (final s in listSessionsResponse) {
       projects.putIfAbsent(
@@ -169,8 +205,10 @@ class FakeCommanderApi implements CommanderApi {
         ),
       );
     }
-    return WorkspaceSnapshotDto(
-      projects: projectsResponse ?? projects.values.toList(),
+    return SnapshotDto(
+      projects: [
+        for (final p in projectsResponse ?? projects.values) _tagged(p),
+      ],
       sessions: listSessionsResponse,
       cascadePaused: cascadePausedResponse,
       pendingCommentSessions: const [],
@@ -181,6 +219,9 @@ class FakeCommanderApi implements CommanderApi {
         tmuxOk: true,
         version: '0.0.0-test',
       ),
+      workspaces: workspacesResponse,
+      mainWorkspace: mainWorkspaceResponse,
+      startupWorkspace: startupWorkspaceResponse,
     );
   }
 
@@ -268,26 +309,24 @@ class FakeCommanderApi implements CommanderApi {
     return healthTmuxResponse;
   }
 
-  /// When set, `workspaceSnapshot` awaits this before returning — lets a test
+  /// When set, `snapshot` awaits this before returning — lets a test
   /// hold a refresh in flight (e.g. a slow server mid-fetch). Checked before
-  /// [onWorkspaceSnapshot] runs, so a hook can arm the gate for the *next* fetch
+  /// [onSnapshot] runs, so a hook can arm the gate for the *next* fetch
   /// without parking its own.
-  Completer<void>? workspaceSnapshotGate;
+  Completer<void>? snapshotGate;
 
-  /// Called on every [workspaceSnapshot] — the seam for a test that needs
+  /// Called on every [snapshot] — the seam for a test that needs
   /// something to happen *while* a refresh is in flight (e.g. [emitChange],
   /// modelling a poller tick landing mid-fetch).
-  void Function()? onWorkspaceSnapshot;
+  void Function()? onSnapshot;
 
   @override
-  Future<WorkspaceSnapshotDto> workspaceSnapshot({
-    required String handle,
-  }) async {
-    _record('workspaceSnapshot', {'handle': handle});
-    if (workspaceSnapshotGate != null) await workspaceSnapshotGate!.future;
-    onWorkspaceSnapshot?.call();
-    if (workspaceSnapshotError != null) throw workspaceSnapshotError!;
-    return workspaceSnapshotResponse;
+  Future<SnapshotDto> snapshot({required String handle}) async {
+    _record('snapshot', {'handle': handle});
+    if (snapshotGate != null) await snapshotGate!.future;
+    onSnapshot?.call();
+    if (snapshotError != null) throw snapshotError!;
+    return snapshotResponse;
   }
 
   @override
@@ -503,8 +542,9 @@ class FakeCommanderApi implements CommanderApi {
   Future<String> addProject({
     required String handle,
     required String path,
+    String? workspace,
   }) async {
-    _record('addProject', {'path': path});
+    _record('addProject', {'path': path, 'workspace': workspace});
     return addProjectResponse;
   }
 
@@ -512,17 +552,130 @@ class FakeCommanderApi implements CommanderApi {
   Future<String> ensureProject({
     required String handle,
     required String path,
+    String? workspace,
   }) async {
-    _record('ensureProject', {'path': path});
+    _record('ensureProject', {'path': path, 'workspace': workspace});
     // Idempotent like the route it stands in for: a path already in the snapshot
     // answers with that project's id. A fake that always returned a fresh id
     // would let a caller that used the non-idempotent `addProject` pass a test
     // about not duplicating.
-    for (final p in workspaceSnapshotResponse.projects) {
+    for (final p in snapshotResponse.projects) {
       if (p.repoPath == path) return p.id.field0.uuid;
     }
     return addProjectResponse;
   }
+
+  @override
+  Future<void> setProjectWorkspace({
+    required String handle,
+    required String projectId,
+    String? workspace,
+  }) async {
+    _record('setProjectWorkspace', {
+      'handle': handle,
+      'projectId': projectId,
+      'workspace': workspace,
+    });
+    if (workspaceMutationError != null) throw workspaceMutationError!;
+    projectWorkspaceTags[projectId] = workspace;
+    // The server defines a workspace it is asked to move a project into.
+    if (workspace != null &&
+        !workspacesResponse.any((w) => w.name == workspace)) {
+      workspacesResponse = [
+        ...workspacesResponse,
+        WorkspaceDef(name: workspace),
+      ];
+    }
+  }
+
+  @override
+  Future<void> setWorkspaces({
+    required String handle,
+    required SetWorkspacesRequestDto request,
+  }) async {
+    _record('setWorkspaces', {'handle': handle, 'request': request});
+    if (workspaceMutationError != null) throw workspaceMutationError!;
+    workspacesResponse = request.workspaces;
+    if (request.main != null) mainWorkspaceResponse = request.main;
+    if (request.startupWorkspace != null) {
+      startupWorkspaceResponse = request.startupWorkspace!;
+    }
+  }
+
+  /// Every project in the current snapshot currently tagged [name].
+  Iterable<ProjectInfoDto> _projectsTagged(String name) =>
+      snapshotResponse.projects.where((p) => p.workspace == name);
+
+  @override
+  Future<void> renameWorkspace({
+    required String handle,
+    required String from,
+    required String to,
+  }) async {
+    _record('renameWorkspace', {'handle': handle, 'from': from, 'to': to});
+    if (workspaceMutationError != null) throw workspaceMutationError!;
+    for (final p in _projectsTagged(from).toList()) {
+      projectWorkspaceTags[p.id.field0.uuid] = to;
+    }
+    workspacesResponse = [
+      for (final w in workspacesResponse)
+        w.name == from ? WorkspaceDef(name: to) : w,
+    ];
+    if (startupWorkspaceResponse == from) startupWorkspaceResponse = to;
+  }
+
+  @override
+  Future<void> deleteWorkspace({
+    required String handle,
+    required String name,
+  }) async {
+    _record('deleteWorkspace', {'handle': handle, 'name': name});
+    if (workspaceMutationError != null) throw workspaceMutationError!;
+    for (final p in _projectsTagged(name).toList()) {
+      projectWorkspaceTags[p.id.field0.uuid] = null;
+    }
+    workspacesResponse = [
+      for (final w in workspacesResponse)
+        if (w.name != name) w,
+    ];
+    if (startupWorkspaceResponse == name) startupWorkspaceResponse = 'main';
+  }
+
+  @override
+  List<MergedWorkspace> mergeWorkspaces(List<WorkspaceSourceDto> sources) =>
+      fakeMergeWorkspaces(sources);
+
+  @override
+  String? resolveStartupWorkspace({
+    required String startup,
+    String? last,
+    required List<MergedWorkspace> workspaces,
+  }) => fakeResolveStartupWorkspace(
+    startup: startup,
+    last: last,
+    workspaces: workspaces,
+  );
+
+  @override
+  String? workspaceNameError(String raw) => fakeWorkspaceNameError(raw);
+
+  @override
+  bool workspaceNameTaken(
+    List<MergedWorkspace> workspaces,
+    String name, {
+    MergedWorkspace? except,
+  }) => fakeWorkspaceNameTaken(workspaces, name, except: except);
+
+  @override
+  List<WorkspaceDef> definitionsForServer({
+    required List<WorkspaceDef> wanted,
+    required List<WorkspaceDef> own,
+    String? mainLabel,
+  }) =>
+      fakeDefinitionsForServer(wanted: wanted, own: own, mainLabel: mainLabel);
+
+  @override
+  String? workspaceLabelError(String raw) => fakeWorkspaceLabelError(raw);
 
   @override
   Future<void> removeProject({
@@ -536,8 +689,9 @@ class FakeCommanderApi implements CommanderApi {
   Future<ScanResultDto> scanDirectory({
     required String handle,
     required String path,
+    String? workspace,
   }) async {
-    _record('scanDirectory', {'path': path});
+    _record('scanDirectory', {'path': path, 'workspace': workspace});
     return scanDirectoryResponse;
   }
 

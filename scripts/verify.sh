@@ -61,6 +61,15 @@ export DO_NOT_TRACK=1
 # regions, never styles. Pinning it would imply an assertion depends on it.
 export TERM=xterm-256color
 
+# And not the developer's git signing either. Test fixtures commit into temp
+# repos; one that inherits `commit.gpgsign=true` hangs on a locked 1Password
+# signer and passes on an unlocked one. So every lane runs under a global git
+# config where signing is on and the signer is `false` (cc_poisoned_gitconfig
+# says why a global file and not GIT_CONFIG_COUNT): a fixture that forgets the
+# opt-out fails here, at once, on every machine. ci.yml's test steps use the same
+# file. Under target/, like the logs, so it outlives the run for a re-run by hand.
+cc_export_poisoned_git_signing "$CC_REPO_ROOT/target/verify-gitconfig"
+
 FORCE_E2E=0
 GOLDENS_UPDATE=0
 
@@ -110,7 +119,18 @@ EOF
 
 lane_fmt() { cc_run_in_shell "" cargo "cargo fmt --all -- --check"; }
 lane_clippy() { cc_run_in_shell "" cargo "cargo clippy --workspace --all-targets -- -D warnings"; }
-lane_build() { cc_run_in_shell "" cargo "cargo build --workspace --all-targets"; }
+lane_build() {
+  cc_run_in_shell "" cargo "cargo build --workspace --all-targets" || return $?
+  # Core's `test-support` must reach the build over dev edges only; see
+  # cc_tree_leaks_test_support. Runs offline in well under a second.
+  local tree
+  tree="$(cc_capture_in_shell "" cargo "$CC_CORE_FEATURE_TREE_CMD")" || return $?
+  if cc_tree_leaks_test_support <<<"$tree"; then
+    cc_error "core's test-support feature is enabled over a normal/build edge:"
+    printf '%s\n' "$tree"
+    return 1
+  fi
+}
 lane_test() { cc_run_in_shell "" cargo "cargo test --workspace"; }
 
 lane_pub_get() {

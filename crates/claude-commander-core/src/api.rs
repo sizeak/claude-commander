@@ -12,6 +12,9 @@ use claude_commander_protocol::github::{
     CloneJob, CloneJobId, CloneRequest, CloneSource, GithubRepo, validate_clone_url,
     validate_dest_name, validate_repo_slug,
 };
+use claude_commander_protocol::workspace::{
+    SetWorkspacesRequest, WorkspaceRejection, validate_set_workspaces, validate_workspace_label,
+};
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -32,6 +35,7 @@ use crate::git::{
     run_clone,
 };
 use crate::reviewed::ReviewedStore;
+use crate::session::workspace;
 use crate::session::{
     AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionLookup, SessionManager,
     SessionStatus, WorktreeSession, apply_assignment, clear_override_and_reassign,
@@ -57,13 +61,13 @@ pub struct CommanderService {
     reviewed: Arc<ReviewedStore>,
     telemetry: Telemetry,
     /// Bounded in-memory ledger of recent cascade / push-stack operations,
-    /// surfaced through [`Self::workspace_snapshot`]. Capped at
+    /// surfaced through [`Self::snapshot`]. Capped at
     /// [`OPERATION_LEDGER_CAP`]; oldest entries are evicted.
     operations: Arc<std::sync::Mutex<std::collections::VecDeque<OperationStatus>>>,
     /// Monotonic id source for ledger entries (stable for the process lifetime).
     next_op_id: Arc<std::sync::atomic::AtomicU64>,
     /// Cached `gh --version` availability. Computed once (fork/exec is not free)
-    /// and reused for every `workspace_snapshot`.
+    /// and reused for every `snapshot`.
     gh_available: Arc<tokio::sync::OnceCell<bool>>,
     /// Shared agent-state detector with a short TTL cache, reused across
     /// non-`fresh` [`Self::agent_states`] calls so repeated polls don't
@@ -81,7 +85,7 @@ pub struct CommanderService {
     /// falls back to on-demand detection.
     agent_states_primed: Arc<std::sync::atomic::AtomicBool>,
     /// Most recent per-project background-pull status, maintained by the pull
-    /// loop and surfaced in [`WorkspaceSnapshot::project_pull`].
+    /// loop and surfaced in [`Snapshot::project_pull`].
     pull_status: Arc<std::sync::Mutex<BTreeMap<ProjectId, PullStatus>>>,
     /// Last PR-status fan-out time, for debouncing manual refresh bursts.
     last_pr_check: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
@@ -91,7 +95,7 @@ pub struct CommanderService {
     /// once per service, even if both a local TUI and an embedded caller ask.
     background_started: Arc<std::sync::atomic::AtomicBool>,
     /// Short-TTL cache of the last `tmux -V` probe result, so per-client
-    /// [`Self::workspace_snapshot`] polling (~2s cadence) doesn't fork a
+    /// [`Self::snapshot`] polling (~2s cadence) doesn't fork a
     /// subprocess on every poll. See [`Self::cached_tmux_ok`].
     tmux_ok_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     /// Running and recently-finished repository clones, started by
@@ -107,7 +111,7 @@ const OPERATION_LEDGER_CAP: usize = 32;
 /// `agent_states` polls.
 const AGENT_STATE_CACHE_TTL: Duration = Duration::from_millis(1000);
 
-/// TTL for the [`CommanderService::workspace_snapshot`] tmux-availability cache.
+/// TTL for the [`CommanderService::snapshot`] tmux-availability cache.
 /// Long enough that a 2s client poll reuses the last probe rather than forking
 /// `tmux -V` every time, short enough that tmux coming up/going down surfaces
 /// within a few seconds.
@@ -273,6 +277,155 @@ impl CommanderService {
         self.config_store.mutate(|c| c.programs = programs)
     }
 
+    // -- Workspaces --
+
+    /// Replace the workspace definitions (order = display order), and — when
+    /// given — Main's label and the startup choice. Never re-tags a
+    /// project: [`Self::rename_workspace`] and [`Self::delete_workspace`] do
+    /// that, because a replace cannot tell a rename from a delete + create.
+    /// Validated against the protocol's rules first, so nothing is written for
+    /// a refused list.
+    ///
+    /// `main: None` leaves Main's label alone, so names are checked against
+    /// the label this server already stores — otherwise a replace that omits
+    /// `main` (every create/reorder edit, and any older client) could
+    /// define a workspace named like Main, which a rename is refused for.
+    pub fn set_workspace_defs(&self, req: SetWorkspacesRequest) -> Result<()> {
+        let touches_main = req.main.is_some();
+        let checked = SetWorkspacesRequest {
+            // Only the stored label takes part (it is not written back), and
+            // a hand-edited invalid one must not block every edit.
+            main: req.main.or_else(|| {
+                self.read_config()
+                    .main_workspace
+                    .filter(|m| validate_workspace_label(&m.name).is_ok())
+            }),
+            ..req
+        };
+        let mut req = validate_set_workspaces(&checked).map_err(|e| {
+            let name = match &e {
+                WorkspaceRejection::Reserved { name }
+                | WorkspaceRejection::Duplicate { name }
+                | WorkspaceRejection::UnknownStartup { name } => name.clone(),
+                _ => "workspaces".to_string(),
+            };
+            workspace::workspace_rejected(&name, e)
+        })?;
+        if !touches_main {
+            // Validated against the stored label only; nothing to write back.
+            req.main = None;
+        }
+        self.telemetry.feature("workspace.update_defs");
+        self.config_store.mutate(|c| {
+            c.workspaces = req.workspaces;
+            if let Some(main) = req.main {
+                c.main_workspace = Some(main);
+            }
+            if let Some(startup) = req.startup_workspace {
+                c.startup_workspace = startup;
+            }
+        })
+    }
+
+    /// Rename workspace `from` to `to`: the definition, a startup pin on it,
+    /// this host's local theme for it (`[workspace_themes]`), and every project
+    /// tagged with it, in that order. Returns `false` when this host neither
+    /// defines `from` nor tags a project with it — so a rename sent eagerly to
+    /// every server is a harmless no-op on the ones that never had the
+    /// workspace. The theme moves even then: it is local config, and the TUI
+    /// keeps themes for workspaces that live only on a remote server.
+    pub async fn rename_workspace(&self, from: &str, to: &str) -> Result<bool> {
+        let renamed_def = self
+            .config_store
+            .mutate(|c| {
+                let renamed = workspace::rename_workspace_def(c, from, to)?;
+                // `to` is valid and unclaimed once the def rename accepted it.
+                workspace::rename_workspace_theme(c, from, to.trim());
+                Ok(renamed)
+            })?
+            .map_err(|e| workspace::workspace_rejected(to, e))?;
+        let to = claude_commander_protocol::workspace::validate_workspace_name(to)
+            .map_err(|e| workspace::workspace_rejected(to, e))?;
+        let (from_owned, to_tag) = (from.to_string(), to.clone());
+        let moved = self
+            .store
+            .mutate(move |state| workspace::retag_projects(state, &from_owned, Some(&to_tag)))
+            .await?;
+        if !renamed_def && moved == 0 {
+            return Ok(false);
+        }
+        if !renamed_def {
+            // Tags existed without a definition (lost to an older binary's
+            // write); give the new name one so it keeps its place.
+            self.config_store
+                .mutate(|c| workspace::ensure_workspace_defined(c, &to))?;
+        }
+        self.telemetry.feature("workspace.rename");
+        Ok(true)
+    }
+
+    /// Delete workspace `name`: drop its definition (a startup pin on it
+    /// becomes Main) and its local theme, and move its projects to Main.
+    /// Returns `false` when there was no definition or tag to delete (a theme
+    /// alone is still dropped). Main itself has no name and cannot be deleted.
+    pub async fn delete_workspace(&self, name: &str) -> Result<bool> {
+        let removed_def = self.config_store.mutate(|c| {
+            workspace::delete_workspace_theme(c, name);
+            workspace::delete_workspace_def(c, name)
+        })?;
+        let owned = name.to_string();
+        let moved = self
+            .store
+            .mutate(move |state| workspace::retag_projects(state, &owned, None))
+            .await?;
+        if !removed_def && moved == 0 {
+            return Ok(false);
+        }
+        self.telemetry.feature("workspace.delete");
+        Ok(true)
+    }
+
+    /// Move project `id` into `workspace` (`None` = Main). A name this host
+    /// has no definition for gets one appended — the self-heal that lets a
+    /// client move a project into a workspace it created on another server.
+    pub async fn set_project_workspace(
+        &self,
+        id: &ProjectId,
+        workspace: Option<String>,
+    ) -> Result<()> {
+        let tag = workspace::validate_tag(workspace.as_deref())?;
+        let id = *id;
+        let exists = self.store.read().await.projects.contains_key(&id);
+        if !exists {
+            return Err(SessionError::ProjectNotFound(id.to_string()).into());
+        }
+        self.telemetry.feature("workspace.move_project");
+        if let Some(name) = &tag {
+            self.config_store
+                .mutate(|c| workspace::ensure_workspace_defined(c, name))?;
+        }
+        self.store
+            .mutate(move |state| match state.projects.get_mut(&id) {
+                Some(project) => {
+                    project.workspace = tag;
+                    Ok(())
+                }
+                None => Err(SessionError::ProjectNotFound(id.to_string()).into()),
+            })
+            .await?
+    }
+
+    /// Validate `workspace` for a project about to be registered and make sure
+    /// it is defined, returning the tag to store.
+    fn prepare_new_project_workspace(&self, workspace: Option<String>) -> Result<Option<String>> {
+        let tag = workspace::validate_tag(workspace.as_deref())?;
+        if let Some(name) = &tag {
+            self.config_store
+                .mutate(|c| workspace::ensure_workspace_defined(c, name))?;
+        }
+        Ok(tag)
+    }
+
     /// Reload config from disk if the file changed since the last read.
     pub fn reload_config(&self) -> Result<bool> {
         self.config_store.reload_if_changed()
@@ -285,16 +438,30 @@ impl CommanderService {
 
     // -- Projects --
 
-    /// Register a git repository as a project.
-    pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
+    /// Register a git repository as a project, tagged with `workspace`
+    /// (`None` = Main) — how a new project lands in the caller's active
+    /// workspace. An undefined workspace name is defined on the way.
+    pub async fn add_project(
+        &self,
+        repo_path: PathBuf,
+        workspace: Option<String>,
+    ) -> Result<ProjectId> {
         self.telemetry.feature("project.add");
-        self.manager.add_project(repo_path).await
+        let tag = self.prepare_new_project_workspace(workspace)?;
+        self.manager.add_project(repo_path, tag).await
     }
 
-    /// Scan a directory for git repositories and register them as projects.
-    pub async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
+    /// Scan a directory for git repositories and register them as projects,
+    /// each tagged with `workspace` (`None` = Main) like [`Self::add_project`].
+    /// Repositories that are already projects keep their tag.
+    pub async fn scan_directory(
+        &self,
+        dir: &Path,
+        workspace: Option<String>,
+    ) -> Result<ScanResult> {
         self.telemetry.feature("project.scan_directory");
-        self.manager.scan_directory(dir).await
+        let tag = self.prepare_new_project_workspace(workspace)?;
+        self.manager.scan_directory(dir, tag).await
     }
 
     // -- Repository clone --
@@ -363,6 +530,9 @@ impl CommanderService {
     /// [`CloneStatus::DestinationExists`]: claude_commander_protocol::github::CloneStatus::DestinationExists
     pub async fn start_clone(&self, req: CloneRequest) -> Result<CloneJob> {
         let dir_name = clone_dir_name(&req)?;
+        // Checked up front like the destination: `clone_then_register` would
+        // only refuse it after the whole clone, then delete the checkout.
+        workspace::validate_tag(req.workspace.as_deref())?;
         let config = self.read_config();
         let projects_dir = config.projects_dir()?;
         // `projects_dir()` only *resolves* a path (as `worktrees_dir()` does), so
@@ -394,7 +564,7 @@ impl CommanderService {
             let job_dest = dest.clone();
             self.clone_jobs
                 .spawn(dest, source_label, async move {
-                    clone_then_register(service, req.source, job_dest, timeout).await
+                    clone_then_register(service, req.source, req.workspace, job_dest, timeout).await
                 })
                 .await
         };
@@ -679,7 +849,7 @@ impl CommanderService {
     }
 
     /// tmux availability with a short-TTL cache ([`TMUX_OK_CACHE_TTL`]) so a
-    /// per-client `workspace_snapshot` poll doesn't fork `tmux -V` every call.
+    /// per-client `snapshot` poll doesn't fork `tmux -V` every call.
     /// The lock is never held across the probe `.await`; two concurrent stale
     /// callers may both re-probe once (a benign, self-healing race).
     async fn cached_tmux_ok(&self) -> bool {
@@ -720,7 +890,10 @@ impl CommanderService {
             backend.path().to_path_buf()
         };
 
-        let project_id = self.ensure_project(path).await?;
+        // A session on an unregistered repo registers it in Main; a caller that
+        // wants it elsewhere ensures the project with a workspace first (the
+        // CLI's `new -d <path> --workspace`).
+        let project_id = self.ensure_project(path, None).await?;
 
         let session_id = self
             .manager
@@ -1206,7 +1379,14 @@ impl CommanderService {
     /// [`repo_identity`](crate::session::repo_identity), not by the
     /// caller's string — see there for why comparing raw paths silently
     /// duplicates.
-    pub async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
+    ///
+    /// `workspace` tags the project only when this call registers it; an
+    /// existing project keeps its workspace.
+    pub async fn ensure_project(
+        &self,
+        path: PathBuf,
+        workspace: Option<String>,
+    ) -> Result<ProjectId> {
         let identity = crate::session::repo_identity(&path).await;
         let existing = {
             let state = self.store.read().await;
@@ -1218,7 +1398,10 @@ impl CommanderService {
         };
         match existing {
             Some(id) => Ok(id),
-            None => self.manager.add_project(path).await,
+            None => {
+                let tag = self.prepare_new_project_workspace(workspace)?;
+                self.manager.add_project(path, tag).await
+            }
         }
     }
 
@@ -1601,11 +1784,19 @@ impl CommanderService {
     /// `project_pull` reflects the background pull loop's latest per-project
     /// status ([`Self::spawn_background_tasks`]); it is empty until the loop has
     /// run (or when project auto-pull is disabled).
-    pub async fn workspace_snapshot(&self) -> Result<WorkspaceSnapshot> {
+    pub async fn snapshot(&self) -> Result<Snapshot> {
         let gh_available = self.gh_available().await;
         let tmux_ok = self.cached_tmux_ok().await;
         let pending = self.sessions_with_pending_comments().await?;
 
+        let (workspaces, main_workspace, startup_workspace) = {
+            let config = self.config_store.read();
+            (
+                config.workspaces.clone(),
+                config.main_workspace.clone(),
+                config.startup_workspace.clone(),
+            )
+        };
         let (projects, sessions, cascade_paused) = {
             let state = self.store.read().await;
             (
@@ -1618,7 +1809,7 @@ impl CommanderService {
         let mut pending_comment_sessions: Vec<SessionId> = pending.into_iter().collect();
         pending_comment_sessions.sort();
 
-        Ok(WorkspaceSnapshot {
+        Ok(Snapshot {
             projects,
             sessions,
             cascade_paused,
@@ -1634,11 +1825,14 @@ impl CommanderService {
                 tmux_ok,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
+            workspaces,
+            main_workspace,
+            startup_workspace,
         })
     }
 
     /// List projects (sorted by name), for clients that only need the project
-    /// set rather than a full [`Self::workspace_snapshot`].
+    /// set rather than a full [`Self::snapshot`].
     pub async fn list_projects(&self) -> Vec<ProjectInfo> {
         let state = self.store.read().await;
         build_project_info_list(&state)
@@ -2093,7 +2287,7 @@ impl CommanderService {
     /// Every loop drives the same observable surface the frontends read: the
     /// agent loop maintains [`Self::agent_states`]' cache and persists unread
     /// transitions; the PR loop persists results via [`Self::apply_pr_results`];
-    /// the pull loop feeds [`WorkspaceSnapshot::project_pull`]; the sync loop
+    /// the pull loop feeds [`Snapshot::project_pull`]; the sync loop
     /// reloads the state file. Each wakes the [`StateStore`] change-feed on a
     /// real change (either via a persisted mutation or [`StateStore::notify_change`]),
     /// so a subscriber (the TUI's per-backend change-feed task) re-reads the
@@ -2335,7 +2529,7 @@ impl CommanderService {
 
     /// Fast-forward each project's main branch on a fixed cadence, recording the
     /// per-project outcome in [`Self::pull_status`] (surfaced through
-    /// [`WorkspaceSnapshot::project_pull`]) and waking the change-feed when any
+    /// [`Snapshot::project_pull`]) and waking the change-feed when any
     /// project's status changes. No-op loop when disabled or `interval_secs` 0.
     fn spawn_project_pull_loop(
         &self,
@@ -2936,7 +3130,7 @@ pub use claude_commander_protocol::api::{
     DiffStat, NewComment, OperationKind, OperationOutcome, OperationStatus, PrRetarget,
     PreviewData, ProgramInfo, ProjectInfo, PullBlockReason, PullStatus, RenameSession,
     ReviewSnapshot, ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection,
-    SetSessionBase, SetSessionBaseOutcome, ToggleReviewed, WorkspaceSnapshot,
+    SetSessionBase, SetSessionBaseOutcome, Snapshot, ToggleReviewed,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
@@ -2981,7 +3175,7 @@ pub(crate) fn session_info_from_session(
 
 /// Build the [`ProjectInfo`] list from state, sorted by project name (stable
 /// ordering for the tree). Sessions are carried by id only; the full
-/// [`SessionInfo`] list rides alongside in [`WorkspaceSnapshot`].
+/// [`SessionInfo`] list rides alongside in [`Snapshot`].
 fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
     let mut projects: Vec<_> = state.projects.values().collect();
     projects.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2994,6 +3188,7 @@ fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
             main_branch: p.main_branch.clone(),
             session_ids: p.worktrees.clone(),
             origin_url: p.origin_url.clone(),
+            workspace: p.workspace.clone(),
         })
         .collect()
 }
@@ -3027,16 +3222,16 @@ fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<Sessi
     entries.into_iter().map(|(_, info)| info).collect()
 }
 
-/// Build a [`WorkspaceSnapshot`] purely from persisted state, with no live
+/// Build a [`Snapshot`] purely from persisted state, with no live
 /// gh/tmux probing — the I/O-bearing fields ([`ServerStatus`], pending
 /// comments, operations) get cheap placeholders. The full
-/// [`CommanderService::workspace_snapshot`] is the production source of truth
+/// [`CommanderService::snapshot`] is the production source of truth
 /// (the change-feed cache reads it); this synchronous, allocation-only
 /// projection is retained for the tree-builder tests, which feed a
 /// hand-constructed `AppState` through the same DTO builders.
 #[cfg(any(test, feature = "test-support"))]
-pub fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
-    WorkspaceSnapshot {
+pub fn snapshot_from_state(state: &AppState) -> Snapshot {
+    Snapshot {
         projects: build_project_info_list(state),
         sessions: build_session_info_list(state, true),
         cascade_paused: state.cascade_paused_at,
@@ -3048,6 +3243,9 @@ pub fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
             tmux_ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
+        workspaces: Vec::new(),
+        main_workspace: None,
+        startup_workspace: Default::default(),
     }
 }
 
@@ -3165,13 +3363,14 @@ fn occupied_destination(dest: &Path) -> Option<bool> {
 async fn clone_then_register(
     service: CommanderService,
     source: CloneSource,
+    workspace: Option<String>,
     dest: PathBuf,
     timeout: Duration,
 ) -> CloneOutcome {
     let cloned = async {
         run_clone(&source, &dest, timeout).await?;
         let path = dest.clone();
-        run_local(move || async move { service.ensure_project(path).await })
+        run_local(move || async move { service.ensure_project(path, workspace).await })
             .await
             .map_err(|e| match e {
                 RunLocalError::Inner(err) => err,
@@ -3214,9 +3413,11 @@ fn remove_partial_clone(dest: &Path) {
 mod tests {
     use super::*;
     use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::workspace::{StartupWorkspace, WorkspaceDef};
 
     use crate::comment::CommentSide;
-    use crate::git::{PrState, git_command_std};
+    use crate::git::PrState;
+    use crate::git::fixture::{fixture_git, fixture_git_std};
     use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
     use std::path::PathBuf;
 
@@ -3730,7 +3931,7 @@ mod tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = async |args: &[&str]| {
-            git_command()
+            fixture_git()
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -3740,7 +3941,6 @@ mod tests {
         git(&["init", "-q", "-b", "main"]).await;
         git(&["config", "user.email", "t@example.com"]).await;
         git(&["config", "user.name", "T"]).await;
-        git(&["config", "commit.gpgsign", "false"]).await;
         std::fs::write(repo.join("changed.txt"), "one\n").unwrap();
         std::fs::write(repo.join("reverted.txt"), "stable\n").unwrap();
         git(&["add", "."]).await;
@@ -3873,7 +4073,7 @@ mod tests {
         // working-tree-vs-HEAD, in which `changed.txt` no longer appears at all —
         // exactly the false-orphan trap the guard exists for.
         let git = async |args: &[&str]| {
-            git_command()
+            fixture_git()
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -3945,7 +4145,7 @@ mod tests {
 
         // Now degrade: commit the work and point at an unresolvable base, so the
         // composed diff no longer contains `changed.txt` at all.
-        git_command()
+        fixture_git()
             .current_dir(&repo)
             .args(["commit", "-qam", "work"])
             .output()
@@ -4145,12 +4345,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_carries_projects_and_sessions() {
+    async fn snapshot_carries_projects_and_sessions() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (pid, sid) = seed_project_session(&svc).await;
 
-        let snap = svc.workspace_snapshot().await.unwrap();
+        let snap = svc.snapshot().await.unwrap();
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.projects[0].id, pid);
         assert_eq!(snap.projects[0].session_ids, vec![sid]);
@@ -4408,12 +4608,12 @@ mod tests {
         assert!(s.pr_base_branch.is_none());
     }
 
-    /// Run `git` in `dir`, panicking on failure. GPG signing is forced off so
-    /// the repo's `commit.gpgsign` policy can't break isolated tests.
+    /// Run `git` in `dir`, panicking on failure. Signing is forced off by
+    /// [`fixture_git_std`], so the developer's policy can't break isolated tests.
     fn run_git(dir: &Path, args: &[&str]) {
-        let status = git_command_std()
+        let status = fixture_git_std()
             .current_dir(dir)
-            .args(["-c", "commit.gpgsign=false", "-c", "gc.auto=0"])
+            .args(["-c", "gc.auto=0"])
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -4421,6 +4621,368 @@ mod tests {
             .status()
             .expect("spawn git");
         assert!(status.success(), "git {args:?} failed");
+    }
+
+    // -- Workspaces --
+
+    fn one_commit_repo(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let repo = dir.path().join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        repo
+    }
+
+    async fn project_tag(svc: &CommanderService, id: &ProjectId) -> Option<String> {
+        svc.store().read().await.projects[id].workspace.clone()
+    }
+
+    fn def_names(svc: &CommanderService) -> Vec<String> {
+        svc.read_config()
+            .workspaces
+            .into_iter()
+            .map(|d| d.name)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn moving_a_project_tags_it_and_defines_a_missing_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+
+        svc.set_project_workspace(&pid, Some(" Work ".into()))
+            .await
+            .unwrap();
+        assert_eq!(project_tag(&svc, &pid).await.as_deref(), Some("Work"));
+        assert_eq!(
+            def_names(&svc),
+            ["Work"],
+            "the move self-heals the definition"
+        );
+
+        // Moving again neither duplicates the definition nor loses the tag.
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        assert_eq!(def_names(&svc), ["Work"]);
+
+        svc.set_project_workspace(&pid, None).await.unwrap();
+        assert_eq!(project_tag(&svc, &pid).await, None, "None is Main");
+        assert_eq!(def_names(&svc), ["Work"], "leaving a workspace keeps it");
+    }
+
+    #[tokio::test]
+    async fn moving_a_project_refuses_bad_names_and_unknown_projects() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        let err = svc
+            .set_project_workspace(&pid, Some("last".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Session(SessionError::InvalidName { .. })),
+            "{err:?}"
+        );
+        assert!(
+            def_names(&svc).is_empty(),
+            "nothing defined for a refused name"
+        );
+        let err = svc
+            .set_project_workspace(&ProjectId::new(), Some("Work".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Session(SessionError::ProjectNotFound(_))),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_workspace_rewrites_tags_definition_and_startup_pin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: Some(StartupWorkspace::Named("Work".into())),
+        })
+        .unwrap();
+
+        assert!(svc.rename_workspace("Work", "Job").await.unwrap());
+        assert_eq!(project_tag(&svc, &pid).await.as_deref(), Some("Job"));
+        assert_eq!(def_names(&svc), ["Job", "Play"], "order is kept");
+        assert_eq!(
+            svc.read_config().startup_workspace,
+            StartupWorkspace::Named("Job".into())
+        );
+
+        // Idempotent on a host that never had it — eager propagation is safe.
+        assert!(!svc.rename_workspace("Nope", "Other").await.unwrap());
+        assert!(
+            svc.rename_workspace("Job", "Play").await.is_err(),
+            "collision"
+        );
+    }
+
+    /// A tag whose definition was lost (an older binary rewrote config.toml)
+    /// still renames, and the new name gets a definition back.
+    #[tokio::test]
+    async fn rename_workspace_heals_an_orphaned_tag() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.store()
+            .mutate(move |s| s.projects.get_mut(&pid).unwrap().workspace = Some("Lost".into()))
+            .await
+            .unwrap();
+        assert!(svc.rename_workspace("Lost", "Found").await.unwrap());
+        assert_eq!(project_tag(&svc, &pid).await.as_deref(), Some("Found"));
+        assert_eq!(def_names(&svc), ["Found"]);
+    }
+
+    #[tokio::test]
+    async fn delete_workspace_moves_its_projects_to_main() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: None,
+            startup_workspace: Some(StartupWorkspace::Named("Work".into())),
+        })
+        .unwrap();
+
+        assert!(svc.delete_workspace("Work").await.unwrap());
+        assert_eq!(project_tag(&svc, &pid).await, None);
+        assert!(def_names(&svc).is_empty());
+        assert_eq!(svc.read_config().startup_workspace, StartupWorkspace::Main);
+        assert!(!svc.delete_workspace("Work").await.unwrap(), "idempotent");
+    }
+
+    fn seed_workspace_themes(svc: &CommanderService, names: &[&str]) {
+        svc.config_store
+            .mutate(|c| {
+                for (i, name) in names.iter().enumerate() {
+                    c.workspace_themes.insert(
+                        (*name).to_string(),
+                        crate::config::ThemeOverrides {
+                            preset: Some(format!("p{i}")),
+                            ..Default::default()
+                        },
+                    );
+                }
+            })
+            .unwrap();
+    }
+
+    fn theme_keys(svc: &CommanderService) -> Vec<String> {
+        svc.read_config().workspace_themes.into_keys().collect()
+    }
+
+    /// Renaming a workspace carries its local theme to the new name, and Main's
+    /// entry is untouched.
+    #[tokio::test]
+    async fn rename_workspace_moves_its_local_theme() {
+        use crate::config::MAIN_WORKSPACE_THEME_KEY;
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        seed_workspace_themes(&svc, &["Work", MAIN_WORKSPACE_THEME_KEY]);
+        let before = svc.read_config().workspace_themes["Work"].clone();
+
+        assert!(svc.rename_workspace("Work", "Job").await.unwrap());
+        assert_eq!(theme_keys(&svc), ["Job", MAIN_WORKSPACE_THEME_KEY]);
+        assert_eq!(svc.read_config().workspace_themes["Job"], before);
+
+        // A refused rename moves nothing.
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Job"), WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        assert!(svc.rename_workspace("Job", "play").await.is_err());
+        assert_eq!(theme_keys(&svc), ["Job", MAIN_WORKSPACE_THEME_KEY]);
+    }
+
+    /// The theme is local config, so it follows a rename even on a host that
+    /// has neither the definition nor a tagged project — the TUI's local
+    /// service, say, when the workspace lives only on a remote server.
+    #[tokio::test]
+    async fn rename_workspace_moves_a_theme_this_host_has_no_definition_for() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_workspace_themes(&svc, &["Remote"]);
+        svc.rename_workspace("Remote", "Elsewhere").await.unwrap();
+        assert_eq!(theme_keys(&svc), ["Elsewhere"]);
+    }
+
+    /// Deleting a workspace drops its theme; Main's reserved key cannot be
+    /// renamed or deleted through the workspace paths.
+    #[tokio::test]
+    async fn delete_workspace_removes_its_local_theme_but_never_mains() {
+        use crate::config::MAIN_WORKSPACE_THEME_KEY;
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        seed_workspace_themes(&svc, &["Work", "Orphan", MAIN_WORKSPACE_THEME_KEY]);
+
+        assert!(svc.delete_workspace("Work").await.unwrap());
+        assert_eq!(theme_keys(&svc), ["Orphan", MAIN_WORKSPACE_THEME_KEY]);
+        // No definition here, but the local theme still goes.
+        svc.delete_workspace("Orphan").await.unwrap();
+        assert_eq!(theme_keys(&svc), [MAIN_WORKSPACE_THEME_KEY]);
+
+        let _ = svc.delete_workspace(MAIN_WORKSPACE_THEME_KEY).await;
+        let _ = svc
+            .rename_workspace(MAIN_WORKSPACE_THEME_KEY, "Stolen")
+            .await;
+        assert_eq!(theme_keys(&svc), [MAIN_WORKSPACE_THEME_KEY]);
+    }
+
+    #[tokio::test]
+    async fn set_workspace_defs_validates_and_leaves_unset_fields_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: Some(StartupWorkspace::Main),
+        })
+        .unwrap();
+        // A later replace without main/startup keeps both.
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        let c = svc.read_config();
+        assert_eq!(def_names(&svc), ["Play"]);
+        assert_eq!(c.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(c.startup_workspace, StartupWorkspace::Main);
+
+        let err = svc
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("A"), WorkspaceDef::named("a")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidName { .. })
+        ));
+        assert_eq!(def_names(&svc), ["Play"], "a refused list writes nothing");
+    }
+
+    /// `main: None` means "leave Main's label alone", not "there is no Main
+    /// label": a replace from a client that sends no `main` (every create
+    /// and reorder, and any older client) must still be refused
+    /// when a name clashes with the label this server stores.
+    #[tokio::test]
+    async fn set_workspace_defs_checks_names_against_the_stored_main_label() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: None,
+        })
+        .unwrap();
+        let err = svc
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("home")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidName { .. })
+        ));
+        assert!(def_names(&svc).is_empty(), "a refused list writes nothing");
+        assert_eq!(
+            svc.read_config().main_workspace,
+            Some(WorkspaceDef::named("Home"))
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_carries_workspace_config_and_project_tags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: Some(StartupWorkspace::Named("Work".into())),
+        })
+        .unwrap();
+        let snap = svc.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(snap.workspaces, vec![WorkspaceDef::named("Work")]);
+        assert_eq!(snap.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(
+            snap.startup_workspace,
+            StartupWorkspace::Named("Work".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_project_lands_in_the_requested_workspace_but_ensure_never_retags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let repo = one_commit_repo(&dir, "repo");
+        let id = svc
+            .ensure_project(repo.clone(), Some("Work".into()))
+            .await
+            .unwrap();
+        assert_eq!(project_tag(&svc, &id).await.as_deref(), Some("Work"));
+        assert_eq!(def_names(&svc), ["Work"]);
+
+        let again = svc
+            .ensure_project(repo.clone(), Some("Play".into()))
+            .await
+            .unwrap();
+        assert_eq!(again, id);
+        assert_eq!(project_tag(&svc, &id).await.as_deref(), Some("Work"));
+        assert_eq!(def_names(&svc), ["Work"], "no definition for an unused tag");
+
+        let other = one_commit_repo(&dir, "other");
+        let added = svc.add_project(other, None).await.unwrap();
+        assert_eq!(project_tag(&svc, &added).await, None);
+        assert!(
+            svc.add_project(one_commit_repo(&dir, "bad"), Some("main".into()))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -4654,7 +5216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_reports_paused_cascade() {
+    async fn snapshot_reports_paused_cascade() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (_pid, sid) = seed_project_session(&svc).await;
@@ -4662,7 +5224,7 @@ mod tests {
             .mutate(move |state| state.cascade_paused_at = Some(sid))
             .await
             .unwrap();
-        let snap = svc.workspace_snapshot().await.unwrap();
+        let snap = svc.snapshot().await.unwrap();
         assert_eq!(snap.cascade_paused, Some(sid));
     }
 
@@ -5356,20 +5918,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_surfaces_project_pull_cache() {
+    async fn snapshot_surfaces_project_pull_cache() {
         use crate::api::{PullBlockReason, PullStatus};
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (pid, _sid) = seed_project_session(&svc).await;
         // The pull loop maintains this cache; inject an outcome directly to prove
-        // `workspace_snapshot` surfaces it in `project_pull`.
+        // `snapshot` surfaces it in `project_pull`.
         svc.pull_status.lock().unwrap().insert(
             pid,
             PullStatus::Blocked {
                 reason: PullBlockReason::Dirty,
             },
         );
-        let snap = svc.workspace_snapshot().await.unwrap();
+        let snap = svc.snapshot().await.unwrap();
         assert_eq!(
             snap.project_pull.get(&pid),
             Some(&PullStatus::Blocked {
@@ -5499,6 +6061,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&remote),
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5535,6 +6098,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&remote),
                 dest_name: Some("renamed".to_string()),
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5573,6 +6137,7 @@ mod tests {
                 .start_clone(CloneRequest {
                     source: url_source(&remote),
                     dest_name: Some(name.to_string()),
+                    workspace: None,
                 })
                 .await
                 .unwrap()
@@ -5608,6 +6173,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&dir.path().join("does-not-exist")),
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5648,6 +6214,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&remote),
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5689,6 +6256,7 @@ mod tests {
                 svc.start_clone(CloneRequest {
                     source: source.clone(),
                     dest_name: None,
+                    workspace: None,
                 })
                 .await
                 .is_err(),
@@ -5714,6 +6282,7 @@ mod tests {
                 svc.start_clone(CloneRequest {
                     source: url_source(&remote),
                     dest_name: Some(name.to_string()),
+                    workspace: None,
                 })
                 .await
                 .is_err(),
@@ -5743,6 +6312,7 @@ mod tests {
                     full_name: format!("https://sizeak:{SECRET}@github.com/o/r"),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap_err();
@@ -5763,6 +6333,7 @@ mod tests {
                     url: format!("file://sizeak:{SECRET}@{}", missing.display()),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()
@@ -5797,6 +6368,72 @@ mod tests {
         assert!(svc.clone_job(CloneJobId::new()).await.is_none());
     }
 
+    /// A directory scan registers what it finds into the caller's workspace,
+    /// the same way a single add does — so a scan run from the TUI and one run
+    /// from the Flutter app (through `POST /projects/scan`) land alike. A
+    /// refused name is refused before anything is registered.
+    #[tokio::test]
+    async fn scan_directory_tags_new_projects_with_the_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let root = dir.path().join("repos");
+        let repo = root.join("one");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("README"), "v1\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+
+        let err = svc
+            .scan_directory(&root, Some("last".into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidName { .. })
+        ));
+        assert!(svc.list_projects().await.is_empty(), "nothing registered");
+
+        let result = svc
+            .scan_directory(&root, Some("Work".into()))
+            .await
+            .unwrap();
+        assert_eq!(result.added, 1);
+        let projects = svc.list_projects().await;
+        assert_eq!(projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(def_names(&svc), ["Work"], "the workspace is defined");
+    }
+
+    /// A clone's `workspace` is checked before anything is cloned: a refused
+    /// name would otherwise only surface after the whole checkout, which
+    /// `clone_then_register` then deletes.
+    #[tokio::test]
+    async fn start_clone_refuses_a_bad_workspace_before_cloning() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+        for bad in ["main", &"x".repeat(41)] {
+            let err = svc
+                .start_clone(CloneRequest {
+                    source: url_source(&remote),
+                    dest_name: None,
+                    workspace: Some(bad.to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, crate::Error::Session(SessionError::InvalidName { .. })),
+                "{bad}: {err:?}"
+            );
+        }
+        assert!(
+            !svc.read_config().projects_dir().unwrap().exists(),
+            "nothing was cloned"
+        );
+    }
+
     /// The projects directory is created on demand: `Config::projects_dir` only
     /// *resolves* a path (matching `worktrees_dir`), so a first clone on a fresh
     /// machine has nowhere to land unless `start_clone` creates it.
@@ -5815,6 +6452,7 @@ mod tests {
             .start_clone(CloneRequest {
                 source: url_source(&remote),
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap()

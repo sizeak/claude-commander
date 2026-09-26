@@ -434,6 +434,58 @@ case "$lane_out" in
 esac
 assert_eq "yes" "$tail_shown" "a failing lane prints its log tail"
 
+echo "== cc_poisoned_gitconfig =="
+# The guard only guards if the poison really does make signing fail, and if the
+# two opt-outs the fixtures use really do beat it.
+git_tmp="$(mktemp -d)"
+cc_poisoned_gitconfig >"$git_tmp/gitconfig"
+poisoned_git() {
+  GIT_CONFIG_GLOBAL="$git_tmp/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git -C "$git_tmp/repo" "$@"
+}
+git init -q "$git_tmp/repo"
+assert_fails "a commit under the poison fails instead of signing" \
+  poisoned_git commit -q --allow-empty -m c
+assert_fails "an annotated tag under the poison fails instead of signing" \
+  poisoned_git tag -a -m t v0
+cli_rc=0
+poisoned_git -c commit.gpgsign=false -c tag.gpgsign=false commit -q --allow-empty -m c \
+  >/dev/null 2>&1 || cli_rc=$?
+assert_eq "0" "$cli_rc" "-c commit.gpgsign=false beats the poison"
+poisoned_git config commit.gpgsign false
+poisoned_git config tag.gpgsign false
+local_rc=0
+{ poisoned_git commit -q --allow-empty -m c && poisoned_git tag -a -m t v1; } \
+  >/dev/null 2>&1 || local_rc=$?
+assert_eq "0" "$local_rc" "repo-local commit/tag.gpgsign=false beats the poison"
+export_rc=0
+(
+  cc_export_poisoned_git_signing "$git_tmp/exported/gitconfig"
+  [ "$GIT_CONFIG_GLOBAL" = "$git_tmp/exported/gitconfig" ] &&
+    cmp -s "$GIT_CONFIG_GLOBAL" "$git_tmp/gitconfig"
+) || export_rc=$?
+assert_eq "0" "$export_rc" "cc_export_poisoned_git_signing writes the file and exports it"
+rm -rf "$git_tmp"
+
+echo "== cc_tree_leaks_test_support =="
+# Trimmed real `cargo tree` output: the clean shape (as on 26034ee^) and the
+# leak 26034ee introduced through claude-commander-test-support's [dependencies].
+clean_tree='claude-commander-core v0.36.0 (/r/crates/claude-commander-core)
+└── claude-commander-test-support v0.36.0 (/r/crates/claude-commander-test-support) (*)
+├── claude-commander-core feature "audio"
+│   └── claude-commander-core feature "default" (command-line)
+└── claude-commander-core feature "default" (command-line) (*)'
+leaky_tree="$clean_tree
+└── claude-commander-core feature \"test-support\"
+    └── claude-commander-test-support v0.36.0 (/r/crates/claude-commander-test-support) (*)"
+assert_fails "a normal-edge-clean tree is not a leak" cc_tree_leaks_test_support <<<"$clean_tree"
+leak_rc=0
+cc_tree_leaks_test_support <<<"$leaky_tree" || leak_rc=$?
+assert_eq "0" "$leak_rc" "a tree enabling core's test-support is a leak"
+assert_eq "cargo tree --offline --workspace -e normal,build,features -i claude-commander-core" \
+  "$CC_CORE_FEATURE_TREE_CMD" "the guard inspects normal+build edges only, offline"
+
 echo
 printf '%s passed, %s failed\n' "$pass_count" "$fail_count"
 [ "$fail_count" -eq 0 ] || exit 1

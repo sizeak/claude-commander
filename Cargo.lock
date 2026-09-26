@@ -802,6 +802,7 @@ dependencies = [
  "arboard",
  "async-trait",
  "chrono",
+ "claude-commander-core",
  "claude-commander-protocol",
  "claude-commander-viewmodel",
  "cpal",
@@ -938,7 +939,9 @@ dependencies = [
 name = "claude-commander-viewmodel"
 version = "0.36.0"
 dependencies = [
+ "claude-commander-protocol",
  "fuzzy-matcher",
+ "serde_json",
 ]
 
 [[package]]

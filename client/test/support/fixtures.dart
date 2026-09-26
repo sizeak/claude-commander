@@ -83,6 +83,9 @@ ProjectInfoDto projectInfo({
   /// local path with no remote — because that is the shape the repo picker's
   /// "already added" badge must NOT treat as a match against anything.
   String? originUrl,
+
+  /// The workspace the project is tagged with; null (the default) is Main.
+  String? workspace,
 }) => ProjectInfoDto(
   id: ProjectId(field0: UuidValue.fromString(id)),
   name: name,
@@ -90,6 +93,7 @@ ProjectInfoDto projectInfo({
   mainBranch: mainBranch,
   sessionIds: const [],
   originUrl: originUrl,
+  workspace: workspace,
 );
 
 /// A clone job as a frontend polls it. Defaults to `Running`, the status

@@ -11,6 +11,7 @@ pub mod lookup;
 mod manager;
 pub mod section;
 mod types;
+pub mod workspace;
 
 pub use board::{
     Board, BoardBackendInput, BoardCard, BoardColumn, BoardPos, BoardProjectEntry, BoardServer,

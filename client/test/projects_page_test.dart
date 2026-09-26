@@ -23,7 +23,7 @@ void main() {
 
   Widget wrap() => MaterialApp(home: ProjectsPage(store: store));
 
-  /// Connect the store (so the page has a live handle + workspace), then pump.
+  /// Connect the store (so the page has a live handle + snapshot), then pump.
   Future<void> pump(WidgetTester tester) async {
     await store.connect();
     await tester.pumpWidget(wrap());
@@ -82,7 +82,7 @@ void main() {
     tester,
   ) async {
     await pump(tester);
-    final refreshesBefore = api.countOf('workspaceSnapshot');
+    final refreshesBefore = api.countOf('snapshot');
 
     await chooseAddSource(tester, 'Add existing path');
     await enterPathAndConfirm(tester, '/srv/repos/new');
@@ -90,7 +90,7 @@ void main() {
     expect(api.countOf('addProject'), 1);
     expect(api.lastCall('addProject')!.args['path'], '/srv/repos/new');
     // A refresh follows the add so the new project shows without a manual pull.
-    expect(api.countOf('workspaceSnapshot'), greaterThan(refreshesBefore));
+    expect(api.countOf('snapshot'), greaterThan(refreshesBefore));
   });
 
   testWidgets('scanning a directory calls scanDirectory and reports counts', (
@@ -105,6 +105,21 @@ void main() {
     expect(api.countOf('scanDirectory'), 1);
     expect(api.lastCall('scanDirectory')!.args['path'], '/srv/repos');
     expect(find.textContaining('Added 2, skipped 1'), findsOneWidget);
+  });
+
+  testWidgets('a scan lands its repos in the active workspace', (tester) async {
+    await store.connect();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ProjectsPage(store: store, workspace: 'Work'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await chooseAddSource(tester, 'Scan directory');
+    await enterPathAndConfirm(tester, '/srv/repos');
+
+    expect(api.lastCall('scanDirectory')!.args['workspace'], 'Work');
   });
 
   testWidgets('Clone from GitHub pushes the repo picker', (tester) async {

@@ -20,11 +20,12 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    SetSessionBaseOutcome, WorkspaceSnapshot,
+    SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 use super::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
@@ -88,7 +89,7 @@ impl CommanderBackend for PlaceholderBackend {
         BackendChangeFeed::new(self.gen_rx.clone())
     }
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
+    async fn snapshot(&self) -> BResult<Snapshot> {
         self.unavailable()
     }
 
@@ -184,11 +185,39 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
-    async fn add_project(&self, _path: std::path::PathBuf) -> BResult<ProjectId> {
+    async fn add_project(
+        &self,
+        _path: std::path::PathBuf,
+        _workspace: Option<String>,
+    ) -> BResult<ProjectId> {
         self.unavailable()
     }
 
-    async fn ensure_project(&self, _path: std::path::PathBuf) -> BResult<ProjectId> {
+    async fn ensure_project(
+        &self,
+        _path: std::path::PathBuf,
+        _workspace: Option<String>,
+    ) -> BResult<ProjectId> {
+        self.unavailable()
+    }
+
+    async fn set_workspaces(&self, _req: SetWorkspacesRequest) -> BResult<()> {
+        self.unavailable()
+    }
+
+    async fn rename_workspace(&self, _from: String, _to: String) -> BResult<()> {
+        self.unavailable()
+    }
+
+    async fn delete_workspace(&self, _name: String) -> BResult<()> {
+        self.unavailable()
+    }
+
+    async fn set_project_workspace(
+        &self,
+        _id: ProjectId,
+        _workspace: Option<String>,
+    ) -> BResult<()> {
         self.unavailable()
     }
 
@@ -196,7 +225,11 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
-    async fn scan_directory(&self, _dir: std::path::PathBuf) -> BResult<ScanResult> {
+    async fn scan_directory(
+        &self,
+        _dir: std::path::PathBuf,
+        _workspace: Option<String>,
+    ) -> BResult<ScanResult> {
         self.unavailable()
     }
 
@@ -292,7 +325,7 @@ mod tests {
         let b = PlaceholderBackend::new("buildbox", "invalid url");
         assert_eq!(b.descriptor().name, "buildbox");
         assert_eq!(b.descriptor().kind, BackendKind::Remote);
-        let err = b.workspace_snapshot().await.unwrap_err();
+        let err = b.snapshot().await.unwrap_err();
         match err {
             BackendError::Unavailable { reason } => assert_eq!(reason, "invalid url"),
             other => panic!("expected Unavailable, got {other:?}"),
@@ -318,6 +351,7 @@ mod tests {
                     full_name: "octo/widget".to_string(),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap_err(),

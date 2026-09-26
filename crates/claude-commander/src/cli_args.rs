@@ -63,6 +63,11 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Only list sessions in this workspace (by name, case-insensitive;
+        /// `main` or Main's label for the built-in workspace).
+        #[arg(short = 'w', long)]
+        workspace: Option<String>,
     },
 
     /// Show detailed status of a session
@@ -162,6 +167,12 @@ pub enum Commands {
         /// new one (the path is resolved on the server, not this machine).
         #[arg(long)]
         remote: Option<String>,
+
+        /// Workspace for the project when `--path` registers a new one (an
+        /// existing project keeps its workspace). An unknown name creates the
+        /// workspace; `main` is the built-in one.
+        #[arg(short = 'w', long, requires = "path")]
+        workspace: Option<String>,
     },
 
     /// Attach to an existing session

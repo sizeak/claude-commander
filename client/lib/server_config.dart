@@ -5,7 +5,7 @@ import 'package:uuid/uuid.dart';
 
 /// One server the client talks to: a stable [id], a display [name] (shown as the
 /// group header in the aggregated session list), the [baseUrl], and the bearer
-/// [token]. The app keeps N of these connected at once (see `WorkspaceStore`).
+/// [token]. The app keeps N of these connected at once (see `FleetStore`).
 class ServerConfig {
   /// Stable identity, minted once when the server is first added. Survives
   /// URL/token/name edits so the live connection can be reconciled in place.

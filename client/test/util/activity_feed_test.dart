@@ -39,6 +39,23 @@ String id(int n) =>
     '${n.toString().padLeft(8, '0')}-2222-3333-4444-555555555555';
 
 void main() {
+  test(
+    'where narrows the contributing sessions (the workspace scope)',
+    () async {
+      final keep = sessionInfo(id: id(1), title: 'In scope');
+      final drop = sessionInfo(id: id(2), title: 'Elsewhere');
+      final store = await connectedStore(
+        [keep, drop],
+        states: {
+          id(1): AgentState.waitingForInput,
+          id(2): AgentState.waitingForInput,
+        },
+      );
+      final feed = buildActivityFeed([store], where: (_, s) => s.id == keep.id);
+      expect(feed.map((e) => e.sessionId).toSet(), {keep.id});
+    },
+  );
+
   test('empty stores yield an empty feed', () async {
     expect(buildActivityFeed(const []), isEmpty);
     final store = await connectedStore(const []);

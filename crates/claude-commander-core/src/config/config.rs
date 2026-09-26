@@ -17,6 +17,16 @@ use crate::config::migrations;
 use crate::config::theme::ThemeOverrides;
 use crate::error::{ConfigError, Error, Result};
 
+/// The `[workspace_themes]` key that holds the built-in Main workspace's theme.
+///
+/// Main has no name (it is the untagged workspace, and its display label is
+/// renameable), so its theme needs a fixed key that no user workspace can
+/// take. `"main"` is one of the protocol's
+/// [`RESERVED_WORKSPACE_NAMES`](claude_commander_protocol::workspace::RESERVED_WORKSPACE_NAMES),
+/// which `validate_workspace_name` refuses case-insensitively, and it is the
+/// spelling `startup_workspace = "main"` already uses for Main.
+pub const MAIN_WORKSPACE_THEME_KEY: &str = "main";
+
 /// A selectable agent harness in the new-session program picker: a display
 /// `label` paired with the `command` to launch (program plus any flags).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +341,35 @@ pub struct Config {
     #[serde(default)]
     pub sections: Vec<crate::session::SectionConfig>,
 
+    /// User-defined workspaces (`[[workspaces]]`: `name`), in display order. A workspace is a label on a project; the
+    /// built-in Main workspace (untagged projects) is never listed here. Edited
+    /// through `CommanderService::set_workspace_defs` / `rename_workspace` /
+    /// `delete_workspace` — the latter two also rewrite project tags, which a
+    /// plain config write cannot.
+    #[serde(default)]
+    pub workspaces: Vec<claude_commander_protocol::workspace::WorkspaceDef>,
+
+    /// Display label for the built-in Main workspace (`[main_workspace]`).
+    /// Unset shows "Main".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_workspace: Option<claude_commander_protocol::workspace::WorkspaceDef>,
+
+    /// Which workspace a frontend opens on: `"last"` (default — whichever that
+    /// client last had active), `"main"`, or a workspace name. A pinned name
+    /// that no longer exists falls back to Main.
+    #[serde(default)]
+    pub startup_workspace: claude_commander_protocol::workspace::StartupWorkspace,
+
+    /// Per-workspace TUI themes (`[workspace_themes."<name>"]`), keyed by
+    /// workspace name, with Main under [`MAIN_WORKSPACE_THEME_KEY`]. Each entry
+    /// is a `ThemeOverrides` read against `[theme]`: an entry without `preset`
+    /// layers its overrides over the usual theme; one with `preset` starts from
+    /// that preset. Local only: not on the wire and not in the server's config
+    /// patch. `CommanderService::rename_workspace` / `delete_workspace` move or
+    /// drop the entry.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub workspace_themes: std::collections::BTreeMap<String, ThemeOverrides>,
+
     /// Advisory WIP limit for the implicit "In Progress" catch-all section.
     /// When set, the section header shows `count/n`, rendering in the warning
     /// colour when `count == n` and the error colour when `count > n`. Purely
@@ -615,6 +654,10 @@ impl Default for Config {
             rounded_borders: false,
             precompute_review_caches: true,
             sections: Vec::new(),
+            workspaces: Vec::new(),
+            main_workspace: None,
+            workspace_themes: std::collections::BTreeMap::new(),
+            startup_workspace: Default::default(),
             in_progress_limit: None,
             recent_sessions_limit: default_recent_sessions_limit(),
             commander_enabled: false,

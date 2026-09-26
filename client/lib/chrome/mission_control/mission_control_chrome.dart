@@ -8,6 +8,7 @@ import '../../widgets/brand_mark.dart';
 import '../chrome.dart';
 import '../chrome_forms.dart';
 import '../chrome_wide.dart';
+import '../title_menu.dart';
 
 /// The default chrome: a Material `Scaffold` with an `AppBar`, app-bar actions,
 /// and a docked `FloatingActionButton` for the primary action.
@@ -884,8 +885,10 @@ class MissionControlChrome extends Chrome {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  spec.title,
+                chromeMenuTitle(
+                  context,
+                  title: spec.title,
+                  menu: spec.titleMenu,
                   style: branded
                       ? TextStyle(
                           fontSize: 23,

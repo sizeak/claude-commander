@@ -8,6 +8,7 @@ import '../../util/viewport.dart';
 import '../chrome.dart';
 import '../chrome_forms.dart';
 import '../chrome_wide.dart';
+import '../title_menu.dart';
 import 'bleed.dart';
 import 'elbow.dart';
 
@@ -1115,10 +1116,11 @@ class LcarsChrome extends Chrome {
         const SizedBox(height: 7),
         MediaQuery.withClampedTextScaling(
           maxScaleFactor: 1.5,
-          child: Text(
-            spec.title.toUpperCase(),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+          child: chromeMenuTitle(
+            context,
+            title: spec.title,
+            menu: spec.titleMenu,
+            upper: true,
             style: t.display(size: 22),
           ),
         ),

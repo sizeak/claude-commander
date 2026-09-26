@@ -48,7 +48,7 @@ void main() {
       ChromeWideSpec(
         style: style,
         fleetList: const SizedBox.expand(),
-        workspace: const SizedBox.expand(),
+        detail: const SizedBox.expand(),
         modes: [
           ChromeNavItem(
             label: 'Fleet',
@@ -97,7 +97,7 @@ void main() {
       await tester.pumpWidget(wide(ChromeViewRailStyle.branded));
       await tester.pumpAndSettle();
 
-      // The nav column's identifier block, then the fleet and workspace caps.
+      // The nav column's identifier block, then the fleet and detail caps.
       expect(firstBlockColour(tester), lcarsTokens.primary);
       expect(capColour(tester, 0), lcarsTokens.primary);
       expect(capColour(tester, 1), lcarsTokens.primary);

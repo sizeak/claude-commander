@@ -141,6 +141,34 @@ for anything without a matching PR), **In Review** (open PR), and **Merged**
 to move a card to another column. Empty columns are hidden by default
 (`hide_empty_sections`), so a board shows only sections that have work.
 
+### Workspaces
+
+A **workspace** is a named group of projects — say *Work* and *Personal* — so
+the list, the board (and its project sidebar), the Recent block and the status
+counts show one group at a time. It is only a label on each project: every
+workspace shares the same sessions, server and background refresh, and
+switching is instant. Projects start in the built-in **Main** workspace, and
+none of the workspace UI appears until you create a second one.
+
+`w` cycles workspaces and `W` opens a picker (type a name that doesn't exist to
+create it). Each workspace can have its own theme, and switching re-themes the
+whole TUI. The status bar then shows the active workspace as a chip in its
+theme's accent, followed by a `Personal ●2` hint (in that workspace's accent)
+for any other workspace with sessions waiting for input; the board header and an attached session's tmux status line name it
+too. The palette and the in-session `Ctrl-Space` switcher still search **every**
+workspace: the active one's sessions rank first, the rest are tagged with their
+workspace, and picking one switches workspace before jumping. New projects,
+clones and scans land in the active workspace. **Settings → Workspaces** creates
+(`n`), renames (`r`), deletes (`d`, which moves its projects back to Main) and
+reorders (`J`/`K`) them, moves projects between them (`m`), and chooses which
+workspace opens at startup (`s`); `Enter` on a workspace's **Theme** row opens
+**Settings → Theme** scoped to it, where you pick a preset or recolour any role
+from the theme's swatches or a typed or pasted hex, and **Reset to usual theme**
+drops it again. With remote servers,
+workspaces merge by name and every change is sent to each server. See
+[Workspaces](docs/configuration.md#workspaces) and
+[Workspace themes](docs/configuration.md#workspace-themes).
+
 ### Status Symbols
 
 Each session displays a status indicator to the left of its name:
@@ -212,6 +240,9 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |
 | `Esc` | Clear the active project filter (set by selecting a project in the sidebar) |
+| `w` | Next [workspace](#workspaces) (wraps around; with only one workspace it says so and does nothing) |
+| `W` | Workspace picker — switch workspace, or type a new name to create one |
+| palette only | Previous workspace, New workspace…, and Move project to workspace… (moves the selected project; unbound by default) |
 | `i` | Show session info in a modal — metadata, diffstat, PR details, stack chain, `g` for AI summary. Same content as the right pane's Info tab, and the only way to reach it from the board |
 | `n` | New worktree session |
 | `t` | New session stacked on top of the selected session's stack |

@@ -202,6 +202,15 @@ fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> 
             state.paste_into_draft(text);
             None
         }
+        // Settings → Theme: a paste over a colour picker is a hex colour,
+        // wherever the picker's focus is.
+        Modal::Settings(SettingsState {
+            editing: Some(super::SettingsEditing::Colour { picker }),
+            ..
+        }) => {
+            picker.paste(&clean);
+            None
+        }
         _ => None,
     }
 }
@@ -578,8 +587,18 @@ impl App {
                     }
                 }
             }
-            InputEvent::Resize(_, _) => {
-                // Terminal will re-render automatically
+            InputEvent::Resize(width, height) => {
+                // The terminal re-renders on its own, but an open colour
+                // picker's row width must follow now: a key queued behind the
+                // resize would otherwise step by the old one.
+                let area = Rect::new(0, 0, width, height);
+                if let Modal::Settings(SettingsState {
+                    editing: Some(super::SettingsEditing::Colour { picker }),
+                    ..
+                }) = &mut self.ui_state.modal
+                {
+                    picker.fit_to_width(super::settings::colour_picker_width(area));
+                }
             }
             InputEvent::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -1344,7 +1363,7 @@ impl App {
         // Clone the selected item so the borrow on `matches` is released
         // before we mutate `modal` and dispatch. `unmatched` carries the typed
         // query for the one mode that can act without a highlighted row.
-        let (selected, unmatched) = match &self.ui_state.modal {
+        let (mode, selected, unmatched) = match &self.ui_state.modal {
             Modal::QuickSwitch {
                 mode,
                 query,
@@ -1352,13 +1371,20 @@ impl App {
                 selected_idx,
                 ..
             } => (
+                *mode,
                 matches.get(*selected_idx).cloned(),
                 // The repo picker's "clone something not in the list" path: with
                 // no row matching, the query itself is the clone source. Mirrors
                 // the checkout modal, where an unmatched query is used as-is.
-                (*mode == PaletteMode::GithubRepoPicker)
-                    .then(|| query.value().trim().to_string())
-                    .filter(|q| !q.is_empty()),
+                // The workspace pickers use it the same way, as a new name.
+                matches!(
+                    mode,
+                    PaletteMode::GithubRepoPicker
+                        | PaletteMode::WorkspacePicker
+                        | PaletteMode::MoveProjectPicker { .. }
+                )
+                .then(|| query.value().trim().to_string())
+                .filter(|q| !q.is_empty()),
             ),
             _ => return,
         };
@@ -1366,6 +1392,11 @@ impl App {
             Some(QuickSwitchItem::Session(m)) => {
                 let session_id = m.session_id;
                 self.ui_state.modal = Modal::None;
+                // The palette spans every workspace; a pick from another one
+                // switches there first so the jump lands on a visible row.
+                if m.other_workspace.is_some() {
+                    self.switch_workspace(m.workspace.clone(), false).await;
+                }
                 // The target may be hidden by an active project filter (the
                 // palette lists every session regardless of the filter). Clear
                 // it and rebuild so the jump always lands — quick-switch is the
@@ -1443,6 +1474,16 @@ impl App {
                     on_confirm: ConfirmAction::SetSessionBase { session_id, target },
                 };
             }
+            Some(QuickSwitchItem::Workspace { name, .. }) => {
+                self.ui_state.modal = Modal::None;
+                self.switch_workspace(name, true).await;
+            }
+            Some(QuickSwitchItem::ProjectWorkspace {
+                project_id, target, ..
+            }) => {
+                self.ui_state.modal = Modal::None;
+                self.move_project_to_workspace(project_id, target).await;
+            }
             Some(QuickSwitchItem::ProgramChange {
                 session_id,
                 program,
@@ -1462,11 +1503,25 @@ impl App {
             // No row is highlighted. Only the repo picker can still act: the
             // typed text is a clone URL (validated in `open_clone_url_prompt`,
             // which leaves the picker open and says why if it's refused).
-            None => {
-                if let Some(typed) = unmatched {
+            None => match (mode, unmatched) {
+                (PaletteMode::GithubRepoPicker, Some(typed)) => {
                     self.open_clone_url_prompt(&typed);
                 }
-            }
+                // A name no workspace matches: create it, then act on it.
+                (PaletteMode::WorkspacePicker, Some(typed)) => {
+                    self.ui_state.modal = Modal::None;
+                    if let Some(name) = self.create_workspace(&typed).await {
+                        self.switch_workspace(Some(name), true).await;
+                    }
+                }
+                (PaletteMode::MoveProjectPicker { project_id }, Some(typed)) => {
+                    self.ui_state.modal = Modal::None;
+                    if let Some(name) = self.create_workspace(&typed).await {
+                        self.move_project_to_workspace(project_id, Some(name)).await;
+                    }
+                }
+                _ => {}
+            },
         }
     }
 
@@ -1688,6 +1743,21 @@ impl App {
             UserCommand::ToggleSection => {
                 self.handle_toggle_section().await;
             }
+            UserCommand::NextWorkspace => {
+                self.handle_cycle_workspace(true).await;
+            }
+            UserCommand::PreviousWorkspace => {
+                self.handle_cycle_workspace(false).await;
+            }
+            UserCommand::WorkspacePicker => {
+                self.open_workspace_picker().await;
+            }
+            UserCommand::NewWorkspace => {
+                self.handle_new_workspace();
+            }
+            UserCommand::MoveProjectToWorkspace => {
+                self.handle_move_project_to_workspace().await;
+            }
             UserCommand::RestartSession => {
                 self.handle_restart_session();
             }
@@ -1772,7 +1842,9 @@ impl App {
                     editing: None,
                     rows,
                     sections_state: SectionsState::default(),
+                    workspaces_state: WorkspacesState::default(),
                     programs_state: ProgramsState::default(),
+                    theme_scope: self.default_theme_scope(),
                     search: None,
                 });
             }

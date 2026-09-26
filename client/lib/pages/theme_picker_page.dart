@@ -2,38 +2,107 @@ import 'package:flutter/material.dart';
 
 import '../chrome/chrome.dart';
 import '../chrome/chrome_forms.dart';
+import '../state/commander_store_scope.dart';
+import '../state/fleet_store.dart';
 import '../theme/theme_controller.dart';
+import '../theme/theme_prefs.dart';
 import '../theme/tokens.dart';
+import '../util/colour_hex.dart';
+import '../widgets/colour_dialog.dart';
 
 /// The height of a theme's live preview. Big enough to read as a miniature
 /// screen, small enough that every theme fits on one phone screen without
 /// scrolling past the first card.
 const double _previewHeight = 88;
 
+/// The picker's scope selector, for tests.
+const themeScopeSelectorKey = ValueKey('theme-scope-selector');
+
+/// The usual-theme segment's label.
+const usualScopeLabel = 'Usual (all workspaces)';
+
+/// The marker on the preset card a workspace inherits from the usual theme,
+/// in place of the check a preset the workspace picked itself carries.
+const inheritedPresetLabel = 'USUAL';
+
+/// The workspace scope's "stop pinning a preset" control, for tests.
+const inheritUsualPresetKey = ValueKey('theme-inherit-usual-preset');
+
+/// The inherited preset card's "pin it for this workspace" control, for tests.
+const pinInheritedPresetKey = ValueKey('theme-pin-inherited-preset');
+
+/// The key of [role]'s colour row.
+Key themeRoleRowKey(ThemeRole role) => ValueKey('theme-role:${role.wire}');
+
+/// Which theme the picker edits: the usual theme, or one workspace's (by its
+/// `workspaceThemeKey`).
+@immutable
+class ThemeEditScope {
+  /// Null for the usual theme.
+  final String? workspaceKey;
+
+  const ThemeEditScope.usual() : workspaceKey = null;
+  const ThemeEditScope.workspace(String key) : workspaceKey = key;
+}
+
 /// Pick the app's theme. One card per [ThemeId], each carrying a live preview
-/// painted in that theme's own colours, and tapping one applies it immediately
-/// — the whole app rethemes underneath while this page stays open showing the
-/// new selection.
+/// painted in that theme's own colours, then one row per overridable colour
+/// role, each opening the colour dialog. Changes apply immediately — the whole
+/// app rethemes underneath while this page stays open.
 ///
-/// The selection is a device preference, not server state: [ThemeController]
+/// With two or more workspaces a scope selector heads the page: the theme for
+/// one workspace (the active one by default, or [initialScope]) or the usual
+/// theme every workspace without its own inherits. The inheritance rules are
+/// [resolveTheme]'s. With only Main there is nothing to scope to and the page
+/// edits the usual theme, as it always did.
+///
+/// Everything here is a device preference, not server state: [ThemeController]
 /// persists it to the device's own preference store, and it never travels to a
 /// server.
-class ThemePickerPage extends StatelessWidget {
-  const ThemePickerPage({super.key});
+class ThemePickerPage extends StatefulWidget {
+  /// The scope to open on. Null opens on the active workspace (or the usual
+  /// theme when there is only Main).
+  final ThemeEditScope? initialScope;
+
+  const ThemePickerPage({super.key, this.initialScope});
+
+  @override
+  State<ThemePickerPage> createState() => _ThemePickerPageState();
+}
+
+class _ThemePickerPageState extends State<ThemePickerPage> {
+  /// Whether the user switched to the usual segment. The workspace segment is
+  /// always the one this page opened for, so switching back needs no key.
+  bool? _usual;
 
   @override
   Widget build(BuildContext context) {
     final controller = ThemeScope.of(context)!;
+    final fleet = FleetScope.of(context);
     return ChromePage(
       title: 'Theme',
       code: '47-Y',
       // Rebuild on selection so the check mark and accents move even though the
       // app above also rebuilds — this page must not depend on who is listening
-      // higher up.
+      // higher up. The fleet too, for the workspace labels.
       body: ListenableBuilder(
-        listenable: controller,
+        listenable: Listenable.merge([controller, ?fleet]),
         builder: (context, _) {
           final t = CommanderTokens.of(context);
+          // The workspace this page can scope to, if any.
+          final String? workspaceKey =
+              widget.initialScope?.workspaceKey ??
+              (fleet != null && fleet.workspacesVisible
+                  ? workspaceThemeKey(fleet.activeWorkspace)
+                  : null);
+          final openedOnUsual =
+              widget.initialScope != null &&
+              widget.initialScope!.workspaceKey == null;
+          final usual = workspaceKey == null || (_usual ?? openedOnUsual);
+          final key = usual ? null : workspaceKey;
+          final resolved = controller.resolvedFor(key);
+          final tokens = resolved.tokens;
+          final own = key == null ? null : controller.workspaceTheme(key);
           return ListView(
             padding: const EdgeInsets.fromLTRB(14, 4, 14, 24),
             children: [
@@ -45,18 +114,176 @@ class ThemePickerPage extends StatelessWidget {
                   style: t.meta(size: 11, height: 1.4),
                 ),
               ),
+              if (workspaceKey != null) ...[
+                const ChromeEyebrow('THEME FOR'),
+                ChromeSegmented(
+                  key: themeScopeSelectorKey,
+                  ChromeSegmentedSpec(
+                    segments: [
+                      ChromeSegment(
+                        label: _workspaceLabel(fleet, workspaceKey),
+                        selected: !usual,
+                        onTap: () => setState(() => _usual = false),
+                      ),
+                      ChromeSegment(
+                        label: usualScopeLabel,
+                        selected: usual,
+                        onTap: () => setState(() => _usual = true),
+                      ),
+                    ],
+                  ),
+                ),
+                if (key != null)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: own == null
+                        ? Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Text(
+                              'Following the usual theme.',
+                              style: t.meta(size: 10.5),
+                            ),
+                          )
+                        : TextButton.icon(
+                            icon: const Icon(Icons.restart_alt, size: 16),
+                            label: const Text('Reset to usual theme'),
+                            onPressed: () => controller.resetWorkspace(key),
+                          ),
+                  )
+                else
+                  const SizedBox(height: 10),
+              ],
+              if (key != null && own?.themeId != null)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    key: inheritUsualPresetKey,
+                    icon: const Icon(Icons.subdirectory_arrow_left, size: 16),
+                    label: const Text('Inherit usual preset'),
+                    onPressed: () => controller.inheritUsualPreset(key),
+                  ),
+                ),
               for (final id in ThemeId.values)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
                   child: _ThemeCard(
                     id: id,
-                    selected: id == controller.id,
-                    onTap: () => controller.select(id),
+                    selected: id == resolved.id,
+                    // A workspace without a preset of its own renders the
+                    // usual one. Its card says so rather than wearing the
+                    // check, and tapping it does nothing: picking it would pin
+                    // the preset and, under [resolveTheme], silently drop the
+                    // usual overrides the workspace was showing. Pinning is
+                    // still wanted -- it is how a workspace sheds those
+                    // overrides -- so the card offers it as an explicit,
+                    // labelled button instead.
+                    inherited:
+                        key != null &&
+                        own?.themeId == null &&
+                        id == resolved.id,
+                    onTap: () => controller.selectFor(key, id),
                   ),
+                ),
+              const SizedBox(height: 6),
+              const ChromeEyebrow('COLOURS'),
+              for (final role in ThemeRole.values)
+                _RoleRow(
+                  key: themeRoleRowKey(role),
+                  role: role,
+                  color: role.of(tokens),
+                  source: roleSource(
+                    usual: controller.usual,
+                    workspace: key == null ? null : own ?? const ThemePref(),
+                    role: role,
+                  ),
+                  onTap: () async {
+                    final choice = await showColourDialog(
+                      context,
+                      title: role.label,
+                      current: role.of(tokens),
+                      swatchesFrom: tokens,
+                    );
+                    if (choice == null) return;
+                    await controller.setOverride(key, role, choice.color);
+                  },
                 ),
             ],
           );
         },
+      ),
+    );
+  }
+
+  /// [key]'s display name: Main's label for Main, the name otherwise.
+  String _workspaceLabel(FleetStore? fleet, String key) {
+    if (key != mainWorkspaceThemeKey) return key;
+    return fleet?.workspaces.first.label ?? 'Main';
+  }
+}
+
+/// One colour role: its swatch, name, and where the colour comes from — the
+/// preset, inherited from the usual theme, or customised here — so an
+/// inherited value never reads as one set in this scope.
+class _RoleRow extends StatelessWidget {
+  final ThemeRole role;
+  final Color color;
+  final RoleSource source;
+  final VoidCallback onTap;
+
+  const _RoleRow({
+    super.key,
+    required this.role,
+    required this.color,
+    required this.source,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
+    final (sourceLabel, sourceColor) = switch (source) {
+      RoleSource.preset => ('preset', t.textFaint),
+      RoleSource.usual => ('usual', t.textFaint),
+      RoleSource.overridden => ('custom', t.primary),
+    };
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: ChromePanel(
+        ChromePanelSpec(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          onTap: onTap,
+          child: Row(
+            children: [
+              Container(
+                width: 14,
+                height: 14,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Text(
+                  t.caseLabel(role.label),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: t.sans,
+                    fontSize: 13,
+                    fontWeight: source == RoleSource.overridden
+                        ? FontWeight.w700
+                        : FontWeight.w500,
+                    color: source == RoleSource.overridden
+                        ? t.text
+                        : t.textMuted,
+                  ),
+                ),
+              ),
+              Text(
+                '${hexOf(color)} · $sourceLabel',
+                style: t.meta(size: 10.5, color: sourceColor),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -77,15 +304,22 @@ String? _badge(ThemeId id) => switch (id) {
 };
 
 /// One theme's card: its name, badge, mono description, a check mark when
-/// active, and a live preview of the theme itself.
+/// active (or [inheritedPresetLabel] when inherited), and a live preview of the
+/// theme itself.
 class _ThemeCard extends StatelessWidget {
   final ThemeId id;
   final bool selected;
+
+  /// Selected only because the workspace inherits the usual preset: marked
+  /// [inheritedPresetLabel] in place of the check, and not tappable as a
+  /// whole; a "Pin this preset" button calls [onTap] instead.
+  final bool inherited;
   final VoidCallback onTap;
 
   const _ThemeCard({
     required this.id,
     required this.selected,
+    required this.inherited,
     required this.onTap,
   });
 
@@ -98,7 +332,7 @@ class _ThemeCard extends StatelessWidget {
         // picking one here; only the selected card claims the accent.
         accent: selected ? t.primary : null,
         padding: const EdgeInsets.all(10),
-        onTap: onTap,
+        onTap: inherited ? null : onTap,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -126,7 +360,9 @@ class _ThemeCard extends StatelessWidget {
                   _Badge(label: badge, highlighted: selected),
                 ],
                 const Spacer(),
-                if (selected)
+                if (inherited)
+                  const _Badge(label: inheritedPresetLabel, highlighted: true)
+                else if (selected)
                   Icon(Icons.check_circle, size: 17, color: t.primary),
               ],
             ),
@@ -134,6 +370,16 @@ class _ThemeCard extends StatelessWidget {
             Text(_describe(id), style: t.meta(size: 10)),
             const SizedBox(height: 9),
             ThemePreview(id: id),
+            if (inherited)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  key: pinInheritedPresetKey,
+                  icon: const Icon(Icons.push_pin_outlined, size: 16),
+                  label: const Text('Pin this preset'),
+                  onPressed: onTap,
+                ),
+              ),
           ],
         ),
       ),

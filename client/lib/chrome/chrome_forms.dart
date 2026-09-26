@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/tokens.dart';
 import 'chrome.dart';
 import 'chrome_wide.dart';
+import 'title_menu.dart';
 
 /// A row in a list of sessions, activity events, servers or files.
 ///
@@ -300,6 +301,10 @@ class ChromeViewRailSpec {
 
   final String title;
 
+  /// Turns [title] into a switcher ("Fleet · Work ▾"). Null leaves it a plain
+  /// title — the case until there are two workspaces to switch between.
+  final ChromeTitleMenu? titleMenu;
+
   /// The aggregate line under the title ("0 active · 0 total · 1 server").
   final String? subtitle;
 
@@ -320,6 +325,7 @@ class ChromeViewRailSpec {
   const ChromeViewRailSpec({
     this.code,
     required this.title,
+    this.titleMenu,
     this.subtitle,
     this.style = ChromeViewRailStyle.branded,
     this.filter,
@@ -464,7 +470,7 @@ abstract interface class ChromeForms {
   Widget buildField(BuildContext context, ChromeFieldSpec spec);
   Widget buildViewRail(BuildContext context, ChromeViewRailSpec spec);
 
-  /// The wide (desktop/tablet) shell, and the workspace pane inside it. Their
+  /// The wide (desktop/tablet) shell, and the detail pane inside it. Their
   /// specs and both implementations live in `chrome_wide.dart` — see that file
   /// for why the two variants are co-located.
   Widget buildWide(BuildContext context, ChromeWideSpec spec);

@@ -1,7 +1,7 @@
 //! State management: state updates, session sync, list refresh, selection persistence.
 
 use super::*;
-use claude_commander_core::api::{ProjectInfo, SessionInfo, WorkspaceSnapshot};
+use claude_commander_core::api::{ProjectInfo, SessionInfo, Snapshot};
 use std::collections::BTreeMap;
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
@@ -749,6 +749,11 @@ impl App {
     }
 
     pub(super) async fn refresh_list_items(&mut self) {
+        // The active workspace (or whether there are workspaces at all) may
+        // have changed since the theme was built; the rest of this rebuild
+        // then reads the right palette.
+        self.sync_workspace_theme();
+
         // A section list mode needs configured sections; fall back to the
         // project list view if the user removed them (hot-reload). The board
         // uses baked-in defaults, so it is unaffected.
@@ -759,11 +764,15 @@ impl App {
         // Drop a board filter whose project no longer exists in any snapshot
         // (e.g. just deleted) so the columns don't filter to an absent project.
         // Board-only; harmless in list modes.
+        let filter = self.workspace_filter();
         if let Some(f) = self.ui_state.board_filter
-            && !self
-                .backends
-                .iter()
-                .any(|h| h.view.snapshot.projects.iter().any(|p| p.id == f))
+            && !self.backends.iter().any(|h| {
+                h.view
+                    .snapshot
+                    .projects
+                    .iter()
+                    .any(|p| p.id == f && filter.admits(p.workspace.as_deref()))
+            })
         {
             self.ui_state.board_filter = None;
         }
@@ -832,10 +841,18 @@ impl App {
     /// re-anchor the board cursor to the tracked selection.
     fn rebuild_board_view(&mut self) {
         let sections = self.config.effective_sections();
+        // The board and its project sidebar show the active workspace only.
+        let filter = self.workspace_filter();
+        let scoped: Vec<std::borrow::Cow<'_, Snapshot>> = self
+            .backends
+            .iter()
+            .map(|h| filter.scope(&h.view.snapshot))
+            .collect();
         let inputs: Vec<claude_commander_core::session::BoardBackendInput> = self
             .backends
             .iter()
-            .map(|h| {
+            .zip(&scoped)
+            .map(|(h, snapshot)| {
                 let version_warning = if h.id == claude_commander_core::backend::LOCAL_BACKEND_ID {
                     None
                 } else {
@@ -849,7 +866,7 @@ impl App {
                     name: h.backend.descriptor().name,
                     connection: h.view.connection.clone(),
                     version_warning,
-                    snapshot: &h.view.snapshot,
+                    snapshot,
                     agent_states: &h.view.agent_states.states,
                 }
             })
@@ -861,6 +878,8 @@ impl App {
             self.ui_state.board_filter,
             self.config.hide_empty_sections,
         );
+        drop(inputs);
+        drop(scoped);
 
         // Mark rows whose LFS content is still being pulled (UI-only state).
         if !self.ui_state.lfs_pull_in_flight.is_empty() {
@@ -916,6 +935,14 @@ impl App {
     fn rebuild_list_view(&mut self) {
         let single_backend = self.backends.len() == 1;
         let mut items: Vec<SessionListItem> = Vec::new();
+        // Every list block — Recent and each backend's tree — shows the
+        // active workspace only.
+        let filter = self.workspace_filter();
+        let scoped: Vec<std::borrow::Cow<'_, Snapshot>> = self
+            .backends
+            .iter()
+            .map(|h| filter.scope(&h.view.snapshot))
+            .collect();
 
         // Recent-sessions block, prepended above the per-backend tree and
         // independent of any server. Each row is a shortcut to a session that
@@ -926,9 +953,9 @@ impl App {
         let recent_limit = self.config.recent_sessions_limit as usize;
         if recent_limit > 0 {
             let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, SessionListItem)> = Vec::new();
-            for handle in &self.backends {
+            for (handle, snapshot) in self.backends.iter().zip(&scoped) {
                 let agent_states = &handle.view.agent_states.states;
-                for s in &handle.view.snapshot.sessions {
+                for s in &snapshot.sessions {
                     if let Some(at) = s.last_attached_at {
                         candidates.push((
                             at,
@@ -972,8 +999,8 @@ impl App {
         // divider); the per-backend tree appended below is the scrolling list.
         let recents_len = items.len();
 
-        for handle in &self.backends {
-            let snapshot = &handle.view.snapshot;
+        for (handle, snapshot) in self.backends.iter().zip(&scoped) {
+            let snapshot: &Snapshot = snapshot;
             let agent_states = &handle.view.agent_states.states;
             if !single_backend {
                 let version_warning =
@@ -1018,6 +1045,7 @@ impl App {
             };
             items.append(&mut backend_items);
         }
+        drop(scoped);
 
         // Mark rows whose LFS content is still being pulled (UI-only state).
         if !self.ui_state.lfs_pull_in_flight.is_empty() {
@@ -1169,7 +1197,7 @@ pub(super) fn order_recent<T>(
 /// Index a snapshot's sessions by id for O(1) lookup during stack-chain
 /// building.
 fn session_index(
-    snapshot: &claude_commander_core::api::WorkspaceSnapshot,
+    snapshot: &claude_commander_core::api::Snapshot,
 ) -> std::collections::HashMap<
     claude_commander_core::session::SessionId,
     &claude_commander_core::api::SessionInfo,
@@ -1227,7 +1255,7 @@ pub(super) fn apply_viewed_session_refresh(
 /// the delete-confirm dialog derives its preview from the cached snapshot rather
 /// than reading the store, so a remote backend's snapshot drives it identically.
 pub(super) fn stack_retarget_preview_from_snapshot(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     session_id: SessionId,
 ) -> Option<(usize, String)> {
     let deleted = snapshot
@@ -1287,7 +1315,7 @@ pub(super) fn stack_retarget_preview_from_snapshot(
 /// session shows no marker rather than a possibly-wrong one; every row is still
 /// a legal target.
 pub(super) fn base_picker_rows_from_snapshot(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     session_id: SessionId,
 ) -> Vec<(Option<SessionId>, String, String)> {
     let Some(session) = snapshot
@@ -1356,7 +1384,7 @@ const CURRENT_SUFFIX: &str = " — current base";
 // ---- List-view item builders (revived from main; reuse board.rs helpers) ----
 
 pub(super) fn build_project_grouped_items(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     agent_states: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionListItem> {
     let by_id = session_index(snapshot);
@@ -1398,7 +1426,7 @@ pub(super) fn build_project_grouped_items(
 }
 
 pub(super) fn build_section_grouped_items(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     sections: &[claude_commander_core::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
@@ -1487,7 +1515,7 @@ pub(super) fn build_section_grouped_items(
 }
 
 pub(super) fn build_stacked_section_items(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     sections: &[claude_commander_core::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
@@ -1747,7 +1775,7 @@ mod unread_transition_tests {
 mod stack_order_tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use claude_commander_core::api::workspace_snapshot_from_state;
+    use claude_commander_core::api::snapshot_from_state;
     use claude_commander_core::session::{ProjectId, WorktreeSession};
     use std::path::PathBuf;
 
@@ -1788,11 +1816,11 @@ mod stack_order_tests {
         }
     }
 
-    /// Build the DTO [`WorkspaceSnapshot`] the tree builders now consume, from a
+    /// Build the DTO [`Snapshot`] the tree builders now consume, from a
     /// list of domain sessions — same shaped input as before, projected through
-    /// the production `workspace_snapshot_from_state` so tests exercise the real
+    /// the production `snapshot_from_state` so tests exercise the real
     /// conversion path.
-    fn appstate_from(sessions: Vec<WorktreeSession>) -> WorkspaceSnapshot {
+    fn appstate_from(sessions: Vec<WorktreeSession>) -> Snapshot {
         let mut state = claude_commander_core::config::AppState::default();
         // Group sessions by their project_id so projects with multiple
         // worktrees stay linked correctly.
@@ -1813,7 +1841,7 @@ mod stack_order_tests {
             state.projects.get_mut(&pid).unwrap().add_worktree(s.id);
             state.sessions.insert(s.id, s);
         }
-        workspace_snapshot_from_state(&state)
+        snapshot_from_state(&state)
     }
 
     /// The picker offers main plus every non-descendant sibling, and never the
@@ -2899,7 +2927,7 @@ mod stack_order_tests {
         // Project into the DTO snapshot the builders now consume, once, outside
         // the timed loop — we measure the builders, not snapshot construction
         // (the cached snapshot is built on change, not per refresh).
-        let snapshot = workspace_snapshot_from_state(&state);
+        let snapshot = snapshot_from_state(&state);
 
         // Warm up so the first-touch allocation cost doesn't dominate the timing.
         for _ in 0..50 {

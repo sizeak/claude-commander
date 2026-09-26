@@ -115,10 +115,13 @@ impl SessionManager {
 
     /// Build a `StatusBarInfo` from session metadata
     pub fn status_bar_info(&self, session: &WorktreeSession, state: &AppState) -> StatusBarInfo {
-        let project_name = state
-            .get_project(&session.project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
+        let project = state.get_project(&session.project_id);
+        let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
+        let workspace = status_bar_workspace(
+            &self.config_store.read(),
+            state,
+            project.and_then(|p| p.workspace.as_deref()),
+        );
         StatusBarInfo {
             branch: session.branch.clone(),
             pr_number: session.pr_number,
@@ -126,6 +129,7 @@ impl SessionManager {
             status_style: self.tmux_status_style.clone(),
             is_shell: false,
             project_name,
+            workspace,
         }
     }
 
@@ -145,6 +149,29 @@ impl SessionManager {
     fn sanitize_name(&self, name: &str) -> String {
         sanitize_name(name)
     }
+}
+
+/// The workspace label an attached pane's tmux status line names: the
+/// project's tag, or Main's label for an untagged project — but only once this
+/// host has a second workspace (a definition, or any tagged project), matching
+/// the frontends' "hidden until 2+ workspaces" rule.
+fn status_bar_workspace(
+    config: &crate::config::Config,
+    state: &AppState,
+    tag: Option<&str>,
+) -> Option<String> {
+    let has_workspaces =
+        !config.workspaces.is_empty() || state.projects.values().any(|p| p.workspace.is_some());
+    if !has_workspaces {
+        return None;
+    }
+    Some(match tag {
+        Some(name) => name.to_string(),
+        None => config.main_workspace.as_ref().map_or_else(
+            || claude_commander_protocol::workspace::MAIN_WORKSPACE_LABEL.to_string(),
+            |m| m.name.clone(),
+        ),
+    })
 }
 
 /// Sanitize a name for use as a branch/directory name.

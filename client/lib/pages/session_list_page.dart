@@ -4,13 +4,15 @@ import '../chrome/chrome_forms.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
-import '../state/workspace_store.dart';
+import '../state/fleet_store.dart';
 import '../theme/agent_glyphs.dart';
+import '../theme/theme_controller.dart';
 import '../theme/tokens.dart';
 import '../util/error_text.dart';
 import '../util/format.dart';
 import '../util/session_filter.dart';
 import '../widgets/session_chips.dart';
+import '../widgets/workspace_menu.dart';
 import 'create_session_page.dart';
 import 'programs_page.dart';
 import 'projects_page.dart';
@@ -74,7 +76,7 @@ bool _isLocalServer(String baseUrl) {
 /// and settings as its action — over a body of quick-filter chips and either the
 /// servers' sessions grouped by project (All) or a flat, cross-server
 /// most-recently-attached list (Recent). Enumerates the servers from the
-/// [WorkspaceStore]; in All mode each server section re-provides its own
+/// [FleetStore]; in All mode each server section re-provides its own
 /// [CommanderStoreScope] so per-server consumers (detail, cascade banner) keep
 /// their single-store contract, and its header is suppressed when only one
 /// server is configured.
@@ -142,17 +144,21 @@ class _SessionListBodyState extends State<SessionListBody> {
 
   @override
   Widget build(BuildContext context) {
-    final workspace = WorkspaceScope.of(context)!;
+    final fleet = FleetScope.of(context)!;
     return ListenableBuilder(
-      listenable: workspace,
+      listenable: fleet,
       builder: (context, _) {
-        final servers = workspace.servers;
+        final servers = fleet.servers;
         final multi = servers.length > 1;
+        // Everything below is scoped to the active workspace: the counts, the
+        // chips, and both views. Other workspaces surface only through the
+        // title's switcher, with their waiting counts.
+        final workspace = fleet.activeWorkspace;
 
         // A single cross-server pass powers the header counts and the chip row.
         var active = 0, total = 0, needs = 0, working = 0, review = 0;
         for (final store in servers) {
-          for (final s in store.sessions) {
+          for (final s in store.sessionsIn(workspace)) {
             total++;
             if (s.status.isActive) active++;
             if (_isNeedsInput(store, s)) needs++;
@@ -187,10 +193,10 @@ class _SessionListBodyState extends State<SessionListBody> {
             _ConnectionStrip(connection: servers.single.connection),
           Expanded(
             child: RefreshIndicator(
-              onRefresh: workspace.refreshAll,
+              onRefresh: fleet.refreshAll,
               child: _view == _SessionView.recent
-                  ? _buildRecent(context, servers)
-                  : _buildAll(servers, multi),
+                  ? _buildRecent(context, servers, workspace)
+                  : _buildAll(servers, multi, workspace),
             ),
           ),
         ];
@@ -221,6 +227,7 @@ class _SessionListBodyState extends State<SessionListBody> {
           ChromeViewRailSpec(
             code: '47-A',
             title: 'Fleet',
+            titleMenu: workspaceTitleMenu(fleet, theme: ThemeScope.of(context)),
             subtitle:
                 '$active active · $total total · ${servers.length} '
                 'server${servers.length == 1 ? '' : 's'}',
@@ -310,13 +317,18 @@ class _SessionListBodyState extends State<SessionListBody> {
     );
   }
 
-  Widget _buildAll(List<CommanderStore> servers, bool multi) {
+  Widget _buildAll(
+    List<CommanderStore> servers,
+    bool multi,
+    String? workspace,
+  ) {
     return ListView(
       padding: const EdgeInsets.only(top: 6, bottom: 12),
       children: [
         for (final store in servers)
           _ServerSection(
             store: store,
+            workspace: workspace,
             showHeader: multi,
             selectedId: widget.selectedId,
             onSelect: widget.onSelect,
@@ -345,10 +357,14 @@ class _SessionListBodyState extends State<SessionListBody> {
   /// The TUI can drop those, because its recents block is pinned *above* the
   /// full tree; here Recent is one of two exclusive tabs, so dropping a session
   /// hides it outright — including the one the user has only just created.
-  Widget _buildRecent(BuildContext context, List<CommanderStore> servers) {
+  Widget _buildRecent(
+    BuildContext context,
+    List<CommanderStore> servers,
+    String? workspace,
+  ) {
     var pairs = <(CommanderStore, SessionInfo)>[
       for (final store in servers)
-        for (final s in store.sessions)
+        for (final s in store.sessionsIn(workspace))
           if (s.status.isActive &&
               (_quick == null || _matchesQuick(_quick!, store, s)))
             (store, s),
@@ -386,7 +402,7 @@ class _SessionListBodyState extends State<SessionListBody> {
     // Loading/error take priority over the query notes, so typing while the
     // only server is still connecting shows the spinner (as All mode does),
     // not a misleading "No matches".
-    final loading = servers.any((s) => s.workspace == null && s.error == null);
+    final loading = servers.any((s) => s.snapshot == null && s.error == null);
     if (loading) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 24),
@@ -473,6 +489,9 @@ class _QuickChip extends StatelessWidget {
 /// server's [CommanderStoreScope] so the banner and pushed routes resolve to it.
 class _ServerSection extends StatelessWidget {
   final CommanderStore store;
+
+  /// The active workspace (null = Main): only its projects are listed.
+  final String? workspace;
   final bool showHeader;
   final String? selectedId;
   final void Function(CommanderStore store, SessionInfo session) onSelect;
@@ -486,6 +505,7 @@ class _ServerSection extends StatelessWidget {
 
   const _ServerSection({
     required this.store,
+    required this.workspace,
     required this.showHeader,
     required this.selectedId,
     required this.onSelect,
@@ -503,7 +523,11 @@ class _ServerSection extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (showHeader) _ServerHeader(store: store),
+            if (showHeader)
+              _ServerHeader(
+                store: store,
+                count: store.sessionsIn(workspace).length,
+              ),
             ..._content(context),
           ],
         ),
@@ -512,7 +536,7 @@ class _ServerSection extends StatelessWidget {
   }
 
   List<Widget> _content(BuildContext context) {
-    if (store.workspace == null) {
+    if (store.snapshot == null) {
       // This server hasn't loaded yet (or failed) — show a compact per-server
       // state so a slow/down server never blanks the whole list.
       if (store.error != null) {
@@ -533,7 +557,7 @@ class _ServerSection extends StatelessWidget {
       ];
     }
     final groups = <ProjectSessions>[];
-    for (final g in store.sessionsByProject) {
+    for (final g in store.sessionsByProjectIn(workspace)) {
       var sessions = matchingSessions(g.sessions, query);
       if (quick != null) {
         sessions = [
@@ -601,10 +625,10 @@ Future<void> openSessionDetail(
 /// Null means "no server / user cancelled".
 Future<CommanderStore?> pickServer(
   BuildContext context,
-  WorkspaceStore workspace, {
+  FleetStore fleet, {
   String title = 'Choose a server',
 }) async {
-  final servers = workspace.servers;
+  final servers = fleet.servers;
   if (servers.isEmpty) return null;
   if (servers.length == 1) return servers.single;
   return showModalBottomSheet<CommanderStore>(
@@ -637,30 +661,27 @@ Future<CommanderStore?> pickServer(
 /// Push the create-session route for a chosen server. Shared by both layouts.
 /// The page refetches the snapshot itself before popping, so this route returns
 /// to a list that already holds the new session.
-Future<void> openCreateSession(
-  BuildContext context,
-  WorkspaceStore workspace,
-) async {
-  final store = await pickServer(context, workspace, title: 'Create on…');
+Future<void> openCreateSession(BuildContext context, FleetStore fleet) async {
+  final store = await pickServer(context, fleet, title: 'Create on…');
   if (store == null || store.handle == null || !context.mounted) return;
   await Navigator.of(context).push<String>(
-    MaterialPageRoute(builder: (_) => CreateSessionPage(store: store)),
+    MaterialPageRoute(
+      builder: (_) =>
+          CreateSessionPage(store: store, workspace: fleet.activeWorkspace),
+    ),
   );
 }
 
 /// Push the servers manager (add/edit/remove).
-void openServers(BuildContext context, WorkspaceStore workspace) {
+void openServers(BuildContext context, FleetStore fleet) {
   Navigator.of(
     context,
-  ).push(MaterialPageRoute(builder: (_) => ServersPage(workspace: workspace)));
+  ).push(MaterialPageRoute(builder: (_) => ServersPage(fleet: fleet)));
 }
 
 /// Push the program-list editor for a chosen server (`PUT /api/config/programs`).
-Future<void> openPrograms(
-  BuildContext context,
-  WorkspaceStore workspace,
-) async {
-  final store = await pickServer(context, workspace, title: 'Programs on…');
+Future<void> openPrograms(BuildContext context, FleetStore fleet) async {
+  final store = await pickServer(context, fleet, title: 'Programs on…');
   final handle = store?.handle;
   if (store == null || handle == null || !context.mounted) return;
   Navigator.of(context).push(
@@ -671,15 +692,15 @@ Future<void> openPrograms(
 }
 
 /// Push the projects manager for a chosen server (add/remove/scan + branches).
-Future<void> openProjects(
-  BuildContext context,
-  WorkspaceStore workspace,
-) async {
-  final store = await pickServer(context, workspace, title: 'Projects on…');
+Future<void> openProjects(BuildContext context, FleetStore fleet) async {
+  final store = await pickServer(context, fleet, title: 'Projects on…');
   if (store == null || store.handle == null || !context.mounted) return;
-  Navigator.of(
-    context,
-  ).push(MaterialPageRoute(builder: (_) => ProjectsPage(store: store)));
+  Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (_) =>
+          ProjectsPage(store: store, workspace: fleet.activeWorkspace),
+    ),
+  );
 }
 
 /// Opens the [SettingsPage].
@@ -845,7 +866,10 @@ class _CascadeBannerState extends State<CascadeBanner> {
 /// a down server reads as inert but never vanishes from the list.
 class _ServerHeader extends StatelessWidget {
   final CommanderStore store;
-  const _ServerHeader({required this.store});
+
+  /// The server's session count in the active workspace.
+  final int count;
+  const _ServerHeader({required this.store, required this.count});
 
   @override
   Widget build(BuildContext context) {
@@ -868,7 +892,6 @@ class _ServerHeader extends StatelessWidget {
         true,
       ),
     };
-    final count = store.sessions.length;
     final tag = _isLocalServer(store.config.baseUrl) ? 'local' : 'remote';
     return Opacity(
       opacity: degraded ? 0.6 : 1,

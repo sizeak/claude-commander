@@ -7,6 +7,7 @@ use diffgrid::style::{Appearance, Ink, Palette, Rgb, Role};
 use ratatui::style::{Color, Style};
 
 use claude_commander_core::config::theme::{AgentWorkingStyle, ThemeOverrides};
+use claude_commander_core::config::{Config, MAIN_WORKSPACE_THEME_KEY};
 use claude_commander_core::term_caps::ColorMode;
 
 /// All recognised preset names, in display order.
@@ -915,6 +916,17 @@ impl Theme {
         }
     }
 
+    /// One `[theme]`-shaped table on its own: its preset (auto-detected when
+    /// unset, empty or unknown) with its colour overrides on top.
+    pub fn from_overrides(overrides: &ThemeOverrides) -> Self {
+        overrides
+            .preset
+            .as_deref()
+            .and_then(Self::from_preset)
+            .unwrap_or_default()
+            .with_overrides(overrides)
+    }
+
     /// Apply user-supplied overrides on top of this theme.
     ///
     /// Only `Some` fields in `overrides` replace the corresponding color;
@@ -1021,6 +1033,105 @@ impl Theme {
             .bg(self.status_bar_bg)
             .fg(self.status_bar_fg)
     }
+
+    /// The theme's foreground and accent colours as pickable swatches, in
+    /// role order, deduplicated by hex value (the first role keeps it).
+    /// The diff bands, the selection and the status bar are left out (they
+    /// are washes behind other text, too faint to read as an accent), as is
+    /// `Reset`. The PR pill and command-palette backgrounds are kept: they
+    /// are accent-strength fills, not washes.
+    pub fn swatches(&self) -> Vec<ThemeSwatch> {
+        let mut roles: Vec<(String, Color)> = [
+            ("accent", self.text_accent),
+            ("border", self.border_focused),
+            ("creating", self.status_creating),
+            ("running", self.status_running),
+            ("stopped", self.status_stopped),
+            ("pr", self.status_pr),
+            ("merged", self.status_pr_merged),
+            ("pr open", self.pr_open),
+            ("pr draft", self.pr_draft),
+            ("pr closed", self.pr_closed),
+            ("waiting", self.agent_waiting),
+            ("unread", self.unread_indicator),
+            ("conversation", self.conversation_accent),
+        ]
+        .into_iter()
+        .map(|(role, c)| (role.to_string(), c))
+        .collect();
+        if let AgentWorkingStyle::Solid(c) = self.agent_working {
+            roles.push(("working".to_string(), c));
+        }
+        for (i, (header, title)) in self.project_colors.iter().enumerate() {
+            roles.push((format!("project {}", i + 1), *header));
+            roles.push((format!("project {} title", i + 1), *title));
+        }
+        roles.extend(
+            [
+                ("added", self.diff_added),
+                ("removed", self.diff_removed),
+                ("hunk header", self.diff_hunk_header),
+                ("file header", self.diff_file_header),
+                ("info", self.modal_info),
+                ("warning", self.modal_warning),
+                ("error", self.modal_error),
+                ("pill open", self.pr_pill_open_bg),
+                ("pill draft", self.pr_pill_draft_bg),
+                ("pill closed", self.pr_pill_closed_bg),
+                ("pill review", self.pr_pill_review_bg),
+                ("pill merged", self.pr_pill_merged_bg),
+                ("command", self.palette_command_bg),
+            ]
+            .into_iter()
+            .map(|(role, c)| (role.to_string(), c)),
+        );
+        let mut seen = std::collections::HashSet::new();
+        roles
+            .into_iter()
+            .filter_map(|(role, color)| {
+                let hex = color_to_hex(color)?;
+                seen.insert(hex.clone())
+                    .then_some(ThemeSwatch { role, color, hex })
+            })
+            .collect()
+    }
+}
+
+/// The `[workspace_themes]` key for a workspace (`None` = Main, which has no
+/// name and so lives under [`MAIN_WORKSPACE_THEME_KEY`]).
+pub fn workspace_theme_key(workspace: Option<&str>) -> &str {
+    workspace.unwrap_or(MAIN_WORKSPACE_THEME_KEY)
+}
+
+/// Resolve a workspace's theme from the usual `[theme]` and the workspace's
+/// own `[workspace_themes."<name>"]` entry, if it has one:
+///
+/// - no entry: the usual theme (its preset plus its overrides);
+/// - an entry without a `preset`: the usual theme, then the entry's overrides
+///   layered on top;
+/// - an entry with a `preset`: that preset plus *only* the entry's overrides —
+///   the usual overrides were chosen for the usual preset and do not carry.
+pub fn resolve_workspace_theme(usual: &ThemeOverrides, entry: Option<&ThemeOverrides>) -> Theme {
+    match entry {
+        None => Theme::from_overrides(usual),
+        Some(entry) if entry_sets_preset(entry) => Theme::from_overrides(entry),
+        Some(entry) => Theme::from_overrides(usual).with_overrides(entry),
+    }
+}
+
+/// Whether a workspace entry picks its own base preset (and so drops the
+/// usual theme's overrides) rather than layering over the usual theme.
+pub fn entry_sets_preset(entry: &ThemeOverrides) -> bool {
+    entry.preset.as_deref().is_some_and(|p| !p.is_empty())
+}
+
+/// [`resolve_workspace_theme`] for `workspace` (`None` = Main) as `config`
+/// declares it.
+pub fn theme_for_workspace(config: &Config, workspace: Option<&str>) -> Theme {
+    resolve_workspace_theme(
+        &config.theme,
+        config.workspace_themes.get(workspace_theme_key(workspace)),
+    )
 }
 
 /// Build a saturated line fill from a base colour for the review diff view.
@@ -1112,25 +1223,56 @@ pub fn dim_color(color: Color, opacity: f32) -> Color {
 /// Approximate RGB values for named ANSI colors
 fn color_to_approx_rgb(color: Color) -> (u8, u8, u8) {
     match color {
-        Color::Black => (0, 0, 0),
-        Color::Red => (205, 0, 0),
-        Color::Green => (0, 205, 0),
-        Color::Yellow => (205, 205, 0),
-        Color::Blue => (0, 0, 238),
-        Color::Magenta => (205, 0, 205),
-        Color::Cyan => (0, 205, 205),
-        Color::White | Color::Gray => (229, 229, 229),
-        Color::DarkGray => (127, 127, 127),
-        Color::LightRed => (255, 0, 0),
-        Color::LightGreen => (0, 255, 0),
-        Color::LightYellow => (255, 255, 0),
-        Color::LightBlue => (92, 92, 255),
-        Color::LightMagenta => (255, 0, 255),
-        Color::LightCyan => (0, 255, 255),
-        Color::Indexed(n) => indexed_to_rgb(n),
         Color::Rgb(r, g, b) => (r, g, b),
         Color::Reset => (200, 200, 200),
+        other => indexed_to_rgb(ansi_index(other).unwrap_or(7)),
     }
+}
+
+/// The xterm palette index of a named or indexed colour (`None` for `Rgb` and
+/// `Reset`, which have no index).
+fn ansi_index(color: Color) -> Option<u8> {
+    Some(match color {
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Indexed(n) => n,
+        Color::Rgb(..) | Color::Reset => return None,
+    })
+}
+
+/// A colour as `#rrggbb`: `Rgb` directly, named and indexed colours through
+/// the standard xterm palette. `None` for `Reset`, which is "whatever the
+/// terminal's default is" and has no fixed value.
+pub fn color_to_hex(color: Color) -> Option<String> {
+    let (r, g, b) = match color {
+        Color::Reset => return None,
+        other => color_to_approx_rgb(other),
+    };
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+/// One pickable colour of a [`Theme`]: the role it plays there and its value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeSwatch {
+    /// The theme role the colour came from (the first, if several share it).
+    pub role: String,
+    pub color: Color,
+    /// `#rrggbb`, lower-case.
+    pub hex: String,
 }
 
 /// Convert a 256-color index to approximate RGB
@@ -1170,6 +1312,51 @@ fn indexed_to_rgb(n: u8) -> (u8, u8, u8) {
     }
 }
 
+/// WCAG relative luminance, for [`contrast_ratio`]. Named and indexed colours
+/// are judged by their standard xterm value.
+pub(crate) fn relative_luminance(color: Color) -> f32 {
+    let (r, g, b) = color_to_approx_rgb(color);
+    let lin = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+/// WCAG contrast ratio between two colours, 1.0 (identical) to 21.0.
+pub(crate) fn contrast_ratio(a: Color, b: Color) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The least contrast a coloured label keeps against the status bar before
+/// [`Theme::on_status_bar`] swaps it for the bar's own text colour. WCAG's
+/// 3:1 floor for UI components: the labels are short, bold-weight chips, and
+/// a higher bar would strip colour from chips that read fine on dark bars.
+pub(crate) const STATUS_BAR_MIN_CONTRAST: f32 = 3.0;
+
+impl Theme {
+    /// `color`, if it reads on the status bar; otherwise `status_bar_fg`.
+    ///
+    /// The status-bar chips (commander, embedded server, waiting hints) are
+    /// painted in semantic colours chosen for the canvas, and nothing stops a
+    /// preset using the same colour for its bar: `lcars` paints both
+    /// `status_running` and `status_bar_bg` in amber `#f7a01d`, which made the
+    /// `⇅ 7878` server chip invisible, orange on orange.
+    pub fn on_status_bar(&self, color: Color) -> Color {
+        if contrast_ratio(color, self.status_bar_bg) >= STATUS_BAR_MIN_CONTRAST {
+            color
+        } else {
+            self.status_bar_fg
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1191,6 +1378,78 @@ mod tests {
         let from_config = ColorValue::from(rendered);
         let back: Color = from_config.0;
         assert_eq!(back, rendered);
+    }
+
+    #[test]
+    fn color_to_hex_uses_the_xterm_palette() {
+        assert_eq!(
+            color_to_hex(Color::Rgb(0x12, 0xab, 0xef)).as_deref(),
+            Some("#12abef")
+        );
+        assert_eq!(color_to_hex(Color::Red).as_deref(), Some("#cd0000"));
+        assert_eq!(color_to_hex(Color::White).as_deref(), Some("#ffffff"));
+        assert_eq!(color_to_hex(Color::Gray).as_deref(), Some("#e5e5e5"));
+        assert_eq!(color_to_hex(Color::DarkGray).as_deref(), Some("#7f7f7f"));
+        // A named colour and its index agree.
+        assert_eq!(
+            color_to_hex(Color::Indexed(12)),
+            color_to_hex(Color::LightBlue)
+        );
+        // Cube and grey ramp.
+        assert_eq!(
+            color_to_hex(Color::Indexed(147)).as_deref(),
+            Some("#afafff")
+        );
+        assert_eq!(
+            color_to_hex(Color::Indexed(232)).as_deref(),
+            Some("#080808")
+        );
+        assert_eq!(color_to_hex(Color::Reset), None);
+    }
+
+    #[test]
+    fn swatches_are_deduplicated_by_hex_and_keep_the_first_role() {
+        let theme = Theme::truecolor();
+        let swatches = theme.swatches();
+        let mut hexes: Vec<&str> = swatches.iter().map(|s| s.hex.as_str()).collect();
+        let total = hexes.len();
+        hexes.sort_unstable();
+        hexes.dedup();
+        assert_eq!(hexes.len(), total, "no hex appears twice");
+        assert_eq!(swatches[0].role, "accent");
+        assert_eq!(swatches[0].hex, "#b4befe");
+        // `pr open` is the same sky blue as the focused border, so only the
+        // earlier role is listed.
+        assert!(
+            swatches
+                .iter()
+                .any(|s| s.role == "border" && s.hex == "#89b4fa")
+        );
+        assert!(!swatches.iter().any(|s| s.role == "pr open"));
+        assert!(swatches.iter().any(|s| s.role == "running"));
+        assert!(swatches.iter().any(|s| s.role == "project 1"));
+    }
+
+    #[test]
+    fn swatches_convert_named_colours_and_skip_reset() {
+        for theme in [Theme::basic(), Theme::indexed()] {
+            let swatches = theme.swatches();
+            assert!(!swatches.is_empty());
+            for s in &swatches {
+                assert_eq!(color_to_hex(s.color).as_ref(), Some(&s.hex));
+                assert!(
+                    s.hex.len() == 7
+                        && s.hex.starts_with('#')
+                        && s.hex == s.hex.to_ascii_lowercase()
+                        && crate::widgets::parse_hex_color(&s.hex).is_some(),
+                    "{} is a lower-case #rrggbb colour",
+                    s.hex
+                );
+            }
+        }
+        let mut theme = Theme::basic();
+        theme.text_accent = Color::Reset;
+        assert!(theme.swatches().iter().all(|s| s.role != "accent"));
     }
 
     #[test]
@@ -1375,27 +1634,6 @@ mod tests {
         assert_eq!(theme.status_running, Color::Rgb(247, 160, 29));
     }
 
-    /// WCAG relative luminance, for [`contrast_ratio`].
-    fn relative_luminance(color: Color) -> f32 {
-        let (r, g, b) = color_to_approx_rgb(color);
-        let lin = |c: u8| {
-            let c = c as f32 / 255.0;
-            if c <= 0.03928 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
-    }
-
-    /// WCAG contrast ratio between two colours, 1.0 (identical) to 21.0.
-    fn contrast_ratio(a: Color, b: Color) -> f32 {
-        let (la, lb) = (relative_luminance(a), relative_luminance(b));
-        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
-        (hi + 0.05) / (lo + 0.05)
-    }
-
     /// The hotkey letter in `[n]ew session` and the board's top-bar title are
     /// painted on the **status bar**, so their accent has to contrast with
     /// `status_bar_bg` — not with the canvas.
@@ -1483,6 +1721,107 @@ mod tests {
         // Untouched fields keep the base value
         assert_eq!(themed.border_unfocused, Color::DarkGray);
         assert_eq!(themed.status_stopped, Color::DarkGray);
+    }
+
+    fn rgb_override(r: u8, g: u8, b: u8) -> Option<ColorValue> {
+        Some(ColorValue(Color::Rgb(r, g, b)))
+    }
+
+    #[test]
+    fn a_workspace_without_an_entry_gets_the_usual_theme() {
+        let usual = ThemeOverrides {
+            preset: Some("lcars".into()),
+            text_accent: rgb_override(1, 2, 3),
+            ..Default::default()
+        };
+        let t = resolve_workspace_theme(&usual, None);
+        assert_eq!(t.text_accent, Color::Rgb(1, 2, 3));
+        assert_eq!(t.border_focused, Theme::lcars().border_focused);
+    }
+
+    #[test]
+    fn an_entry_without_a_preset_layers_over_the_usual_theme() {
+        let usual = ThemeOverrides {
+            preset: Some("lcars".into()),
+            text_accent: rgb_override(1, 2, 3),
+            border_focused: rgb_override(4, 5, 6),
+            ..Default::default()
+        };
+        let entry = ThemeOverrides {
+            text_accent: rgb_override(7, 8, 9),
+            ..Default::default()
+        };
+        let t = resolve_workspace_theme(&usual, Some(&entry));
+        assert_eq!(t.text_accent, Color::Rgb(7, 8, 9), "the entry wins");
+        assert_eq!(
+            t.border_focused,
+            Color::Rgb(4, 5, 6),
+            "usual overrides carry"
+        );
+        assert_eq!(
+            t.status_bar_bg,
+            Theme::lcars().status_bar_bg,
+            "usual preset"
+        );
+    }
+
+    #[test]
+    fn an_entry_with_a_preset_takes_only_its_own_overrides() {
+        let usual = ThemeOverrides {
+            preset: Some("lcars".into()),
+            border_focused: rgb_override(4, 5, 6),
+            appearance: Some(claude_commander_core::config::theme::AppearanceValue::Light),
+            ..Default::default()
+        };
+        let entry = ThemeOverrides {
+            preset: Some("basic".into()),
+            text_accent: rgb_override(7, 8, 9),
+            ..Default::default()
+        };
+        let t = resolve_workspace_theme(&usual, Some(&entry));
+        assert_eq!(t.text_accent, Color::Rgb(7, 8, 9));
+        assert_eq!(
+            t.border_focused,
+            Theme::basic().border_focused,
+            "usual overrides do not carry onto a new base"
+        );
+        assert_eq!(t.status_bar_bg, Theme::basic().status_bar_bg);
+        assert_eq!(t.appearance, Theme::basic().appearance);
+    }
+
+    #[test]
+    fn theme_for_workspace_keys_main_and_named_workspaces() {
+        let mut config = Config::default();
+        config.theme.preset = Some("basic".into());
+        config.workspace_themes.insert(
+            MAIN_WORKSPACE_THEME_KEY.to_string(),
+            ThemeOverrides {
+                text_accent: rgb_override(10, 20, 30),
+                ..Default::default()
+            },
+        );
+        config.workspace_themes.insert(
+            "Work".to_string(),
+            ThemeOverrides {
+                preset: Some("lcars".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(workspace_theme_key(None), MAIN_WORKSPACE_THEME_KEY);
+        assert_eq!(workspace_theme_key(Some("Work")), "Work");
+        assert_eq!(
+            theme_for_workspace(&config, None).text_accent,
+            Color::Rgb(10, 20, 30)
+        );
+        assert_eq!(
+            theme_for_workspace(&config, Some("Work")).text_accent,
+            Theme::lcars().text_accent
+        );
+        assert_eq!(
+            theme_for_workspace(&config, Some("Home")).text_accent,
+            Theme::basic().text_accent,
+            "no entry: the usual theme"
+        );
     }
 
     #[test]

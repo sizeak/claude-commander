@@ -6,7 +6,7 @@ import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
@@ -31,7 +31,7 @@ import '../support/golden.dart';
 void main() {
   late FakeCommanderApi api;
   late CommanderStore store;
-  late WorkspaceStore workspace;
+  late FleetStore fleet;
 
   // Two projects, so the list has more than one group and its headings appear.
   // Sessions group by project *id*, not name, hence the shared ids.
@@ -68,11 +68,15 @@ void main() {
         projectName: 'conan-center-index',
       ),
     ];
+    // A second workspace with nothing in it yet: enough to bring the workspace
+    // switcher onto the fleet title ("Fleet · Main ▾") and the Workspaces row's
+    // count into settings, without scoping any of the sessions above away.
+    api.workspacesResponse = const [WorkspaceDef(name: 'Personal')];
     store = CommanderStore(api: api, config: testConfig);
-    workspace = WorkspaceStore.withStores([store]);
+    fleet = FleetStore.withStores([store]);
   });
 
-  tearDown(() => workspace.dispose());
+  tearDown(() => fleet.dispose());
 
   /// Pumps [child] with a connected server behind it, in one theme.
   Future<void> pumpPage(
@@ -99,8 +103,8 @@ void main() {
           : child,
     );
     await tester.pumpWidget(
-      WorkspaceScope(
-        workspace: workspace,
+      FleetScope(
+        fleet: fleet,
         // Both scopes, as `main()` mounts them: the settings screen reads the
         // theme for its row caption and the window controller for its WINDOW
         // section, and a null controller would silently drop that section.
@@ -109,8 +113,16 @@ void main() {
             store: InMemoryPrefStore(),
             service: FakeWindowService(),
           ),
+          // On the golden's own theme, so what the controller resolves (the
+          // workspace switcher's label and dots) agrees with the tokens the
+          // page is painted in.
           child: ThemeScope(
-            controller: ThemeController(store: InMemoryPrefStore()),
+            controller: ThemeController(
+              store: InMemoryPrefStore(),
+              initial: ThemeId.values.firstWhere(
+                (id) => identical(id.tokens, tokens),
+              ),
+            ),
             child: app,
           ),
         ),

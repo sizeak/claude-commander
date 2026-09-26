@@ -1,6 +1,6 @@
 //! Kanban board model.
 //!
-//! Pure transformation from per-backend [`WorkspaceSnapshot`] DTOs + section
+//! Pure transformation from per-backend [`Snapshot`] DTOs + section
 //! config into the board the TUI renders: a project sidebar (grouped per
 //! server when more than one backend is configured) plus one column per
 //! section ("In Progress" catch-all first, then the configured sections in
@@ -18,7 +18,7 @@ use std::ops::Range;
 
 use chrono::{DateTime, Utc};
 
-use crate::api::{SessionInfo, WorkspaceSnapshot};
+use crate::api::{SessionInfo, Snapshot};
 use crate::backend::{BackendId, ConnectionState};
 use crate::session::{
     AgentState, IN_PROGRESS, ProjectId, SectionConfig, SessionId, SessionListItem, SessionNode,
@@ -35,7 +35,7 @@ pub struct BoardBackendInput<'a> {
     /// as a non-blocking `⚠` on its sidebar heading (independent of
     /// `connection`, so a mismatched-but-healthy server still shows its cards).
     pub version_warning: Option<crate::backend::VersionMismatch>,
-    pub snapshot: &'a WorkspaceSnapshot,
+    pub snapshot: &'a Snapshot,
     pub agent_states: &'a BTreeMap<SessionId, AgentState>,
 }
 
@@ -658,7 +658,7 @@ pub fn resolve_section_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{ProjectInfo, ServerStatus, WorkspaceSnapshot};
+    use crate::api::{ProjectInfo, ServerStatus, Snapshot};
     use crate::backend::LOCAL_BACKEND_ID;
     use crate::session::{ProjectId, WorktreeSession};
     use chrono::{Duration as ChronoDuration, Utc};
@@ -700,7 +700,7 @@ mod tests {
     /// Convert `WorktreeSession` fixtures into a one-server snapshot, deriving
     /// one project per distinct `project_id` (named `p-<id>` so name-sorting is
     /// deterministic per fixture set).
-    fn snapshot_from(sessions: Vec<WorktreeSession>) -> WorkspaceSnapshot {
+    fn snapshot_from(sessions: Vec<WorktreeSession>) -> Snapshot {
         let mut project_titles: HashMap<ProjectId, String> = Default::default();
         for s in &sessions {
             project_titles
@@ -720,6 +720,7 @@ mod tests {
                     .map(|s| s.id)
                     .collect(),
                 origin_url: None,
+                workspace: None,
             })
             .collect();
         projects.sort_by(|a, b| a.name.cmp(&b.name));
@@ -734,7 +735,7 @@ mod tests {
                 crate::api::session_info_from_session(s, pname)
             })
             .collect();
-        WorkspaceSnapshot {
+        Snapshot {
             projects,
             sessions: session_infos,
             cascade_paused: None,
@@ -746,13 +747,16 @@ mod tests {
                 tmux_ok: true,
                 version: "test".to_string(),
             },
+            workspaces: Vec::new(),
+            main_workspace: None,
+            startup_workspace: Default::default(),
         }
     }
 
     /// Build a board from one local-backend snapshot with the given sections
     /// and agent states — the single-server shape most tests exercise.
     fn board_from(
-        snapshot: &WorkspaceSnapshot,
+        snapshot: &Snapshot,
         sections: &[SectionConfig],
         in_progress_limit: Option<u32>,
         agent_states: &BTreeMap<SessionId, AgentState>,
@@ -769,7 +773,7 @@ mod tests {
 
     /// As [`board_from`], with an active project filter and hide-empty toggle.
     fn board_from_filtered(
-        snapshot: &WorkspaceSnapshot,
+        snapshot: &Snapshot,
         sections: &[SectionConfig],
         in_progress_limit: Option<u32>,
         agent_states: &BTreeMap<SessionId, AgentState>,
@@ -1127,6 +1131,7 @@ mod tests {
             main_branch: "main".to_string(),
             session_ids: Vec::new(),
             origin_url: None,
+            workspace: None,
         });
 
         let board = board_from(&state, &[], None, &BTreeMap::new());

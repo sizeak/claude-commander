@@ -11,7 +11,7 @@ import 'projects_page.dart';
 /// Form for creating a session. The project is picked from the server's
 /// registered projects (a dropdown of [CommanderStore.projects]); its repo path
 /// is what the session branches from. The body rebuilds with the store, so if
-/// the workspace snapshot is still loading when the page opens, the picker fills
+/// the snapshot is still loading when the page opens, the picker fills
 /// in as soon as the projects arrive rather than stranding on an empty state. If
 /// the server genuinely has no projects, the page offers a jump to the projects
 /// manager to add one.
@@ -23,9 +23,17 @@ import 'projects_page.dart';
 /// section is applied with `setSection` right after the session is created. On
 /// success it refreshes the store (so the list behind it already holds the new
 /// session) and pops with the new session id.
+///
+/// The project list is scoped to [workspace] — the app's active one — as every
+/// other list in the app is, so a session is always started in the workspace
+/// the user is looking at.
 class CreateSessionPage extends StatefulWidget {
   final CommanderStore store;
-  const CreateSessionPage({super.key, required this.store});
+
+  /// The active workspace (null = Main); only its projects are offered.
+  final String? workspace;
+
+  const CreateSessionPage({super.key, required this.store, this.workspace});
 
   @override
   State<CreateSessionPage> createState() => _CreateSessionPageState();
@@ -165,12 +173,12 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
     return ChromePage(
       title: 'New session',
       code: '47-N',
-      // Rebuild with the store so a still-loading workspace fills the picker in
+      // Rebuild with the store so a still-loading snapshot fills the picker in
       // as soon as its snapshot lands, rather than stranding on the empty state.
       body: ListenableBuilder(
         listenable: widget.store,
         builder: (context, _) {
-          final projects = widget.store.projects;
+          final projects = widget.store.projectsIn(widget.workspace);
           if (projects.isEmpty) return _noProjects();
           // Keep the selection valid: preselect the first project, and recover
           // if the chosen one vanished from the live list (a dropdown whose
@@ -225,14 +233,21 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
         children: [
           const Icon(Icons.folder_off_outlined, size: 48),
           const SizedBox(height: 12),
-          const Text('No projects registered on the server'),
+          Text(
+            widget.workspace == null
+                ? 'No projects registered on the server'
+                : 'No projects in ${widget.workspace} on this server',
+          ),
           const SizedBox(height: 16),
           // The store is right here, so let the user jump straight to the
           // projects manager and add one; the picker fills in when they return.
           FilledButton.icon(
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (_) => ProjectsPage(store: widget.store),
+                builder: (_) => ProjectsPage(
+                  store: widget.store,
+                  workspace: widget.workspace,
+                ),
               ),
             ),
             icon: const Icon(Icons.folder_open),

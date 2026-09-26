@@ -1,0 +1,6 @@
+---
+source: crates/claude-commander-tui/src/app/tests.rs
+assertion_line: 10949
+expression: bar.trim_end()
+---
+  Main  Work ●1 │ Sessions: 1 │ [n]ew session │ s[t]acked │ [N]ew project                    ? help

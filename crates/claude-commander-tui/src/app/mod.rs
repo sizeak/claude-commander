@@ -68,6 +68,7 @@ use claude_commander_core::tmux::PaneInfo;
 
 mod actions;
 mod background;
+mod colour_picker;
 mod conversation;
 mod event_loop;
 mod input;
@@ -78,6 +79,8 @@ mod selection;
 mod settings;
 mod state;
 mod switcher;
+mod workspace_settings;
+mod workspaces;
 
 #[cfg(test)]
 mod tests;
@@ -145,7 +148,7 @@ async fn fetch_and_send_backend_change(
     backend: Arc<dyn CommanderBackend>,
     tx: tokio::sync::mpsc::Sender<AppEvent>,
 ) -> bool {
-    let snapshot = match backend.workspace_snapshot().await {
+    let snapshot = match backend.snapshot().await {
         Ok(s) => s,
         Err(e) => {
             debug!("Snapshot refresh for backend {backend_id} failed: {e}");
@@ -182,7 +185,7 @@ async fn fetch_and_send_backend_change(
 /// for the rest of the outage.
 fn connection_from_snapshot(
     is_local: bool,
-    snapshot: &claude_commander_core::api::WorkspaceSnapshot,
+    snapshot: &claude_commander_core::api::Snapshot,
 ) -> Option<ConnectionState> {
     if !is_local {
         return None;
@@ -545,6 +548,13 @@ pub struct QuickSwitchMatch {
     /// query is empty (newest first, mirroring the pinned "Recent" block).
     /// `None` for sessions never attached, which sort to the bottom.
     pub last_attached_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The session's workspace (its project's tag; `None` = Main). Picking a
+    /// session outside the active workspace switches to this one first.
+    pub workspace: Option<String>,
+    /// The workspace's label when it is *not* the active one (and workspace UI
+    /// is showing), drawn as a dim tag; `None` for active-workspace rows, which
+    /// also rank first.
+    pub other_workspace: Option<String>,
 }
 
 /// How the quick-switch palette was opened.
@@ -588,6 +598,14 @@ pub enum PaletteMode {
     /// that changes the session's program and relaunches it.
     ProgramPicker {
         session_id: SessionId,
+    },
+    /// Workspace picker (`W`): one row per merged workspace; selecting one
+    /// switches to it. An unmatched query creates a workspace of that name.
+    WorkspacePicker,
+    /// Target picker for moving `project_id` to another workspace. An
+    /// unmatched query creates a workspace of that name and moves it there.
+    MoveProjectPicker {
+        project_id: ProjectId,
     },
 }
 
@@ -639,6 +657,19 @@ pub enum QuickSwitchItem {
         session_id: SessionId,
         /// The launch command to switch to.
         program: String,
+        /// Pre-formatted display label.
+        label: String,
+    },
+    /// Selecting this row switches to workspace `name` (`None` = Main).
+    Workspace {
+        name: Option<String>,
+        /// Pre-formatted display label (with waiting count / current marker).
+        label: String,
+    },
+    /// Selecting this row moves `project_id` into `target` (`None` = Main).
+    ProjectWorkspace {
+        project_id: ProjectId,
+        target: Option<String>,
         /// Pre-formatted display label.
         label: String,
     },
@@ -737,17 +768,19 @@ pub enum SettingsTab {
     Keybindings,
     Theme,
     Sections,
+    Workspaces,
     Programs,
     Server,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 7] = [
+    const ALL: [SettingsTab; 8] = [
         Self::General,
         Self::Voice,
         Self::Keybindings,
         Self::Theme,
         Self::Sections,
+        Self::Workspaces,
         Self::Programs,
         Self::Server,
     ];
@@ -759,6 +792,7 @@ impl SettingsTab {
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
             Self::Sections => "Sections",
+            Self::Workspaces => "Workspaces",
             Self::Programs => "Programs",
             Self::Server => "Server",
         }
@@ -770,7 +804,8 @@ impl SettingsTab {
             Self::Voice => Self::Keybindings,
             Self::Keybindings => Self::Theme,
             Self::Theme => Self::Sections,
-            Self::Sections => Self::Programs,
+            Self::Sections => Self::Workspaces,
+            Self::Workspaces => Self::Programs,
             Self::Programs => Self::Server,
             Self::Server => Self::General,
         }
@@ -783,7 +818,8 @@ impl SettingsTab {
             Self::Keybindings => Self::Voice,
             Self::Theme => Self::Keybindings,
             Self::Sections => Self::Theme,
-            Self::Programs => Self::Sections,
+            Self::Workspaces => Self::Sections,
+            Self::Programs => Self::Workspaces,
             Self::Server => Self::Programs,
         }
     }
@@ -823,6 +859,45 @@ impl Default for SectionsState {
             editing: None,
         }
     }
+}
+
+/// Which pane is focused in the Workspaces tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspacesFocus {
+    #[default]
+    List,
+    /// The right pane: the theme row, then the workspace's projects.
+    Detail,
+}
+
+/// State for the Workspaces tab. The list it edits is the *merged* one across
+/// every backend (index 0 is Main), read fresh from the snapshots each frame,
+/// so this holds only cursor and editing state.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspacesState {
+    /// Index into the merged workspace list.
+    pub selected: usize,
+    pub focus: WorkspacesFocus,
+    /// Detail-pane row: 0 = theme, 1.. = the workspace's projects.
+    pub detail_selected: usize,
+    pub editing: Option<WorkspacesEditing>,
+}
+
+/// Editing state for the Workspaces tab.
+#[derive(Debug, Clone)]
+pub enum WorkspacesEditing {
+    Creating {
+        value: Input,
+    },
+    Renaming {
+        value: Input,
+    },
+    /// `m` on a project: pick its target in the left list (`target` indexes
+    /// the merged list), Enter to move, Esc to cancel.
+    MovingProject {
+        project_id: ProjectId,
+        target: usize,
+    },
 }
 
 /// Which pane is focused in the Programs tab
@@ -911,12 +986,28 @@ pub struct SettingsState {
     pub rows: Vec<SettingsRow>,
     /// State for the Sections tab (lazily initialised on first tab switch)
     pub sections_state: SectionsState,
+    /// State for the Workspaces tab
+    pub workspaces_state: WorkspacesState,
     /// State for the Programs tab (lazily initialised on first tab switch)
     pub programs_state: ProgramsState,
+    /// Which theme the Theme tab edits. Opening settings defaults it to the
+    /// active workspace once there are two or more; the Workspaces tab's
+    /// Theme row sets it to the selected workspace.
+    pub theme_scope: ThemeScope,
     /// Active search filter for the Keybindings tab. `Some` while the search
     /// box is focused (typing filters the shortcut list live); `None` when the
     /// list is browsed normally.
     pub search: Option<Input>,
+}
+
+/// Which theme Settings → Theme edits.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ThemeScope {
+    /// `[theme]`, which every workspace without its own preset inherits.
+    #[default]
+    Usual,
+    /// One workspace's `[workspace_themes."<name>"]` (`None` = Main).
+    Workspace(Option<String>),
 }
 
 /// Kind of a settings row, carrying its typed value.
@@ -944,6 +1035,10 @@ pub struct SettingsRow {
     pub kind: SettingsRowKind,
     /// Optional color for displaying a swatch next to the value (Theme tab only)
     pub color_swatch: Option<Color>,
+    /// Where an inherited value comes from (`"usual"`, `"preset"`): the row
+    /// has no value of its own, so it is drawn dim with this note. `None` for
+    /// a value set in the scope being edited (Theme tab only).
+    pub inherited_from: Option<&'static str>,
 }
 
 impl SettingsRow {
@@ -958,6 +1053,7 @@ impl SettingsRow {
             field_key: field_key.into(),
             kind: SettingsRowKind::Text(value.into()),
             color_swatch: None,
+            inherited_from: None,
         }
     }
 
@@ -968,6 +1064,7 @@ impl SettingsRow {
             field_key: field_key.into(),
             kind: SettingsRowKind::Toggle(on),
             color_swatch: None,
+            inherited_from: None,
         }
     }
 
@@ -978,6 +1075,7 @@ impl SettingsRow {
             field_key: String::new(),
             kind: SettingsRowKind::Header,
             color_swatch: None,
+            inherited_from: None,
         }
     }
 
@@ -998,6 +1096,7 @@ impl SettingsRow {
             field_key: field_key.into(),
             kind: SettingsRowKind::Text(value.into()),
             color_swatch: Some(color),
+            inherited_from: None,
         }
     }
 
@@ -1032,6 +1131,10 @@ pub enum SettingsEditing {
     OptionPicker {
         options: Vec<PickerOption>,
         selected: usize,
+    },
+    /// A Theme-tab colour row: the swatch grid and hex row.
+    Colour {
+        picker: Box<colour_picker::ColourPicker>,
     },
 }
 
@@ -1408,6 +1511,9 @@ pub enum InputAction {
     /// the name derived from `source` and editable. An empty submission means
     /// "derive it" (`CloneRequest::dest_name = None`), which is a valid choice
     /// rather than an error.
+    /// Name for a new workspace (`NewWorkspace`); created on every backend,
+    /// then switched to.
+    NewWorkspace,
     CloneDestName {
         /// Backend the clone runs on — the one the picker was opened against,
         /// carried explicitly so it can't drift with the tree selection.
@@ -1502,6 +1608,11 @@ pub struct AppUiState {
     /// sidebar cursor (see `refresh_list_items`), cleared by Esc in the main
     /// view. `ProjectId`s are globally unique, so this needs no backend qualifier.
     pub board_filter: Option<ProjectId>,
+    /// The workspace the user asked to see (`None` = Main). Kept as asked:
+    /// the *effective* workspace is this when some backend still has it, else
+    /// Main (see `App::active_workspace`), so a startup workspace takes effect
+    /// once the snapshot carrying it arrives.
+    pub active_workspace: Option<String>,
     /// Enriched PR info for the currently selected session
     pub enriched_pr: Option<(SessionId, EnrichedPrInfo)>,
     /// Session whose enriched-PR fetch came back empty (no PR data, or `gh`
@@ -1579,6 +1690,11 @@ pub struct AppUiState {
     pub should_quit: bool,
     /// Last known terminal size (updated each render frame)
     pub terminal_size: Rect,
+    /// Whose theme `App::theme` was last built for: `None` for the usual
+    /// `[theme]` (workspace UI hidden), `Some(workspace)` (`Some(None)` = Main)
+    /// once there are workspaces. `refresh_list_items` rebuilds the theme when
+    /// `App::theme_workspace` moves off it.
+    pub theme_workspace: Option<Option<String>>,
     /// Inner rect of the review-diff body pane, recorded each render frame so
     /// mouse events can map a screen position to a diff line. `None` unless the
     /// review view is open.
@@ -1735,6 +1851,7 @@ impl Default for AppUiState {
             board_heading_regions: Vec::new(),
             board_column_rects: None,
             board_filter: None,
+            active_workspace: None,
             enriched_pr: None,
             enriched_pr_unavailable: None,
             ai_summaries: std::collections::HashMap::new(),
@@ -1783,6 +1900,7 @@ impl Default for AppUiState {
             enriched_pr_fetch_spawned_at: None,
             review_refresh_in_flight: false,
             terminal_size: Rect::default(),
+            theme_workspace: None,
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             agent_states: BTreeMap::new(),
@@ -1847,6 +1965,9 @@ impl AppUiState {
             | BindableAction::OpenReviewDiff
             | BindableAction::OpenInfo
             | BindableAction::MoveToSection => has_session,
+            // Moving acts on the selected project (a session row selects its
+            // project too) on its owning backend.
+            BindableAction::MoveProjectToWorkspace => has_project,
             // Opening the operator's editor only works against a local worktree;
             // a remote backend has no path on this machine.
             BindableAction::OpenInEditor => {
@@ -2139,13 +2260,9 @@ impl App {
             ));
         }
 
-        let base = config
-            .theme
-            .preset
-            .as_deref()
-            .and_then(Theme::from_preset)
-            .unwrap_or_default();
-        let theme = base.with_overrides(&config.theme);
+        // The usual theme: no workspace is active until the snapshots arrive,
+        // and `refresh_list_items` swaps in the active one's when it is.
+        let theme = Theme::from_overrides(&config.theme);
         let debounce = Duration::from_millis(config.session_number_debounce_ms);
         let commander_enabled_at_init = config.commander_enabled;
 
@@ -2384,7 +2501,7 @@ impl App {
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
         let backend = self.backend_arc(id);
-        let snapshot = backend.workspace_snapshot().await;
+        let snapshot = backend.snapshot().await;
         let states = backend.agent_states(false).await;
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
@@ -2413,7 +2530,7 @@ impl App {
         // Read back through the backend (which wraps the same store the test
         // seeded) rather than the store directly, so this stays clear of the
         // Phase-C store-access gate.
-        if let Ok(snapshot) = self.local_arc().workspace_snapshot().await {
+        if let Ok(snapshot) = self.local_arc().snapshot().await {
             self.backends[0].view.snapshot = snapshot;
             self.backends[0].view.connection =
                 claude_commander_core::backend::ConnectionState::Connected;
@@ -2643,7 +2760,7 @@ impl App {
             {
                 continue;
             }
-            let snapshot = handle.backend.workspace_snapshot().await;
+            let snapshot = handle.backend.snapshot().await;
             let states = handle.backend.agent_states(false).await;
             match (snapshot, states) {
                 (Ok(snapshot), Ok(states)) => {
@@ -2859,6 +2976,11 @@ impl App {
         if let Some(pct) = self.tui_prefs.prefs().left_pane_pct {
             self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
         }
+
+        // Pick the workspace to open on (`startup_workspace`, else the one
+        // `tui.json` remembers) before the first build, so the views are
+        // scoped from the first frame.
+        self.apply_startup_workspace();
 
         // Restore last selection from persisted state
         self.refresh_list_items().await;

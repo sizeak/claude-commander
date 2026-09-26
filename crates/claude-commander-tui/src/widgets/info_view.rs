@@ -443,7 +443,7 @@ impl<'a> Widget for InfoView<'a> {
 }
 
 /// Try to parse a GitHub hex color string (e.g. "d73a4a") into a ratatui Color.
-fn parse_hex_color(hex: &str) -> Option<ratatui::style::Color> {
+pub(crate) fn parse_hex_color(hex: &str) -> Option<ratatui::style::Color> {
     let hex = hex.trim_start_matches('#');
     if hex.len() != 6 {
         return None;

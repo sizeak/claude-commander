@@ -22,9 +22,12 @@ path = "src/lib.rs"
 # or in a frontend. A reviewer can check the rule by reading this block alone.
 [dependencies]
 # Skim-style subsequence scoring for the palette and session search.
-#
-# Deliberately the ONLY dependency for now. `claude-commander-protocol` will be
-# needed as soon as a slice lands that reasons about a DTO (`SessionStatus`, say),
-# but an unused dependency is cruft cargo will not warn about, so it is added when
-# a slice earns it rather than up front.
 fuzzy-matcher = "0.3"
+# The wire DTOs the workspace helpers reason about (`Snapshot`, `ProjectInfo`,
+# `WorkspaceDef`). Serde-only and mobile-safe, so it keeps this crate's
+# no-host-deps rule; added now that a slice (workspaces) earns it.
+claude-commander-protocol = { path = "../claude-commander-protocol" }
+
+[dev-dependencies]
+# Fixture DTOs are built from JSON so they track the wire shape, not a field list.
+serde_json = { workspace = true }

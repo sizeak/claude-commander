@@ -474,6 +474,7 @@ pub async fn diff_stat_summary(path: &Path, base: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::fixture::fixture_git;
 
     #[test]
     fn test_format_diff_stat_summary_pluralization() {
@@ -508,7 +509,7 @@ mod tests {
         use tempfile::TempDir;
 
         async fn git(dir: &Path, args: &[&str]) {
-            let status = git_command()
+            let status = fixture_git()
                 .current_dir(dir)
                 .args(args)
                 .stdin(Stdio::null())
@@ -554,7 +555,7 @@ mod tests {
         use tempfile::TempDir;
 
         async fn git(dir: &Path, args: &[&str]) {
-            git_command()
+            fixture_git()
                 .current_dir(dir)
                 .args(args)
                 .stdin(Stdio::null())

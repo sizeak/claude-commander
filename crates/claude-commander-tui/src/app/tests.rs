@@ -273,6 +273,47 @@ fn a_successful_bind_raises_no_toast() {
     assert!(app.ui_state.status_message.is_none());
 }
 
+/// The foreground of the first status-bar cell holding `symbol`.
+fn status_bar_fg_of(app: &mut App, symbol: &str) -> ratatui::style::Color {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let y = buffer.area.height - 1;
+    let x = (0..buffer.area.width)
+        .find(|&x| buffer[(x, y)].symbol() == symbol)
+        .unwrap_or_else(|| panic!("no {symbol:?} in [{}]", status_bar_row(buffer)));
+    buffer[(x, y)].fg
+}
+
+/// `lcars` paints `status_running` and `status_bar_bg` in the same amber, so
+/// the server and commander chips were drawn orange on orange: present, but
+/// an empty cell to the eye. Each chip must read on the bar it sits on.
+#[test]
+fn status_bar_chips_stay_legible_on_a_bar_the_same_colour_as_them() {
+    let mut app = make_test_app();
+    app.theme = crate::theme::Theme::from_preset("lcars").unwrap();
+    assert_eq!(
+        app.theme.status_running, app.theme.status_bar_bg,
+        "the premise"
+    );
+    app.set_embedded_server(crate::EmbeddedServerStatus::Listening {
+        url: "http://127.0.0.1:7878".into(),
+        token: None,
+    });
+    app.ui_state.commander_running = true;
+    let bar = app.theme.status_bar_bg;
+    for symbol in ["\u{21c5}", "\u{25cf}"] {
+        let fg = status_bar_fg_of(&mut app, symbol);
+        let ratio = crate::theme::contrast_ratio(fg, bar);
+        assert!(
+            ratio >= crate::theme::STATUS_BAR_MIN_CONTRAST,
+            "{symbol} is drawn in {fg:?} on {bar:?} at {ratio:.2}:1"
+        );
+    }
+}
+
 fn make_project() -> SessionListItem {
     SessionListItem::Project {
         id: ProjectId::new(),
@@ -2100,7 +2141,9 @@ fn keybindings_settings_state(app: &App, search: Option<&str>) -> crate::app::Se
         editing: None,
         rows,
         sections_state: SectionsState::default(),
+        workspaces_state: WorkspacesState::default(),
         programs_state: ProgramsState::default(),
+        theme_scope: Default::default(),
         search: search.map(|q| q.into()),
     }
 }
@@ -2140,7 +2183,9 @@ fn render_general_tab_draws_section_headers() {
         editing: None,
         rows,
         sections_state: Default::default(),
+        workspaces_state: Default::default(),
         programs_state: Default::default(),
+        theme_scope: Default::default(),
         search: None,
     });
 
@@ -2431,11 +2476,12 @@ async fn programs_tab_tab_key_switches_tabs() {
         _ => panic!("expected a settings modal"),
     }
 
-    // BackTab from Programs lands on Sections.
+    // BackTab from Programs lands on Workspaces, which sits between it and
+    // Sections.
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
     feed_programs_key(&mut app, KeyCode::BackTab).await;
     match &app.ui_state.modal {
-        Modal::Settings(s) => assert_eq!(s.tab, SettingsTab::Sections),
+        Modal::Settings(s) => assert_eq!(s.tab, SettingsTab::Workspaces),
         _ => panic!("expected a settings modal"),
     }
 }
@@ -2752,7 +2798,9 @@ async fn app_on_sections_tab_with_pinned_session(
     app.refresh_list_items().await;
 
     // No dedicated opener for the Sections tab; reach it as a user would.
+    // Programs → Workspaces → Sections.
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
+    feed_programs_key(app, crossterm::event::KeyCode::BackTab).await;
     feed_programs_key(app, crossterm::event::KeyCode::BackTab).await;
     sid
 }
@@ -2881,6 +2929,7 @@ async fn creating_a_section_refuses_the_reserved_catchall_name() {
 
     let mut app = make_test_app();
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
+    feed_programs_key(&mut app, KeyCode::BackTab).await; // Workspaces tab
     feed_programs_key(&mut app, KeyCode::BackTab).await; // Sections tab
 
     // A section spelled like the catch-all would render as a second header of
@@ -3658,7 +3707,7 @@ fn buffer_lines(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> 
 // ---------------------------------------------------------------------------
 
 use super::reconcile_remote_servers;
-use claude_commander_core::api::WorkspaceSnapshot;
+use claude_commander_core::api::Snapshot;
 use claude_commander_core::backend::{
     BackendId, ConnectionState, RemoteBackendFactory, SessionRef, empty_snapshot, mock::MockBackend,
 };
@@ -3668,11 +3717,7 @@ use claude_commander_core::backend::{
 /// matching snapshot — the board is derived from the snapshot in production, so
 /// snapshot-reading helpers (`selected_session_is_creating`, Info content) need
 /// the session present there too.
-fn snapshot_with_session(
-    pid: ProjectId,
-    sid: SessionId,
-    status: SessionStatus,
-) -> WorkspaceSnapshot {
+fn snapshot_with_session(pid: ProjectId, sid: SessionId, status: SessionStatus) -> Snapshot {
     let mut state = claude_commander_core::config::AppState::default();
     let mut project = claude_commander_core::session::Project::new(
         "P",
@@ -3692,12 +3737,12 @@ fn snapshot_with_session(
     project.add_worktree(sid);
     state.projects.insert(pid, project);
     state.sessions.insert(sid, sess);
-    claude_commander_core::api::workspace_snapshot_from_state(&state)
+    claude_commander_core::api::snapshot_from_state(&state)
 }
 
 /// A snapshot carrying one running session under one project, for exercising a
 /// remote backend's tree contents / command gating.
-fn snapshot_with_one_session() -> (WorkspaceSnapshot, SessionId, ProjectId) {
+fn snapshot_with_one_session() -> (Snapshot, SessionId, ProjectId) {
     use claude_commander_core::session::{Project, SessionStatus, WorktreeSession};
     let mut state = claude_commander_core::config::AppState::default();
     let project = Project::new("remote-proj", std::path::PathBuf::from("/tmp/rp"), "main");
@@ -3716,7 +3761,7 @@ fn snapshot_with_one_session() -> (WorkspaceSnapshot, SessionId, ProjectId) {
     state.projects.insert(pid, project);
     state.sessions.insert(sid, sess);
     (
-        claude_commander_core::api::workspace_snapshot_from_state(&state),
+        claude_commander_core::api::snapshot_from_state(&state),
         sid,
         pid,
     )
@@ -3724,7 +3769,7 @@ fn snapshot_with_one_session() -> (WorkspaceSnapshot, SessionId, ProjectId) {
 
 /// Build an `App` with the local backend plus one mock remote per `(name,
 /// snapshot)`, wired through the real `App::new` factory path.
-fn build_app_with_mock_remotes(servers: Vec<(&str, WorkspaceSnapshot)>) -> App {
+fn build_app_with_mock_remotes(servers: Vec<(&str, Snapshot)>) -> App {
     let tmp = tempfile::TempDir::new().unwrap();
     let config_path = tmp.path().join("config.toml");
     let state_path = tmp.path().join("state.json");
@@ -3733,7 +3778,7 @@ fn build_app_with_mock_remotes(servers: Vec<(&str, WorkspaceSnapshot)>) -> App {
     // `projects_dir` defaults to the user's REAL `~/Projects`, which the
     // repo-clone paths write into. Pin it under `tmp`.
     config.projects_dir = Some(tmp.path().join("projects"));
-    let mut snapshots: std::collections::HashMap<String, WorkspaceSnapshot> = Default::default();
+    let mut snapshots: std::collections::HashMap<String, Snapshot> = Default::default();
     for (name, snap) in servers {
         config
             .remote_servers
@@ -5020,7 +5065,7 @@ async fn palette_includes_remote_backend_sessions() {
 /// last_attached_at)` pairs, all under one project.
 fn snapshot_with_attach_times(
     sessions: &[(&str, Option<chrono::DateTime<chrono::Utc>>)],
-) -> (WorkspaceSnapshot, Vec<SessionId>) {
+) -> (Snapshot, Vec<SessionId>) {
     use claude_commander_core::session::{Project, SessionStatus, WorktreeSession};
     let mut state = claude_commander_core::config::AppState::default();
     let mut project = Project::new("proj", std::path::PathBuf::from("/tmp/p"), "main");
@@ -5036,10 +5081,7 @@ fn snapshot_with_attach_times(
         ids.push(id);
     }
     state.projects.insert(pid, project);
-    (
-        claude_commander_core::api::workspace_snapshot_from_state(&state),
-        ids,
-    )
+    (claude_commander_core::api::snapshot_from_state(&state), ids)
 }
 
 /// The palette must score a session's branch and program, not only its title —
@@ -5072,7 +5114,7 @@ async fn palette_scores_branch_and_program_but_not_project_name() {
     project.add_worktree(sid);
     state.sessions.insert(sid, session);
     state.projects.insert(pid, project);
-    let snap = claude_commander_core::api::workspace_snapshot_from_state(&state);
+    let snap = claude_commander_core::api::snapshot_from_state(&state);
 
     let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
     app.bootstrap_backend_views().await;
@@ -5499,7 +5541,7 @@ async fn app_with_editor_capable_session() -> (App, SessionId, std::path::PathBu
     project.add_worktree(sid);
     state.projects.insert(pid, project);
     state.sessions.insert(sid, sess);
-    let snap = claude_commander_core::api::workspace_snapshot_from_state(&state);
+    let snap = claude_commander_core::api::snapshot_from_state(&state);
 
     let mut app = build_app_with_mock_remotes(vec![("buildbox", snap)]);
     app.bootstrap_backend_views().await;
@@ -9790,7 +9832,7 @@ async fn app_with_sectioned_sessions(alpha_section: Option<&str>) -> (App, Sessi
     let beta = mk("beta-sess");
     state.projects.insert(pid, project);
 
-    let mut snap = claude_commander_core::api::workspace_snapshot_from_state(&state);
+    let mut snap = claude_commander_core::api::snapshot_from_state(&state);
     for s in snap.sessions.iter_mut() {
         let name = if s.session_id == alpha || s.session_id == alpha_two {
             alpha_section.map(str::to_string)
@@ -9852,6 +9894,8 @@ async fn palette_jump_into_a_collapsed_section_attaches_to_the_picked_session() 
             agent_state: None,
             unread: false,
             last_attached_at: None,
+            workspace: None,
+            other_workspace: None,
         })],
         selected_idx: 0,
         scroll: 0,
@@ -10247,4 +10291,1872 @@ async fn toggle_dictation_when_idle_in_list_toasts_and_does_not_record() {
         msg.contains("Attach to a session to dictate into it"),
         "unexpected toast: {msg}"
     );
+}
+
+// ===========================================================================
+// Workspaces
+// ===========================================================================
+
+mod workspaces {
+    use super::*;
+    use crate::app::workspaces::{WorkspaceFilter, set_request_for, set_request_for_backend};
+    use crate::app::{WorkspacesEditing, WorkspacesFocus, WorkspacesState};
+    use claude_commander_core::backend::mock::MockWorkspaceCall;
+    use claude_commander_core::config::theme::ThemeOverrides;
+    use claude_commander_protocol::workspace::{
+        SetWorkspacesRequest, StartupWorkspace, WorkspaceDef,
+    };
+    use claude_commander_viewmodel::workspace::MergedWorkspace;
+    use crossterm::event::KeyCode;
+
+    fn merged(names: &[&str]) -> Vec<MergedWorkspace> {
+        let mut out = vec![MergedWorkspace {
+            name: None,
+            label: "Main".to_string(),
+        }];
+        out.extend(names.iter().map(|n| MergedWorkspace {
+            name: Some(n.to_string()),
+            label: n.to_string(),
+        }));
+        out
+    }
+
+    /// Seed the local backend with one Main project and one project tagged
+    /// `Work` (each with one attached session), and define `Work` in config.
+    /// Returns (main session, work session, main project, work project).
+    async fn app_with_two_workspaces() -> (App, SessionId, SessionId, ProjectId, ProjectId) {
+        app_with_two_workspaces_and_config_path().await.0
+    }
+
+    /// [`app_with_two_workspaces`], plus the path of its `config.toml` so a
+    /// test can edit it "externally" for hot reload.
+    async fn app_with_two_workspaces_and_config_path() -> (
+        (App, SessionId, SessionId, ProjectId, ProjectId),
+        std::path::PathBuf,
+    ) {
+        use claude_commander_core::session::{Project, WorktreeSession};
+        let (mut app, config_path) = make_test_app_with_path();
+        let main_proj = Project::new("main-proj", std::path::PathBuf::from("/tmp/mp"), "main");
+        let mut work_proj = Project::new("work-proj", std::path::PathBuf::from("/tmp/wp"), "main");
+        work_proj.workspace = Some("Work".to_string());
+        let (mp, wp) = (main_proj.id, work_proj.id);
+        let mut main_sess = WorktreeSession::new(
+            mp,
+            "main-sess",
+            "main-br",
+            std::path::PathBuf::from("/tmp/m1"),
+            "claude",
+        );
+        main_sess.status = SessionStatus::Running;
+        main_sess.last_attached_at = Some(chrono::Utc::now());
+        let mut work_sess = WorktreeSession::new(
+            wp,
+            "work-sess",
+            "work-br",
+            std::path::PathBuf::from("/tmp/w1"),
+            "claude",
+        );
+        work_sess.status = SessionStatus::Running;
+        work_sess.last_attached_at = Some(chrono::Utc::now() - chrono::Duration::seconds(60));
+        let (ms, ws) = (main_sess.id, work_sess.id);
+        app.service
+            .store()
+            .mutate(move |state| {
+                state.add_project(main_proj);
+                state.add_project(work_proj);
+                state.add_session(main_sess);
+                state.add_session(work_sess);
+            })
+            .await
+            .unwrap();
+        app.service
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Work")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap();
+        app.config = app.service.read_config();
+        app.sync_local_view_from_store_for_test().await;
+        app.ui_state.view_mode = ViewMode::ProjectGrouped;
+        app.refresh_list_items().await;
+        ((app, ms, ws, mp, wp), config_path)
+    }
+
+    fn listed_sessions(app: &App) -> Vec<SessionId> {
+        app.ui_state
+            .list_items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::Worktree { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn listed_projects(app: &App) -> Vec<ProjectId> {
+        app.ui_state
+            .list_items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::Project { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn recent_sessions(app: &App) -> Vec<SessionId> {
+        app.ui_state.list_items[..app.ui_state.recents_len]
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::RecentSession { session, .. } => Some(session.id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn feed(app: &mut App, code: KeyCode) {
+        feed_programs_key(app, code).await;
+    }
+
+    async fn feed_shift(app: &mut App, c: char) {
+        let state = match std::mem::replace(&mut app.ui_state.modal, Modal::None) {
+            Modal::Settings(s) => s,
+            other => {
+                app.ui_state.modal = other;
+                panic!("expected a settings modal");
+            }
+        };
+        app.handle_settings_key(
+            crossterm::event::KeyEvent::new(
+                KeyCode::Char(c),
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
+            state,
+        )
+        .await;
+    }
+
+    fn open_workspaces_tab(app: &mut App) {
+        app.ui_state.modal = Modal::Settings(SettingsState {
+            tab: SettingsTab::Workspaces,
+            selected_row: 0,
+            editing: None,
+            rows: Vec::new(),
+            sections_state: SectionsState::default(),
+            workspaces_state: WorkspacesState::default(),
+            programs_state: ProgramsState::default(),
+            theme_scope: crate::app::ThemeScope::Usual,
+            search: None,
+        });
+    }
+
+    fn ws_state(app: &App) -> &WorkspacesState {
+        match &app.ui_state.modal {
+            Modal::Settings(s) => &s.workspaces_state,
+            _ => panic!("expected a settings modal"),
+        }
+    }
+
+    fn toast(app: &App) -> String {
+        app.ui_state
+            .status_message
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .unwrap_or_default()
+    }
+
+    // -- pure helpers --
+
+    #[test]
+    fn set_request_sends_main_only_when_it_is_being_edited() {
+        let list = merged(&["Work", "Home"]);
+        let req = set_request_for(&list, false);
+        assert_eq!(
+            req.workspaces,
+            vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Home")]
+        );
+        assert_eq!(req.main, None, "a default Main needs no table");
+        assert_eq!(req.startup_workspace, None);
+        assert_eq!(
+            set_request_for(&list, true).main,
+            Some(WorkspaceDef::named("Main")),
+            "renaming Main back to its default must still be sent"
+        );
+        // A relabelled Main (from whichever server set it) is not pushed onto
+        // servers that never asked for it by an unrelated edit — on one that
+        // defines a workspace of that name it would be refused.
+        let mut relabelled = list.clone();
+        relabelled[0].label = "Home base".into();
+        assert_eq!(set_request_for(&relabelled, false).main, None);
+        assert_eq!(
+            set_request_for(&relabelled, true).main,
+            Some(WorkspaceDef::named("Home base"))
+        );
+    }
+
+    #[test]
+    fn a_backend_request_keeps_its_own_spellings_and_its_mains_label_free() {
+        let mut snap = empty_snapshot();
+        snap.workspaces = vec![WorkspaceDef::named("work")];
+        snap.main_workspace = Some(WorkspaceDef::named("Play"));
+        let wanted = SetWorkspacesRequest {
+            workspaces: vec![
+                WorkspaceDef::named("Work"),
+                WorkspaceDef::named("work"),
+                WorkspaceDef::named("Play"),
+                WorkspaceDef::named("New"),
+            ],
+            main: None,
+            startup_workspace: None,
+        };
+        assert_eq!(
+            set_request_for_backend(&wanted, &snap).workspaces,
+            vec![WorkspaceDef::named("work"), WorkspaceDef::named("New")]
+        );
+    }
+
+    #[test]
+    fn next_startup_cycles_last_main_then_each_workspace() {
+        use crate::app::workspace_settings::next_startup;
+        let list = merged(&["Work"]);
+        let s1 = next_startup(&StartupWorkspace::Last, &list);
+        assert_eq!(s1, StartupWorkspace::Main);
+        let s2 = next_startup(&s1, &list);
+        assert_eq!(s2, StartupWorkspace::Named("Work".into()));
+        assert_eq!(next_startup(&s2, &list), StartupWorkspace::Last);
+        assert_eq!(
+            next_startup(&StartupWorkspace::Named("Gone".into()), &list),
+            StartupWorkspace::Main
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_all_borrows_and_only_narrows_projects_and_sessions() {
+        let (app, ms, ws, mp, wp) = app_with_two_workspaces().await;
+        let snap = &app.local_view().snapshot;
+        assert!(matches!(
+            WorkspaceFilter::All.scope(snap),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let work = WorkspaceFilter::Only(Some("Work".into())).scope(snap);
+        assert_eq!(
+            work.projects.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![wp]
+        );
+        assert_eq!(
+            work.sessions
+                .iter()
+                .map(|s| s.session_id)
+                .collect::<Vec<_>>(),
+            vec![ws]
+        );
+        let main = WorkspaceFilter::Only(None).scope(snap);
+        assert_eq!(
+            main.projects.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![mp]
+        );
+        assert_eq!(
+            main.sessions
+                .iter()
+                .map(|s| s.session_id)
+                .collect::<Vec<_>>(),
+            vec![ms]
+        );
+    }
+
+    // -- scoping --
+
+    #[tokio::test]
+    async fn one_workspace_filters_nothing() {
+        let mut app = make_test_app();
+        assert_eq!(app.workspace_filter(), WorkspaceFilter::All);
+        app.ui_state.active_workspace = Some("Anything".into());
+        assert_eq!(app.workspace_filter(), WorkspaceFilter::All);
+        assert_eq!(app.visible_active_workspace(), None);
+    }
+
+    #[tokio::test]
+    async fn list_view_and_recents_show_only_the_active_workspace() {
+        let (mut app, ms, ws, mp, wp) = app_with_two_workspaces().await;
+        assert_eq!(listed_projects(&app), vec![mp]);
+        assert_eq!(listed_sessions(&app), vec![ms]);
+        assert_eq!(recent_sessions(&app), vec![ms]);
+
+        app.switch_workspace(Some("Work".into()), true).await;
+        assert_eq!(listed_projects(&app), vec![wp]);
+        assert_eq!(listed_sessions(&app), vec![ws]);
+        assert_eq!(recent_sessions(&app), vec![ws]);
+    }
+
+    #[tokio::test]
+    async fn board_and_its_sidebar_show_only_the_active_workspace() {
+        let (mut app, ms, ws, mp, wp) = app_with_two_workspaces().await;
+        app.ui_state.view_mode = ViewMode::Board;
+        app.refresh_list_items().await;
+        let sidebar: Vec<ProjectId> = app
+            .ui_state
+            .board
+            .projects
+            .iter()
+            .map(|p| p.project_id)
+            .collect();
+        assert_eq!(sidebar, vec![mp]);
+        assert!(app.ui_state.board.position_of(ms).is_some());
+        assert!(app.ui_state.board.position_of(ws).is_none());
+
+        app.switch_workspace(Some("Work".into()), true).await;
+        let sidebar: Vec<ProjectId> = app
+            .ui_state
+            .board
+            .projects
+            .iter()
+            .map(|p| p.project_id)
+            .collect();
+        assert_eq!(sidebar, vec![wp]);
+        assert!(app.ui_state.board.position_of(ws).is_some());
+        assert!(app.ui_state.board.position_of(ms).is_none());
+    }
+
+    #[tokio::test]
+    async fn switching_clears_a_board_filter_and_lands_on_the_first_row() {
+        let (mut app, _ms, ws, mp, _wp) = app_with_two_workspaces().await;
+        app.ui_state.board_filter = Some(mp);
+        app.switch_workspace(Some("Work".into()), true).await;
+        assert_eq!(app.ui_state.board_filter, None);
+        let first = app.ui_state.list_state.selected().unwrap();
+        let first_selectable = app
+            .ui_state
+            .list_items
+            .iter()
+            .position(|i| i.is_selectable())
+            .unwrap();
+        assert_eq!(first, first_selectable);
+        // Recents lead the list, so the first row is the Work session's.
+        assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(ws));
+    }
+
+    #[tokio::test]
+    async fn switching_remembers_the_workspace_in_tui_json() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.switch_workspace(Some("Work".into()), true).await;
+        assert_eq!(
+            app.tui_prefs.prefs().last_workspace.as_deref(),
+            Some("Work")
+        );
+        app.switch_workspace(None, true).await;
+        assert_eq!(app.tui_prefs.prefs().last_workspace, None);
+    }
+
+    #[tokio::test]
+    async fn startup_workspace_last_restores_and_named_pins() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.tui_prefs.set_last_workspace(Some("Work".into())).await;
+        app.apply_startup_workspace();
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+
+        app.config.startup_workspace = StartupWorkspace::Main;
+        app.apply_startup_workspace();
+        assert_eq!(app.active_workspace(), None);
+
+        // A pin on a workspace that no longer exists opens Main.
+        app.config.startup_workspace = StartupWorkspace::Named("Gone".into());
+        app.apply_startup_workspace();
+        assert_eq!(app.active_workspace(), None);
+    }
+
+    #[tokio::test]
+    async fn the_new_session_project_picker_is_scoped() {
+        let (mut app, _ms, _ws, mp, wp) = app_with_two_workspaces().await;
+        let picker = app.new_project_picker(LOCAL_BACKEND_ID, mp).await;
+        let ids: Vec<ProjectId> = picker.choices.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![mp]);
+        app.switch_workspace(Some("Work".into()), true).await;
+        let picker = app.new_project_picker(LOCAL_BACKEND_ID, wp).await;
+        let ids: Vec<ProjectId> = picker.choices.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![wp]);
+    }
+
+    // -- w / W --
+
+    #[tokio::test]
+    async fn w_with_one_workspace_says_so() {
+        let mut app = make_test_app();
+        app.handle_command(UserCommand::NextWorkspace).await;
+        assert!(
+            toast(&app).contains("Only one workspace"),
+            "{}",
+            toast(&app)
+        );
+        assert_eq!(app.ui_state.active_workspace, None);
+    }
+
+    #[tokio::test]
+    async fn w_cycles_and_wraps() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.handle_command(UserCommand::NextWorkspace).await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+        app.handle_command(UserCommand::NextWorkspace).await;
+        assert_eq!(app.active_workspace(), None, "wraps back to Main");
+        app.handle_command(UserCommand::PreviousWorkspace).await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+    }
+
+    #[tokio::test]
+    async fn workspace_picker_lists_every_workspace_and_switches() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.handle_command(UserCommand::WorkspacePicker).await;
+        let labels: Vec<String> = match &app.ui_state.modal {
+            Modal::QuickSwitch {
+                mode: PaletteMode::WorkspacePicker,
+                matches,
+                ..
+            } => matches
+                .iter()
+                .map(|m| match m {
+                    QuickSwitchItem::Workspace { label, .. } => label.clone(),
+                    other => panic!("unexpected row {other:?}"),
+                })
+                .collect(),
+            _ => panic!("expected the workspace picker"),
+        };
+        assert_eq!(
+            labels,
+            vec!["Main  (current)".to_string(), "Work".to_string()]
+        );
+        if let Modal::QuickSwitch { selected_idx, .. } = &mut app.ui_state.modal {
+            *selected_idx = 1;
+        }
+        app.activate_quick_switch_selection().await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+        assert!(matches!(app.ui_state.modal, Modal::None));
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_picker_query_creates_and_switches() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.handle_command(UserCommand::WorkspacePicker).await;
+        for c in "Zebra".chars() {
+            if let Modal::QuickSwitch { query, .. } = &mut app.ui_state.modal {
+                super::super::edit_text_input(query, key(KeyCode::Char(c)));
+            }
+            app.refilter_quick_switch();
+        }
+        app.activate_quick_switch_selection().await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Zebra"));
+        assert!(
+            app.config.workspaces.iter().any(|w| w.name == "Zebra"),
+            "the new workspace is defined locally"
+        );
+    }
+
+    // -- palette --
+
+    #[tokio::test]
+    async fn palette_ranks_the_active_workspace_first_and_tags_the_rest() {
+        let (app, ms, ws, ..) = app_with_two_workspaces().await;
+        let rows = app.gather_quick_switch_matches("sess").await;
+        let order: Vec<SessionId> = rows.iter().map(|m| m.session_id).collect();
+        assert_eq!(order, vec![ms, ws]);
+        assert_eq!(rows[0].other_workspace, None);
+        assert_eq!(rows[1].other_workspace.as_deref(), Some("Work"));
+        assert_eq!(rows[1].workspace.as_deref(), Some("Work"));
+    }
+
+    #[tokio::test]
+    async fn palette_rows_carry_no_tag_with_one_workspace() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.service.delete_workspace("Work").await.unwrap();
+        app.sync_local_view_from_store_for_test().await;
+        let rows = app.gather_quick_switch_matches("").await;
+        assert!(rows.iter().all(|m| m.other_workspace.is_none()));
+    }
+
+    #[tokio::test]
+    async fn picking_a_session_in_another_workspace_switches_first() {
+        let (mut app, _ms, ws, ..) = app_with_two_workspaces().await;
+        app.open_quick_switch_with_mode(PaletteMode::SessionOnly)
+            .await;
+        let idx = match &app.ui_state.modal {
+            Modal::QuickSwitch { matches, .. } => matches
+                .iter()
+                .position(|m| matches!(m, QuickSwitchItem::Session(s) if s.session_id == ws))
+                .unwrap(),
+            _ => panic!("expected the palette"),
+        };
+        if let Modal::QuickSwitch { selected_idx, .. } = &mut app.ui_state.modal {
+            *selected_idx = idx;
+        }
+        app.activate_quick_switch_selection().await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Work"));
+        assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(ws));
+    }
+
+    // -- moving / creating --
+
+    #[tokio::test]
+    async fn move_project_picker_offers_other_workspaces_and_moves() {
+        let (mut app, _ms, _ws, mp, _wp) = app_with_two_workspaces().await;
+        app.ui_state.selected_session_id = None;
+        app.ui_state.selected_project_id = Some((LOCAL_BACKEND_ID, mp));
+        app.handle_command(UserCommand::MoveProjectToWorkspace)
+            .await;
+        let targets: Vec<Option<String>> = match &app.ui_state.modal {
+            Modal::QuickSwitch { matches, .. } => matches
+                .iter()
+                .map(|m| match m {
+                    QuickSwitchItem::ProjectWorkspace { target, .. } => target.clone(),
+                    other => panic!("unexpected row {other:?}"),
+                })
+                .collect(),
+            _ => panic!("expected the move picker"),
+        };
+        assert_eq!(
+            targets,
+            vec![Some("Work".to_string())],
+            "not its own workspace"
+        );
+        app.activate_quick_switch_selection().await;
+        let tag = app
+            .local_view()
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == mp)
+            .unwrap()
+            .workspace
+            .clone();
+        assert_eq!(tag.as_deref(), Some("Work"));
+        assert!(
+            !listed_projects(&app).contains(&mp),
+            "it left the Main view"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_workspace_input_creates_and_switches() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.handle_command(UserCommand::NewWorkspace).await;
+        assert!(matches!(
+            app.ui_state.modal,
+            Modal::Input {
+                on_submit: InputAction::NewWorkspace,
+                ..
+            }
+        ));
+        app.ui_state.modal = Modal::None;
+        app.handle_input_submit(InputAction::NewWorkspace, "Home".into(), None, None)
+            .await;
+        assert_eq!(app.active_workspace().as_deref(), Some("Home"));
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Work".to_string(), "Home".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_reserved_or_duplicate_name_is_refused_with_a_toast() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        assert_eq!(app.create_workspace("work").await, None);
+        assert!(toast(&app).contains("not created"), "{}", toast(&app));
+        assert_eq!(app.create_workspace("last").await, None);
+        assert_eq!(app.config.workspaces.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn move_project_is_only_offered_with_a_project() {
+        let mut s = AppUiState::default();
+        assert!(!s.is_command_available(BindableAction::MoveProjectToWorkspace));
+        s.selected_project_id = Some((LOCAL_BACKEND_ID, ProjectId::new()));
+        assert!(s.is_command_available(BindableAction::MoveProjectToWorkspace));
+        // The rest are always listed (no zero-count gating).
+        for a in [
+            BindableAction::NextWorkspace,
+            BindableAction::PreviousWorkspace,
+            BindableAction::WorkspacePicker,
+            BindableAction::NewWorkspace,
+        ] {
+            assert!(AppUiState::default().is_command_available(a), "{a:?}");
+        }
+    }
+
+    // -- propagation to remotes --
+
+    #[tokio::test]
+    async fn creating_propagates_to_every_backend() {
+        let mut app = build_app_with_mock_remotes(vec![("box", empty_snapshot())]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        assert!(app.create_workspace("Work").await.is_some());
+        assert_eq!(
+            remote_mock(&app, remote).workspace_calls(),
+            vec![MockWorkspaceCall::SetWorkspaces(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Work")],
+                main: None,
+                startup_workspace: None,
+            })]
+        );
+        assert_eq!(
+            app.service.read_config().workspaces,
+            vec![WorkspaceDef::named("Work")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_degraded_backend_is_named_in_the_toast_and_the_rest_still_apply() {
+        let mut app = build_app_with_mock_remotes(vec![("box", empty_snapshot())]);
+        let remote = BackendId(1);
+        app.backend_mut_for_test(remote).view.connection = ConnectionState::Degraded {
+            reason: "down".into(),
+        };
+        assert!(app.create_workspace("Work").await.is_some());
+        assert!(remote_mock(&app, remote).workspace_calls().is_empty());
+        assert!(toast(&app).contains("box"), "{}", toast(&app));
+        assert_eq!(app.service.read_config().workspaces.len(), 1);
+    }
+
+    /// Two servers that disagree ("Work" here, "work" there — created while
+    /// each could not reach the other) merge into two entries by exact name,
+    /// but no server accepts both. Each backend gets the list narrowed to what
+    /// it can take, so the disagreement never blocks an edit.
+    #[tokio::test]
+    async fn a_case_clash_between_servers_does_not_block_edits() {
+        let mut snap = empty_snapshot();
+        snap.workspaces = vec![WorkspaceDef::named("work")];
+        let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.service
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Work")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap();
+        app.refresh_local_view().await;
+
+        assert!(app.create_workspace("Play").await.is_some());
+        assert!(
+            !toast(&app).contains("not"),
+            "every backend took it: {}",
+            toast(&app)
+        );
+        assert_eq!(
+            app.service.read_config().workspaces,
+            vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")]
+        );
+        assert_eq!(
+            remote_mock(&app, remote).workspace_calls(),
+            vec![MockWorkspaceCall::SetWorkspaces(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("work"), WorkspaceDef::named("Play")],
+                main: None,
+                startup_workspace: None,
+            })]
+        );
+    }
+
+    /// When no backend takes a new workspace it does not exist anywhere, so
+    /// the TUI must not switch to it (or remember it as `last_workspace`).
+    #[tokio::test]
+    async fn a_workspace_no_backend_took_is_not_switched_to() {
+        let mut app = make_test_app();
+        // A hand-edited config the server's own rule now refuses to extend:
+        // Main is labelled "home" and a workspace is named "Home".
+        let mut config = app.service.read_config();
+        config.workspaces = vec![WorkspaceDef::named("Home")];
+        config.main_workspace = Some(WorkspaceDef::named("home"));
+        app.service.update_config(config).unwrap();
+        app.config = app.service.read_config();
+        app.refresh_local_view().await;
+
+        assert_eq!(app.create_workspace("Play").await, None);
+        assert!(toast(&app).contains("not applied"), "{}", toast(&app));
+
+        app.handle_input_submit(InputAction::NewWorkspace, "Play".into(), None, None)
+            .await;
+        assert_eq!(app.active_workspace(), None);
+        assert_eq!(app.tui_prefs.prefs().last_workspace, None);
+    }
+
+    /// `s` in the settings tab changes only the startup choice: workspaces
+    /// defined only on a remote are not copied into the local config — except
+    /// a pinned one, which the local server needs defined to accept the pin.
+    #[tokio::test]
+    async fn setting_the_startup_workspace_leaves_local_definitions_alone() {
+        let mut snap = empty_snapshot();
+        snap.workspaces = vec![WorkspaceDef::named("Remote")];
+        let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.service
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Work")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap();
+        app.refresh_local_view().await;
+
+        app.set_startup_workspace(StartupWorkspace::Main).await;
+        let c = app.service.read_config();
+        assert_eq!(c.startup_workspace, StartupWorkspace::Main);
+        assert_eq!(c.workspaces, vec![WorkspaceDef::named("Work")]);
+        assert!(remote_mock(&app, remote).workspace_calls().is_empty());
+
+        app.set_startup_workspace(StartupWorkspace::Named("Remote".into()))
+            .await;
+        let c = app.service.read_config();
+        assert_eq!(
+            c.startup_workspace,
+            StartupWorkspace::Named("Remote".into())
+        );
+        assert_eq!(
+            c.workspaces,
+            vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Remote")]
+        );
+    }
+
+    /// A directory scan registers into the workspace being looked at, as a
+    /// single add does (the server tags them; no after-the-fact re-tag).
+    #[tokio::test]
+    async fn scanning_a_directory_lands_repos_in_the_active_workspace() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.switch_workspace(Some("Work".into()), true).await;
+        let root = tempfile::TempDir::new().unwrap();
+        let repo = root.path().join("scanned");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            &["init", "-b", "main"][..],
+            &["config", "user.email", "t@t.t"],
+            &["config", "user.name", "t"],
+            &["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let status = claude_commander_core::git::fixture::fixture_git_std()
+                .current_dir(&repo)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+
+        app.handle_input_submit(
+            InputAction::ScanDirectory,
+            root.path().display().to_string(),
+            None,
+            None,
+        )
+        .await;
+        let scanned = app
+            .local_view()
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.name == "scanned")
+            .cloned()
+            .expect("the scan registered the repo");
+        assert_eq!(scanned.workspace.as_deref(), Some("Work"));
+        assert!(
+            listed_projects(&app).contains(&scanned.id),
+            "it shows in the active workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_and_delete_go_to_every_backend_and_the_active_one_follows() {
+        let mut app = build_app_with_mock_remotes(vec![("box", empty_snapshot())]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.create_workspace("Work").await.unwrap();
+        app.switch_workspace(Some("Work".into()), true).await;
+
+        assert!(
+            app.rename_workspace_everywhere(Some("Work".into()), "Job")
+                .await
+        );
+        assert_eq!(app.active_workspace().as_deref(), Some("Job"));
+        assert_eq!(app.tui_prefs.prefs().last_workspace.as_deref(), Some("Job"));
+
+        app.delete_workspace_everywhere("Job").await;
+        assert_eq!(app.active_workspace(), None);
+        let calls = remote_mock(&app, remote).workspace_calls();
+        assert_eq!(
+            calls[1..],
+            [
+                MockWorkspaceCall::Rename {
+                    from: "Work".into(),
+                    to: "Job".into()
+                },
+                MockWorkspaceCall::Delete("Job".into()),
+            ]
+        );
+        assert!(app.service.read_config().workspaces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn moving_a_remote_project_writes_to_its_owner_only() {
+        let (snap, _sid, pid) = snapshot_with_one_session();
+        let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.move_project_to_workspace(pid, Some("Work".into()))
+            .await;
+        assert_eq!(
+            remote_mock(&app, remote).workspace_calls(),
+            vec![MockWorkspaceCall::SetProject {
+                id: pid,
+                workspace: Some("Work".into())
+            }]
+        );
+        assert!(
+            app.service.read_config().workspaces.is_empty(),
+            "the local backend is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn registering_an_existing_clone_lands_in_the_active_workspace() {
+        let mut app = build_app_with_mock_remotes(vec![("box", empty_snapshot())]);
+        let remote = BackendId(1);
+        app.refresh_backend_view(remote).await;
+        app.create_workspace("Work").await.unwrap();
+        app.switch_workspace(Some("Work".into()), true).await;
+        app.handle_confirm(ConfirmAction::RegisterExistingClone {
+            backend: remote,
+            dest: std::path::PathBuf::from("/srv/repo"),
+        })
+        .await;
+        for _ in 0..100 {
+            if !remote_mock(&app, remote)
+                .project_add_workspaces()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            remote_mock(&app, remote).project_add_workspaces(),
+            vec![Some("Work".to_string())]
+        );
+    }
+
+    // -- per-workspace themes --
+
+    fn preset_entry(preset: &str) -> ThemeOverrides {
+        ThemeOverrides {
+            preset: Some(preset.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn switching_workspace_swaps_the_theme() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.config.theme.preset = Some("basic".into());
+        app.config
+            .workspace_themes
+            .insert("Work".into(), preset_entry("lcars"));
+        app.reload_theme();
+        assert_eq!(
+            app.theme.status_bar_bg,
+            Theme::basic().status_bar_bg,
+            "Main has no entry: the usual theme"
+        );
+        app.switch_workspace(Some("Work".into()), true).await;
+        assert_eq!(app.theme.status_bar_bg, Theme::lcars().status_bar_bg);
+        app.handle_cycle_workspace(true).await; // wraps back to Main
+        assert_eq!(app.active_workspace(), None);
+        assert_eq!(app.theme.status_bar_bg, Theme::basic().status_bar_bg);
+    }
+
+    #[tokio::test]
+    async fn the_startup_workspace_opens_in_its_theme() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.config
+            .workspace_themes
+            .insert("Work".into(), preset_entry("lcars"));
+        app.tui_prefs.set_last_workspace(Some("Work".into())).await;
+        // What `App::run` does before the first frame.
+        app.apply_startup_workspace();
+        app.refresh_list_items().await;
+        assert_eq!(app.theme.status_bar_bg, Theme::lcars().status_bar_bg);
+    }
+
+    #[tokio::test]
+    async fn hot_reload_rebuilds_the_active_workspaces_theme() {
+        let ((mut app, ..), config_path) = app_with_two_workspaces_and_config_path().await;
+        app.switch_workspace(Some("Work".into()), true).await;
+        let mut edited = app.service.read_config();
+        edited
+            .workspace_themes
+            .insert("Work".into(), preset_entry("lcars"));
+        std::fs::write(&config_path, toml::to_string(&edited).unwrap()).unwrap();
+        // Make sure the store sees a new mtime even on a coarse clock.
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&config_path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        app.check_config_reload();
+        assert_eq!(app.theme.status_bar_bg, Theme::lcars().status_bar_bg);
+    }
+
+    #[tokio::test]
+    async fn with_one_workspace_mains_entry_is_not_worn() {
+        let mut app = make_test_app();
+        app.config.theme.preset = Some("basic".into());
+        app.config.workspace_themes.insert(
+            claude_commander_core::config::MAIN_WORKSPACE_THEME_KEY.into(),
+            preset_entry("lcars"),
+        );
+        app.reload_theme();
+        assert_eq!(
+            app.theme.status_bar_bg,
+            Theme::basic().status_bar_bg,
+            "workspace UI is hidden, so the usual theme is the one being edited and worn"
+        );
+    }
+
+    #[tokio::test]
+    async fn renaming_the_active_workspace_keeps_its_theme() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        let mut c = app.service.read_config();
+        c.workspace_themes
+            .insert("Work".into(), preset_entry("lcars"));
+        app.service.update_config(c).unwrap();
+        app.config = app.service.read_config();
+        app.switch_workspace(Some("Work".into()), true).await;
+        assert_eq!(app.theme.status_bar_bg, Theme::lcars().status_bar_bg);
+        assert!(
+            app.rename_workspace_everywhere(Some("Work".into()), "Office")
+                .await
+        );
+        assert!(app.config.workspace_themes.contains_key("Office"));
+        assert!(!app.config.workspace_themes.contains_key("Work"));
+        assert_eq!(app.active_workspace().as_deref(), Some("Office"));
+        assert_eq!(app.theme.status_bar_bg, Theme::lcars().status_bar_bg);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_active_workspace_drops_its_theme() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        let mut c = app.service.read_config();
+        c.theme.preset = Some("basic".into());
+        c.workspace_themes
+            .insert("Work".into(), preset_entry("lcars"));
+        app.service.update_config(c).unwrap();
+        app.config = app.service.read_config();
+        app.switch_workspace(Some("Work".into()), true).await;
+        app.delete_workspace_everywhere("Work").await;
+        assert!(app.config.workspace_themes.is_empty());
+        assert_eq!(app.theme.status_bar_bg, Theme::basic().status_bar_bg);
+    }
+
+    // -- status bar --
+
+    fn status_bar_text(app: &mut App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        status_bar_row(terminal.backend().buffer())
+    }
+
+    #[tokio::test]
+    async fn status_bar_with_one_workspace_has_no_chip() {
+        let mut app = make_test_app();
+        app.ui_state.view_mode = ViewMode::ProjectGrouped;
+        app.refresh_list_items().await;
+        let bar = status_bar_text(&mut app);
+        assert!(!bar.contains("Main"), "{bar}");
+        insta::assert_snapshot!(bar.trim_end());
+    }
+
+    #[tokio::test]
+    async fn status_bar_with_two_workspaces_shows_the_chip_and_waiting_hints() {
+        let (mut app, _ms, ws, ..) = app_with_two_workspaces().await;
+        // The Work session is waiting for input, so Main's bar hints at it.
+        app.backend_mut_for_test(LOCAL_BACKEND_ID)
+            .view
+            .agent_states
+            .states
+            .insert(ws, AgentState::WaitingForInput);
+        app.refresh_list_items().await;
+        let bar = status_bar_text(&mut app);
+        assert!(bar.starts_with("  Main  Work ●1 │ Sessions: 1"), "{bar}");
+        assert!(bar.contains("Sessions: 1"), "counts are scoped: {bar}");
+        insta::assert_snapshot!(bar.trim_end());
+
+        // In Work, its own waiting session is not an "elsewhere" hint.
+        app.switch_workspace(Some("Work".into()), true).await;
+        let bar = status_bar_text(&mut app);
+        assert!(bar.starts_with("  Work  │ Sessions"), "{bar}");
+    }
+
+    /// The status bar's workspace zone with each label's colours: the chip
+    /// wears the active workspace's accent (on a contrasting text colour), and
+    /// each waiting hint the accent of *its* workspace.
+    fn workspace_zone(app: &mut App, labels: &[&str]) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let bar = status_bar_row(buffer);
+        let y = buffer.area.height - 1;
+        let zone = bar.split(" │").next().unwrap().to_string();
+        let mut out = format!("bar: {zone:?}\n");
+        for label in labels {
+            let x = zone
+                .find(label)
+                .unwrap_or_else(|| panic!("{label} in {zone:?}")) as u16;
+            let style = buffer[(x, y)].style();
+            out.push_str(&format!(
+                "{label}: fg={:?} bg={:?} bold={}\n",
+                style.fg,
+                style.bg,
+                style.add_modifier.contains(Modifier::BOLD)
+            ));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn status_bar_chips_wear_each_workspaces_theme() {
+        let (mut app, ms, ws, ..) = app_with_two_workspaces().await;
+        pin_truecolor(&mut app);
+        app.config
+            .workspace_themes
+            .insert("Work".into(), preset_entry("lcars"));
+        app.reload_theme();
+        // Both workspaces have a session waiting, so each bar hints at the other.
+        let states = &mut app
+            .backend_mut_for_test(LOCAL_BACKEND_ID)
+            .view
+            .agent_states
+            .states;
+        states.insert(ws, AgentState::WaitingForInput);
+        states.insert(ms, AgentState::WaitingForInput);
+        app.refresh_list_items().await;
+
+        let (truecolor, lcars) = (Theme::truecolor().text_accent, Theme::lcars().text_accent);
+        let in_main = workspace_zone(&mut app, &["Main", "Work"]);
+        app.switch_workspace(Some("Work".into()), true).await;
+        let in_work = workspace_zone(&mut app, &["Work", "Main"]);
+        assert!(
+            in_main.contains(&format!(
+                "Main: fg=Some(Black) bg=Some({truecolor:?}) bold=true"
+            )),
+            "{in_main}"
+        );
+        assert!(
+            in_main.contains(&format!("Work: fg=Some({lcars:?})")),
+            "{in_main}"
+        );
+        assert!(
+            in_work.contains(&format!("Work: fg=Some(Black) bg=Some({lcars:?})")),
+            "{in_work}"
+        );
+        // Main's accent barely differs from lcars' amber bar, so its hint falls
+        // back to the bar's own text colour rather than vanishing into it.
+        let on_amber = Theme::lcars().on_status_bar(truecolor);
+        assert_eq!(on_amber, Theme::lcars().status_bar_fg, "the premise");
+        assert!(
+            in_work.contains(&format!("Main: fg=Some({on_amber:?})")),
+            "{in_work}"
+        );
+        insta::assert_snapshot!(format!(
+            "In Main (truecolor):\n{in_main}\nIn Work (lcars):\n{in_work}"
+        ));
+    }
+
+    #[tokio::test]
+    async fn board_header_names_the_workspace_once_there_are_two() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.ui_state.view_mode = ViewMode::Board;
+        app.switch_workspace(Some("Work".into()), true).await;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let top: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(top.starts_with(" Claude Commander · Work"), "{top}");
+    }
+
+    // -- settings tab --
+
+    #[tokio::test]
+    async fn settings_tab_renders_list_colour_projects_and_startup() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('j')).await; // select Work
+        // Wide enough for the whole tab bar and footer.
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[tokio::test]
+    async fn settings_tab_n_creates_and_r_renames() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('n')).await;
+        type_programs(&mut app, "Home").await;
+        feed(&mut app, KeyCode::Enter).await;
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Work".to_string(), "Home".to_string()]);
+        assert_eq!(ws_state(&app).selected, 2, "the new workspace is selected");
+
+        feed(&mut app, KeyCode::Char('r')).await;
+        for _ in 0.."Home".len() {
+            feed(&mut app, KeyCode::Backspace).await;
+        }
+        type_programs(&mut app, "House").await;
+        feed(&mut app, KeyCode::Enter).await;
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Work".to_string(), "House".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn settings_tab_renaming_main_changes_only_its_label() {
+        let (mut app, _ms, _ws, mp, _wp) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('r')).await;
+        for _ in 0.."Main".len() {
+            feed(&mut app, KeyCode::Backspace).await;
+        }
+        type_programs(&mut app, "Personal").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(
+            app.config.main_workspace,
+            Some(WorkspaceDef::named("Personal"))
+        );
+        assert!(
+            listed_projects(&app).contains(&mp),
+            "Main keeps its projects"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_tab_d_deletes_but_refuses_main() {
+        let (mut app, _ms, _ws, _mp, wp) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('d')).await;
+        assert!(
+            toast(&app).contains("Main can't be deleted"),
+            "{}",
+            toast(&app)
+        );
+        feed(&mut app, KeyCode::Char('j')).await;
+        feed(&mut app, KeyCode::Char('d')).await;
+        assert!(app.config.workspaces.is_empty());
+        // Its project is back in Main (the only workspace, so nothing filters).
+        assert!(listed_projects(&app).contains(&wp));
+        assert_eq!(ws_state(&app).selected, 0, "cursor clamped");
+    }
+
+    #[tokio::test]
+    async fn settings_tab_shift_j_k_reorders_named_workspaces_only() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        app.create_workspace("Home").await.unwrap();
+        open_workspaces_tab(&mut app);
+        // Main can't move.
+        feed_shift(&mut app, 'J').await;
+        assert_eq!(ws_state(&app).selected, 0);
+        feed(&mut app, KeyCode::Char('j')).await; // Work
+        feed_shift(&mut app, 'J').await;
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Home".to_string(), "Work".to_string()]);
+        assert_eq!(ws_state(&app).selected, 2, "the cursor follows the row");
+        feed_shift(&mut app, 'K').await;
+        feed_shift(&mut app, 'K').await; // can't pass Main
+        let names: Vec<String> = app
+            .config
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Work".to_string(), "Home".to_string()]);
+        assert_eq!(ws_state(&app).selected, 1);
+    }
+
+    // -- Theme tab: scopes, inheritance, the colour picker --
+
+    use crate::app::colour_picker::ColourPickerFocus;
+    use crate::app::{SettingsEditing, ThemeScope};
+
+    /// Pin the usual theme to truecolor (auto-detection would make swatch
+    /// positions and hexes depend on the terminal running the tests).
+    fn pin_truecolor(app: &mut App) {
+        app.config.theme.preset = Some("truecolor".into());
+        app.reload_theme();
+    }
+
+    fn settings(app: &App) -> &SettingsState {
+        match &app.ui_state.modal {
+            Modal::Settings(s) => s,
+            _ => panic!("expected a settings modal"),
+        }
+    }
+
+    /// Open Settings as the user does, then Tab to the Theme tab.
+    async fn open_theme_tab(app: &mut App) {
+        app.handle_command(UserCommand::ShowSettings).await;
+        while settings(app).tab != SettingsTab::Theme {
+            feed(app, KeyCode::Tab).await;
+        }
+    }
+
+    /// Move the Theme tab's cursor to the row editing `field_key`.
+    fn select_row(app: &mut App, field_key: &str) {
+        let Modal::Settings(state) = &mut app.ui_state.modal else {
+            panic!("expected a settings modal");
+        };
+        state.selected_row = state
+            .rows
+            .iter()
+            .position(|r| r.field_key == field_key)
+            .unwrap_or_else(|| panic!("no {field_key} row"));
+    }
+
+    fn row<'a>(app: &'a App, field_key: &str) -> &'a crate::app::SettingsRow {
+        settings(app)
+            .rows
+            .iter()
+            .find(|r| r.field_key == field_key)
+            .unwrap_or_else(|| panic!("no {field_key} row"))
+    }
+
+    fn picker(app: &App) -> &crate::app::colour_picker::ColourPicker {
+        match &settings(app).editing {
+            Some(SettingsEditing::Colour { picker }) => picker,
+            other => panic!("expected the colour picker, got {other:?}"),
+        }
+    }
+
+    /// Two workspaces, Work active, the usual theme truecolor, and the Theme
+    /// tab open (so scoped to Work) with the cursor on `field_key`.
+    async fn work_theme_tab_on(field_key: &str) -> App {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        pin_truecolor(&mut app);
+        app.switch_workspace(Some("Work".into()), true).await;
+        open_theme_tab(&mut app).await;
+        select_row(&mut app, field_key);
+        app
+    }
+
+    fn rgb(hex: &str) -> ratatui::style::Color {
+        crate::widgets::parse_hex_color(hex).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_theme_tab_opens_on_the_active_workspace() {
+        let app = work_theme_tab_on("preset").await;
+        assert_eq!(
+            settings(&app).theme_scope,
+            ThemeScope::Workspace(Some("Work".into()))
+        );
+        let keys: Vec<&str> = settings(&app)
+            .rows
+            .iter()
+            .take(4)
+            .map(|r| r.field_key.as_str())
+            .collect();
+        assert_eq!(keys, ["theme_scope", "theme_reset", "preset", "appearance"]);
+        assert_eq!(row(&app, "theme_scope").text_value(), "Work");
+        assert_eq!(row(&app, "preset").text_value(), "(usual)");
+        assert_eq!(
+            row(&app, "text_accent").inherited_from,
+            Some("usual"),
+            "nothing set for Work: every colour is the usual theme's"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_one_workspace_the_theme_tab_edits_the_usual_theme_as_before() {
+        let mut app = make_test_app();
+        pin_truecolor(&mut app);
+        open_theme_tab(&mut app).await;
+        assert_eq!(settings(&app).rows[0].field_key, "preset", "no scope row");
+        assert!(
+            settings(&app)
+                .rows
+                .iter()
+                .all(|r| r.field_key != "theme_reset")
+        );
+        assert_eq!(row(&app, "preset").text_value(), "truecolor");
+        assert_eq!(row(&app, "text_accent").inherited_from, Some("preset"));
+        // …but its colour rows open the picker, not free text.
+        select_row(&mut app, "text_accent");
+        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char('#')).await;
+        type_programs(&mut app, "123456").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(
+            app.config.theme.text_accent.map(|c| c.0),
+            Some(rgb("#123456"))
+        );
+        assert_eq!(app.theme.text_accent, rgb("#123456"), "worn at once");
+        assert_eq!(row(&app, "text_accent").inherited_from, None);
+    }
+
+    #[tokio::test]
+    async fn a_pick_in_a_workspace_scope_writes_its_entry_and_restyles_the_ui() {
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(picker(&app).selected, 0, "inheriting: the Inherit cell");
+        assert_eq!(picker(&app).none_label, "Inherit (usual)");
+        feed(&mut app, KeyCode::Char('#')).await;
+        type_programs(&mut app, "AABBCC").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert!(settings(&app).editing.is_none(), "the picker closed");
+        let entry = &app.config.workspace_themes["Work"];
+        assert_eq!(entry.text_accent.map(|c| c.0), Some(rgb("#aabbcc")));
+        assert!(
+            app.config.theme.text_accent.is_none(),
+            "the usual theme is untouched"
+        );
+        assert_eq!(app.theme.text_accent, rgb("#aabbcc"), "Work is active");
+        assert_eq!(
+            app.service.read_config().workspace_themes["Work"]
+                .text_accent
+                .map(|c| c.0),
+            Some(rgb("#aabbcc")),
+            "persisted"
+        );
+        assert_eq!(row(&app, "text_accent").inherited_from, None);
+        assert_eq!(row(&app, "text_accent").text_value(), "#aabbcc");
+        assert_eq!(row(&app, "theme_reset").text_value(), "customised");
+        // Main still wears the usual theme.
+        app.switch_workspace(None, true).await;
+        assert_eq!(app.theme.text_accent, Theme::truecolor().text_accent);
+    }
+
+    #[tokio::test]
+    async fn picking_a_theme_swatch_saves_its_hex() {
+        let mut app = work_theme_tab_on("border_focused").await;
+        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char('l')).await;
+        feed(&mut app, KeyCode::Right).await;
+        feed(&mut app, KeyCode::Char('j')).await;
+        feed(&mut app, KeyCode::Up).await;
+        feed(&mut app, KeyCode::Char('h')).await;
+        let expected = picker(&app).selected_swatch().unwrap().clone();
+        assert_eq!(expected.role, "accent");
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(
+            app.config.workspace_themes["Work"]
+                .border_focused
+                .map(|c| c.0),
+            Some(rgb(&expected.hex))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_inherit_cell_clears_the_override_and_an_empty_entry_goes() {
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char('#')).await;
+        type_programs(&mut app, "aabbcc").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert!(app.config.workspace_themes.contains_key("Work"));
+        // Reopening preselects the swatch that is now Work's own accent;
+        // step back to cell 0 and take it.
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(picker(&app).focus, ColourPickerFocus::Grid);
+        assert_eq!(picker(&app).selected_swatch().unwrap().hex, "#aabbcc");
+        feed(&mut app, KeyCode::Left).await;
+        assert!(picker(&app).selected_swatch().is_none());
+        feed(&mut app, KeyCode::Enter).await;
+        assert!(
+            !app.config.workspace_themes.contains_key("Work"),
+            "nothing left of Work's theme: {:?}",
+            app.config.workspace_themes
+        );
+        assert_eq!(row(&app, "text_accent").inherited_from, Some("usual"));
+        assert_eq!(app.theme.text_accent, Theme::truecolor().text_accent);
+    }
+
+    #[tokio::test]
+    async fn the_scope_row_switches_to_the_usual_theme() {
+        let mut app = work_theme_tab_on("theme_scope").await;
+        feed(&mut app, KeyCode::Enter).await;
+        let Some(SettingsEditing::OptionPicker { options, .. }) = &settings(&app).editing else {
+            panic!("the scope row opens a picker");
+        };
+        let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Main", "Work", "Usual theme (all workspaces)"]);
+        feed(&mut app, KeyCode::Char('j')).await; // from Work
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(settings(&app).theme_scope, ThemeScope::Usual);
+        assert!(
+            settings(&app)
+                .rows
+                .iter()
+                .all(|r| r.field_key != "theme_reset")
+        );
+        select_row(&mut app, "text_accent");
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(picker(&app).none_label, "Inherit (preset)");
+        feed(&mut app, KeyCode::Char('#')).await;
+        type_programs(&mut app, "010203").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(
+            app.config.theme.text_accent.map(|c| c.0),
+            Some(rgb("#010203"))
+        );
+        assert!(app.config.workspace_themes.is_empty());
+        assert_eq!(
+            app.theme.text_accent,
+            rgb("#010203"),
+            "Work has no entry, so it wears the usual theme"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workspace_preset_is_a_new_base_without_the_usual_overrides() {
+        let mut app = work_theme_tab_on("preset").await;
+        app.config.theme.border_focused = Some(claude_commander_core::config::theme::ColorValue(
+            rgb("#010203"),
+        ));
+        app.reload_theme();
+        feed(&mut app, KeyCode::Enter).await;
+        let Some(SettingsEditing::OptionPicker { options, .. }) = &settings(&app).editing else {
+            panic!("the preset row opens a picker");
+        };
+        assert_eq!(options[0].label, "(usual)");
+        assert!(options.iter().all(|o| o.label != "(auto)"));
+        let lcars = options.iter().position(|o| o.value == "lcars").unwrap();
+        for _ in 0..lcars {
+            feed(&mut app, KeyCode::Char('j')).await;
+        }
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(
+            app.config.workspace_themes["Work"].preset.as_deref(),
+            Some("lcars")
+        );
+        assert_eq!(app.theme.status_bar_bg, Theme::lcars().status_bar_bg);
+        assert_eq!(
+            app.theme.border_focused,
+            Theme::lcars().border_focused,
+            "the usual override does not carry onto a new base"
+        );
+        assert_eq!(row(&app, "border_focused").inherited_from, Some("preset"));
+        // Back to "(usual)": the entry is empty again, so it goes.
+        select_row(&mut app, "preset");
+        feed(&mut app, KeyCode::Enter).await; // opens on lcars
+        for _ in 0..lcars {
+            feed(&mut app, KeyCode::Char('k')).await;
+        }
+        feed(&mut app, KeyCode::Enter).await;
+        assert!(!app.config.workspace_themes.contains_key("Work"));
+        assert_eq!(app.theme.border_focused, rgb("#010203"));
+    }
+
+    #[tokio::test]
+    async fn reset_to_usual_theme_drops_the_workspaces_entry() {
+        let mut app = work_theme_tab_on("theme_reset").await;
+        assert_eq!(row(&app, "theme_reset").text_value(), "(already usual)");
+        feed(&mut app, KeyCode::Enter).await;
+        assert!(
+            toast(&app).contains("already uses the usual theme"),
+            "{}",
+            toast(&app)
+        );
+        app.config
+            .workspace_themes
+            .insert("Work".into(), preset_entry("lcars"));
+        app.reload_theme();
+        feed(&mut app, KeyCode::Enter).await;
+        assert!(app.config.workspace_themes.is_empty());
+        assert!(
+            app.service.read_config().workspace_themes.is_empty(),
+            "persisted"
+        );
+        assert_eq!(app.theme.status_bar_bg, Theme::truecolor().status_bar_bg);
+        assert!(
+            toast(&app).contains("Work now uses the usual theme"),
+            "{}",
+            toast(&app)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_workspaces_tab_theme_row_reads_customised_and_jumps_to_the_theme_tab() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        pin_truecolor(&mut app);
+        app.config
+            .workspace_themes
+            .insert("Work".into(), preset_entry("lcars"));
+        assert!(app.workspace_theme_customised(Some("Work")));
+        assert!(!app.workspace_theme_customised(None));
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('j')).await; // Work
+        feed(&mut app, KeyCode::Right).await;
+        assert_eq!(ws_state(&app).focus, WorkspacesFocus::Detail);
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(settings(&app).tab, SettingsTab::Theme);
+        assert_eq!(
+            settings(&app).theme_scope,
+            ThemeScope::Workspace(Some("Work".into())),
+            "scoped to the selected workspace, not the active one (Main)"
+        );
+        assert_eq!(row(&app, "preset").text_value(), "lcars");
+    }
+
+    /// Work disappears while its Theme-tab editor is open — a hot reload, or
+    /// a remote snapshot dropping it.
+    async fn lose_work(app: &mut App) {
+        app.service.delete_workspace("Work").await.unwrap();
+        // `pin_truecolor` set the usual theme in memory only; keep it.
+        let usual = app.config.theme.clone();
+        app.config = app.service.read_config();
+        app.config.theme = usual;
+        app.sync_local_view_from_store_for_test().await;
+    }
+
+    #[tokio::test]
+    async fn a_colour_picked_for_a_workspace_that_has_gone_is_discarded() {
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        // Off the inherit cell, onto a real swatch — a pick that sets a value.
+        feed(&mut app, KeyCode::Char('l')).await;
+        assert!(picker(&app).selected_swatch().is_some());
+        lose_work(&mut app).await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(
+            app.config.theme.text_accent, None,
+            "the picker named Work; the pick must not land in the usual theme"
+        );
+        assert!(app.config.workspace_themes.is_empty());
+        assert!(toast(&app).contains("Work"), "{}", toast(&app));
+    }
+
+    #[tokio::test]
+    async fn a_preset_picked_for_a_workspace_that_has_gone_is_discarded() {
+        let mut app = work_theme_tab_on("preset").await;
+        feed(&mut app, KeyCode::Enter).await; // the option picker, on "(usual)"
+        lose_work(&mut app).await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert_eq!(
+            app.config.theme.preset.as_deref(),
+            Some("truecolor"),
+            "Work's \"(usual)\" must not clear the usual theme's preset"
+        );
+        assert!(toast(&app).contains("Work"), "{}", toast(&app));
+    }
+
+    #[tokio::test]
+    async fn with_one_workspace_the_workspaces_tab_shows_the_theme_actually_worn() {
+        // A `[workspace_themes.main]` left from when there were more is not
+        // worn with only Main, and Enter edits the usual theme — so the row
+        // and the swatch must read the usual theme too.
+        let mut app = make_test_app();
+        pin_truecolor(&mut app);
+        let mut entry = preset_entry("basic");
+        entry.text_accent = Some(claude_commander_core::config::theme::ColorValue(rgb(
+            "#ff0000",
+        )));
+        app.config.workspace_themes.insert(
+            claude_commander_core::config::MAIN_WORKSPACE_THEME_KEY.into(),
+            entry,
+        );
+        app.reload_theme();
+        assert!(!app.workspace_theme_customised(None));
+        assert_eq!(app.workspace_accent(None), app.theme.text_accent);
+        assert_ne!(app.workspace_accent(None), rgb("#ff0000"));
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_takes_a_bracketed_paste() {
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        app.handle_input(InputEvent::Paste("  3366ff\n".to_string()))
+            .await;
+        assert_eq!(picker(&app).hex.value(), "3366ff");
+        assert_eq!(
+            picker(&app).hex_value().as_deref(),
+            Some("#3366ff"),
+            "the # is optional"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_refuses_invalid_hex() {
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        // Tab goes to the hex row and back without leaving the picker or the
+        // Theme tab.
+        assert_eq!(picker(&app).focus, ColourPickerFocus::Grid);
+        feed(&mut app, KeyCode::Tab).await;
+        assert_eq!(picker(&app).focus, ColourPickerFocus::Hex);
+        feed(&mut app, KeyCode::Tab).await;
+        assert_eq!(picker(&app).focus, ColourPickerFocus::Grid);
+        feed(&mut app, KeyCode::Tab).await;
+        assert_eq!(
+            settings(&app).tab,
+            SettingsTab::Theme,
+            "Tab stayed inside the picker"
+        );
+        assert_eq!(picker(&app).focus, ColourPickerFocus::Hex);
+        type_programs(&mut app, "zz").await;
+        feed(&mut app, KeyCode::Enter).await;
+        assert!(picker(&app).error.is_some(), "refused with a message");
+        assert!(!app.config.workspace_themes.contains_key("Work"));
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_esc_cancels_without_saving() {
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Right).await;
+        feed(&mut app, KeyCode::Esc).await;
+        assert!(settings(&app).editing.is_none());
+        assert!(
+            matches!(app.ui_state.modal, Modal::Settings(_)),
+            "still in settings"
+        );
+        assert!(app.config.workspace_themes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn settings_tab_colour_picker_renders() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Tab).await;
+        type_programs(&mut app, "#3366f").await;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[tokio::test]
+    async fn the_theme_tab_renders_its_scope_row_and_inherited_values() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = work_theme_tab_on("text_accent").await;
+        app.config.workspace_themes.insert(
+            "Work".into(),
+            ThemeOverrides {
+                text_accent: Some(claude_commander_core::config::theme::ColorValue(rgb(
+                    "#aabbcc",
+                ))),
+                ..Default::default()
+            },
+        );
+        app.reload_theme();
+        let Modal::Settings(state) = &mut app.ui_state.modal else {
+            unreachable!()
+        };
+        let mut state = state.clone();
+        state.rows = app.settings_rows(&state);
+        app.ui_state.modal = Modal::Settings(state);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    /// Cells per drawn grid row: the `■■`/`··` cells on the first grid row.
+    fn drawn_grid_width(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> usize {
+        let screen = buffer_lines(terminal);
+        let row = screen
+            .lines()
+            .find(|l| l.contains("··"))
+            .expect("the grid is drawn");
+        row.matches("■■").count() + row.matches("··").count()
+    }
+
+    /// A narrow terminal makes the grid wrap to what fits: every drawn row
+    /// ends on a whole cell, and the highlighted cell is on screen wherever
+    /// the cursor goes.
+    #[tokio::test]
+    async fn settings_tab_colour_picker_fits_a_narrow_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        let screen = buffer_lines(&terminal);
+        let grid_rows: Vec<&str> = screen.lines().filter(|l| l.contains("[··]")).collect();
+        assert_eq!(
+            grid_rows.len(),
+            1,
+            "the Inherit cell is highlighted:\n{screen}"
+        );
+        // The grid's first row, inside the modal's borders.
+        let row = grid_rows[0]
+            .split('│')
+            .find(|seg| seg.contains("[··]"))
+            .unwrap();
+        assert!(
+            row.trim_end().ends_with("■■"),
+            "the row's last cell is cut off: {row:?}"
+        );
+        assert!(drawn_grid_width(&terminal) < crate::app::colour_picker::MAX_GRID_COLUMNS);
+
+        let cells = picker(&app).cells();
+        for i in 1..cells {
+            feed(&mut app, KeyCode::Right).await;
+            assert_eq!(picker(&app).selected, i);
+            terminal.draw(|f| app.render(f)).unwrap();
+            let screen = buffer_lines(&terminal);
+            assert!(
+                screen.contains("[■■]"),
+                "cell {i} is highlighted off screen:\n{screen}"
+            );
+        }
+    }
+
+    /// `j`/`k` step by the row width the user is looking at, after a render.
+    #[tokio::test]
+    async fn j_and_k_move_by_the_drawn_width_after_a_render() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let drawn = drawn_grid_width(&terminal);
+        feed(&mut app, KeyCode::Char('j')).await;
+        assert_eq!(picker(&app).selected, drawn);
+        feed(&mut app, KeyCode::Char('k')).await;
+        assert_eq!(picker(&app).selected, 0);
+    }
+
+    /// A key in the same burst as the Enter that opens the picker — before any
+    /// frame draws it — already steps by the width it will be drawn at.
+    #[tokio::test]
+    async fn the_picker_is_fitted_when_it_opens() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = work_theme_tab_on("text_accent").await;
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap(); // the Theme tab, no picker
+        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char('j')).await; // no frame in between
+        let stepped = picker(&app).selected;
+        terminal.draw(|f| app.render(f)).unwrap();
+        assert_eq!(stepped, drawn_grid_width(&terminal));
+    }
+
+    /// A resize refits the grid at once, so a key queued behind it steps by
+    /// the new width.
+    #[tokio::test]
+    async fn a_resize_refits_the_picker() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = work_theme_tab_on("text_accent").await;
+        feed(&mut app, KeyCode::Enter).await;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        assert_eq!(
+            picker(&app).columns,
+            crate::app::colour_picker::MAX_GRID_COLUMNS
+        );
+        app.handle_input(InputEvent::Resize(40, 30)).await;
+        feed(&mut app, KeyCode::Char('j')).await; // no frame in between
+        let stepped = picker(&app).selected;
+        let mut narrow = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        narrow.draw(|f| app.render(f)).unwrap();
+        assert_eq!(stepped, drawn_grid_width(&narrow));
+        assert!(stepped < crate::app::colour_picker::MAX_GRID_COLUMNS);
+    }
+
+    #[tokio::test]
+    async fn settings_tab_m_moves_a_project_to_the_picked_workspace() {
+        let (mut app, _ms, _ws, mp, _wp) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Right).await; // Main's details
+        feed(&mut app, KeyCode::Char('j')).await; // its project
+        feed(&mut app, KeyCode::Char('m')).await;
+        assert!(matches!(
+            ws_state(&app).editing,
+            Some(WorkspacesEditing::MovingProject { project_id, target: 0 }) if project_id == mp
+        ));
+        feed(&mut app, KeyCode::Char('j')).await; // target Work
+        feed(&mut app, KeyCode::Enter).await;
+        let tag = app
+            .local_view()
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == mp)
+            .unwrap()
+            .workspace
+            .clone();
+        assert_eq!(tag.as_deref(), Some("Work"));
+        assert!(ws_state(&app).editing.is_none());
+    }
+
+    #[tokio::test]
+    async fn settings_tab_s_cycles_the_local_startup_workspace() {
+        let (mut app, ..) = app_with_two_workspaces().await;
+        open_workspaces_tab(&mut app);
+        feed(&mut app, KeyCode::Char('s')).await;
+        assert_eq!(app.config.startup_workspace, StartupWorkspace::Main);
+        feed(&mut app, KeyCode::Char('s')).await;
+        assert_eq!(
+            app.config.startup_workspace,
+            StartupWorkspace::Named("Work".into())
+        );
+        assert_eq!(
+            app.service.read_config().startup_workspace,
+            StartupWorkspace::Named("Work".into()),
+            "persisted through the service"
+        );
+    }
+
+    #[test]
+    fn the_help_modal_documents_workspaces() {
+        let app = make_test_app();
+        let text: String = app
+            .build_help_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The bindable actions, under their own section…
+        assert!(text.contains("Workspaces:"), "help: {text}");
+        assert!(text.contains("Next workspace"), "help: {text}");
+        assert!(text.contains("Move project to workspace"), "help: {text}");
+        // …and how the palette treats them, which no action describes.
+        assert!(
+            text.contains("searches every workspace"),
+            "help must say the palette spans workspaces: {text}"
+        );
+        // …and where a workspace's theme is edited.
+        assert!(
+            text.contains("its own theme") && text.contains("Settings → Theme"),
+            "help must say workspaces have themes and where to edit them: {text}"
+        );
+    }
 }

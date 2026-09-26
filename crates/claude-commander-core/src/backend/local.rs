@@ -16,12 +16,13 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CommanderService, CreateOptions, CreateSessionOpts, DiffSide,
     NewComment, OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot,
-    SessionDetail, SetSessionBaseOutcome, WorkspaceSnapshot,
+    SessionDetail, SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, ScanResult, SessionId};
 use crate::tmux::HeadlessAttach;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 use super::error::BResult;
 use super::run_local::run_local;
@@ -213,8 +214,8 @@ impl CommanderBackend for LocalBackend {
 
     // -- Queries (all `Send`: store reads, tmux, git CLI) --
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
-        Ok(self.service.workspace_snapshot().await?)
+    async fn snapshot(&self) -> BResult<Snapshot> {
+        Ok(self.service.snapshot().await?)
     }
 
     async fn agent_states(&self, fresh: bool) -> BResult<AgentStatesSnapshot> {
@@ -341,14 +342,32 @@ impl CommanderBackend for LocalBackend {
 
     // -- Projects (gix-backed → `run_local`) --
 
-    async fn add_project(&self, path: PathBuf) -> BResult<ProjectId> {
+    async fn add_project(&self, path: PathBuf, workspace: Option<String>) -> BResult<ProjectId> {
         let svc = self.service.clone();
-        Ok(run_local(move || async move { svc.add_project(path).await }).await?)
+        Ok(run_local(move || async move { svc.add_project(path, workspace).await }).await?)
     }
 
-    async fn ensure_project(&self, path: PathBuf) -> BResult<ProjectId> {
+    async fn ensure_project(&self, path: PathBuf, workspace: Option<String>) -> BResult<ProjectId> {
         let svc = self.service.clone();
-        Ok(run_local(move || async move { svc.ensure_project(path).await }).await?)
+        Ok(run_local(move || async move { svc.ensure_project(path, workspace).await }).await?)
+    }
+
+    async fn set_workspaces(&self, req: SetWorkspacesRequest) -> BResult<()> {
+        Ok(self.service.set_workspace_defs(req)?)
+    }
+
+    async fn rename_workspace(&self, from: String, to: String) -> BResult<()> {
+        self.service.rename_workspace(&from, &to).await?;
+        Ok(())
+    }
+
+    async fn delete_workspace(&self, name: String) -> BResult<()> {
+        self.service.delete_workspace(&name).await?;
+        Ok(())
+    }
+
+    async fn set_project_workspace(&self, id: ProjectId, workspace: Option<String>) -> BResult<()> {
+        Ok(self.service.set_project_workspace(&id, workspace).await?)
     }
 
     async fn remove_project(&self, id: ProjectId) -> BResult<()> {
@@ -356,9 +375,9 @@ impl CommanderBackend for LocalBackend {
         Ok(run_local(move || async move { svc.remove_project(&id).await }).await?)
     }
 
-    async fn scan_directory(&self, dir: PathBuf) -> BResult<ScanResult> {
+    async fn scan_directory(&self, dir: PathBuf, workspace: Option<String>) -> BResult<ScanResult> {
         let svc = self.service.clone();
-        Ok(run_local(move || async move { svc.scan_directory(&dir).await }).await?)
+        Ok(run_local(move || async move { svc.scan_directory(&dir, workspace).await }).await?)
     }
 
     // -- Repository clone --
@@ -597,11 +616,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_delegates() {
+    async fn snapshot_delegates() {
         let dir = tempfile::TempDir::new().unwrap();
         let be = backend(&dir);
         let (pid, sid) = seed(&be).await;
-        let snap = be.workspace_snapshot().await.unwrap();
+        let snap = be.snapshot().await.unwrap();
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.projects[0].id, pid);
         assert_eq!(snap.sessions.len(), 1);
@@ -786,6 +805,7 @@ mod tests {
                     url: "https://example.invalid/octo/widget.git".to_string(),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap();
@@ -833,6 +853,7 @@ mod tests {
                     url: "--upload-pack=evil".to_string(),
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap_err();

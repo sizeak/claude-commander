@@ -3,21 +3,20 @@ import 'package:flutter/material.dart';
 import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
-import '../state/workspace_store.dart';
+import '../state/fleet_store.dart';
 import '../theme/tokens.dart';
 import 'connection_page.dart';
 
 /// Manage the configured servers: add, edit, or remove. Each row shows a live
 /// connection dot. Adding/editing pushes the [ConnectionPage] form, whose
-/// `onSubmit` persists + (re)connects through the [WorkspaceStore].
+/// `onSubmit` persists + (re)connects through the [FleetStore].
 class ServersPage extends StatelessWidget {
-  final WorkspaceStore workspace;
-  const ServersPage({super.key, required this.workspace});
+  final FleetStore fleet;
+  const ServersPage({super.key, required this.fleet});
 
   Future<void> _add(BuildContext context) => Navigator.of(context).push(
     MaterialPageRoute(
-      builder: (_) =>
-          ConnectionPage(api: workspace.api, onSubmit: workspace.addServer),
+      builder: (_) => ConnectionPage(api: fleet.api, onSubmit: fleet.addServer),
     ),
   );
 
@@ -27,7 +26,7 @@ class ServersPage extends StatelessWidget {
           builder: (_) => ConnectionPage(
             api: store.api,
             existing: store.config,
-            onSubmit: workspace.updateServer,
+            onSubmit: fleet.updateServer,
           ),
         ),
       );
@@ -56,7 +55,7 @@ class ServersPage extends StatelessWidget {
         ],
       ),
     );
-    if (ok ?? false) await workspace.removeServer(store.config.id);
+    if (ok ?? false) await fleet.removeServer(store.config.id);
   }
 
   @override
@@ -71,9 +70,9 @@ class ServersPage extends StatelessWidget {
         onPressed: () => _add(context),
       ),
       body: ListenableBuilder(
-        listenable: workspace,
+        listenable: fleet,
         builder: (context, _) {
-          final servers = workspace.servers;
+          final servers = fleet.servers;
           return ListView(
             children: [
               for (final store in servers)

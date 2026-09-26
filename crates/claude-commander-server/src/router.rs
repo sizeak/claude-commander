@@ -16,7 +16,7 @@ use tracing::warn;
 
 use crate::auth::require_bearer;
 use crate::handlers::{
-    blobs, cascade, config, github, health, paste, projects, review, sessions, workspace,
+    blobs, cascade, config, github, health, paste, projects, review, sessions, snapshot,
 };
 use crate::state::AppState;
 use crate::ws;
@@ -59,10 +59,10 @@ pub fn build_router(state: AppState) -> Router {
 
     let api = Router::new()
         // -- workspace surface --
-        .route("/workspace", get(workspace::snapshot))
-        .route("/agent-states", get(workspace::agent_states))
-        .route("/pr-refresh", post(workspace::pr_refresh))
-        .route("/create-options", get(workspace::create_options))
+        .route("/workspace", get(snapshot::snapshot))
+        .route("/agent-states", get(snapshot::agent_states))
+        .route("/pr-refresh", post(snapshot::pr_refresh))
+        .route("/create-options", get(snapshot::create_options))
         .route("/comments/pending", get(review::pending))
         // -- cascade / push-stack --
         .route("/cascade/resume", post(cascade::resume))
@@ -123,6 +123,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/scan", post(projects::scan))
         .route("/projects/ensure", post(projects::ensure))
         .route("/projects/{id}", delete(projects::delete))
+        .route("/projects/{id}/workspace", put(projects::set_workspace))
         .route("/projects/{id}/branches", get(projects::branches))
         .route("/projects/{id}/preview", get(projects::preview))
         // -- repo picker + clone --
@@ -141,6 +142,10 @@ pub fn build_router(state: AppState) -> Router {
         // -- config + health --
         .route("/config", get(config::read).patch(config::update))
         .route("/config/programs", put(config::put_programs))
+        // -- workspaces (definitions; project tags go via /projects/{id}/workspace) --
+        .route("/config/workspaces", put(config::put_workspaces))
+        .route("/config/workspaces/rename", post(config::rename_workspace))
+        .route("/config/workspaces/delete", post(config::delete_workspace))
         .route("/config/reload", post(config::reload))
         .route("/health/tmux", get(config::health_tmux))
         // Bearer auth guards the whole `/api` surface; the CORS layer sits
@@ -280,6 +285,84 @@ mod tests {
                 .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .is_none(),
             "empty allowlist must not emit a CORS allow header"
+        );
+    }
+
+    /// The snapshot is served at `/api/workspace` with a fixed top-level key
+    /// set. The Rust type is named `Snapshot`, but the URL and the JSON shape
+    /// are the wire contract every client (TUI remote, Flutter) builds against,
+    /// so a rename must not move either.
+    #[tokio::test]
+    async fn snapshot_is_served_at_api_workspace_with_a_stable_shape() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+
+        let req = Request::get("/api/workspace").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("snapshot is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "cascade_paused",
+                "main_workspace",
+                "operations",
+                "pending_comment_sessions",
+                "project_pull",
+                "projects",
+                "server",
+                "sessions",
+                "startup_workspace",
+                "workspaces",
+            ]
+        );
+    }
+
+    /// The workspace routes are reachable through the real router (and so
+    /// behind auth, with the static `rename`/`delete` segments not shadowed).
+    #[tokio::test]
+    async fn workspace_routes_are_mounted() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+        for (method, uri, body) in [
+            (
+                "PUT",
+                "/api/config/workspaces",
+                r#"{"workspaces":[{"name":"Work"}]}"#,
+            ),
+            (
+                "POST",
+                "/api/config/workspaces/rename",
+                r#"{"from":"Work","to":"Job"}"#,
+            ),
+            ("POST", "/api/config/workspaces/delete", r#"{"name":"Job"}"#),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), 204, "{method} {uri}");
+        }
+        let req = Request::put(format!("/api/projects/{}/workspace", uuid::Uuid::new_v4()))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"workspace":"Work"}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            404,
+            "an unknown project, not an unmounted route"
         );
     }
 }

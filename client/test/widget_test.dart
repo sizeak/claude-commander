@@ -1,6 +1,6 @@
 import 'package:claude_commander_client/main.dart';
 import 'package:claude_commander_client/server_config.dart';
-import 'package:claude_commander_client/state/workspace_store.dart';
+import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:flutter/material.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
@@ -12,15 +12,15 @@ void main() {
   testWidgets('shows the add-server form when no server is configured', (
     tester,
   ) async {
-    final workspace = WorkspaceStore(
+    final fleet = FleetStore(
       api: FakeCommanderApi(),
       listStore: InMemoryServerListStore(),
     );
-    await workspace.loadAndConnectAll();
+    await fleet.loadAndConnectAll();
     await tester.pumpWidget(
       CommanderApp(
         api: FakeCommanderApi(),
-        workspace: workspace,
+        fleet: fleet,
         theme: ThemeController(store: InMemoryPrefStore()),
       ),
     );
