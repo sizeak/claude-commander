@@ -1312,6 +1312,51 @@ fn indexed_to_rgb(n: u8) -> (u8, u8, u8) {
     }
 }
 
+/// WCAG relative luminance, for [`contrast_ratio`]. Named and indexed colours
+/// are judged by their standard xterm value.
+pub(crate) fn relative_luminance(color: Color) -> f32 {
+    let (r, g, b) = color_to_approx_rgb(color);
+    let lin = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+/// WCAG contrast ratio between two colours, 1.0 (identical) to 21.0.
+pub(crate) fn contrast_ratio(a: Color, b: Color) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The least contrast a coloured label keeps against the status bar before
+/// [`Theme::on_status_bar`] swaps it for the bar's own text colour. WCAG's
+/// 3:1 floor for UI components: the labels are short, bold-weight chips, and
+/// a higher bar would strip colour from chips that read fine on dark bars.
+pub(crate) const STATUS_BAR_MIN_CONTRAST: f32 = 3.0;
+
+impl Theme {
+    /// `color`, if it reads on the status bar; otherwise `status_bar_fg`.
+    ///
+    /// The status-bar chips (commander, embedded server, waiting hints) are
+    /// painted in semantic colours chosen for the canvas, and nothing stops a
+    /// preset using the same colour for its bar: `lcars` paints both
+    /// `status_running` and `status_bar_bg` in amber `#f7a01d`, which made the
+    /// `⇅ 7878` server chip invisible, orange on orange.
+    pub fn on_status_bar(&self, color: Color) -> Color {
+        if contrast_ratio(color, self.status_bar_bg) >= STATUS_BAR_MIN_CONTRAST {
+            color
+        } else {
+            self.status_bar_fg
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1587,27 +1632,6 @@ mod tests {
         assert_eq!(theme.text_primary, Color::Reset);
         // A field the fixture leaves alone keeps its LCARS value.
         assert_eq!(theme.status_running, Color::Rgb(247, 160, 29));
-    }
-
-    /// WCAG relative luminance, for [`contrast_ratio`].
-    fn relative_luminance(color: Color) -> f32 {
-        let (r, g, b) = color_to_approx_rgb(color);
-        let lin = |c: u8| {
-            let c = c as f32 / 255.0;
-            if c <= 0.03928 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
-    }
-
-    /// WCAG contrast ratio between two colours, 1.0 (identical) to 21.0.
-    fn contrast_ratio(a: Color, b: Color) -> f32 {
-        let (la, lb) = (relative_luminance(a), relative_luminance(b));
-        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
-        (hi + 0.05) / (lo + 0.05)
     }
 
     /// The hotkey letter in `[n]ew session` and the board's top-bar title are

@@ -734,7 +734,10 @@ impl App {
                         1..1,
                         [
                             Span::styled(" \u{2502} ", base_style),
-                            Span::styled(label, base_style.fg(self.theme.status_running)),
+                            Span::styled(
+                                label,
+                                base_style.fg(self.theme.on_status_bar(self.theme.status_running)),
+                            ),
                         ],
                     );
                     true
@@ -756,7 +759,7 @@ impl App {
                 at..at,
                 [
                     Span::styled(" \u{2502} ", base_style),
-                    Span::styled(label, base_style.fg(colour)),
+                    Span::styled(label, base_style.fg(self.theme.on_status_bar(colour))),
                 ],
             );
         }

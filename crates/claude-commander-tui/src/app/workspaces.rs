@@ -678,11 +678,13 @@ impl App {
             // Each hint in *its* workspace's accent, as its chip would be.
             spans.push(Span::styled(
                 format!(" {label} "),
-                base.fg(self.workspace_accent(waiting.name.as_deref())),
+                base.fg(self
+                    .theme
+                    .on_status_bar(self.workspace_accent(waiting.name.as_deref()))),
             ));
             spans.push(Span::styled(
                 format!("\u{25cf}{}", waiting.waiting),
-                base.fg(self.theme.agent_waiting),
+                base.fg(self.theme.on_status_bar(self.theme.agent_waiting)),
             ));
         }
         spans

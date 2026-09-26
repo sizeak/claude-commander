@@ -273,6 +273,47 @@ fn a_successful_bind_raises_no_toast() {
     assert!(app.ui_state.status_message.is_none());
 }
 
+/// The foreground of the first status-bar cell holding `symbol`.
+fn status_bar_fg_of(app: &mut App, symbol: &str) -> ratatui::style::Color {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let y = buffer.area.height - 1;
+    let x = (0..buffer.area.width)
+        .find(|&x| buffer[(x, y)].symbol() == symbol)
+        .unwrap_or_else(|| panic!("no {symbol:?} in [{}]", status_bar_row(buffer)));
+    buffer[(x, y)].fg
+}
+
+/// `lcars` paints `status_running` and `status_bar_bg` in the same amber, so
+/// the server and commander chips were drawn orange on orange: present, but
+/// an empty cell to the eye. Each chip must read on the bar it sits on.
+#[test]
+fn status_bar_chips_stay_legible_on_a_bar_the_same_colour_as_them() {
+    let mut app = make_test_app();
+    app.theme = crate::theme::Theme::from_preset("lcars").unwrap();
+    assert_eq!(
+        app.theme.status_running, app.theme.status_bar_bg,
+        "the premise"
+    );
+    app.set_embedded_server(crate::EmbeddedServerStatus::Listening {
+        url: "http://127.0.0.1:7878".into(),
+        token: None,
+    });
+    app.ui_state.commander_running = true;
+    let bar = app.theme.status_bar_bg;
+    for symbol in ["\u{21c5}", "\u{25cf}"] {
+        let fg = status_bar_fg_of(&mut app, symbol);
+        let ratio = crate::theme::contrast_ratio(fg, bar);
+        assert!(
+            ratio >= crate::theme::STATUS_BAR_MIN_CONTRAST,
+            "{symbol} is drawn in {fg:?} on {bar:?} at {ratio:.2}:1"
+        );
+    }
+}
+
 fn make_project() -> SessionListItem {
     SessionListItem::Project {
         id: ProjectId::new(),
@@ -11323,8 +11364,12 @@ mod workspaces {
             in_work.contains(&format!("Work: fg=Some(Black) bg=Some({lcars:?})")),
             "{in_work}"
         );
+        // Main's accent barely differs from lcars' amber bar, so its hint falls
+        // back to the bar's own text colour rather than vanishing into it.
+        let on_amber = Theme::lcars().on_status_bar(truecolor);
+        assert_eq!(on_amber, Theme::lcars().status_bar_fg, "the premise");
         assert!(
-            in_work.contains(&format!("Main: fg=Some({truecolor:?})")),
+            in_work.contains(&format!("Main: fg=Some({on_amber:?})")),
             "{in_work}"
         );
         insta::assert_snapshot!(format!(
