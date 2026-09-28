@@ -18,8 +18,8 @@ use axum::{
 };
 use claude_commander_core::api::{NewComment, ReviewSnapshot, ToggleReviewed};
 use claude_commander_core::comment::Comment;
+use claude_commander_protocol::api::{CreatedId, ReviewedToggle};
 use serde::Deserialize;
-use serde_json::json;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -80,7 +80,7 @@ pub async fn create_comment(
 ) -> Result<Response, ApiError> {
     let id = parse_session_id(&id)?;
     let cid = state.service.create_comment(&id, body).await?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": cid }))).into_response())
+    Ok((StatusCode::CREATED, Json(CreatedId { id: cid })).into_response())
 }
 
 /// `DELETE /sessions/{id}/comments/{cid}` → `delete_comment` → 204.
@@ -104,7 +104,7 @@ pub async fn apply(
 }
 
 /// `POST /sessions/{id}/files/reviewed` → `toggle_file_reviewed_by_path` →
-/// `{ "reviewed": bool }`. The body is a [`ToggleReviewed`] display path; the
+/// [`ReviewedToggle`]. The body is a [`ToggleReviewed`] display path; the
 /// server resolves the file in the current review diff (404 when the path
 /// isn't in it).
 pub async fn toggle_reviewed(
@@ -117,7 +117,7 @@ pub async fn toggle_reviewed(
         .service
         .toggle_file_reviewed_by_path(&id, &body.display_path)
         .await?;
-    Ok(Json(json!({ "reviewed": reviewed })).into_response())
+    Ok(Json(ReviewedToggle { reviewed }).into_response())
 }
 
 /// `GET /comments/pending` → session ids with at least one not-yet-applied

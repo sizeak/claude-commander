@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// PR state as reported by the GitHub API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum PrState {
     Open,
@@ -17,6 +18,7 @@ pub enum PrState {
 
 /// GitHub `reviewDecision` field — derived state of the review process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
     /// Reviews requested, none decisive yet (includes comment-only reviews).

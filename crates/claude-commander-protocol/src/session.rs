@@ -15,6 +15,7 @@ use uuid::Uuid;
 /// The inner `Uuid` is `pub` so flutter_rust_bridge can mirror this newtype for
 /// the Flutter client; prefer the `from_uuid`/`as_uuid` accessors in Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ProjectId(pub Uuid);
 
 impl ProjectId {
@@ -52,6 +53,7 @@ impl fmt::Display for ProjectId {
 /// The inner `Uuid` is `pub` so flutter_rust_bridge can mirror this newtype for
 /// the Flutter client; prefer the `from_uuid`/`as_uuid` accessors in Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SessionId(pub Uuid);
 
 impl SessionId {
@@ -71,6 +73,19 @@ impl SessionId {
     }
 }
 
+/// Fixed identity of the commander session in the agent-state map.
+///
+/// The commander is a long-lived session that is never stored in
+/// `state.sessions`, so it has no real [`SessionId`]. The server injects this
+/// reserved id into [`AgentStatesSnapshot::states`](crate::api::AgentStatesSnapshot)
+/// to carry the commander chip's live agent state — which makes it part of the
+/// wire contract: every client must recognise it and skip it when rendering
+/// per-session rows (it maps to no session or worktree). It is never persisted
+/// and never a valid target for a mutation route.
+pub const COMMANDER_SENTINEL_ID: SessionId = SessionId(Uuid::from_u128(
+    0xc0_3a_de_cc_00_00_00_00_00_00_00_00_00_00_00_00,
+));
+
 impl Default for SessionId {
     fn default() -> Self {
         Self::new()
@@ -86,6 +101,7 @@ impl fmt::Display for SessionId {
 
 /// Status of a worktree session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     /// Session is being created (worktree/tmux setup in progress)
@@ -152,6 +168,7 @@ impl fmt::Display for SessionStatus {
 /// Sub-state of a Running Claude Code session, detected via pane content parsing.
 /// This is ephemeral (not persisted) and only meaningful when SessionStatus == Running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     /// Claude is actively generating output
@@ -178,6 +195,23 @@ impl fmt::Display for AgentState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sentinel is a wire value every client matches on, so its exact
+    /// serialized form is pinned — and it must never collide with a real,
+    /// randomly generated (v4) session id.
+    #[test]
+    fn commander_sentinel_is_a_fixed_non_v4_id() {
+        assert_eq!(
+            serde_json::to_string(&COMMANDER_SENTINEL_ID).unwrap(),
+            r#""c03adecc-0000-0000-0000-000000000000""#
+        );
+        assert_ne!(COMMANDER_SENTINEL_ID, SessionId::new());
+        assert_ne!(
+            COMMANDER_SENTINEL_ID.as_uuid().get_version_num(),
+            4,
+            "a v4 sentinel could collide with a generated id"
+        );
+    }
 
     #[test]
     fn session_status_round_trips_and_aliases_paused() {

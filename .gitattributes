@@ -13,3 +13,7 @@
 # line endings in what the binary serves; `linguist-generated` because the
 # directory is build output (the TypeScript sources will live under web/).
 crates/claude-commander-server/webui/** -filter -diff -merge -text linguist-generated
+
+# Generated from claude-commander-protocol (`--features ts`); checked for drift by
+# its `ts_export` test. Collapsed in GitHub diffs, but still diffable locally.
+web/src/generated/** linguist-generated=true

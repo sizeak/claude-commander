@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 /// Which side of the diff a line range refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CommentSide {
     Old,
@@ -21,6 +22,7 @@ pub enum CommentSide {
 
 /// Lifecycle status of a comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CommentStatus {
     /// Anchored to the current diff, ready to apply.
@@ -34,6 +36,7 @@ pub enum CommentStatus {
 
 /// A single review comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Comment {
     pub id: Uuid,
     /// Display path of the file (new path, or old path for deletions).
@@ -74,6 +77,7 @@ impl Comment {
 
 /// Outcome of applying a session's staged comments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum ApplyOutcome {
     /// No staged comments to apply.

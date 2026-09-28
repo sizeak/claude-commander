@@ -68,6 +68,7 @@ pub const fn attach_dead_after() -> Duration {
 /// frame. The `auth` then `attach` messages form the mandatory handshake;
 /// `resize` and `detach` are valid in steady state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientControl {
     /// First frame: authenticate the socket. Browsers can't set headers on the
@@ -134,6 +135,7 @@ pub enum ClientControl {
 
 /// A control message sent by the *server* as a JSON text frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerControl {
     /// Handshake succeeded and the bridge is attached. Echoes the resolved tmux
@@ -163,6 +165,7 @@ pub const WS_ERR_NO_SESSION: &str = "no such session";
 /// omitted on the wire (see the `skip_serializing_if` on the field), so the
 /// frame an old client sends is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AttachKind {
     /// The agent (e.g. Claude) pane — the session's primary tmux session.
@@ -182,6 +185,7 @@ impl AttachKind {
 
 /// Why an attach ended. Serialized as part of [`ServerControl::Detached`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DetachReason {
     /// The client sent a `detach` control frame.
@@ -190,6 +194,26 @@ pub enum DetachReason {
     SessionEnded,
     /// The transport dropped (socket closed, heartbeat timed out).
     Transport,
+}
+
+/// Map the HTTP(S) base URL to the `/ws/attach` WebSocket URL: `http`→`ws`,
+/// `https`→`wss`, path prefix preserved. A base with any other scheme is left
+/// as-is (the endpoint path is still appended) — a client that accepts only
+/// http(s) bases rejects the others before it gets here.
+///
+/// Here rather than in a client because the endpoint's location relative to
+/// the HTTP base is part of the contract every client (Rust, Flutter via the
+/// client crate, the browser page) must agree on.
+pub fn ws_attach_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let ws = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        base.to_string()
+    };
+    format!("{ws}/ws/attach")
 }
 
 impl ClientControl {
@@ -223,6 +247,25 @@ impl ServerControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ws_url_maps_scheme_and_appends_path() {
+        assert_eq!(
+            ws_attach_url("http://host:8080"),
+            "ws://host:8080/ws/attach"
+        );
+        assert_eq!(
+            ws_attach_url("https://host:8080/"),
+            "wss://host:8080/ws/attach"
+        );
+        // A path prefix is preserved ahead of the endpoint.
+        assert_eq!(
+            ws_attach_url("https://host/prefix"),
+            "wss://host/prefix/ws/attach"
+        );
+        // Unknown scheme is left as-is, path still appended.
+        assert_eq!(ws_attach_url("host:8080"), "host:8080/ws/attach");
+    }
 
     #[test]
     fn client_auth_round_trip() {

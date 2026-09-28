@@ -12,14 +12,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use claude_commander_core::api::{
-    ChangeProgram, CreateSessionOpts, PreviewData, PreviewTarget, RenameSession, SessionInfo,
-    SetSection, SetSessionBase, SetSessionBaseOutcome,
+    CreateSessionOpts, PreviewData, PreviewTarget, SessionInfo, SetSessionBase,
+    SetSessionBaseOutcome,
 };
 use claude_commander_core::session::SessionLookup;
+use claude_commander_protocol::api::{CreatedId, MarkUnread, PatchSession};
 use serde::Deserialize;
-use serde_json::json;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, error_response};
 use crate::state::AppState;
 
 use super::{parse_session_id, run_local};
@@ -58,16 +58,11 @@ pub async fn find(
         match state.service.find_session_exact(&q.q).await? {
             SessionLookup::Found(info) => Ok(Json(info).into_response()),
             SessionLookup::NotFound => Ok(StatusCode::NOT_FOUND.into_response()),
-            SessionLookup::Ambiguous(n) => Ok((
+            SessionLookup::Ambiguous(n) => Ok(error_response(
                 StatusCode::CONFLICT,
-                Json(json!({
-                    "error": {
-                        "kind": "session",
-                        "message": format!("{n} sessions match {:?}", q.q),
-                    }
-                })),
-            )
-                .into_response()),
+                "session",
+                format!("{n} sessions match {:?}", q.q),
+            )),
         }
     } else {
         match state.service.find_session(&q.q).await? {
@@ -116,7 +111,7 @@ pub async fn create(
 ) -> Result<Response, ApiError> {
     // `create_session` builds a `gix::Repository` (non-`Send`) across an await.
     let id = run_local(move || async move { state.service.create_session(opts).await }).await?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id }))).into_response())
+    Ok((StatusCode::CREATED, Json(CreatedId { id })).into_response())
 }
 
 /// `POST /sessions/{id}/kill` → `kill_session` → 204.
@@ -193,17 +188,6 @@ pub async fn branch_diff(
     Ok(state.service.branch_diff(&id).await?)
 }
 
-/// PATCH body for a session: rename it, or move it to a section (`section:
-/// null` clears the manual override). Tagged by `op` so a section clear
-/// (`null`) is unambiguous.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum PatchSession {
-    Rename(RenameSession),
-    SetSection(SetSection),
-    ChangeProgram(ChangeProgram),
-}
-
 /// `PATCH /sessions/{id}` → `rename_session` / `set_section` / `change_program` → 204.
 pub async fn patch(
     State(state): State<AppState>,
@@ -263,12 +247,6 @@ pub async fn set_base(
     ))
 }
 
-/// Body for the batch mark-unread route: the session ids to flag.
-#[derive(Debug, Deserialize)]
-pub struct UnreadBody {
-    pub ids: Vec<String>,
-}
-
 /// `POST /sessions/unread` with `{ "ids": [...] }` → `mark_unread` → 204.
 ///
 /// The batch counterpart to `read`: the remote client's palette bulk
@@ -276,7 +254,7 @@ pub struct UnreadBody {
 /// skipped by the service (a no-op), matching the local backend.
 pub async fn unread(
     State(state): State<AppState>,
-    Json(body): Json<UnreadBody>,
+    Json(body): Json<MarkUnread>,
 ) -> Result<StatusCode, ApiError> {
     let ids = body
         .ids

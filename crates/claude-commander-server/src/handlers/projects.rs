@@ -12,10 +12,9 @@ use axum::{
 };
 use claude_commander_core::api::{BranchInfo, PreviewData, PreviewTarget, ProjectInfo};
 use claude_commander_core::session::ProjectId;
-use claude_commander_protocol::api::AddProjectRequest;
+use claude_commander_protocol::api::{AddProjectRequest, CreatedId, ScanResponse};
 use claude_commander_protocol::workspace::SetProjectWorkspace;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde::Deserialize;
 
 use crate::error::ApiError;
 use crate::handlers::{parse_id, run_local};
@@ -40,7 +39,7 @@ pub async fn add(
             move || async move { state.service.add_project(body.path, body.workspace).await },
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id }))).into_response())
+    Ok((StatusCode::CREATED, Json(CreatedId { id })).into_response())
 }
 
 /// `POST /projects/ensure` (`{ path, workspace? }`) → `ensure_project` → 201
@@ -56,7 +55,7 @@ pub async fn ensure(
             .await
     })
     .await?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id }))).into_response())
+    Ok((StatusCode::CREATED, Json(CreatedId { id })).into_response())
 }
 
 /// `PUT /projects/{id}/workspace` (`{ workspace }`, `null` = Main) → 204.
@@ -73,14 +72,6 @@ pub async fn set_workspace(
         .set_project_workspace(&id, body.workspace)
         .await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Response for `POST /projects/scan`. Mirrors core's `ScanResult`, which is not
-/// `Serialize`. (`Deserialize` is for the handler's own round-trip test.)
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ScanResponse {
-    pub added: usize,
-    pub skipped: usize,
 }
 
 /// `POST /projects/scan` (body `{ path, workspace? }`) → `scan_directory`. A
@@ -183,7 +174,7 @@ mod tests {
             .unwrap();
         let (status, body) = send(router, req).await;
         assert_eq!(status, 200);
-        let resp: super::ScanResponse = json(&body);
+        let resp: claude_commander_protocol::api::ScanResponse = json(&body);
         assert_eq!(resp.added, 0);
         assert_eq!(resp.skipped, 0);
     }

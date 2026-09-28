@@ -38,6 +38,7 @@ pub const RESERVED_WORKSPACE_NAMES: [&str; 2] = ["last", "main"];
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct WorkspaceDef {
     /// The workspace's name, which is also its identity: projects are tagged
     /// with it, and servers merge definitions by it (exact match).
@@ -57,7 +58,11 @@ impl WorkspaceDef {
 ///
 /// FLUTTER: mirror this (as its string form).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(from = "String", into = "String")]
+// On the wire this is its string form (`"last"`, `"main"`, or a name), not the
+// enum's structure — so the TypeScript type is the string, like the serde one.
+#[cfg_attr(feature = "ts", ts(type = "string"))]
 pub enum StartupWorkspace {
     /// Reopen whichever workspace this client last had active (the default).
     #[default]
@@ -98,6 +103,7 @@ impl From<StartupWorkspace> for String {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetWorkspacesRequest {
     pub workspaces: Vec<WorkspaceDef>,
     /// Label for the built-in Main workspace. `None` leaves the
@@ -114,6 +120,7 @@ pub struct SetWorkspacesRequest {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RenameWorkspaceRequest {
     pub from: String,
     pub to: String,
@@ -125,6 +132,7 @@ pub struct RenameWorkspaceRequest {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DeleteWorkspaceRequest {
     pub name: String,
 }
@@ -133,6 +141,7 @@ pub struct DeleteWorkspaceRequest {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetProjectWorkspace {
     #[serde(default)]
     pub workspace: Option<String>,
