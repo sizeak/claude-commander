@@ -1,9 +1,9 @@
 //! The browser UI, embedded into the binary at build time.
 //!
-//! `webui/` (the page + vendored xterm.js) is baked in via [`rust_embed`], so
-//! every binary that links this crate — the standalone server and the
-//! `claude-commander` TUI's embedded server alike — serves it with no runtime
-//! file lookups. It is mounted as the router's fallback, outside the bearer
+//! `webui/` (the page, built from `web/` with xterm.js bundled in) is baked in
+//! via [`rust_embed`], so every binary that links this crate — the standalone
+//! server and the `claude-commander` TUI's embedded server alike — serves it
+//! with no runtime file lookups. It is mounted as the router's fallback, outside the bearer
 //! layer like `/health`: the page holds no data, and every call it makes goes
 //! through `/api`, which still demands the token.
 //!
@@ -118,7 +118,7 @@ mod tests {
         for p in ["api", "api/", "api/x", "ws", "ws/", "ws/attach/x"] {
             assert!(is_api_path(p), "{p}");
         }
-        for p in ["", "index.html", "apix", "wsx/y", "vendor/xterm.js"] {
+        for p in ["", "index.html", "apix", "wsx/y", "style.css"] {
             assert!(!is_api_path(p), "{p}");
         }
     }

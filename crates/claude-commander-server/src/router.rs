@@ -442,21 +442,26 @@ mod tests {
         assert!(body_string(resp).await.is_empty());
     }
 
-    /// The vendored terminal is embedded too — without it the page loads but
-    /// can never attach.
+    /// The terminal is embedded too — without it the page loads but can never
+    /// attach. web/build.mjs bundles xterm.js (+ its fit addon) into `app.js`,
+    /// with a licence banner naming each package, and inlines xterm's
+    /// stylesheet into `style.css`.
     #[tokio::test]
-    async fn vendored_xterm_is_embedded() {
+    async fn bundled_xterm_is_embedded() {
         let dir = TempDir::new().unwrap();
         let app = token_router(&dir);
-        for path in [
-            "/vendor/xterm.js",
-            "/vendor/addon-fit.js",
-            "/vendor/xterm.css",
-        ] {
-            let resp = get_resp(app.clone(), path).await;
-            assert_eq!(resp.status(), 200, "{path}");
-            assert!(!content_type(&resp).starts_with("text/html"), "{path}");
+
+        let js = get_resp(app.clone(), "/app.js").await;
+        assert_eq!(js.status(), 200);
+        let js = body_string(js).await;
+        for pkg in ["@xterm/xterm@", "@xterm/addon-fit@"] {
+            assert!(js.contains(pkg), "app.js lacks {pkg}");
         }
+
+        let css = get_resp(app, "/style.css").await;
+        assert_eq!(css.status(), 200);
+        assert!(content_type(&css).starts_with("text/css"), "{css:?}");
+        assert!(body_string(css).await.contains(".xterm-viewport"));
     }
 
     /// The favicon is the real SVG, not a Git LFS pointer (which is what a

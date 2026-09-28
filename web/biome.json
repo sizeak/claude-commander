@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.9/schema.json",
   "files": {
-    "includes": ["**", "!node_modules", "!test-results", "!playwright-report"]
+    "includes": ["**", "!node_modules", "!test-results", "!playwright-report", "!src/generated"]
   },
   "formatter": {
     "indentStyle": "space",
@@ -10,5 +10,17 @@
   },
   "linter": {
     "enabled": true
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["src/style.css"],
+      "linter": {
+        "rules": {
+          "suspicious": { "noDuplicateProperties": "off" },
+          "complexity": { "noImportantStyles": "off" },
+          "style": { "noDescendingSpecificity": "off" }
+        }
+      }
+    }
+  ]
 }
