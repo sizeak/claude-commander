@@ -330,6 +330,32 @@ Settings → Programs targeting that server. In the Programs tab, `t` cycles whi
 backend (local or a remote server) you're editing; edits are saved to the chosen
 backend as you make them.
 
+## Web UI
+
+The server also serves a browser UI, on the same port as its API: whichever of
+`claude-commander --serve` or `claude-commander-server` is running, open
+
+```
+http://127.0.0.1:7878/#token=<bearer token>
+```
+
+(**Copy server token** in the palette gives you the token.) The page reads the
+token from the URL fragment — which browsers never send to the server — stores it
+in that browser's local storage, and strips it from the address bar. Without one
+it asks. It lists projects and sessions, creates, restarts and deletes them,
+attaches to the live terminal over WebSocket, and reviews diffs.
+
+**Keep it on loopback, or behind a TLS-terminating reverse proxy.** The server
+speaks plain HTTP, so on any other address the token and your terminal traffic
+cross the network in the clear, and the bearer token is the only thing standing
+between that network and a shell on your machine. Authentication fit for an
+internet-facing deployment has not been designed yet; don't expose the port
+directly.
+
+Working on the page itself: its source is in [`web/`](web/), and
+`scripts/dev-run.sh web` rebuilds it on save and serves it from an isolated
+debug server, printing a ready-to-open URL.
+
 ## Flutter Client
 
 For the times you're not at a terminal, [`client/`](client/README.md) is a
