@@ -175,7 +175,7 @@ cc_lane_description() {
     dart-format) printf 'client/tool/dart-format.sh --check\n' ;;
     analyze) printf 'flutter analyze lib test integration_test\n' ;;
     flutter-test) printf 'flutter test (client widget + golden tests)\n' ;;
-    cdylib) printf 'cargo test in client/rust\n' ;;
+    cdylib) printf 'cargo test --locked in client/rust\n' ;;
     e2e) printf 'client/tool/e2e.sh (hermetic server + Linux app)\n' ;;
     goldens) printf 'flutter test test/goldens (reference images only)\n' ;;
     web) printf 'web/: npm ci, check, typecheck, test, build is fresh; protocol TS drift\n' ;;

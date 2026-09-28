@@ -453,7 +453,7 @@ jobs:
       - name: Run cdylib Integration Tests
         env:
           GIT_CONFIG_GLOBAL: ${{ runner.temp }}/poisoned-gitconfig
-        run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test'
+        run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test --locked'
 
       # DISABLED for this PR: the headless Linux GUI e2e (flutter test
       # integration_test under xvfb) builds fine but the app fails to *launch*

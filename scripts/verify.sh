@@ -180,7 +180,10 @@ lane_goldens() {
 }
 
 lane_cdylib() {
-  cc_run_in_shell "$CC_CLIENT_SHELL" cargo "cd client/rust && cargo test"
+  # --locked: client/rust has its own Cargo.lock, which a dependency added to a
+  # workspace crate it links (e.g. the server's rust-embed) leaves stale. Without
+  # the flag cargo quietly rewrites it and the drift only shows as a dirty tree.
+  cc_run_in_shell "$CC_CLIENT_SHELL" cargo "cd client/rust && cargo test --locked"
 }
 
 lane_e2e() {
