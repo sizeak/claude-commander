@@ -155,6 +155,11 @@ serve_page() {
   cc_die "$CC_EXIT_TOOLCHAIN" "target/debug/claude-commander-server missing (drop --no-build)"
 
 rm -rf "$LOG_DIR"
+# Everything cleanup acts on (it rm -rf's CC_WORK, kills CC_SERVER_PID) must be
+# this run's own, never inherited from the caller: the trap is live before
+# cc_fixture_env assigns them, and a setup that fails first would otherwise
+# kill or delete whatever the environment named.
+unset CC_WORK CC_SERVER_PID
 # The trap goes in before cc_fixture_env, which mktemps the tree first: a
 # failure anywhere after that must still reach cleanup, or the tree leaks.
 trap cleanup EXIT
