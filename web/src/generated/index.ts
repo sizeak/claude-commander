@@ -22,6 +22,7 @@ export * from "./CommentSide";
 export * from "./CommentStatus";
 export * from "./ConfigPatch";
 export * from "./ConfigReloaded";
+export * from "./ConfigView";
 export * from "./ConnectionState";
 export * from "./CreateOptions";
 export * from "./CreateSessionOpts";

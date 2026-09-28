@@ -4,5 +4,8 @@
  * The inside of [`ApiErrorBody`]. `kind` is a short machine-readable category
  * (`session`, `tmux`, `git`, `config`, `io`, `tts`, `auth`, `request`, ...);
  * `message` is safe to show the user and never carries a credential.
+ *
+ * `kind` defaults to empty when absent, so a client still surfaces `message`
+ * from an error body that omits it rather than failing the whole parse.
  */
 export type ApiErrorDetail = { kind: string, message: string, };

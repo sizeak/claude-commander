@@ -24,10 +24,10 @@ export function initSettings(api: Api): void {
   els.settingsBtn.addEventListener("click", async () => {
     try {
       const c = await api.config();
-      field.branchPrefix.value = c.branch_prefix ?? "";
-      field.fetchBeforeCreate.checked = !!c.fetch_before_create;
-      field.resumeSession.checked = !!c.resume_session;
-      field.projectPullEnabled.checked = !!c.project_pull_enabled;
+      field.branchPrefix.value = c.branch_prefix;
+      field.fetchBeforeCreate.checked = c.fetch_before_create;
+      field.resumeSession.checked = c.resume_session;
+      field.projectPullEnabled.checked = c.project_pull_enabled;
       openModal(els.settingsModal);
     } catch (e) {
       if (!(e instanceof Unauthorized)) alert(`Failed to load settings: ${(e as Error).message}`);

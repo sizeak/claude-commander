@@ -98,6 +98,7 @@ fn export_into(dir: &Path) {
         comment::Comment,
         comment::ApplyOutcome,
         config::ConfigPatch,
+        config::ConfigView,
         connection::ConnectionState,
         diff::LineOrigin,
         diff::DiffLine,

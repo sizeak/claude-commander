@@ -230,6 +230,7 @@ mod tests {
         routing::{get, post, put},
     };
     use claude_commander_core::Config;
+    use claude_commander_protocol::config::ConfigView;
     use tempfile::TempDir;
 
     use crate::handlers::test_support::{get as do_get, json, send, test_state};
@@ -375,6 +376,41 @@ mod tests {
         assert!(!text.contains("own-secret"), "token leaked: {text}");
         // The non-secret part of the table still comes through.
         assert!(text.contains("9999"), "{text}");
+    }
+
+    /// `GET /config` serves core's whole (redacted) `Config`, which has no
+    /// protocol type; `ConfigView` is the subset clients read. Its fields are
+    /// required, so a rename or type change on core's side fails here rather
+    /// than reaching the page as a silently missing value.
+    #[tokio::test]
+    async fn get_config_body_reads_as_a_config_view() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        state
+            .service
+            .update_config({
+                let mut c = state.service.read_config();
+                c.branch_prefix = "pfx/".into();
+                c.fetch_before_create = !c.fetch_before_create;
+                c.resume_session = !c.resume_session;
+                c.project_pull_enabled = !c.project_pull_enabled;
+                c
+            })
+            .unwrap();
+        let expected = state.service.read_config();
+
+        let (status, body) = do_get(router(state), "/config").await;
+        assert_eq!(status, 200);
+        let view: ConfigView = serde_json::from_slice(&body).expect("GET /config is a ConfigView");
+        assert_eq!(
+            view,
+            ConfigView {
+                branch_prefix: "pfx/".into(),
+                fetch_before_create: expected.fetch_before_create,
+                resume_session: expected.resume_session,
+                project_pull_enabled: expected.project_pull_enabled,
+            }
+        );
     }
 
     /// A remote client must not be able to move this server's own bind address,

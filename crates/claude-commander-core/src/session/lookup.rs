@@ -8,13 +8,6 @@
 use crate::config::AppState;
 use crate::session::WorktreeSession;
 
-/// Whether `query` identifies `session`: a full-UUID match, an 8-char
-/// display-prefix match, or (handled by callers) a title match.
-///
-/// `SessionId`'s `Display` is an 8-char prefix of the UUID, but the HTTP API
-/// hands clients the full 36-char UUID. Matching on either keeps both the
-/// CLI/TUI (which show the prefix) and API clients (which echo the full id)
-/// working through the same resolution path.
 /// A blank query (empty or whitespace-only) never identifies a session.
 ///
 /// `""` is a prefix of every ID and equals an empty title, so without this
@@ -27,6 +20,13 @@ fn is_blank(query: &str) -> bool {
     query.trim().is_empty()
 }
 
+/// Whether `query` identifies `session`: a full-UUID match, an 8-char
+/// display-prefix match, or (handled by callers) a title match.
+///
+/// `SessionId`'s `Display` is an 8-char prefix of the UUID, but the HTTP API
+/// hands clients the full 36-char UUID. Matching on either keeps both the
+/// CLI/TUI (which show the prefix) and API clients (which echo the full id)
+/// working through the same resolution path.
 fn id_matches(session: &WorktreeSession, query: &str) -> bool {
     // Full UUID is exact and unambiguous; the 8-char display is a prefix match.
     session.id.as_uuid().to_string() == query || session.id.to_string().starts_with(query)

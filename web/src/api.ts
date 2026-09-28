@@ -11,6 +11,7 @@ import type {
   ApiErrorBody,
   ApplyOutcome,
   ConfigPatch,
+  ConfigView,
   CreatedId,
   CreateOptions,
   CreateSessionOpts,
@@ -172,11 +173,10 @@ export class Api {
   // ---- config ----------------------------------------------------------------
 
   /**
-   * `GET /config` serves the whole (redacted) config, which has no generated
-   * type; the page only reads the patchable fields, which share `ConfigPatch`'s
-   * names and types.
+   * `GET /config` serves the whole (redacted) host config; `ConfigView` is the
+   * part of it the page reads, pinned against the real response server-side.
    */
-  config = () => this.request<ConfigPatch>("GET", "/config");
+  config = () => this.request<ConfigView>("GET", "/config");
   patchConfig = (patch: ConfigPatch) => this.request<unknown>("PATCH", "/config", patch);
 
   // ---- review ----------------------------------------------------------------

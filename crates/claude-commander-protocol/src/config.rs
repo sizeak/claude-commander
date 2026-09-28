@@ -20,10 +20,14 @@ use serde::{Deserialize, Serialize};
 ///
 /// `deny_unknown_fields` means a body that even *mentions* such a field is
 /// rejected (4xx) rather than silently dropped — a clear signal to the caller
-/// that the field is off-limits. It also keeps the route safe with axum's
-/// plain `Json` extractor: serde names an unknown field without echoing its
-/// value. **Never add a secret-bearing field here**; see the server's
-/// `extract::SafeJson` for why that would change the route's obligations.
+/// that the field is off-limits. Serde's rejection of an *unknown* field names
+/// the field without echoing its value; that is the only case it keeps quiet.
+/// A type error on a *known* field does quote the value (`invalid type: string
+/// "…", expected u32`), and axum's plain `Json` extractor puts that message in
+/// the 4xx body. The route stays safe with plain `Json` only because no field
+/// here can hold a secret. **Never add a secret-bearing field here**; see the
+/// server's `extract::SafeJson` for why that would change the route's
+/// obligations.
 ///
 /// Absent fields are omitted when serialized, so a client sending a patch sends
 /// only what it means to change.
@@ -75,6 +79,25 @@ pub struct ConfigPatch {
     pub precompute_review_caches: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_progress_limit: Option<Option<u32>>,
+}
+
+/// The fields of the `GET /config` response that a client reads.
+///
+/// `GET /config` serves core's whole `Config` (secrets redacted), which is not
+/// a protocol type: it is host config, and most of it is no client's business.
+/// This is the subset clients actually consume, so they are typed against a
+/// contract rather than against `ConfigPatch`'s look-alike names. It does not
+/// change the wire body: unknown fields are ignored when deserializing, and the
+/// server's `get_config_body_reads_as_a_config_view` test deserializes the real
+/// response into it, so a rename in core fails there. Every field is required
+/// for that reason; widen it only with fields a client reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ConfigView {
+    pub branch_prefix: String,
+    pub fetch_before_create: bool,
+    pub resume_session: bool,
+    pub project_pull_enabled: bool,
 }
 
 #[cfg(test)]

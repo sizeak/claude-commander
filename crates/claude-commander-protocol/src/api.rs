@@ -622,9 +622,13 @@ pub struct ApiErrorBody {
 /// The inside of [`ApiErrorBody`]. `kind` is a short machine-readable category
 /// (`session`, `tmux`, `git`, `config`, `io`, `tts`, `auth`, `request`, ...);
 /// `message` is safe to show the user and never carries a credential.
+///
+/// `kind` defaults to empty when absent, so a client still surfaces `message`
+/// from an error body that omits it rather than failing the whole parse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ApiErrorDetail {
+    #[serde(default)]
     pub kind: String,
     pub message: String,
 }
@@ -1150,6 +1154,16 @@ mod tests {
             assert_eq!(back.new_base_branch, "main");
             assert_eq!(back.old_base_branch.as_deref(), Some("feat"));
         }
+    }
+
+    /// Clients read the envelope leniently: a body with a `message` but no
+    /// `kind` (an older server, a proxy's own JSON error) still yields the
+    /// message instead of falling back to a bare status line.
+    #[test]
+    fn error_body_without_a_kind_still_parses() {
+        let body: ApiErrorBody = serde_json::from_str(r#"{"error":{"message":"busy"}}"#).unwrap();
+        assert_eq!(body.error.message, "busy");
+        assert_eq!(body.error.kind, "");
     }
 
     #[test]
