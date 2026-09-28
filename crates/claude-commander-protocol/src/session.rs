@@ -15,6 +15,7 @@ use uuid::Uuid;
 /// The inner `Uuid` is `pub` so flutter_rust_bridge can mirror this newtype for
 /// the Flutter client; prefer the `from_uuid`/`as_uuid` accessors in Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ProjectId(pub Uuid);
 
 impl ProjectId {
@@ -52,6 +53,7 @@ impl fmt::Display for ProjectId {
 /// The inner `Uuid` is `pub` so flutter_rust_bridge can mirror this newtype for
 /// the Flutter client; prefer the `from_uuid`/`as_uuid` accessors in Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SessionId(pub Uuid);
 
 impl SessionId {
@@ -99,6 +101,7 @@ impl fmt::Display for SessionId {
 
 /// Status of a worktree session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     /// Session is being created (worktree/tmux setup in progress)
@@ -165,6 +168,7 @@ impl fmt::Display for SessionStatus {
 /// Sub-state of a Running Claude Code session, detected via pane content parsing.
 /// This is ephemeral (not persisted) and only meaningful when SessionStatus == Running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     /// Claude is actively generating output

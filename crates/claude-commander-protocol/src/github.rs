@@ -118,6 +118,7 @@ const _: () = assert!(
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct GithubRepo {
     /// `owner/name`, the form `gh repo clone` takes as an argument.
     pub full_name: String,
@@ -150,6 +151,7 @@ pub struct GithubRepo {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CloneSource {
     /// An `owner/name` slug — validate with [`validate_repo_slug`].
@@ -162,6 +164,7 @@ pub enum CloneSource {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloneRequest {
     pub source: CloneSource,
     /// Override for the destination directory name. `None` means "use the name
@@ -187,6 +190,7 @@ pub struct CloneRequest {
 /// The inner `Uuid` is `pub` so flutter_rust_bridge can mirror the newtype;
 /// prefer the `from_uuid`/`as_uuid` accessors in Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloneJobId(pub Uuid);
 
 impl CloneJobId {
@@ -228,6 +232,7 @@ impl fmt::Display for CloneJobId {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CloneStatus {
     /// Clone in progress.
@@ -244,6 +249,7 @@ pub enum CloneStatus {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloneJob {
     pub id: CloneJobId,
     /// What to show the user as the source — the `owner/name` slug or the URL.
@@ -264,6 +270,7 @@ pub struct CloneJob {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloneTarget {
     pub source: String,
     pub default_dir_name: String,

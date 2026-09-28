@@ -68,6 +68,7 @@ pub const fn attach_dead_after() -> Duration {
 /// frame. The `auth` then `attach` messages form the mandatory handshake;
 /// `resize` and `detach` are valid in steady state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientControl {
     /// First frame: authenticate the socket. Browsers can't set headers on the
@@ -134,6 +135,7 @@ pub enum ClientControl {
 
 /// A control message sent by the *server* as a JSON text frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerControl {
     /// Handshake succeeded and the bridge is attached. Echoes the resolved tmux
@@ -163,6 +165,7 @@ pub const WS_ERR_NO_SESSION: &str = "no such session";
 /// omitted on the wire (see the `skip_serializing_if` on the field), so the
 /// frame an old client sends is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AttachKind {
     /// The agent (e.g. Claude) pane — the session's primary tmux session.
@@ -182,6 +185,7 @@ impl AttachKind {
 
 /// Why an attach ended. Serialized as part of [`ServerControl::Detached`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DetachReason {
     /// The client sent a `detach` control frame.

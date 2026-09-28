@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 /// `None` (clear the limit) is not reachable over the wire today.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ConfigPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch_prefix: Option<String>,
