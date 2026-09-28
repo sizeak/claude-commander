@@ -13,9 +13,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use claude_commander_protocol::api::{
-    AddProjectRequest, AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide,
-    NewComment, OperationStatus, PreviewData, ProgramInfo, ReviewSnapshot, SessionDetail,
-    SetProgramsRequest, SetSessionBase, SetSessionBaseOutcome, Snapshot, ToggleReviewed,
+    AddProjectRequest, AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions,
+    CreateSessionOpts, CreatedId, DiffSide, MarkUnread, NewComment, OperationStatus, PatchSession,
+    PreviewData, ProgramInfo, RenameSession, ReviewSnapshot, ReviewedToggle, ScanResponse,
+    SessionDetail, SetProgramsRequest, SetSection, SetSessionBase, SetSessionBaseOutcome, Snapshot,
+    ToggleReviewed,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
@@ -145,7 +147,7 @@ impl RemoteClient {
     /// The `/ws/attach` WebSocket URL for this server (scheme mapped, path
     /// prefix preserved).
     fn ws_attach_url(&self) -> String {
-        crate::attach::ws_attach_url(self.base.as_str())
+        claude_commander_protocol::ws::ws_attach_url(self.base.as_str())
     }
 
     /// The raw bearer token, if configured. Crate-internal and only handed to
@@ -518,8 +520,7 @@ impl RemoteClient {
     // -- Session mutations --
 
     pub async fn create_session(&self, opts: CreateSessionOpts) -> ClientResult<SessionId> {
-        let env: IdEnvelope<SessionId> =
-            self.post_json(self.endpoint(&["sessions"]), &opts).await?;
+        let env: CreatedId<SessionId> = self.post_json(self.endpoint(&["sessions"]), &opts).await?;
         Ok(env.id)
     }
 
@@ -544,12 +545,12 @@ impl RemoteClient {
     }
 
     pub async fn rename_session(&self, id: SessionId, title: String) -> ClientResult<()> {
-        let body = serde_json::json!({ "op": "rename", "title": title });
+        let body = PatchSession::Rename(RenameSession { title });
         self.patch_json_ok(self.session_url(id, &[]), &body).await
     }
 
     pub async fn set_section(&self, id: SessionId, section: Option<String>) -> ClientResult<()> {
-        let body = serde_json::json!({ "op": "set_section", "section": section });
+        let body = PatchSession::SetSection(SetSection { section });
         self.patch_json_ok(self.session_url(id, &[]), &body).await
     }
 
@@ -571,7 +572,7 @@ impl RemoteClient {
 
     /// Change a session's launch program (PATCH `change_program` op).
     pub async fn change_program(&self, id: SessionId, program: String) -> ClientResult<()> {
-        let body = serde_json::json!({ "op": "change_program", "program": program });
+        let body = PatchSession::ChangeProgram(ChangeProgram { program });
         self.patch_json_ok(self.session_url(id, &[]), &body).await
     }
 
@@ -612,8 +613,9 @@ impl RemoteClient {
         // Batch counterpart to `mark_read`: `POST /api/sessions/unread` with
         // `{ "ids": [...] }`. Unknown ids are silently skipped server-side,
         // matching the local backend.
-        let ids: Vec<String> = ids.iter().map(|id| id.as_uuid().to_string()).collect();
-        let body = serde_json::json!({ "ids": ids });
+        let body = MarkUnread {
+            ids: ids.iter().map(|id| id.as_uuid().to_string()).collect(),
+        };
         self.post_json_ok(self.endpoint(&["sessions", "unread"]), &body)
             .await
     }
@@ -629,8 +631,7 @@ impl RemoteClient {
         workspace: Option<String>,
     ) -> ClientResult<ProjectId> {
         let body = AddProjectRequest { path, workspace };
-        let env: IdEnvelope<ProjectId> =
-            self.post_json(self.endpoint(&["projects"]), &body).await?;
+        let env: CreatedId<ProjectId> = self.post_json(self.endpoint(&["projects"]), &body).await?;
         Ok(env.id)
     }
 
@@ -651,7 +652,7 @@ impl RemoteClient {
         workspace: Option<String>,
     ) -> ClientResult<ProjectId> {
         let body = AddProjectRequest { path, workspace };
-        let env: IdEnvelope<ProjectId> = self
+        let env: CreatedId<ProjectId> = self
             .post_json(self.endpoint(&["projects", "ensure"]), &body)
             .await?;
         Ok(env.id)
@@ -827,7 +828,7 @@ impl RemoteClient {
     }
 
     pub async fn create_comment(&self, id: SessionId, draft: NewComment) -> ClientResult<Uuid> {
-        let env: IdEnvelope<Uuid> = self
+        let env: CreatedId<Uuid> = self
             .post_json_within(
                 self.session_url(id, &["comments"]),
                 &draft,
@@ -860,7 +861,7 @@ impl RemoteClient {
         display_path: String,
     ) -> ClientResult<bool> {
         let body = ToggleReviewed { display_path };
-        let out: ReviewedBody = self
+        let out: ReviewedToggle = self
             .post_json_within(
                 self.session_url(id, &["files", "reviewed"]),
                 &body,
@@ -909,27 +910,6 @@ impl RemoteClient {
 
 async fn decode_json<T: DeserializeOwned>(response: Response) -> ClientResult<T> {
     response.json::<T>().await.map_err(error::body_error)
-}
-
-/// The server wraps created-resource ids as `{ "id": … }`.
-#[derive(serde::Deserialize)]
-struct IdEnvelope<T> {
-    id: T,
-}
-
-/// `POST /sessions/{id}/files/reviewed` → `{ "reviewed": bool }`.
-#[derive(serde::Deserialize)]
-struct ReviewedBody {
-    reviewed: bool,
-}
-
-/// `POST /projects/scan` → `{ added, skipped }`. Mirrors the fields of core's
-/// `ScanResult` (which isn't `Deserialize`); the remote adapter rebuilds the
-/// core type from this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-pub struct ScanResponse {
-    pub added: usize,
-    pub skipped: usize,
 }
 
 fn diff_side_param(side: DiffSide) -> &'static str {

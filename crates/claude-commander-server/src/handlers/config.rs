@@ -26,20 +26,15 @@
 //! command by passing `program` to `POST /sessions`, so the picker list is a
 //! convenience, not a security boundary.
 
-use axum::{
-    Json,
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use axum::{Json, extract::State, http::StatusCode};
 use claude_commander_core::Config;
 use claude_commander_core::api::SetProgramsRequest;
 use claude_commander_core::error::SessionError;
+use claude_commander_protocol::api::ConfigReloaded;
+use claude_commander_protocol::config::ConfigPatch;
 use claude_commander_protocol::workspace::{
     DeleteWorkspaceRequest, RenameWorkspaceRequest, SetWorkspacesRequest,
 };
-use serde::Deserialize;
-use serde_json::json;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -58,75 +53,66 @@ pub async fn read(State(state): State<AppState>) -> Json<Config> {
     Json(config)
 }
 
-/// Partial config update: every field is optional, and only the fields below —
-/// a conservative allow-list of benign UI/timing/behaviour options — may be
-/// changed. Filesystem-path fields (`worktrees_dir`, `log_file`,
-/// `commander_dir`, `per_repo_worktree_dirs`), program-launch fields
-/// (`programs`, `shell_program`, `editor`, `editor_gui`,
-/// `commander_program`, `commander_enabled`, `nix_develop`), and complex nested
-/// tables (`keybindings`, `theme`, `sections`, `conversation`, `stt`,
-/// `telemetry`) are intentionally absent, so a request can neither set nor
-/// reset them *here* — `programs` is editable, but only via its own dedicated
-/// route [`put_programs`], never this general patch.
-/// `deny_unknown_fields` means a body that even *mentions* such a
-/// field is rejected (400) rather than silently dropped — a clear signal to the
-/// caller that the field is off-limits.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ConfigPatch {
-    pub branch_prefix: Option<String>,
-    pub max_concurrent_tmux: Option<usize>,
-    pub capture_cache_ttl_ms: Option<u64>,
-    pub diff_cache_ttl_ms: Option<u64>,
-    pub ui_refresh_fps: Option<u32>,
-    pub pr_check_interval_secs: Option<u64>,
-    pub project_pull_enabled: Option<bool>,
-    pub project_pull_interval_secs: Option<u64>,
-    pub pr_review_labels: Option<Vec<String>>,
-    pub fetch_before_create: Option<bool>,
-    pub resume_session: Option<bool>,
-    pub state_sync_interval_ms: Option<u64>,
-    pub agent_state_poll_interval_ms: Option<u64>,
-    pub invert_pr_label_color: Option<bool>,
-    pub show_session_program: Option<bool>,
-    pub session_number_debounce_ms: Option<u64>,
-    pub ai_summary_enabled: Option<bool>,
-    pub rounded_borders: Option<bool>,
-    pub precompute_review_caches: Option<bool>,
-    pub in_progress_limit: Option<Option<u32>>,
-}
-
-impl ConfigPatch {
-    /// Apply the present fields onto `cfg`, leaving everything else untouched.
-    fn apply_to(self, cfg: &mut Config) {
-        macro_rules! set {
-            ($field:ident) => {
-                if let Some(v) = self.$field {
+/// Apply a [`ConfigPatch`]'s present fields onto `cfg`, leaving everything else
+/// untouched. The patch's shape (the allow-list) is protocol's; merging it into
+/// core's `Config` is the server's.
+fn apply_patch(patch: ConfigPatch, cfg: &mut Config) {
+    // Destructured exhaustively (no `..`), so a field added to the protocol's
+    // allow-list fails to compile here until it is applied, rather than being
+    // accepted on the wire and silently ignored.
+    let ConfigPatch {
+        branch_prefix,
+        max_concurrent_tmux,
+        capture_cache_ttl_ms,
+        diff_cache_ttl_ms,
+        ui_refresh_fps,
+        pr_check_interval_secs,
+        project_pull_enabled,
+        project_pull_interval_secs,
+        pr_review_labels,
+        fetch_before_create,
+        resume_session,
+        state_sync_interval_ms,
+        agent_state_poll_interval_ms,
+        invert_pr_label_color,
+        show_session_program,
+        session_number_debounce_ms,
+        ai_summary_enabled,
+        rounded_borders,
+        precompute_review_caches,
+        in_progress_limit,
+    } = patch;
+    macro_rules! set {
+        ($($field:ident),* $(,)?) => {
+            $(
+                if let Some(v) = $field {
                     cfg.$field = v;
                 }
-            };
-        }
-        set!(branch_prefix);
-        set!(max_concurrent_tmux);
-        set!(capture_cache_ttl_ms);
-        set!(diff_cache_ttl_ms);
-        set!(ui_refresh_fps);
-        set!(pr_check_interval_secs);
-        set!(project_pull_enabled);
-        set!(project_pull_interval_secs);
-        set!(pr_review_labels);
-        set!(fetch_before_create);
-        set!(resume_session);
-        set!(state_sync_interval_ms);
-        set!(agent_state_poll_interval_ms);
-        set!(invert_pr_label_color);
-        set!(show_session_program);
-        set!(session_number_debounce_ms);
-        set!(ai_summary_enabled);
-        set!(rounded_borders);
-        set!(precompute_review_caches);
-        set!(in_progress_limit);
+            )*
+        };
     }
+    set!(
+        branch_prefix,
+        max_concurrent_tmux,
+        capture_cache_ttl_ms,
+        diff_cache_ttl_ms,
+        ui_refresh_fps,
+        pr_check_interval_secs,
+        project_pull_enabled,
+        project_pull_interval_secs,
+        pr_review_labels,
+        fetch_before_create,
+        resume_session,
+        state_sync_interval_ms,
+        agent_state_poll_interval_ms,
+        invert_pr_label_color,
+        show_session_program,
+        session_number_debounce_ms,
+        ai_summary_enabled,
+        rounded_borders,
+        precompute_review_caches,
+        in_progress_limit,
+    );
 }
 
 /// Validate a merged config before persisting. Catches values that would break
@@ -161,7 +147,7 @@ pub async fn update(
     Json(patch): Json<ConfigPatch>,
 ) -> Result<StatusCode, ApiError> {
     let mut merged = state.service.read_config();
-    patch.apply_to(&mut merged);
+    apply_patch(patch, &mut merged);
     validate(&merged)?;
     state.service.update_config(merged)?;
     Ok(StatusCode::NO_CONTENT)
@@ -216,11 +202,11 @@ pub async fn delete_workspace(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /config/reload` → `reload_config` → `{ "reloaded": bool }`
+/// `POST /config/reload` → `reload_config` → [`ConfigReloaded`]
 /// (true when the on-disk config differed and was re-read).
-pub async fn reload(State(state): State<AppState>) -> Result<Response, ApiError> {
+pub async fn reload(State(state): State<AppState>) -> Result<Json<ConfigReloaded>, ApiError> {
     let reloaded = state.service.reload_config()?;
-    Ok(Json(json!({ "reloaded": reloaded })).into_response())
+    Ok(Json(ConfigReloaded { reloaded }))
 }
 
 /// `GET /health/tmux` → `check_tmux` → 200 on Ok, 503 on Err.

@@ -244,21 +244,6 @@ impl Drop for AttachTerminator {
     }
 }
 
-/// Map the HTTP(S) base URL to the `/ws/attach` WebSocket URL: `http`→`ws`,
-/// `https`→`wss`, path prefix preserved. Mirrors the Flutter client's `ws_url`
-/// so both clients hit the same endpoint from the same base.
-pub(crate) fn ws_attach_url(base_url: &str) -> String {
-    let base = base_url.trim_end_matches('/');
-    let ws = if let Some(rest) = base.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = base.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else {
-        base.to_string()
-    };
-    format!("{ws}/ws/attach")
-}
-
 /// Open a remote attach: connect, handshake (`auth` → `attach` → `resize` →
 /// await `ready`), then spawn the pump. On any handshake failure the socket is
 /// dropped and a classified [`ClientError`] returned; the token never appears in
@@ -523,25 +508,6 @@ fn end_for(reason: DetachReason) -> AttachEnd {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ws_url_maps_scheme_and_appends_path() {
-        assert_eq!(
-            ws_attach_url("http://host:8080"),
-            "ws://host:8080/ws/attach"
-        );
-        assert_eq!(
-            ws_attach_url("https://host:8080/"),
-            "wss://host:8080/ws/attach"
-        );
-        // A path prefix is preserved ahead of the endpoint.
-        assert_eq!(
-            ws_attach_url("https://host/prefix"),
-            "wss://host/prefix/ws/attach"
-        );
-        // Unknown scheme is left as-is, path still appended.
-        assert_eq!(ws_attach_url("host:8080"), "host:8080/ws/attach");
-    }
 
     #[test]
     fn handshake_error_classifies_by_message() {

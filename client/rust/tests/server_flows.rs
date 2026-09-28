@@ -33,6 +33,7 @@ use claude_commander_core::api::CreateSessionOpts;
 use claude_commander_core::session::SessionId;
 use claude_commander_protocol::api::{OperationKind, ProgramInfo};
 use claude_commander_protocol::github::CloneJobId;
+use claude_commander_protocol::session::COMMANDER_SENTINEL_ID;
 use claude_commander_test_support::{
     create_test_repo, run_git, spawn_server, test_state, tmux_available,
 };
@@ -263,12 +264,11 @@ fn agent_states_snapshot_round_trips() {
 
     let snap = simple::agent_states(fx.handle.clone(), true).expect("agent_states");
     // Every surfaced entry is a real session id — the commander sentinel
-    // (0xc03adecc…) is filtered out by the DTO conversion.
-    let sentinel = Uuid::from_u128(0xc0_3a_de_cc_00_00_00_00_00_00_00_00_00_00_00_00);
+    // is filtered out by the DTO conversion.
     assert!(
         snap.states
             .iter()
-            .all(|e| *e.session_id.as_uuid() != sentinel),
+            .all(|e| e.session_id != COMMANDER_SENTINEL_ID),
         "the commander sentinel must never appear in the flattened states"
     );
 

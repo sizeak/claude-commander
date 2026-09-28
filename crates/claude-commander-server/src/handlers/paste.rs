@@ -14,13 +14,13 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
 };
-use serde_json::{Value, json};
+use claude_commander_protocol::api::PastedImage;
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
 /// `POST /sessions/{id}/paste-image` — body is the raw image bytes. Returns
-/// `{ "path": "<absolute path written on the server>" }`.
+/// a [`PastedImage`] carrying the absolute path written on the server.
 ///
 /// The route carries its own body-size limit (see the router) matching
 /// [`claude_commander_protocol::paste::MAX_IMAGE_BYTES`]; the service also
@@ -30,9 +30,11 @@ pub async fn paste_image(
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: Bytes,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<PastedImage>, ApiError> {
     let path = state.service.paste_image(&id, &body).await?;
-    Ok(Json(json!({ "path": path.display().to_string() })))
+    Ok(Json(PastedImage {
+        path: path.display().to_string(),
+    }))
 }
 
 #[cfg(test)]

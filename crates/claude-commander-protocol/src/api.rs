@@ -513,9 +513,160 @@ pub struct ChangeProgram {
     pub program: String,
 }
 
+/// `PATCH /sessions/{id}` body: rename a session, move it to a section
+/// (`section: null` clears the manual override), or change its launch program.
+/// Tagged by `op` so a section clear (`null`) is unambiguous.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PatchSession {
+    Rename(RenameSession),
+    SetSection(SetSection),
+    ChangeProgram(ChangeProgram),
+}
+
+/// `POST /sessions/unread` body: the session ids (full UUIDs) to flag unread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkUnread {
+    pub ids: Vec<String>,
+}
+
+/// `201` body of the create routes (`POST /sessions`, `/projects`,
+/// `/projects/ensure`, `/sessions/{id}/comments`): the new resource's id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedId<T> {
+    pub id: T,
+}
+
+/// `POST /sessions/{id}/files/reviewed` response: the file's reviewed mark
+/// after the toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedToggle {
+    pub reviewed: bool,
+}
+
+/// `POST /projects/scan` response: how many repositories under the scanned
+/// directory were newly registered, and how many were already known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanResponse {
+    pub added: usize,
+    pub skipped: usize,
+}
+
+/// `POST /config/reload` response: `true` when the on-disk config differed
+/// from the live one and was re-read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigReloaded {
+    pub reloaded: bool,
+}
+
+/// `POST /sessions/{id}/paste-image` response: the absolute path the image was
+/// written to *on the server* (the path injected into the pane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PastedImage {
+    pub path: String,
+}
+
+/// The uniform error envelope every non-2xx JSON response carries:
+/// `{"error": {"kind", "message"}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiErrorBody {
+    pub error: ApiErrorDetail,
+}
+
+/// The inside of [`ApiErrorBody`]. `kind` is a short machine-readable category
+/// (`session`, `tmux`, `git`, `config`, `io`, `tts`, `auth`, `request`, ...);
+/// `message` is safe to show the user and never carries a credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiErrorDetail {
+    pub kind: String,
+    pub message: String,
+}
+
+impl ApiErrorBody {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            error: ApiErrorDetail {
+                kind: kind.into(),
+                message: message.into(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The small response envelopes are built by the server and parsed by every
+    /// client, so their exact JSON is pinned here — these were ad-hoc `json!`
+    /// literals before they were typed, and the move must not change a byte.
+    #[test]
+    fn response_envelopes_have_the_pinned_wire_shape() {
+        let sid = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+        assert_eq!(
+            serde_json::to_string(&CreatedId { id: sid }).unwrap(),
+            r#"{"id":"00000000-0000-0000-0000-000000000001"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ReviewedToggle { reviewed: true }).unwrap(),
+            r#"{"reviewed":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ScanResponse {
+                added: 2,
+                skipped: 1
+            })
+            .unwrap(),
+            r#"{"added":2,"skipped":1}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ConfigReloaded { reloaded: false }).unwrap(),
+            r#"{"reloaded":false}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PastedImage {
+                path: "/srv/x.png".into()
+            })
+            .unwrap(),
+            r#"{"path":"/srv/x.png"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ApiErrorBody::new("session", "nope")).unwrap(),
+            r#"{"error":{"kind":"session","message":"nope"}}"#
+        );
+    }
+
+    #[test]
+    fn patch_session_and_mark_unread_have_the_pinned_wire_shape() {
+        let cases = [
+            (
+                PatchSession::Rename(RenameSession { title: "t".into() }),
+                r#"{"op":"rename","title":"t"}"#,
+            ),
+            (
+                PatchSession::SetSection(SetSection { section: None }),
+                r#"{"op":"set_section","section":null}"#,
+            ),
+            (
+                PatchSession::ChangeProgram(ChangeProgram {
+                    program: "claude".into(),
+                }),
+                r#"{"op":"change_program","program":"claude"}"#,
+            ),
+        ];
+        for (patch, json) in cases {
+            assert_eq!(serde_json::to_string(&patch).unwrap(), json);
+            let back: PatchSession = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+        assert_eq!(
+            serde_json::to_string(&MarkUnread {
+                ids: vec!["a".into()]
+            })
+            .unwrap(),
+            r#"{"ids":["a"]}"#
+        );
+    }
 
     #[test]
     fn create_session_opts_minimal_body_deserializes() {

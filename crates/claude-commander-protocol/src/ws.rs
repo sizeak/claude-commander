@@ -192,6 +192,26 @@ pub enum DetachReason {
     Transport,
 }
 
+/// Map the HTTP(S) base URL to the `/ws/attach` WebSocket URL: `http`→`ws`,
+/// `https`→`wss`, path prefix preserved. A base with any other scheme is left
+/// as-is (the endpoint path is still appended) — a client that accepts only
+/// http(s) bases rejects the others before it gets here.
+///
+/// Here rather than in a client because the endpoint's location relative to
+/// the HTTP base is part of the contract every client (Rust, Flutter via the
+/// client crate, the browser page) must agree on.
+pub fn ws_attach_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let ws = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        base.to_string()
+    };
+    format!("{ws}/ws/attach")
+}
+
 impl ClientControl {
     /// Parse a control message from a text-frame payload.
     pub fn from_text(text: &str) -> Result<Self, serde_json::Error> {
@@ -223,6 +243,25 @@ impl ServerControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ws_url_maps_scheme_and_appends_path() {
+        assert_eq!(
+            ws_attach_url("http://host:8080"),
+            "ws://host:8080/ws/attach"
+        );
+        assert_eq!(
+            ws_attach_url("https://host:8080/"),
+            "wss://host:8080/ws/attach"
+        );
+        // A path prefix is preserved ahead of the endpoint.
+        assert_eq!(
+            ws_attach_url("https://host/prefix"),
+            "wss://host/prefix/ws/attach"
+        );
+        // Unknown scheme is left as-is, path still appended.
+        assert_eq!(ws_attach_url("host:8080"), "host:8080/ws/attach");
+    }
 
     #[test]
     fn client_auth_round_trip() {
