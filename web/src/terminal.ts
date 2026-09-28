@@ -7,7 +7,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import type { Auth } from "./api.ts";
-import { els, flashConn, setConn } from "./dom.ts";
+import { clearStickyConn, els, flashConn, setConn, stickConn } from "./dom.ts";
 import type { AttachKind, ClientControl } from "./generated/index.ts";
 import { state } from "./state.ts";
 import {
@@ -20,8 +20,11 @@ import {
 } from "./ws.ts";
 
 export interface TerminalHooks {
-  /** The attach was refused for the token: take the user to the connect screen. */
-  onAuthRejected(): void;
+  /**
+   * The attach was refused for `token` (the one the socket authenticated
+   * with): take the user to the connect screen, unless it has been replaced.
+   */
+  onAuthRejected(token: string | null): void;
 }
 
 let auth: Auth;
@@ -232,10 +235,27 @@ export function resume(): void {
   }
 }
 
-/** A fresh attach: new lifecycle (backoff, final errors), then its first socket. */
+/**
+ * Attach afresh to the selected session's current pane, whatever state the old
+ * attach was in. For after a restart: the old pane's session ended (a final
+ * close), and the new one needs a new attach.
+ */
+export function reattach(): void {
+  if (!state.selectedId) return;
+  closeSocket();
+  term?.reset();
+  startAttach(state.selectedId);
+}
+
+/**
+ * A fresh attach: new lifecycle (backoff, final errors), then its first socket.
+ * Every path here is a user action (select, toggle, reconnect, restart), which
+ * is what clears a sticky "session ended" from the header.
+ */
 function startAttach(id: string): void {
   lifecycle = new AttachLifecycle();
   halted = false;
+  clearStickyConn();
   openSocket(id);
 }
 
@@ -267,11 +287,14 @@ function openSocket(id: string): void {
   sock.binaryType = "arraybuffer";
   ws = sock;
   const life = lifecycle;
+  // The token this socket authenticates with, so a refusal is pinned to it.
+  let sentToken: string | null = null;
 
   sock.onopen = () => {
     setConn("ok", "connected");
     // Authenticate in-band (browsers can't set headers on the upgrade).
-    if (auth.token) sock.send(JSON.stringify(authFrame(auth.token)));
+    sentToken = auth.token;
+    if (sentToken) sock.send(JSON.stringify(authFrame(sentToken)));
     fitNow();
     const size = term?.cols && term.rows ? { cols: term.cols, rows: term.rows } : null;
     sock.send(JSON.stringify(attachFrame(id, attachKind, size)));
@@ -300,14 +323,22 @@ function openSocket(id: string): void {
         scheduleReconnect(id, next.delayMs);
         break;
       case "auth":
+        // Refused a token the user has since replaced: try again with the new
+        // one rather than halting (the connect submit's resume() has already
+        // run and found nothing halted).
+        if (sentToken !== auth.token) {
+          startAttach(id);
+          break;
+        }
         halted = true;
-        setConn("error", "disconnected");
-        hooks.onAuthRejected();
+        stickConn("error", "disconnected");
+        hooks.onAuthRejected(sentToken);
         break;
       case "gone":
-        // The terminal already shows the error line; stop there.
+        // The terminal already shows the error line; stop there, and keep
+        // saying so in the header until the user attaches again.
         halted = true;
-        setConn("error", next.message);
+        stickConn("error", next.message);
         break;
     }
   };
@@ -452,8 +483,7 @@ function toggleDictation(): void {
   };
   r.onerror = (e) => {
     if (e.error !== "aborted" && e.error !== "no-speech") {
-      setConn("error", `mic: ${e.error}`);
-      setTimeout(() => setConn("ok", "connected"), 2000);
+      flashConn(`mic: ${e.error}`, 2000, "error");
     }
   };
   try {

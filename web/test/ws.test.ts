@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { WS_ERR_AUTH, WS_ERR_NO_SESSION } from "../src/generated/constants.ts";
 import {
+  ATTACH_STABLE_MS,
   AttachLifecycle,
   attachFrame,
   parseControl,
@@ -84,12 +85,42 @@ describe("AttachLifecycle: what a close means", () => {
     assert.equal(l.onClose().kind, "reconnect");
   });
 
-  test("a successful attach resets the backoff", () => {
-    const l = new AttachLifecycle();
+  test("an attach that stayed up resets the backoff", () => {
+    let now = 0;
+    const l = new AttachLifecycle(() => now);
     const first = l.onClose();
     l.onClose();
     l.onClose();
     l.onControl({ type: "ready", session: "s1" });
+    now += ATTACH_STABLE_MS;
     assert.deepEqual(l.onClose(), first);
+  });
+
+  test("a ready that drops at once does not reset the backoff", () => {
+    let now = 0;
+    const l = new AttachLifecycle(() => now);
+    const delay = () => {
+      const d = l.onClose();
+      return d.kind === "reconnect" ? d.delayMs : -1;
+    };
+    const first = delay();
+    const second = delay();
+    l.onControl({ type: "ready", session: "s1" });
+    now += 100; // dropped straight after attaching
+    assert.ok(second > first);
+    assert.ok(delay() > second, "a flapping attach keeps backing off");
+  });
+
+  test("the session ending is final, not a reconnect", () => {
+    const l = new AttachLifecycle();
+    l.onControl({ type: "ready", session: "s1" });
+    l.onControl({ type: "detached", reason: "session_ended" });
+    assert.deepEqual(l.onClose(), { kind: "gone", message: "session ended" });
+  });
+
+  test("a transport detach still reconnects", () => {
+    const l = new AttachLifecycle();
+    l.onControl({ type: "detached", reason: "transport" });
+    assert.equal(l.onClose().kind, "reconnect");
   });
 });

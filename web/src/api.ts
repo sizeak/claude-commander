@@ -51,13 +51,20 @@ export class Auth {
     this.rejected = false;
   }
 
-  /** Forget the token after a 401; returns the message the connect screen shows. */
-  reject(): string | undefined {
+  /**
+   * Forget the token after a 401 for a request sent with `sent` (default: the
+   * current token). Returns the message the connect screen shows — or `null`
+   * when `sent` is no longer the current token: that 401 is about a token the
+   * user has already replaced (a poll in flight across a submit), and acting
+   * on it would throw away the new one.
+   */
+  reject(sent: string | null = this.token): { message: string | undefined } | null {
+    if (sent !== this.token) return null;
     const message = this.source === "submitted" ? "That token was rejected." : undefined;
     this.token = null;
     this.source = "none";
     this.rejected = true;
-    return message;
+    return { message };
   }
 
   headers(): Record<string, string> {
@@ -111,14 +118,16 @@ export class Api {
 
   /**
    * The server refused the token — over HTTP (a 401) or on the attach socket
-   * (`WS_ERR_AUTH`): forget it and hand over to the connect screen.
+   * (`WS_ERR_AUTH`): forget it and hand over to the connect screen. `sent` is
+   * the token that request carried; a refusal of a since-replaced one is
+   * ignored (see `Auth.reject`).
    */
-  unauthorized(): void {
+  unauthorized(sent: string | null = this.auth.token): void {
     // Report a rejection once: later 401s from requests already in flight
     // change nothing the user needs to see.
     const first = !this.auth.rejected;
-    const message = this.auth.reject();
-    if (first) this.onUnauthorized(message);
+    const outcome = this.auth.reject(sent);
+    if (outcome && first) this.onUnauthorized(outcome.message);
   }
 
   /**
@@ -126,6 +135,7 @@ export class Api {
    * one, e.g. a 204); rejects with `Unauthorized` or `ApiError`.
    */
   async request<T>(method: Method, path: string, body?: unknown): Promise<T> {
+    const sent = this.auth.token;
     const headers: Record<string, string> = { Accept: "application/json", ...this.auth.headers() };
     const init: RequestInit = { method, headers };
     if (body !== undefined) {
@@ -134,7 +144,7 @@ export class Api {
     }
     const res = await this.fetchImpl(`/api${path}`, init);
     if (res.status === 401) {
-      this.unauthorized();
+      this.unauthorized(sent);
       throw new Unauthorized();
     }
     const text = await res.text();

@@ -6,6 +6,8 @@
 // Server data only ever reaches the page as text: `h()` sets `textContent`,
 // and no module assigns `innerHTML`.
 
+import { type ConnClass, ConnStatus } from "./status.ts";
+
 export function byId<T extends HTMLElement = HTMLElement>(id: string): T {
   const el = document.getElementById(id);
   if (!el) throw new Error(`#${id} is missing from index.html`);
@@ -174,15 +176,44 @@ export const els = {
   },
 };
 
-export function setConn(cls: "ok" | "error" | "unknown", text: string): void {
-  els.conn.className = `conn ${cls}`;
-  els.conn.textContent = text;
+// The header's connection indicator; see status.ts for the layering.
+const conn = new ConnStatus();
+
+function renderConn(): void {
+  const v = conn.view();
+  els.conn.className = `conn ${v.cls}`;
+  els.conn.textContent = v.text;
 }
 
-/** Show a transient status (e.g. "copied"), then return to "connected". */
-export function flashConn(text: string, ms: number): void {
-  setConn("ok", text);
-  setTimeout(() => setConn("ok", "connected"), ms);
+/** The poll's (or a live socket's) view of the connection. */
+export function setConn(cls: ConnClass, text: string): void {
+  conn.setBase(cls, text);
+  renderConn();
+}
+
+/**
+ * A terminal state ("session ended", a rejected token) that the next poll
+ * must not overwrite. Held until `clearStickyConn`, i.e. the user's next
+ * attach.
+ */
+export function stickConn(cls: ConnClass, text: string): void {
+  conn.setSticky(cls, text);
+  renderConn();
+}
+
+export function clearStickyConn(): void {
+  conn.clearSticky();
+  renderConn();
+}
+
+/** Show a transient status (e.g. "copied"), then whatever is underneath. */
+export function flashConn(text: string, ms: number, cls: ConnClass = "ok"): void {
+  const id = conn.flash(cls, text);
+  renderConn();
+  setTimeout(() => {
+    conn.endFlash(id);
+    renderConn();
+  }, ms);
 }
 
 // ---- modals ------------------------------------------------------------------

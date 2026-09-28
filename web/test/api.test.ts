@@ -122,7 +122,7 @@ describe("Auth: what a rejection says", () => {
   const rejectedFrom = (source: TokenSource) => {
     const auth = new Auth();
     auth.set("tok", source);
-    return auth.reject();
+    return auth.reject()?.message;
   };
 
   test("a token the user just submitted is reported as rejected", () => {
@@ -132,7 +132,7 @@ describe("Auth: what a rejection says", () => {
   test("a stored or linked token going stale says nothing: nothing was submitted", () => {
     assert.equal(rejectedFrom("stored"), undefined);
     assert.equal(rejectedFrom("hash"), undefined);
-    assert.equal(new Auth().reject(), undefined);
+    assert.equal(new Auth().reject()?.message, undefined);
   });
 
   test("a rejection holds until a new token is set", () => {
@@ -146,5 +146,39 @@ describe("Auth: what a rejection says", () => {
     assert.equal(auth.rejected, true);
     auth.set("next", "submitted");
     assert.equal(auth.rejected, false);
+  });
+});
+
+describe("a 401 for a token that is no longer current", () => {
+  test("is ignored: a new token set mid-request must not be forgotten", async () => {
+    // A poll sent with the old token is still in flight when the user
+    // submits a new one; its 401 is about the old token, not the new.
+    const auth = new Auth();
+    auth.set("old", "stored");
+    let answer: (r: Response) => void = () => {};
+    const fetch = (() =>
+      new Promise<Response>((resolve) => {
+        answer = resolve;
+      })) as unknown as typeof globalThis.fetch;
+    const rejected: (string | undefined)[] = [];
+    const api = new Api(auth, { onUnauthorized: (m) => rejected.push(m), fetch });
+
+    const inFlight = api.workspace();
+    auth.set("new", "submitted");
+    answer(new Response(null, { status: 401 }));
+    await assert.rejects(inFlight, Unauthorized);
+
+    assert.equal(auth.token, "new");
+    assert.equal(auth.rejected, false);
+    assert.deepEqual(rejected, []);
+  });
+
+  test("Auth.reject ignores a stale token and acts on the current one", () => {
+    const auth = new Auth();
+    auth.set("current", "submitted");
+    assert.equal(auth.reject("stale"), null);
+    assert.equal(auth.token, "current");
+    assert.deepEqual(auth.reject("current"), { message: "That token was rejected." });
+    assert.equal(auth.token, null);
   });
 });

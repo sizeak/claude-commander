@@ -13,6 +13,7 @@ import {
   closeModal,
   copyToClipboard,
   els,
+  flashConn,
   h,
   isMobile,
   type MenuItem,
@@ -25,37 +26,21 @@ import {
 import { initForms, openNewSession, removeProject } from "./forms.ts";
 import type { ProjectInfo, SessionInfo } from "./generated/index.ts";
 import { NotifyTracker, requestPermissionOnFirstClick, showNotifications } from "./notify.ts";
+import { Poller } from "./poll.ts";
 import { initReview, openReview } from "./review.ts";
 import { initSettings } from "./settings.ts";
 import { agentStateFor, currentSession, humanize, state } from "./state.ts";
-import { attach, detach, fitNow, initTerminal, resume, sendResize } from "./terminal.ts";
+import { attach, detach, fitNow, initTerminal, reattach, resume, sendResize } from "./terminal.ts";
+import { TokenStore, takeHashToken } from "./token.ts";
 import { renderTree, type TreeHandlers, TreeView } from "./tree.ts";
 
 const POLL_MS = 1500;
-const TOKEN_KEY = "cc_token";
 
-// localStorage throws in some private modes; the token then lives for the tab.
-function storeToken(token: string | null): void {
-  try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch {
-    // Not persisted.
-  }
-}
-
-function storedToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
+const tokens = new TokenStore();
 const auth = new Auth();
 const api = new Api(auth, {
   onUnauthorized: (message) => {
-    storeToken(null);
+    tokens.set(null);
     openConnect(message);
   },
 });
@@ -63,16 +48,20 @@ const notifier = new NotifyTracker();
 
 // ---- connect -----------------------------------------------------------------
 
-function openConnect(errMsg: string | undefined): void {
+function showConnectError(errMsg: string | undefined): void {
   els.connectError.textContent = errMsg ?? "";
   els.connectError.classList.toggle("hidden", !errMsg);
+}
+
+function openConnect(errMsg: string | undefined): void {
+  showConnectError(errMsg);
   openModal(els.connectModal);
   els.connectToken.focus();
 }
 
 function setToken(token: string, source: TokenSource): void {
   auth.set(token, source);
-  storeToken(token);
+  tokens.set(token);
 }
 
 els.connectForm.addEventListener("submit", async (e) => {
@@ -80,10 +69,17 @@ els.connectForm.addEventListener("submit", async (e) => {
   const token = els.connectToken.value.trim();
   if (!token) return;
   setToken(token, "submitted");
-  // Validate by a real request; a 401 re-opens the connect screen.
+  // Validate by a real request. A 401 re-opens the connect screen with its
+  // own message; anything else (server down, a 5xx) is said here, since the
+  // token was not judged either way.
+  showConnectError(undefined);
   try {
     await api.workspace();
-  } catch {
+  } catch (err) {
+    if (!(err instanceof Unauthorized)) {
+      const why = err instanceof Error ? err.message : String(err);
+      showConnectError(`Could not check the token: ${why}`);
+    }
     return;
   }
   closeModal(els.connectModal);
@@ -95,7 +91,19 @@ els.connectForm.addEventListener("submit", async (e) => {
 
 // ---- polling -----------------------------------------------------------------
 
-async function refreshAll(): Promise<void> {
+// One poll at a time (poll.ts): the next is scheduled when this one finishes,
+// and a refresh requested mid-poll runs once more straight after it.
+const poller = new Poller(poll, POLL_MS);
+
+/** Whether the latest poll reached the server and was accepted. */
+let lastPollOk = false;
+
+/** Refresh now (a mutation's follow-up, the refresh button). */
+function refreshAll(): Promise<void> {
+  return poller.trigger();
+}
+
+async function poll(): Promise<void> {
   // The token was refused: every poll would only 401 again. Wait on the
   // connect screen, which sets a new token (and resumes) on submit.
   if (auth.rejected) return;
@@ -113,8 +121,10 @@ async function refreshAll(): Promise<void> {
       selectSession,
     );
     setConn("ok", "connected");
+    lastPollOk = true;
     render();
   } catch (e) {
+    lastPollOk = false;
     if (!(e instanceof Unauthorized)) setConn("error", "disconnected");
   }
 }
@@ -164,7 +174,10 @@ function renderToolbar(): void {
 }
 
 async function restartSession(s: SessionInfo): Promise<void> {
-  if (await act(api.restartSession(s.id))) refreshAll();
+  if (!(await act(api.restartSession(s.id)))) return;
+  // The old pane's session ended (a final close); attach to the new one.
+  if (state.selectedId === s.id) reattach();
+  refreshAll();
 }
 
 async function killSession(s: SessionInfo): Promise<void> {
@@ -264,7 +277,7 @@ function wire(): void {
   wireModals();
   wireContextMenu();
   requestPermissionOnFirstClick();
-  initTerminal(auth, { onAuthRejected: () => api.unauthorized() });
+  initTerminal(auth, { onAuthRejected: (token) => api.unauthorized(token) });
   initReview(api);
   initSettings(api);
   initForms(api, { refresh: refreshAll, select: selectSession });
@@ -301,29 +314,23 @@ function wire(): void {
 
 // ---- boot ----------------------------------------------------------------------
 
-// A `#token=…` fragment (a pairing link) wins over a stored token: store it,
-// then strip it from the address bar so it isn't left in history or a shared
-// screenshot. The fragment never reaches the server in a request.
-function takeHashToken(): string | null {
-  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-  const token = (params.get("token") ?? "").trim();
-  if (!token) return null;
-  params.delete("token");
-  const rest = params.toString();
-  history.replaceState(null, "", location.pathname + location.search + (rest ? `#${rest}` : ""));
-  return token;
-}
-
 async function boot(): Promise<void> {
   syncAppHeight();
   wire();
-  const hashToken = takeHashToken();
-  if (hashToken) setToken(hashToken, "hash");
-  else auth.set(storedToken(), "stored");
+  // A `#token=` link wins over a stored token (token.ts says why), and says
+  // so once the server has accepted it.
+  const linked = takeHashToken(location, history, tokens);
+  if (linked) auth.set(linked.token, "hash");
+  else auth.set(tokens.get(), "stored");
   // A 401 here opens the connect screen (Api's onUnauthorized).
-  await refreshAll();
+  await poller.start();
+  if (linked && lastPollOk) {
+    const text = linked.replacedOther
+      ? "using the link's token (replaced the saved one)"
+      : "connected with the link's token";
+    flashConn(text, 4000);
+  }
   if (isMobile() && !state.selectedId) openDrawer();
-  setInterval(refreshAll, POLL_MS);
 }
 
 boot();

@@ -74,30 +74,54 @@ export type CloseDecision =
   | { kind: "reconnect"; delayMs: number }
   /** The token was rejected: back to the connect screen; retrying can't help. */
   | { kind: "auth" }
-  /** The session does not exist: say so; retrying can't help. */
+  /**
+   * The session does not exist, or its program exited (`detached` with
+   * `session_ended`): say so; retrying can't help. A restart re-attaches
+   * explicitly.
+   */
   | { kind: "gone"; message: string };
 
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 15_000;
+/**
+ * How long an attach must stay up after `ready` before it counts as a success
+ * that resets the backoff. Without it an attach that is accepted and then
+ * dropped at once (a crash-looping pane) would reconnect every second forever.
+ */
+export const ATTACH_STABLE_MS = 5000;
 
 /**
  * One attach — a session + pane — across however many sockets it takes. Fed
  * each control frame, asked on every close what to do next. Reconnects back
- * off exponentially (capped) until an attach succeeds (`ready`), so a server
- * that is down is not hammered at a fixed rate.
+ * off exponentially (capped) until an attach has stayed up for
+ * `ATTACH_STABLE_MS`, so a server that is down, or an attach that keeps
+ * dropping, is not hammered at a fixed rate.
  */
 export class AttachLifecycle {
   private failures = 0;
   private final: CloseDecision | null = null;
+  private readyAt: number | null = null;
+  private readonly now: () => number;
+
+  constructor(now: () => number = () => Date.now()) {
+    this.now = now;
+  }
 
   /** A line to show in the terminal for this control frame, if any. */
   onControl(msg: ServerControl): string | null {
     switch (msg.type) {
       case "ready":
         // The pane streams in over binary frames; nothing to show.
-        this.failures = 0;
+        this.readyAt = this.now();
         return null;
       case "detached":
+        // Sent by the server's pump as it tears an attach down
+        // (crates/claude-commander-server/src/ws/attach.rs, `pump`):
+        // `session_ended` when the PTY hit EOF, i.e. the tmux session or its
+        // attach client is gone. Reconnecting would only fail again.
+        if (msg.reason === "session_ended") {
+          this.final = { kind: "gone", message: "session ended" };
+        }
         return `\r\n\x1b[90m[detached: ${msg.reason ?? ""}]\x1b[0m\r\n`;
       case "error": {
         const message = msg.message ?? "";
@@ -113,6 +137,8 @@ export class AttachLifecycle {
 
   onClose(): CloseDecision {
     if (this.final) return this.final;
+    if (this.readyAt !== null && this.now() - this.readyAt >= ATTACH_STABLE_MS) this.failures = 0;
+    this.readyAt = null;
     const delayMs = Math.min(RECONNECT_BASE_MS * 2 ** this.failures, RECONNECT_MAX_MS);
     this.failures++;
     return { kind: "reconnect", delayMs };
