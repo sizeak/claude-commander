@@ -27,7 +27,10 @@
 #
 # The page under test is whatever crates/claude-commander-server/webui/ holds:
 # a debug build of the server reads it from disk, so rebuild it first
-# (`npm run build`) when testing a change to web/src.
+# (`npm run build`) when testing a change to web/src. Beware --no-build after
+# `cargo test -p claude-commander-server`: that rebuilds target/debug's server
+# binary with the crate's dev-only `debug-embed` feature, which bakes the page
+# in as it was then — the suite would silently test a stale page.
 #
 # The suite itself only knows the page's origin and token (CC_WEB_BASE_URL,
 # CC_WEB_TOKEN); where the page comes from is decided here, in serve_page.
