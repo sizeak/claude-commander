@@ -27,20 +27,35 @@ import type {
 /** Where the current token came from — decides what a rejection says. */
 export type TokenSource = "none" | "stored" | "hash" | "submitted";
 
-/** The browser's copy of the server's bearer token. */
+/**
+ * The browser's copy of the server's bearer token.
+ *
+ * Only a token the user just typed into the connect screen is reported as
+ * "rejected". A stored or linked token that has gone stale (a rotated server
+ * token, a reload) simply lands the user on the connect screen, which has
+ * nothing to say until they submit something.
+ *
+ * After a rejection, `rejected` holds until a new token is set: the page stops
+ * polling (every poll would only 401 again) and the connect screen keeps its
+ * message instead of a late 401 re-opening it blank.
+ */
 export class Auth {
   token: string | null = null;
   source: TokenSource = "none";
+  rejected = false;
 
   set(token: string | null, source: TokenSource): void {
     this.token = token || null;
     this.source = this.token ? source : "none";
+    this.rejected = false;
   }
 
   /** Forget the token after a 401; returns the message the connect screen shows. */
   reject(): string | undefined {
-    const message = this.token ? "That token was rejected." : undefined;
-    this.set(null, "none");
+    const message = this.source === "submitted" ? "That token was rejected." : undefined;
+    this.token = null;
+    this.source = "none";
+    this.rejected = true;
     return message;
   }
 
@@ -98,7 +113,11 @@ export class Api {
    * (`WS_ERR_AUTH`): forget it and hand over to the connect screen.
    */
   unauthorized(): void {
-    this.onUnauthorized(this.auth.reject());
+    // Report a rejection once: later 401s from requests already in flight
+    // change nothing the user needs to see.
+    const first = !this.auth.rejected;
+    const message = this.auth.reject();
+    if (first) this.onUnauthorized(message);
   }
 
   /**

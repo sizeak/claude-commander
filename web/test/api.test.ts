@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { Api, ApiError, Auth, act, errorMessage, Unauthorized } from "../src/api.ts";
+import {
+  Api,
+  ApiError,
+  Auth,
+  act,
+  errorMessage,
+  type TokenSource,
+  Unauthorized,
+} from "../src/api.ts";
 
 interface Call {
   url: string;
@@ -82,6 +90,16 @@ describe("Api.request", () => {
     assert.equal(auth.token, null);
     assert.equal(rejected.length, 1);
   });
+
+  test("a second 401 (a poll already in flight) does not re-report", async () => {
+    // Re-reporting would re-open the connect screen with no message, wiping
+    // the "rejected" the user was just shown.
+    const auth = new Auth();
+    auth.set("typo", "submitted");
+    const { api, rejected } = apiWith(401, "", auth);
+    await Promise.allSettled([api.workspace(), api.agentStates()]);
+    assert.deepEqual(rejected, ["That token was rejected."]);
+  });
 });
 
 describe("act", () => {
@@ -97,5 +115,36 @@ describe("act", () => {
   test("stays quiet on a 401 (the connect screen handles it)", async () => {
     const r = await act(Promise.reject(new Unauthorized()), assert.fail);
     assert.equal(r, null);
+  });
+});
+
+describe("Auth: what a rejection says", () => {
+  const rejectedFrom = (source: TokenSource) => {
+    const auth = new Auth();
+    auth.set("tok", source);
+    return auth.reject();
+  };
+
+  test("a token the user just submitted is reported as rejected", () => {
+    assert.equal(rejectedFrom("submitted"), "That token was rejected.");
+  });
+
+  test("a stored or linked token going stale says nothing: nothing was submitted", () => {
+    assert.equal(rejectedFrom("stored"), undefined);
+    assert.equal(rejectedFrom("hash"), undefined);
+    assert.equal(new Auth().reject(), undefined);
+  });
+
+  test("a rejection holds until a new token is set", () => {
+    const auth = new Auth();
+    assert.equal(auth.rejected, false);
+    auth.set("tok", "submitted");
+    auth.reject();
+    assert.equal(auth.rejected, true);
+    // A second 401 (e.g. a poll already in flight) must not clear it.
+    auth.reject();
+    assert.equal(auth.rejected, true);
+    auth.set("next", "submitted");
+    assert.equal(auth.rejected, false);
   });
 });

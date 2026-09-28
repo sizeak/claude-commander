@@ -10,15 +10,19 @@ test.describe("connect screen", () => {
     await page.goto("/");
     const modal = page.locator("#connect-modal");
     await expect(modal).toBeVisible();
+    // Nothing has been submitted yet, so nothing has been rejected.
+    await expect(page.locator("#connect-error")).toBeHidden();
 
     await page.locator("#connect-token").fill("definitely-not-the-token");
     await modal.getByRole("button", { name: "Connect" }).click();
 
     await expect(page.locator("#connect-error")).toBeVisible();
     await expect(page.locator("#connect-error")).toContainText("rejected");
-    // Outlive a poll cycle (1.5s) to prove it stays up rather than flashing.
+    // Outlive a poll cycle (1.5s) to prove it stays up rather than flashing —
+    // the screen and its message both.
     await page.waitForTimeout(2_000);
     await expect(modal).toBeVisible();
+    await expect(page.locator("#connect-error")).toContainText("rejected");
     await expect(page.locator("#conn-status")).not.toHaveText("connected");
     await expect(page.locator("#tree .project-header")).toHaveCount(0);
   });
@@ -37,5 +41,8 @@ test.describe("connect screen", () => {
     await page.reload();
     await expect(page.locator("#connect-modal")).toBeVisible();
     await expect(page.locator("#conn-status")).not.toHaveText("connected");
+    // The stale token was never typed here, so the screen doesn't call it
+    // "rejected" before the user has submitted anything.
+    await expect(page.locator("#connect-error")).toBeHidden();
   });
 });

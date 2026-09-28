@@ -96,6 +96,9 @@ els.connectForm.addEventListener("submit", async (e) => {
 // ---- polling -----------------------------------------------------------------
 
 async function refreshAll(): Promise<void> {
+  // The token was refused: every poll would only 401 again. Wait on the
+  // connect screen, which sets a new token (and resumes) on submit.
+  if (auth.rejected) return;
   try {
     const [ws, agents] = await Promise.all([
       api.workspace(),
