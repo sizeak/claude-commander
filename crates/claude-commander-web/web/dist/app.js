@@ -686,10 +686,20 @@ function openSocket(id) {
     if (state.mode === "direct" && state.token) {
       ws.send(JSON.stringify({ type: "auth", token: state.token }));
     }
+    // Size the PTY in the handshake, not a resize after it: the server spawns
+    // `tmux attach` immediately at a default 80x24, tmux paints that screen
+    // before any resize arrives, xterm reflows it at our width, and tmux's
+    // incremental repaint never clears the mis-wrapped lines (see #281).
+    fitNow();
     const attach = { type: "attach", session_id: id };
     if (state.attachKind === "shell") attach.kind = "shell";
+    if (state.term && state.term.cols && state.term.rows) {
+      attach.cols = state.term.cols;
+      attach.rows = state.term.rows;
+    }
     ws.send(JSON.stringify(attach));
-    fitNow();
+    // An older server ignores the handshake size; this resize covers it and is
+    // a no-op for a server that already sized the PTY.
     sendResizeNow();
   };
 
