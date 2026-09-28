@@ -291,8 +291,8 @@ async fn main() -> Result<()> {
                 cli_reference(),
             );
 
-            // Held for the rest of `main`: dropping the guard stops the server,
-            // so the listener goes away exactly when the TUI does.
+            // Held for the rest of `main`: dropping the guards stops the server
+            // and the web UI, so the listeners go away exactly when the TUI does.
             //
             // This binds before `app.run()`, which means a client can be served
             // during the TUI's startup reconciliation (dropping stale `Creating`
@@ -302,13 +302,16 @@ async fn main() -> Result<()> {
             // closing it would mean either delaying the listener behind the TUI's
             // startup or plumbing the server into `App::run` — which would make
             // the terminal frontend depend on axum.
-            let _server = match plan {
+            let _serving = match plan {
                 Some(plan) => {
-                    let (guard, status) = serve::start(app.service_handle(), plan).await;
-                    app.set_embedded_server(status);
-                    guard
+                    let (serving, status) = serve::start(app.service_handle(), plan).await;
+                    app.set_embedded_server(status.server);
+                    if let Some(web) = status.web {
+                        app.set_embedded_web(web);
+                    }
+                    serving
                 }
-                None => None,
+                None => serve::Serving::default(),
             };
 
             app.run().await?;

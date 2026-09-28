@@ -8,9 +8,11 @@
 pub mod assets;
 pub mod auth;
 pub mod config;
+pub mod embed;
 pub mod proxy;
 pub mod router;
 pub mod ws_proxy;
 
 pub use config::{AppState, AuthMode};
+pub use embed::{EmbeddedWeb, StartError, start};
 pub use router::build_router;

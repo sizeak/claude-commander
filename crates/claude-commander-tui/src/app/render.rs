@@ -79,6 +79,19 @@ pub(super) fn server_chip_label(status: Option<&EmbeddedServerStatus>) -> Option
     }
 }
 
+/// The status-bar chip for the in-process web UI: its port, or that it failed.
+/// Like the server chip it never carries the reason (that goes to a toast), so
+/// it stays narrow enough not to evict the action buttons.
+pub(super) fn web_chip_label(status: Option<&EmbeddedServerStatus>) -> Option<String> {
+    match status? {
+        EmbeddedServerStatus::Listening { url, .. } => {
+            let port = url.rsplit(':').next().unwrap_or(url);
+            Some(format!("web {port}"))
+        }
+        EmbeddedServerStatus::Failed { .. } => Some("web unavailable".to_string()),
+    }
+}
+
 impl App {
     /// Return the border type based on config: rounded or plain (square).
     pub(super) fn border_type(&self) -> BorderType {
@@ -747,14 +760,25 @@ impl App {
 
         // Same reasoning as the commander chip, and spliced after it so the two
         // keep a stable order regardless of which is present.
-        if let Some(label) = server_chip_label(self.ui_state.embedded_server.as_ref()) {
-            let colour = match self.ui_state.embedded_server {
+        // The web chip follows the server chip, for the same stable order.
+        let mut at = left_spans
+            .len()
+            .min(1 + usize::from(commander_chip_shown) * 2);
+        for (label, status) in [
+            (
+                server_chip_label(self.ui_state.embedded_server.as_ref()),
+                self.ui_state.embedded_server.as_ref(),
+            ),
+            (
+                web_chip_label(self.ui_state.embedded_web.as_ref()),
+                self.ui_state.embedded_web.as_ref(),
+            ),
+        ] {
+            let Some(label) = label else { continue };
+            let colour = match status {
                 Some(EmbeddedServerStatus::Failed { .. }) => self.theme.modal_error,
                 _ => self.theme.status_running,
             };
-            let at = left_spans
-                .len()
-                .min(1 + usize::from(commander_chip_shown) * 2);
             left_spans.splice(
                 at..at,
                 [
@@ -762,6 +786,7 @@ impl App {
                     Span::styled(label, base_style.fg(self.theme.on_status_bar(colour))),
                 ],
             );
+            at += 2;
         }
 
         // The workspace chip and the other workspaces' waiting hints lead the

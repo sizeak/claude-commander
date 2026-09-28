@@ -36,6 +36,9 @@ EXCLUDED_PROBES=(
     "_filter_probe_dir/probe.rs"
 )
 INCLUDED_PROBE="crates/claude-commander-core/src/_filter_probe.md"
+# The web UI's assets are rust-embed'ed into the binary, so they must be
+# admitted too, or the packaged binary serves an empty UI.
+WEB_ASSET_PROBE="crates/claude-commander-web/web/dist/_filter_probe.js"
 
 # Only ever clean up probes this run actually created. The trap must not be able
 # to delete a pre-existing file — that is the very thing the guard below refuses
@@ -75,7 +78,7 @@ cleanup() {
     done
 }
 
-for probe in "${EXCLUDED_PROBES[@]}" "${INCLUDED_PROBE}"; do
+for probe in "${EXCLUDED_PROBES[@]}" "${INCLUDED_PROBE}" "${WEB_ASSET_PROBE}"; do
     if [ -e "${probe}" ]; then
         echo "error: probe path ${probe} already exists; refusing to clobber it" >&2
         exit 1
@@ -132,6 +135,18 @@ else
     echo "     crates/**/*.md must stay admitted — core's commander_prime.md is" >&2
     echo "     include_str!'d into the binary. A filter that admits nothing would" >&2
     echo "     otherwise pass the checks above vacuously." >&2
+fi
+
+add_probe "${WEB_ASSET_PROBE}"
+web_included="$(src_hash)"
+drop_probe "${WEB_ASSET_PROBE}"
+if [ "${web_included}" != "${baseline}" ]; then
+    echo "ok   ${WEB_ASSET_PROBE} is inside the build inputs"
+else
+    status=1
+    echo "FAIL ${WEB_ASSET_PROBE} did NOT change the src hash" >&2
+    echo "     claude-commander-web/web/dist is rust-embed'ed into the binary;" >&2
+    echo "     without it the packaged web UI is empty. Admit it in flake.nix." >&2
 fi
 
 exit "${status}"

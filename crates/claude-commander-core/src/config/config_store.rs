@@ -526,6 +526,32 @@ mod tests {
         assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
     }
 
+    /// `[web_ui]` must survive an unrelated settings edit, or the first toggle
+    /// in the settings modal would wipe the browser login and lock the
+    /// operator out of the web UI on its next launch.
+    #[test]
+    fn mutate_preserves_the_web_ui_table() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[web_ui]\nauto_start = true\nbind = \"0.0.0.0\"\nport = 8421\nusername = \"me\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        let store = ConfigStore::with_path(config, config_path.clone());
+        store.mutate(|c| c.ui_refresh_fps = 30).unwrap();
+
+        let reloaded = Config::load_from_path(&config_path).unwrap();
+        assert!(reloaded.web_ui.auto_start);
+        assert_eq!(reloaded.web_ui.bind.to_string(), "0.0.0.0");
+        assert_eq!(reloaded.web_ui.port, 8421);
+        assert_eq!(reloaded.web_ui.username, "me");
+        assert_eq!(reloaded.web_ui.password.as_deref(), Some("pw"));
+        assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
+    }
+
     /// `[[workspaces]]`, `[main_workspace]` and `startup_workspace` must survive
     /// an unrelated settings edit — the same whole-`Config` re-serialisation
     /// that once deleted `[server]` would otherwise drop every definition.

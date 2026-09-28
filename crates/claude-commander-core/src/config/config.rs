@@ -431,6 +431,13 @@ pub struct Config {
     /// not model was deleted by the next settings edit.
     #[serde(default)]
     pub server: super::ServerConfig,
+
+    /// The browser UI the TUI can serve beside its embedded server: the
+    /// `[web_ui]` table. See [`WebUiConfig`](super::WebUiConfig). Modelled here
+    /// for the same reason as `server`: an unmodelled table is deleted by the
+    /// next settings edit.
+    #[serde(default)]
+    pub web_ui: super::WebUiConfig,
 }
 
 /// Conversation-mode (text-to-speech) settings.
@@ -668,6 +675,7 @@ impl Default for Config {
             telemetry: TelemetryConfig::default(),
             remote_servers: Vec::new(),
             server: super::ServerConfig::default(),
+            web_ui: super::WebUiConfig::default(),
         }
     }
 }
@@ -729,6 +737,9 @@ impl Config {
         // hold it for one server and must not learn the others' — and it is
         // written to logs and support dumps by the same call sites.
         self.server.token = None;
+        // The web UI's Basic-auth password: it unlocks a browser session that
+        // holds this server's token by proxy, so it is exactly as sensitive.
+        self.web_ui.password = None;
         self
     }
 
@@ -1141,7 +1152,7 @@ fn parse_key_code(s: &str) -> KeyCode {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::ServerConfig;
+    use crate::config::{ServerConfig, WebUiConfig};
     #[test]
     fn with_secrets_redacted_clears_every_credential_field() {
         let c = Config {
@@ -1163,6 +1174,11 @@ mod tests {
                 token: Some("own-secret".into()),
                 ..Default::default()
             },
+            web_ui: WebUiConfig {
+                port: 8421,
+                password: Some("web-secret".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1171,15 +1187,18 @@ mod tests {
         assert!(redacted.stt.api_key.is_none());
         assert!(redacted.telemetry.token.is_none());
         assert!(redacted.server.token.is_none());
+        assert!(redacted.web_ui.password.is_none());
         // Non-secret fields survive.
         assert_eq!(redacted.remote_servers[0].url, "http://b:7878");
         assert_eq!(redacted.server.port, 9999);
+        assert_eq!(redacted.web_ui.port, 8421);
         let json = serde_json::to_string(&redacted).unwrap();
         for secret in [
             "server-secret",
             "stt-secret",
             "telemetry-secret",
             "own-secret",
+            "web-secret",
         ] {
             assert!(!json.contains(secret), "{secret} survived redaction");
         }

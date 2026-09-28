@@ -18,6 +18,7 @@ pub mod storage;
 pub(crate) mod store;
 pub mod theme;
 mod view_mode;
+mod web_ui;
 
 pub use config::*;
 pub use config_store::ConfigStore;
@@ -88,6 +89,7 @@ pub use storage::*;
 pub use store::StateStore;
 pub use theme::{ColorValue, ThemeOverrides};
 pub use view_mode::ViewMode;
+pub use web_ui::WebUiConfig;
 
 #[cfg(all(test, unix))]
 mod write_private_file_tests {

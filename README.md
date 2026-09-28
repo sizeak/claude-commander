@@ -303,8 +303,14 @@ It binds loopback unless you say otherwise, and always requires a bearer token �
 generated and saved on first serve. Bind address, port and token are editable in
 **Settings → Server**; see [Configuration](docs/configuration.md#serving-this-machine-server).
 
+The TUI can serve the **web UI** the same way: set a password and turn on
+**Settings → Server → Web UI → Auto Start With TUI** (`[web_ui]` in
+`config.toml`). It serves the browser UI on port 8420, behind a Basic-auth login,
+and starts the server along with it. See
+[Configuration](docs/configuration.md#serving-the-web-ui-web_ui).
+
 `claude-commander-server` still exists as a standalone binary for headless hosts
-where there is no TUI to attach it to.
+where there is no TUI to attach it to, as does `claude-commander-web`.
 
 ### Remote Servers
 

@@ -1,6 +1,6 @@
 use super::actions::{CopyTokenReport, adjust_list_scroll, delete_confirm_message};
 use super::modals::centered_rect;
-use super::render::{commander_chip_label, server_chip_label};
+use super::render::{commander_chip_label, server_chip_label, web_chip_label};
 use super::review::ReviewFocus;
 use super::selection::{session_number_to_list_index, worktree_list_index};
 use super::*;
@@ -1065,6 +1065,212 @@ fn submitting_the_token_placeholder_leaves_the_token_alone() {
         app.config.server.token.as_deref(),
         Some("(unusual-but-legal")
     );
+}
+
+// --- Settings: Server tab, Web UI section ---------------------------------
+
+#[test]
+fn server_tab_rows_cover_the_web_ui_settings() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::Server);
+    let keys: Vec<&str> = rows.iter().map(|r| r.field_key.as_str()).collect();
+    for key in [
+        "web_ui_auto_start",
+        "web_ui_bind",
+        "web_ui_port",
+        "web_ui_username",
+        "web_ui_password",
+    ] {
+        assert!(keys.contains(&key), "{key} missing: {keys:?}");
+    }
+}
+
+/// Same rule as the bearer token: the password is never on screen.
+#[test]
+fn server_tab_never_renders_the_web_ui_password() {
+    let mut app = make_test_app();
+    app.config.web_ui.password = Some("hunter2".into());
+    let rows = app.build_settings_rows(SettingsTab::Server);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "web_ui_password")
+        .expect("password row");
+    assert_eq!(row.text_value(), "(set)");
+    for r in &rows {
+        assert!(
+            !r.text_value().contains("hunter2"),
+            "password leaked into the {} row",
+            r.field_key
+        );
+    }
+}
+
+#[test]
+fn web_ui_edits_round_trip_into_config() {
+    let mut app = make_test_app();
+    app.apply_bool_setting("web_ui_auto_start", true);
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_bind", "0.0.0.0");
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_port", "8421");
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_username", " me ");
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_password", "pw");
+
+    let w = &app.config.web_ui;
+    assert!(w.auto_start);
+    assert_eq!(w.bind.to_string(), "0.0.0.0");
+    assert_eq!(w.port, 8421);
+    assert_eq!(w.username, "me");
+    assert_eq!(w.password.as_deref(), Some("pw"));
+    // The API server's own settings are a separate table and stay put.
+    assert!(!app.config.server.auto_start);
+    assert_eq!(app.config.server.port, 7878);
+}
+
+#[test]
+fn web_ui_rejects_a_bad_bind_port_or_username_without_changing_config() {
+    let mut app = make_test_app();
+    let before = app.config.web_ui.clone();
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_bind", "not-an-ip");
+    for bad in ["0", "70000", "eight"] {
+        app.apply_settings_edit(SettingsTab::Server, "web_ui_port", bad);
+    }
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_username", "  ");
+    assert_eq!(app.config.web_ui, before);
+}
+
+#[test]
+fn submitting_the_password_placeholder_leaves_the_password_alone() {
+    let mut app = make_test_app();
+    app.config.web_ui.password = Some("hunter2".into());
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_password", "(set)");
+    assert_eq!(app.config.web_ui.password.as_deref(), Some("hunter2"));
+
+    app.config.web_ui.password = None;
+    let unset_placeholder = app
+        .build_settings_rows(SettingsTab::Server)
+        .iter()
+        .find(|r| r.field_key == "web_ui_password")
+        .map(|r| r.text_value().to_string())
+        .expect("password row");
+    app.config.web_ui.password = Some("hunter2".into());
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_password", &unset_placeholder);
+    assert_eq!(app.config.web_ui.password.as_deref(), Some("hunter2"));
+
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_password", "");
+    assert!(app.config.web_ui.password.is_none(), "empty clears it");
+}
+
+/// Server settings only apply at launch, so every saved edit says so — for
+/// the toggles as much as the text rows.
+#[test]
+fn server_and_web_ui_edits_say_a_restart_is_needed() {
+    let restart_noted = |app: &App| {
+        app.ui_state
+            .status_message
+            .as_ref()
+            .is_some_and(|(m, _)| m.contains("restart"))
+    };
+    let mut app = make_test_app();
+    app.apply_bool_setting("web_ui_auto_start", true);
+    assert!(restart_noted(&app), "{:?}", app.ui_state.status_message);
+
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::Server, "server_port", "9999");
+    assert!(restart_noted(&app), "{:?}", app.ui_state.status_message);
+
+    // A rejected edit reports the rejection, not a restart.
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::Server, "web_ui_port", "0");
+    assert!(!restart_noted(&app), "{:?}", app.ui_state.status_message);
+
+    // An unrelated setting stays quiet.
+    let mut app = make_test_app();
+    app.apply_bool_setting("rounded_borders", false);
+    assert!(!restart_noted(&app), "{:?}", app.ui_state.status_message);
+}
+
+#[test]
+fn web_chip_hidden_when_not_serving() {
+    assert_eq!(web_chip_label(None), None);
+}
+
+#[test]
+fn web_chip_shows_the_port_when_listening() {
+    let status = crate::EmbeddedServerStatus::Listening {
+        url: "http://localhost:8420".into(),
+        token: None,
+    };
+    assert_eq!(web_chip_label(Some(&status)), Some("web 8420".to_string()));
+}
+
+#[test]
+fn web_chip_reports_a_failure_without_the_reason() {
+    let status = crate::EmbeddedServerStatus::Failed {
+        reason: "no password is set".into(),
+    };
+    let label = web_chip_label(Some(&status)).unwrap();
+    assert!(label.contains("unavailable"), "{label}");
+    assert!(!label.contains("password"), "{label}");
+}
+
+#[test]
+fn a_failed_web_ui_reports_its_reason_in_the_status_bar() {
+    let mut app = make_test_app();
+    app.set_embedded_web(crate::EmbeddedServerStatus::Failed {
+        reason: "no password is set".into(),
+    });
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .as_ref()
+        .expect("a failed web UI must say why somewhere");
+    assert!(msg.contains("Web UI not started"), "{msg}");
+    assert!(msg.contains("no password is set"), "{msg}");
+}
+
+/// Both chips reach the bar in a stable order. The pair is too wide to keep
+/// every button at exactly 80 columns on an empty list (`new [p]roject` needs
+/// 16 cells and 13 are left), so the guarantee is: nothing is evicted from 100
+/// columns up, and at 80 the bar degrades by dropping trailing buttons only —
+/// the server chip alone still fits at 80 (`the_server_chip_is_drawn_on_the_status_bar`).
+#[tokio::test]
+async fn the_web_chip_is_drawn_after_the_server_chip() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    for (width, may_evict) in [(100, false), (80, true)] {
+        let mut app = make_test_app();
+        app.ui_state.view_mode = ViewMode::ProjectGrouped;
+        let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+
+        app.set_embedded_server(crate::EmbeddedServerStatus::Listening {
+            url: "http://127.0.0.1:7878".into(),
+            token: Some("sekret".into()),
+        });
+        terminal.draw(|f| app.render(f)).unwrap();
+        let before = status_bar_row(terminal.backend().buffer());
+
+        app.set_embedded_web(crate::EmbeddedServerStatus::Listening {
+            url: "http://localhost:8420".into(),
+            token: None,
+        });
+        terminal.draw(|f| app.render(f)).unwrap();
+        let bar = status_bar_row(terminal.backend().buffer());
+
+        let server_at = bar.find("\u{21c5} 7878").expect(&bar);
+        let web_at = bar.find("web 8420").expect(&bar);
+        assert!(server_at < web_at, "server chip first: {bar}");
+        assert!(
+            bar.contains("[n]ew session"),
+            "the first button stays: {bar}"
+        );
+        if !may_evict {
+            assert_eq!(
+                bar.matches('[').count(),
+                before.matches('[').count(),
+                "{width} cols:\n  {before}\n  {bar}"
+            );
+        }
+    }
 }
 
 // --- Palette: copy server token -------------------------------------------

@@ -11,14 +11,16 @@
 //! testable without a socket; [`start`] is the only part that touches the
 //! network.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 use claude_commander_core::Config;
 use claude_commander_core::api::CommanderService;
-use claude_commander_core::config::ServerConfig;
+use claude_commander_core::config::{ServerConfig, WebUiConfig};
 use claude_commander_server::auth::AuthConfig;
 use claude_commander_server::embed::{self, EmbeddedServer, TokenDecision};
 use claude_commander_tui::EmbeddedServerStatus;
+use claude_commander_web::{AuthMode, EmbeddedWeb};
 use tracing::{info, warn};
 
 /// Whether this run should serve.
@@ -47,6 +49,9 @@ pub struct ServePlan {
     /// is *not* persisted would change on every launch, which would break every
     /// client the operator had already paired.
     pub persist_token: Option<String>,
+    /// The `[web_ui]` settings when the web UI should be served beside the API
+    /// this run, else `None`.
+    pub web: Option<WebUiConfig>,
 }
 
 /// Settle this run's token against already-resolved settings.
@@ -65,6 +70,7 @@ pub fn plan(cfg: ServerConfig) -> ServePlan {
         token: Some(token),
         persist_token,
         cfg,
+        web: None,
     }
 }
 
@@ -110,10 +116,15 @@ pub fn prepare(
 
     // Decide *after* the gate, so a run that will not serve never generates a
     // token it would only throw away.
-    if !should_serve(cfg.auto_start, serve, no_serve) {
+    // The web UI is only a proxy in front of the API, so asking for it asks
+    // for the API too — on the API's own `[server]` bind, which stays loopback
+    // unless the operator widened it.
+    let web = config.web_ui.auto_start;
+    if !should_serve(cfg.auto_start || web, serve, no_serve) {
         return None;
     }
-    let resolved = plan(cfg);
+    let mut resolved = plan(cfg);
+    resolved.web = web.then(|| config.web_ui.clone());
 
     if let Some(token) = &resolved.persist_token {
         if let Err(e) = claude_commander_core::config::persist_server_token(config_path, token) {
@@ -126,31 +137,128 @@ pub fn prepare(
     Some(resolved)
 }
 
-/// Bind and serve, sharing the TUI's own service.
+/// What [`start`] brought up. Hold it for the process's lifetime: dropping it
+/// stops both listeners.
+#[derive(Default)]
+#[allow(
+    dead_code,
+    reason = "held only for Drop, which stops the listeners; read by the tests"
+)]
+pub struct Serving {
+    /// The API server, when it bound.
+    pub server: Option<EmbeddedServer>,
+    /// The web UI, when it was asked for and started.
+    pub web: Option<EmbeddedWeb>,
+}
+
+/// The TUI-facing outcome of [`start`].
+pub struct ServeStatus {
+    /// How the API server fared.
+    pub server: EmbeddedServerStatus,
+    /// How the web UI fared, or `None` when it was not asked for.
+    pub web: Option<EmbeddedServerStatus>,
+}
+
+/// Bind and serve, sharing the TUI's own service, then — if `[web_ui]` asked
+/// for it — the web UI in front of that server.
 ///
-/// Returns the guard to hold for the process's lifetime (dropping it stops the
-/// server) alongside the status to show in the TUI. A failure is **not** fatal:
-/// the overwhelmingly likely cause is that the port is already taken because a
-/// server is already running, and killing the TUI over that would be absurd.
-pub async fn start(
-    service: CommanderService,
-    plan: ServePlan,
-) -> (Option<EmbeddedServer>, EmbeddedServerStatus) {
+/// Neither failure is fatal: the overwhelmingly likely cause is a port already
+/// taken because a server is already running, and killing the TUI over that
+/// would be absurd.
+pub async fn start(service: CommanderService, plan: ServePlan) -> (Serving, ServeStatus) {
     let ServePlan {
-        cfg, auth, token, ..
+        cfg,
+        auth,
+        token,
+        web,
+        ..
     } = plan;
-    match embed::start(service, &cfg, auth).await {
-        Ok(server) => {
-            let url = server.url();
-            info!("serving the commander API on {url}");
-            (Some(server), EmbeddedServerStatus::Listening { url, token })
-        }
+    let server = match embed::start(service, &cfg, auth).await {
+        Ok(server) => server,
         Err(e) => {
             let reason = e.to_string();
             warn!("embedded server not started: {reason}");
-            (None, EmbeddedServerStatus::Failed { reason })
+            // Carry the server's reason: this toast is raised second, so it
+            // replaces the server's, and "needs the server" alone would hide why.
+            let web = web.map(|_| EmbeddedServerStatus::Failed {
+                reason: format!("the embedded server did not start ({reason})"),
+            });
+            let status = ServeStatus {
+                server: EmbeddedServerStatus::Failed { reason },
+                web,
+            };
+            return (Serving::default(), status);
         }
-    }
+    };
+    let url = server.url();
+    info!("serving the commander API on {url}");
+
+    let (web, web_status) = match (web, &token) {
+        (Some(web_cfg), Some(token)) => {
+            match start_web(&web_cfg, upstream_url(server.addr()), token).await {
+                Ok(web) => {
+                    let url = web.url();
+                    info!("serving the web UI on {url}");
+                    (
+                        Some(web),
+                        Some(EmbeddedServerStatus::Listening { url, token: None }),
+                    )
+                }
+                Err(reason) => {
+                    warn!("web UI not started: {reason}");
+                    (None, Some(EmbeddedServerStatus::Failed { reason }))
+                }
+            }
+        }
+        _ => (None, None),
+    };
+
+    let serving = Serving {
+        server: Some(server),
+        web,
+    };
+    let status = ServeStatus {
+        server: EmbeddedServerStatus::Listening { url, token },
+        web: web_status,
+    };
+    (serving, status)
+}
+
+/// The browser auth for the embedded web UI: Basic auth with the configured
+/// credentials, the API token injected upstream so it never reaches the
+/// browser. A missing password refuses to start — there is no unauthenticated
+/// embedded web UI, for the same reason there is no unauthenticated embedded
+/// server.
+pub fn web_auth(web: &WebUiConfig, token: &str) -> Result<AuthMode, String> {
+    let password = web
+        .password()
+        .ok_or("no password is set (Settings \u{203a} Server \u{203a} Web UI Password)")?;
+    AuthMode::bff(web.username.clone(), password, token).map_err(|e| e.to_string())
+}
+
+/// The URL the web UI proxies to: the API server as bound, dialled over
+/// loopback. An unspecified bind (`0.0.0.0` / `::`) is not dialable, and
+/// rendering it as `localhost` would leave the choice of `127.0.0.1` vs `::1`
+/// to the resolver — which, against an IPv4-only listener, can pick the wrong
+/// one.
+pub fn upstream_url(addr: SocketAddr) -> String {
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    format!("http://{}", SocketAddr::new(ip, addr.port()))
+}
+
+async fn start_web(
+    web: &WebUiConfig,
+    upstream: String,
+    token: &str,
+) -> Result<EmbeddedWeb, String> {
+    let auth = web_auth(web, token)?;
+    claude_commander_web::start(web.bind, web.port, &upstream, auth)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -300,6 +408,209 @@ mod tests {
         assert!(prepare(&mut config, &path, false, true).is_none());
         assert!(config.server.token.is_none());
         assert!(!std::fs::read_to_string(&path).unwrap().contains("token"));
+    }
+
+    /// Turning on only the web UI still serves: it is a proxy in front of the
+    /// API, so asking for it has to bring the API up too.
+    #[test]
+    fn web_ui_auto_start_alone_serves_the_api_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[web_ui]\nauto_start = true\n").unwrap();
+        let mut config = Config {
+            web_ui: WebUiConfig {
+                auto_start: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let plan = prepare(&mut config, &path, false, false).expect("web_ui means serve");
+        assert!(plan.web.is_some(), "the web UI must be part of the plan");
+        assert!(
+            !plan.cfg.auto_start,
+            "the API's own auto_start is left as configured"
+        );
+    }
+
+    #[test]
+    fn the_web_ui_is_not_planned_unless_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nauto_start = true\n").unwrap();
+        let mut config = Config {
+            server: ServerConfig {
+                auto_start: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = prepare(&mut config, &path, false, false).unwrap();
+        assert!(plan.web.is_none());
+    }
+
+    /// `--no-serve` turns the web UI off with everything else.
+    #[test]
+    fn no_serve_also_suppresses_the_web_ui() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config {
+            web_ui: WebUiConfig {
+                auto_start: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(prepare(&mut config, &path, false, true).is_none());
+    }
+
+    #[test]
+    fn the_web_ui_refuses_to_start_without_a_password() {
+        for password in [None, Some(String::new()), Some("  ".to_string())] {
+            let web = WebUiConfig {
+                password: password.clone(),
+                ..Default::default()
+            };
+            let err = web_auth(&web, "tok").expect_err("no password must refuse");
+            assert!(err.contains("password"), "{password:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_web_ui_injects_the_api_token_behind_basic_auth() {
+        let web = WebUiConfig {
+            username: "me".into(),
+            password: Some("pw".into()),
+            ..Default::default()
+        };
+        match web_auth(&web, "tok").unwrap() {
+            AuthMode::Bff {
+                username,
+                password,
+                token,
+            } => {
+                assert_eq!(username, "me");
+                assert_eq!(password, "pw");
+                assert_eq!(token, "tok");
+            }
+            AuthMode::PassThrough => panic!("must be BFF"),
+        }
+    }
+
+    #[test]
+    fn upstream_dials_loopback_for_an_unspecified_bind() {
+        let url = |a: &str| upstream_url(a.parse().unwrap());
+        assert_eq!(url("0.0.0.0:7878"), "http://127.0.0.1:7878");
+        assert_eq!(url("[::]:7878"), "http://[::1]:7878");
+        assert_eq!(url("127.0.0.1:7878"), "http://127.0.0.1:7878");
+        assert_eq!(url("100.64.0.7:7878"), "http://100.64.0.7:7878");
+    }
+
+    /// End to end over real sockets: the API and the web UI both come up, and
+    /// the web UI proxies an authenticated browser request through to the API
+    /// with the token injected.
+    #[tokio::test]
+    async fn start_serves_the_web_ui_in_front_of_the_api() {
+        let (data, worktrees) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let service = claude_commander_test_support::test_state(&data, &worktrees).service;
+
+        let mut plan = plan(ServerConfig {
+            port: 0,
+            ..Default::default()
+        });
+        plan.web = Some(WebUiConfig {
+            port: 0,
+            password: Some("pw".into()),
+            ..Default::default()
+        });
+
+        let (serving, status) = start(service, plan).await;
+        assert!(matches!(
+            status.server,
+            EmbeddedServerStatus::Listening { .. }
+        ));
+        let web_url = match status.web {
+            Some(EmbeddedServerStatus::Listening { url, token }) => {
+                assert!(token.is_none(), "the web status must not carry the token");
+                url
+            }
+            other => panic!("web UI did not start: {other:?}"),
+        };
+        assert!(serving.web.is_some());
+
+        let client = reqwest::Client::new();
+        let anon = client
+            .get(format!("{web_url}/api/config"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(anon.status(), 401);
+        let proxied = client
+            .get(format!("{web_url}/api/config"))
+            .basic_auth("admin", Some("pw"))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            proxied.status().is_success(),
+            "the proxied API call must be authenticated upstream: {}",
+            proxied.status()
+        );
+    }
+
+    /// If the API cannot bind, the web UI is not attempted, and its failure
+    /// says why — its toast replaces the server's, so it must carry the reason.
+    #[tokio::test]
+    async fn a_failed_server_fails_the_web_ui_with_the_servers_reason() {
+        let (data, worktrees) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let service = claude_commander_test_support::test_state(&data, &worktrees).service;
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+
+        let mut plan = plan(ServerConfig {
+            port: held.local_addr().unwrap().port(),
+            ..Default::default()
+        });
+        plan.web = Some(WebUiConfig {
+            port: 0,
+            password: Some("pw".into()),
+            ..Default::default()
+        });
+
+        let (serving, status) = start(service, plan).await;
+        assert!(serving.server.is_none() && serving.web.is_none());
+        match status.web {
+            Some(EmbeddedServerStatus::Failed { reason }) => {
+                assert!(reason.contains("could not bind"), "{reason}")
+            }
+            other => panic!("expected a failed web status, got {other:?}"),
+        }
+    }
+
+    /// With the web UI requested but no password, the API still serves and the
+    /// web UI reports why it did not.
+    #[tokio::test]
+    async fn a_web_ui_without_a_password_fails_alone() {
+        let (data, worktrees) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let service = claude_commander_test_support::test_state(&data, &worktrees).service;
+
+        let mut plan = plan(ServerConfig {
+            port: 0,
+            ..Default::default()
+        });
+        plan.web = Some(WebUiConfig {
+            port: 0,
+            ..Default::default()
+        });
+
+        let (serving, status) = start(service, plan).await;
+        assert!(serving.server.is_some(), "the API must still serve");
+        assert!(serving.web.is_none());
+        match status.web {
+            Some(EmbeddedServerStatus::Failed { reason }) => {
+                assert!(reason.contains("password"), "{reason}")
+            }
+            other => panic!("expected a failed web status, got {other:?}"),
+        }
     }
 
     /// An unwritable config file must not stop the server: the token is simply

@@ -57,8 +57,16 @@
               # crates/, or README/docs/CLAUDE.md invalidate the build too.
               isCrateMarkdown =
                 pkgs.lib.hasPrefix "crates/" rel && pkgs.lib.hasSuffix ".md" rel;
+              # claude-commander-web's browser UI (JS/CSS/HTML) is baked into
+              # the binary by rust-embed, which the TUI links to serve it
+              # in-process (`[web_ui] auto_start`). filterCargoSources drops
+              # non-Rust files, so without this the release build would embed
+              # an empty UI. Scoped to that one directory.
+              isWebAssets =
+                pkgs.lib.hasPrefix "crates/claude-commander-web/web/dist" rel;
             in
-            !prunedTopDir && (isCrateMarkdown || craneLib.filterCargoSources path type);
+            !prunedTopDir
+            && (isCrateMarkdown || isWebAssets || craneLib.filterCargoSources path type);
           name = "source";
         };
 

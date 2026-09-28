@@ -5,14 +5,13 @@
 //! - `--commander-token` set  → BFF: browser uses Basic auth, token injected upstream.
 //! - `--commander-token` unset → pass-through: the browser carries the token itself.
 
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::net::IpAddr;
 
 use clap::Parser;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use claude_commander_web::{AppState, AuthMode, build_router};
+use claude_commander_web::AuthMode;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -65,33 +64,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let password = cli.password.clone().ok_or(
                 "--password (or CC_WEB_PASSWORD) is required in BFF mode (when --commander-token is set)",
             )?;
-            if password.trim().is_empty() {
-                return Err("BFF password must not be empty".into());
-            }
-            AuthMode::Bff {
-                username: cli.username.clone(),
-                password,
-                token: token.clone(),
-            }
+            AuthMode::bff(cli.username.clone(), password, token.clone())?
         }
         None => AuthMode::PassThrough,
     };
 
-    let state = AppState {
-        http: reqwest::Client::new(),
-        commander_url: Arc::from(commander_url.as_str()),
-        auth: Arc::new(auth),
-    };
-
-    let addr = SocketAddr::new(cli.bind, cli.port);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-
-    match state.auth.as_ref() {
+    match &auth {
         AuthMode::Bff { username, .. } => info!(
-            "Web UI on http://{addr} — BFF mode (Basic auth, user `{username}`); proxying to {commander_url}"
+            "Web UI on http://{}:{} — BFF mode (Basic auth, user `{username}`); proxying to {commander_url}",
+            cli.bind, cli.port
         ),
         AuthMode::PassThrough => info!(
-            "Web UI on http://{addr} — pass-through mode (browser supplies the token); proxying to {commander_url}"
+            "Web UI on http://{}:{} — pass-through mode (browser supplies the token); proxying to {commander_url}",
+            cli.bind, cli.port
         ),
     }
     if !cli.bind.is_loopback() {
@@ -100,7 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    axum::serve(listener, build_router(state)).await?;
+    claude_commander_web::start(cli.bind, cli.port, &commander_url, auth)
+        .await?
+        .join()
+        .await;
     Ok(())
 }
 

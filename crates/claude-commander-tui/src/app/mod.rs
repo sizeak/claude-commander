@@ -1741,6 +1741,10 @@ pub struct AppUiState {
     /// asked to serve. Set once at startup by the binary (which owns the server
     /// dependency) and read by the status-bar chip and the copy-token command.
     pub embedded_server: Option<crate::EmbeddedServerStatus>,
+    /// How the in-process web UI fared, when `[web_ui]` asked for one. Reuses
+    /// [`EmbeddedServerStatus`](crate::EmbeddedServerStatus); its `token` is
+    /// always `None` here, the web UI having no token of its own to hand out.
+    pub embedded_web: Option<crate::EmbeddedServerStatus>,
     /// What to attach to after the TUI tears down (set by select/shell/commander).
     pub attach_request: Option<AttachTarget>,
     /// Session whose review diff should be opened on returning to the TUI —
@@ -1889,6 +1893,7 @@ impl Default for AppUiState {
             selected_backend_capabilities: BackendCapabilities::LOCAL,
             commander_running: false,
             embedded_server: None,
+            embedded_web: None,
             attach_request: None,
             pending_open_review: None,
             pending_switcher_target: None,
@@ -2324,6 +2329,19 @@ impl App {
             ));
         }
         self.ui_state.embedded_server = Some(status);
+    }
+
+    /// Record how the in-process web UI fared, for its status-bar chip. As with
+    /// [`Self::set_embedded_server`], a failure's reason goes to a toast, since
+    /// the chip only has room to say that it failed.
+    pub fn set_embedded_web(&mut self, status: crate::EmbeddedServerStatus) {
+        if let crate::EmbeddedServerStatus::Failed { reason } = &status {
+            self.ui_state.status_message = Some((
+                format!("Web UI not started: {reason}"),
+                Instant::now() + Duration::from_secs(10),
+            ));
+        }
+        self.ui_state.embedded_web = Some(status);
     }
 
     /// Construct the [`BackendHandle`] for one configured remote server: the

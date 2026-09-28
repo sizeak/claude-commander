@@ -369,6 +369,15 @@ state_sync_interval_ms = 2000
 # port = 7878
 # token = "..."                  # generated and written here on first serve
 # cors_allowed_origins = []      # origins a browser may call /api from
+
+# The browser UI, served by the TUI beside the server above and proxying to it.
+# Turning it on also starts that server. Editable from Settings > Server > Web UI.
+# [web_ui]
+# auto_start = true              # serve the web UI for as long as the TUI is open
+# bind = "127.0.0.1"             # "0.0.0.0" to open it from another machine
+# port = 8420
+# username = "admin"             # Basic-auth login
+# password = "..."               # required: the web UI will not start without one
 ```
 
 ### Serving this machine (`[server]`)
@@ -396,6 +405,29 @@ value, and the copy reports the URL in the status bar rather than putting the
 secret in your scrollback. (The standalone binary differs: it logs a one-time
 token instead of persisting one, since a managed deployment's config file may be
 read-only.)
+
+### Serving the web UI (`[web_ui]`)
+
+`auto_start = true` under `[web_ui]` serves the browser UI from the TUI's own
+process, next to the server above. The browser logs in with `username` and
+`password` over HTTP Basic auth. The web UI then adds the server's bearer token to
+every request it forwards, so the token never reaches the browser. Because the
+web UI is only a front end for the server, turning it on starts the server too,
+on the server's own `[server]` bind. That means you can open the web UI to the
+LAN (`bind = "0.0.0.0"`) while the API stays loopback-only.
+
+The web UI will not start without a `password`, since a web UI with no password
+would give the server's token to anyone who can reach the port. It is also read
+once at startup, like `[server]`. A `web 8420` chip in the status bar confirms
+it came up. If it could not start (no password, port taken, or the server
+itself failed to start) the chip reads `web unavailable` and the reason appears
+in the status bar. The settings modal shows only whether a password is set,
+never the password itself.
+
+Plain HTTP carries Basic-auth credentials unencrypted. Off loopback, put the web
+UI behind TLS, for example with `tailscale serve`. The standalone
+`claude-commander-web` binary is still available for a web UI that runs apart
+from the TUI.
 
 A remote server's `token` is **operator-equivalent**: anyone holding it can create
 sessions (which run arbitrary programs on that machine) and address projects by

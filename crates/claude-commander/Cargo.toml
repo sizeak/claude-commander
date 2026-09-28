@@ -27,6 +27,10 @@ claude-commander-remote = { path = "../claude-commander-remote" }
 # binary depends on both it and the TUI: the terminal frontend must not compile
 # axum, and the server must not compile ratatui. See `src/serve.rs`.
 claude-commander-server = { path = "../claude-commander-server" }
+# The browser UI, served in-process beside the embedded server by
+# `[web_ui] auto_start`. A pure client of the server (it never links core), so
+# it adds axum/reqwest the server already pulls in and nothing terminal-shaped.
+claude-commander-web = { path = "../claude-commander-web" }
 
 # Async runtime (the `#[tokio::main]` entry point)
 tokio = { workspace = true }
@@ -51,3 +55,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 # Hermetic temp dirs for the `serve` module tests (they write a config.toml).
 tempfile = "3.27"
+# A hermetic `CommanderService` (temp state, isolated tmux socket, telemetry
+# off) for the end-to-end serve tests, and a real HTTP client to drive them.
+claude-commander-test-support = { path = "../claude-commander-test-support" }
+reqwest = { version = "0.13", default-features = false }

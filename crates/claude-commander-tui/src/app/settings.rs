@@ -4,12 +4,29 @@ use super::colour_picker::PickerOutcome;
 use super::*;
 use claude_commander_core::config::theme::ThemeOverrides;
 
-/// Shown in the Server tab's Bearer Token row in place of the token itself, which
-/// is operator-equivalent and must not be on screen during a screen-share. Also
+/// Shown in the Server tab's Bearer Token and Web UI Password rows in place of
+/// the secret itself, which must not be on screen during a screen-share. Also
 /// what `apply_settings_edit` recognises as "submitted unchanged", so the two
 /// cannot drift apart.
 const TOKEN_SET_PLACEHOLDER: &str = "(set)";
 const TOKEN_UNSET_PLACEHOLDER: &str = "(not set \u{2014} generated on first serve)";
+/// The Web UI Password row's placeholder when none is set. The web UI refuses to
+/// start without one, so the row says so rather than looking optional.
+const PASSWORD_UNSET_PLACEHOLDER: &str = "(not set \u{2014} required to serve)";
+
+/// A submitted value for a secret row that renders a placeholder instead of the
+/// secret: `None` means "a placeholder came back unchanged, leave it alone",
+/// `Some(None)` clears it (an empty submit), `Some(Some(v))` sets it.
+///
+/// Placeholders are matched exactly, not by a leading `(`, so a secret that
+/// happens to start with one is still settable.
+fn secret_edit(value: &str, placeholders: &[&str]) -> Option<Option<String>> {
+    let trimmed = value.trim();
+    if placeholders.contains(&trimmed) {
+        return None;
+    }
+    Some((!trimmed.is_empty()).then(|| trimmed.to_string()))
+}
 
 impl App {
     /// Refresh the cached input-device list (id + friendly label) backing the
@@ -316,9 +333,14 @@ impl App {
             }
             SettingsTab::Server => {
                 let s = &self.config.server;
+                let w = &self.config.web_ui;
                 let token_display = match &s.token {
                     Some(_) => TOKEN_SET_PLACEHOLDER,
                     None => TOKEN_UNSET_PLACEHOLDER,
+                };
+                let password_display = match w.password() {
+                    Some(_) => TOKEN_SET_PLACEHOLDER,
+                    None => PASSWORD_UNSET_PLACEHOLDER,
                 };
                 with_section_spacers(vec![
                     SettingsRow::header("Embedded Server"),
@@ -342,6 +364,15 @@ impl App {
                         },
                         "server_cors_allowed_origins",
                     ),
+                    // The browser UI, proxying to the server above. Starting it
+                    // starts that server too; both are read at launch.
+                    SettingsRow::header("Web UI"),
+                    SettingsRow::toggle("Auto Start With TUI", w.auto_start, "web_ui_auto_start"),
+                    SettingsRow::text("Bind Address", w.bind.to_string(), "web_ui_bind"),
+                    SettingsRow::text("Port", w.port.to_string(), "web_ui_port"),
+                    SettingsRow::text("Username", w.username.clone(), "web_ui_username"),
+                    // Never shown, for the reason the bearer token is not.
+                    SettingsRow::text("Password", password_display.to_string(), "web_ui_password"),
                 ])
             }
             SettingsTab::Sections | SettingsTab::Workspaces => {
@@ -1660,44 +1691,44 @@ impl App {
                 self.config.keybindings.set_keys_for(action, parsed);
             }
             SettingsTab::Server => match field_key {
-                "server_bind" => match value.trim().parse::<std::net::IpAddr>() {
-                    Ok(ip) => self.config.server.bind = ip,
-                    Err(_) => {
-                        self.ui_state.status_message = Some((
-                            format!("Not an IP address: {value} (try 127.0.0.1 or 0.0.0.0)"),
-                            std::time::Instant::now() + std::time::Duration::from_secs(4),
-                        ));
-                        return;
-                    }
+                "server_bind" => match self.parse_bind_setting(value) {
+                    Some(ip) => self.config.server.bind = ip,
+                    None => return,
                 },
-                // Port 0 is a legal port that binds an ephemeral one the
-                // operator cannot predict — useless for a client that has to be
-                // pointed at it — so it is refused here.
-                "server_port" => match value.trim().parse::<u16>() {
-                    Ok(p) if p > 0 => self.config.server.port = p,
-                    _ => {
-                        self.ui_state.status_message = Some((
-                            format!("Not a port: {value} (1-65535)"),
-                            std::time::Instant::now() + std::time::Duration::from_secs(4),
-                        ));
-                        return;
-                    }
+                "server_port" => match self.parse_port_setting(value) {
+                    Some(p) => self.config.server.port = p,
+                    None => return,
                 },
                 "server_token" => {
-                    let trimmed = value.trim();
                     // The row renders a placeholder instead of the secret, so
                     // submitting it unchanged has to mean "leave it alone" rather
-                    // than "set the token to the literal text `(set)`". Matched
-                    // exactly, not by a leading `(`, so a token that happens to
-                    // start with one is still settable.
-                    if trimmed == TOKEN_SET_PLACEHOLDER || trimmed == TOKEN_UNSET_PLACEHOLDER {
+                    // than "set the token to the literal text `(set)`".
+                    match secret_edit(value, &[TOKEN_SET_PLACEHOLDER, TOKEN_UNSET_PLACEHOLDER]) {
+                        Some(token) => self.config.server.token = token,
+                        None => return,
+                    }
+                }
+                "web_ui_bind" => match self.parse_bind_setting(value) {
+                    Some(ip) => self.config.web_ui.bind = ip,
+                    None => return,
+                },
+                "web_ui_port" => match self.parse_port_setting(value) {
+                    Some(p) => self.config.web_ui.port = p,
+                    None => return,
+                },
+                "web_ui_username" => {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        self.settings_error("The web UI username must not be empty");
                         return;
                     }
-                    self.config.server.token = if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    };
+                    self.config.web_ui.username = trimmed.to_string();
+                }
+                "web_ui_password" => {
+                    match secret_edit(value, &[TOKEN_SET_PLACEHOLDER, PASSWORD_UNSET_PLACEHOLDER]) {
+                        Some(password) => self.config.web_ui.password = password,
+                        None => return,
+                    }
                 }
                 "server_cors_allowed_origins" => {
                     let trimmed = value.trim();
@@ -1732,6 +1763,7 @@ impl App {
         }
 
         self.persist_config();
+        self.note_if_read_at_launch(field_key);
     }
 
     /// Set a boolean General-tab setting to a typed value and persist.
@@ -1760,12 +1792,58 @@ impl App {
             "stt_pause_media" => self.config.stt.pause_media = value,
             "telemetry_enabled" => self.config.telemetry.enabled = value,
             "server_auto_start" => self.config.server.auto_start = value,
+            "web_ui_auto_start" => self.config.web_ui.auto_start = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;
             }
         }
         self.persist_config();
+        self.note_if_read_at_launch(field_key);
+    }
+
+    /// `[server]` and `[web_ui]` are read once at startup, so a saved edit does
+    /// nothing until the next launch. Say so, or toggling Auto Start looks
+    /// broken.
+    fn note_if_read_at_launch(&mut self, field_key: &str) {
+        if field_key.starts_with("server_") || field_key.starts_with("web_ui_") {
+            self.ui_state.status_message = Some((
+                "Saved \u{2014} restart claude-commander to apply server settings".to_string(),
+                std::time::Instant::now() + std::time::Duration::from_secs(6),
+            ));
+        }
+    }
+
+    /// Parse a bind-address row's value, reporting a bad one in the status bar.
+    fn parse_bind_setting(&mut self, value: &str) -> Option<std::net::IpAddr> {
+        let parsed = value.trim().parse().ok();
+        if parsed.is_none() {
+            self.settings_error(&format!(
+                "Not an IP address: {value} (try 127.0.0.1 or 0.0.0.0)"
+            ));
+        }
+        parsed
+    }
+
+    /// Parse a port row's value, reporting a bad one in the status bar.
+    ///
+    /// Port 0 is a legal port that binds an ephemeral one the operator cannot
+    /// predict — useless for a client that has to be pointed at it — so it is
+    /// refused here.
+    fn parse_port_setting(&mut self, value: &str) -> Option<u16> {
+        let parsed = value.trim().parse::<u16>().ok().filter(|&p| p > 0);
+        if parsed.is_none() {
+            self.settings_error(&format!("Not a port: {value} (1-65535)"));
+        }
+        parsed
+    }
+
+    /// Report a rejected settings edit in the status bar.
+    fn settings_error(&mut self, message: &str) {
+        self.ui_state.status_message = Some((
+            message.to_string(),
+            std::time::Instant::now() + std::time::Duration::from_secs(4),
+        ));
     }
 
     /// Persist the current config via the store (updates mtime so hot-reload
