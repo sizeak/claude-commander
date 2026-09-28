@@ -197,4 +197,21 @@ describe("GoneRecovery: re-attaching after the session ended", () => {
     now += GONE_PROBE_MAX_MS;
     assert.equal(r.onPoll(undefined), false);
   });
+
+  test("a probe that attached resets the backoff for the next time", () => {
+    let now = 0;
+    const r = new GoneRecovery(() => now);
+    // Several failed probes build the delay up...
+    for (let i = 0; i < 4; i++) {
+      r.onGone();
+      now += GONE_PROBE_MAX_MS;
+      assert.equal(r.onPoll("running"), true);
+    }
+    // ...then one reaches `ready`: the pane is back.
+    r.onReady();
+    // A later, unrelated end starts over from the base delay.
+    r.onGone();
+    now += GONE_PROBE_BASE_MS;
+    assert.equal(r.onPoll("running"), true);
+  });
 });

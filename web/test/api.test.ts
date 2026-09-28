@@ -198,6 +198,42 @@ describe("request timeout", () => {
   });
 });
 
+describe("per-call timeouts", () => {
+  const slow = (ms: number, body: string) =>
+    (() =>
+      new Promise<Response>((resolve) =>
+        setTimeout(() => resolve(new Response(body, { status: 200 })), ms),
+      )) as unknown as typeof fetch;
+
+  test("the review, which can be slow on a big diff, gets the long bound", async () => {
+    const opts = { onUnauthorized: () => assert.fail("no 401"), timeoutMs: 20 };
+    const f = slow(60, '{"files":[]}');
+    // The same slowness fails an ordinary read...
+    await assert.rejects(new Api(new Auth(), { ...opts, fetch: f }).workspace(), /timed out/);
+    // ...but not the review.
+    const review = await new Api(new Auth(), { ...opts, fetch: f }).review("s1");
+    assert.deepEqual(review, { files: [] });
+  });
+
+  test("a write that times out says it may still be in progress", async () => {
+    // Retrying a create that is in fact still running would make a duplicate.
+    const hung = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+    const api = new Api(new Auth(), {
+      onUnauthorized: () => assert.fail("no 401"),
+      fetch: hung,
+      writeTimeoutMs: 20,
+    });
+    await assert.rejects(api.killSession("s1"), (e) => {
+      assert.ok(e instanceof ApiError);
+      assert.equal(e.status, 0);
+      assert.match(e.message, /no response after/);
+      assert.match(e.message, /may still be working/);
+      assert.match(e.message, /refresh before retrying/);
+      return true;
+    });
+  });
+});
+
 describe("a 401 for a token that is no longer current", () => {
   test("is ignored: a new token set mid-request must not be forgotten", async () => {
     // A poll sent with the old token is still in flight when the user

@@ -123,9 +123,12 @@ type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 export const READ_TIMEOUT_MS = 10_000;
 /**
  * Mutations get far longer: creating a session can fetch the remote and add a
- * worktree first. The bound is only there so none can hang forever.
+ * worktree first. The bound is only there so none can hang forever. So do the
+ * reads that do real work server-side (`review`: a diff of the whole worktree,
+ * slow on a big change or a cold cache), via `request`'s `timeoutMs`.
  */
 export const WRITE_TIMEOUT_MS = 120_000;
+export const HEAVY_READ_TIMEOUT_MS = WRITE_TIMEOUT_MS;
 
 export interface ApiOptions {
   /** Called on the first 401 for the current token, after it has been forgotten. */
@@ -133,6 +136,8 @@ export interface ApiOptions {
   fetch?: typeof fetch;
   /** Overrides READ_TIMEOUT_MS (tests). */
   timeoutMs?: number;
+  /** Overrides WRITE_TIMEOUT_MS and HEAVY_READ_TIMEOUT_MS (tests). */
+  writeTimeoutMs?: number;
 }
 
 export class Api {
@@ -140,12 +145,14 @@ export class Api {
   private readonly onUnauthorized: (rejection: Rejection) => void;
   private readonly fetchImpl: typeof fetch;
   private readonly readTimeoutMs: number;
+  private readonly writeTimeoutMs: number;
 
   constructor(auth: Auth, opts: ApiOptions) {
     this.auth = auth;
     this.onUnauthorized = opts.onUnauthorized;
     this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init));
     this.readTimeoutMs = opts.timeoutMs ?? READ_TIMEOUT_MS;
+    this.writeTimeoutMs = opts.writeTimeoutMs ?? WRITE_TIMEOUT_MS;
   }
 
   /**
@@ -167,7 +174,12 @@ export class Api {
    * one, e.g. a 204); rejects with `Unauthorized` or `ApiError` -- including
    * `ApiError(0, ...)` when no answer (headers and body) arrives in time.
    */
-  async request<T>(method: Method, path: string, body?: unknown): Promise<T> {
+  async request<T>(
+    method: Method,
+    path: string,
+    body?: unknown,
+    timeout: "read" | "long" = method === "GET" ? "read" : "long",
+  ): Promise<T> {
     const sent = this.auth.token;
     const headers: Record<string, string> = { Accept: "application/json", ...this.auth.headers() };
     const init: RequestInit = { method, headers };
@@ -175,8 +187,14 @@ export class Api {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    const ms = method === "GET" ? this.readTimeoutMs : WRITE_TIMEOUT_MS;
-    const { res, text } = await withTimeout(ms, async (signal) => {
+    const ms = timeout === "read" ? this.readTimeoutMs : this.writeTimeoutMs;
+    // A write that timed out may well still be running server-side (a create
+    // fetching the remote): say so, or the natural retry makes a duplicate.
+    const expiredMessage =
+      method === "GET"
+        ? `request timed out after ${seconds(ms)}`
+        : `no response after ${seconds(ms)} — the server may still be working; refresh before retrying`;
+    const { res, text } = await withTimeout(ms, expiredMessage, async (signal) => {
       init.signal = signal;
       const res = await this.fetchImpl(`/api${path}`, init);
       // A 401's body is irrelevant; don't wait on it.
@@ -229,7 +247,8 @@ export class Api {
 
   // ---- review ----------------------------------------------------------------
 
-  review = (id: SessionId) => this.request<ReviewSnapshot>("GET", `/sessions/${id}/review`);
+  review = (id: SessionId) =>
+    this.request<ReviewSnapshot>("GET", `/sessions/${id}/review`, undefined, "long");
   addComment = (id: SessionId, c: NewComment) =>
     this.request<CreatedId<string>>("POST", `/sessions/${id}/comments`, c);
   deleteComment = (id: SessionId, cid: string) =>
@@ -240,18 +259,26 @@ export class Api {
     this.request<ApplyOutcome>("POST", `/sessions/${id}/comments/apply`);
 }
 
+function seconds(ms: number): string {
+  return `${Math.round(ms / 1000)}s`;
+}
+
 /**
  * Run `work` with an abort signal, failing with `ApiError(0, ...)` after `ms`.
  * The race (rather than trusting the signal alone) bounds a fetch or body that
  * ignores its signal too; the signal still tears the real request down.
  */
-async function withTimeout<T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function withTimeout<T>(
+  ms: number,
+  expiredMessage: string,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
   const ctl = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       ctl.abort();
-      reject(new ApiError(0, `request timed out after ${Math.round(ms / 1000)}s`));
+      reject(new ApiError(0, expiredMessage));
     }, ms);
   });
   try {

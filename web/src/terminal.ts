@@ -333,7 +333,10 @@ function openSocket(id: string): void {
   sock.onmessage = (ev: MessageEvent<string | ArrayBuffer>) => {
     if (typeof ev.data === "string") {
       const msg = parseControl(ev.data);
-      if (msg?.type === "ready") clearStickyConn();
+      if (msg?.type === "ready") {
+        clearStickyConn();
+        recovery.onReady();
+      }
       const note = msg && life.onControl(msg);
       if (note) term?.write(note);
     } else {

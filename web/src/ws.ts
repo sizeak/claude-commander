@@ -196,6 +196,16 @@ export class GoneRecovery {
     this.sawDown = false;
   }
 
+  /**
+   * An attach reached `ready`: the pane is back, so a later end starts the
+   * probe delay over from the base rather than where the last outage left it.
+   */
+  onReady(): void {
+    this.goneAt = null;
+    this.sawDown = false;
+    this.probes = 0;
+  }
+
   /** A poll saw the selected session with `status`; true means re-attach now. */
   onPoll(status: string | undefined): boolean {
     if (this.goneAt === null || status === undefined) return false;
