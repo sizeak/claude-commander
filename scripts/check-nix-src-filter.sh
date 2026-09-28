@@ -14,7 +14,8 @@
 # Both directions are checked, because a filter that admitted nothing at all
 # would pass the first half trivially:
 #   - probes outside the build inputs must NOT change the src hash
-#   - a probe inside crates/ MUST change it
+#   - each probe inside the build inputs MUST change it (one evaluation each,
+#     so a single admitted probe cannot mask another that was dropped)
 #
 # Usage: ./scripts/check-nix-src-filter.sh
 
@@ -34,8 +35,32 @@ EXCLUDED_PROBES=(
     # the directory but dropping its files still changes the hash, because an
     # empty directory is part of the tree.
     "_filter_probe_dir/probe.rs"
+    # The web UI's *source*: only its committed build output (webui/, below) is
+    # a build input. Named explicitly rather than left to the new-directory probe
+    # above, because web/ is the one top-level directory that does feed the
+    # binary, which makes it the likeliest to be admitted by a widened filter.
+    "web/src/_filter_probe.ts"
+    # A non-Rust asset *beside* the server's webui/: proves that admission is
+    # scoped to webui/ itself rather than to the whole server crate.
+    "crates/claude-commander-server/_filter_probe.svg"
 )
-INCLUDED_PROBE="crates/claude-commander-core/src/_filter_probe.md"
+INCLUDED_PROBES=(
+    "crates/claude-commander-core/src/_filter_probe.md"
+    "crates/claude-commander-server/webui/_filter_probe.svg"
+)
+
+# Why an included probe must stay admitted, printed if the filter drops it.
+included_reason() {
+    case "$1" in
+        crates/claude-commander-server/webui/*)
+            echo "crates/claude-commander-server/webui/** must stay admitted — rust-embed"
+            echo "     bakes it into the binary, so dropping it ships a server with no web UI." ;;
+        *.md)
+            echo "crates/**/*.md must stay admitted — core's commander_prime.md is"
+            echo "     include_str!'d into the binary." ;;
+        *) echo "it is a build input." ;;
+    esac
+}
 
 # Only ever clean up probes this run actually created. The trap must not be able
 # to delete a pre-existing file — that is the very thing the guard below refuses
@@ -75,7 +100,7 @@ cleanup() {
     done
 }
 
-for probe in "${EXCLUDED_PROBES[@]}" "${INCLUDED_PROBE}"; do
+for probe in "${EXCLUDED_PROBES[@]}" "${INCLUDED_PROBES[@]}"; do
     if [ -e "${probe}" ]; then
         echo "error: probe path ${probe} already exists; refusing to clobber it" >&2
         exit 1
@@ -121,17 +146,19 @@ else
     echo "     Narrow the filter in flake.nix." >&2
 fi
 
-add_probe "${INCLUDED_PROBE}"
-included="$(src_hash)"
-drop_probe "${INCLUDED_PROBE}"
-if [ "${included}" != "${baseline}" ]; then
-    echo "ok   ${INCLUDED_PROBE} is inside the build inputs"
-else
-    status=1
-    echo "FAIL ${INCLUDED_PROBE} did NOT change the src hash" >&2
-    echo "     crates/**/*.md must stay admitted — core's commander_prime.md is" >&2
-    echo "     include_str!'d into the binary. A filter that admits nothing would" >&2
-    echo "     otherwise pass the checks above vacuously." >&2
-fi
+for probe in "${INCLUDED_PROBES[@]}"; do
+    add_probe "${probe}"
+    included="$(src_hash)"
+    drop_probe "${probe}"
+    if [ "${included}" != "${baseline}" ]; then
+        echo "ok   ${probe} is inside the build inputs"
+    else
+        status=1
+        echo "FAIL ${probe} did NOT change the src hash" >&2
+        echo "     $(included_reason "${probe}")" >&2
+        echo "     A filter that admits nothing would otherwise pass the checks" >&2
+        echo "     above vacuously." >&2
+    fi
+done
 
 exit "${status}"

@@ -24,6 +24,7 @@ use crate::workspace::{StartupWorkspace, WorkspaceDef};
 
 /// A session as returned by the list/find/detail endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SessionInfo {
     pub id: String,
     pub session_id: SessionId,
@@ -92,6 +93,7 @@ pub struct SessionInfo {
 /// A session plus its live detail: agent sub-state, diff summary, and a pane
 /// snapshot. `info` is flattened so the JSON is a single object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SessionDetail {
     #[serde(flatten)]
     pub info: SessionInfo,
@@ -102,6 +104,7 @@ pub struct SessionDetail {
 
 /// Request to stage a new comment on a session's review diff.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct NewComment {
     pub file: String,
     pub side: CommentSide,
@@ -115,6 +118,7 @@ pub struct NewComment {
 /// so clients never echo (or cache) the full `FileDiff` and a mark can't be
 /// recorded against a stale copy of the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToggleReviewed {
     pub display_path: String,
 }
@@ -122,6 +126,7 @@ pub struct ToggleReviewed {
 /// Which side of a diff a binary blob fetch refers to: the base ("before") or
 /// the working tree ("after").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DiffSide {
     Old,
@@ -131,6 +136,7 @@ pub enum DiffSide {
 /// Result of opening the review view: the parsed diff plus the session's
 /// (re-anchored) comments and the base they were computed against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReviewSnapshot {
     pub base: String,
     pub diff: ParsedDiff,
@@ -140,6 +146,15 @@ pub struct ReviewSnapshot {
     /// xxh3 hash of the raw unified diff this snapshot was built from, so an
     /// open review view can cheaply tell whether a re-compose actually changed
     /// anything before rebuilding.
+    ///
+    /// Typed `unknown` in the generated TypeScript: a u64 hash routinely exceeds
+    /// 2^53, so `JSON.parse` rounds it to the nearest double, and a browser that
+    /// echoed it back as `prev_hash` would never match — every refresh would
+    /// re-send the whole snapshot. The wire stays a JSON number (the Rust and
+    /// Flutter clients read it losslessly). A web client must not
+    /// treat it as a number; it only matters once the page uses refresh-by-hash,
+    /// which will need the raw digits (or a string form) rather than this field.
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub content_hash: u64,
     /// Comments discarded while building this snapshot because the file they
     /// were written against had left the diff entirely (the change was
@@ -168,6 +183,7 @@ pub struct ReviewSnapshot {
 /// Options for creating a session (request body for `POST /sessions`). Optional
 /// fields default to absent so a minimal `{project_path, title}` body is valid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CreateSessionOpts {
     pub project_path: PathBuf,
     pub title: String,
@@ -196,6 +212,7 @@ pub struct CreateSessionOpts {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ProjectInfo {
     pub id: ProjectId,
     pub name: String,
@@ -229,6 +246,7 @@ pub struct ProjectInfo {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AddProjectRequest {
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,6 +258,7 @@ pub struct AddProjectRequest {
 ///
 /// FLUTTER: mirror this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum PullBlockReason {
     Dirty,
@@ -252,6 +271,7 @@ pub enum PullBlockReason {
 ///
 /// FLUTTER: mirror this enum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PullStatus {
     /// Fast-forward applied.
@@ -268,6 +288,7 @@ pub enum PullStatus {
 ///
 /// FLUTTER: mirror this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     Cascade,
@@ -278,6 +299,7 @@ pub enum OperationKind {
 ///
 /// FLUTTER: mirror this enum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum OperationOutcome {
     /// Completed cleanly. `detail` is a short human summary (e.g. "3 merged").
@@ -293,6 +315,7 @@ pub enum OperationOutcome {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct OperationStatus {
     /// Monotonic id assigned by the service (stable for the process lifetime).
     pub id: u64,
@@ -308,6 +331,7 @@ pub struct OperationStatus {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ServerStatus {
     /// Whether the `gh` CLI is installed and runnable.
     pub gh_available: bool,
@@ -323,6 +347,7 @@ pub struct ServerStatus {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Snapshot {
     pub projects: Vec<ProjectInfo>,
     pub sessions: Vec<SessionInfo>,
@@ -363,6 +388,7 @@ pub struct Snapshot {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AgentStatesSnapshot {
     /// Per-session agent state, keyed by session id. NOTE: when a commander is
     /// running, this map also carries one synthetic entry under the commander
@@ -383,6 +409,7 @@ pub struct AgentStatesSnapshot {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PreviewData {
     #[serde(default)]
     pub pane: Option<String>,
@@ -402,6 +429,7 @@ pub struct PreviewData {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DiffStat {
     pub files_changed: usize,
     pub lines_added: usize,
@@ -412,6 +440,7 @@ pub struct DiffStat {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ProgramInfo {
     pub label: String,
     pub command: String,
@@ -424,6 +453,7 @@ pub struct ProgramInfo {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetProgramsRequest {
     pub programs: Vec<ProgramInfo>,
 }
@@ -433,6 +463,7 @@ pub struct SetProgramsRequest {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CreateOptions {
     pub default_program: String,
     pub programs: Vec<ProgramInfo>,
@@ -444,6 +475,7 @@ pub struct CreateOptions {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct BranchInfo {
     pub name: String,
     pub is_remote: bool,
@@ -451,6 +483,7 @@ pub struct BranchInfo {
 
 /// Request body for renaming a session (`PATCH /sessions/{id}`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RenameSession {
     pub title: String,
 }
@@ -458,6 +491,7 @@ pub struct RenameSession {
 /// Request body for moving a session to a section (`PATCH /sessions/{id}`).
 /// `section: None` clears the manual override and re-runs predicate assignment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetSection {
     #[serde(default)]
     pub section: Option<String>,
@@ -471,6 +505,7 @@ pub struct SetSection {
 /// branch from that session (or the project's main branch), so a client can
 /// never disagree with it about where the session actually landed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetSessionBase {
     #[serde(default)]
     pub parent_session_id: Option<SessionId>,
@@ -483,6 +518,7 @@ pub struct SetSessionBase {
 /// failed edit is not cosmetic — the next PR sync overwrites the local mirror
 /// from GitHub, so an unreported failure silently reverts the retarget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrRetarget {
     /// The session has no PR, so there was nothing to retarget.
@@ -496,6 +532,7 @@ pub enum PrRetarget {
 
 /// Result of retargeting a session's stack base.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetSessionBaseOutcome {
     /// The branch the session is now based on.
     pub new_base_branch: String,
@@ -509,13 +546,178 @@ pub struct SetSessionBaseOutcome {
 /// The new program is the command that will be relaunched in the pane; the
 /// owning host relaunches the agent fresh so it takes effect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ChangeProgram {
     pub program: String,
+}
+
+/// `PATCH /sessions/{id}` body: rename a session, move it to a section
+/// (`section: null` clears the manual override), or change its launch program.
+/// Tagged by `op` so a section clear (`null`) is unambiguous.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PatchSession {
+    Rename(RenameSession),
+    SetSection(SetSection),
+    ChangeProgram(ChangeProgram),
+}
+
+/// `POST /sessions/unread` body: the session ids (full UUIDs) to flag unread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct MarkUnread {
+    pub ids: Vec<String>,
+}
+
+/// `201` body of the create routes (`POST /sessions`, `/projects`,
+/// `/projects/ensure`, `/sessions/{id}/comments`): the new resource's id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CreatedId<T> {
+    pub id: T,
+}
+
+/// `POST /sessions/{id}/files/reviewed` response: the file's reviewed mark
+/// after the toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ReviewedToggle {
+    pub reviewed: bool,
+}
+
+/// `POST /projects/scan` response: how many repositories under the scanned
+/// directory were newly registered, and how many were already known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ScanResponse {
+    pub added: usize,
+    pub skipped: usize,
+}
+
+/// `POST /config/reload` response: `true` when the on-disk config differed
+/// from the live one and was re-read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ConfigReloaded {
+    pub reloaded: bool,
+}
+
+/// `POST /sessions/{id}/paste-image` response: the absolute path the image was
+/// written to *on the server* (the path injected into the pane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct PastedImage {
+    pub path: String,
+}
+
+/// The uniform error envelope every non-2xx JSON response carries:
+/// `{"error": {"kind", "message"}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ApiErrorBody {
+    pub error: ApiErrorDetail,
+}
+
+/// The inside of [`ApiErrorBody`]. `kind` is a short machine-readable category
+/// (`session`, `tmux`, `git`, `config`, `io`, `tts`, `auth`, `request`, ...);
+/// `message` is safe to show the user and never carries a credential.
+///
+/// `kind` defaults to empty when absent, so a client still surfaces `message`
+/// from an error body that omits it rather than failing the whole parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ApiErrorDetail {
+    #[serde(default)]
+    pub kind: String,
+    pub message: String,
+}
+
+impl ApiErrorBody {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            error: ApiErrorDetail {
+                kind: kind.into(),
+                message: message.into(),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The small response envelopes are built by the server and parsed by every
+    /// client, so their exact JSON is pinned here — these were ad-hoc `json!`
+    /// literals before they were typed, and the move must not change a byte.
+    #[test]
+    fn response_envelopes_have_the_pinned_wire_shape() {
+        let sid = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+        assert_eq!(
+            serde_json::to_string(&CreatedId { id: sid }).unwrap(),
+            r#"{"id":"00000000-0000-0000-0000-000000000001"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ReviewedToggle { reviewed: true }).unwrap(),
+            r#"{"reviewed":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ScanResponse {
+                added: 2,
+                skipped: 1
+            })
+            .unwrap(),
+            r#"{"added":2,"skipped":1}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ConfigReloaded { reloaded: false }).unwrap(),
+            r#"{"reloaded":false}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PastedImage {
+                path: "/srv/x.png".into()
+            })
+            .unwrap(),
+            r#"{"path":"/srv/x.png"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ApiErrorBody::new("session", "nope")).unwrap(),
+            r#"{"error":{"kind":"session","message":"nope"}}"#
+        );
+    }
+
+    #[test]
+    fn patch_session_and_mark_unread_have_the_pinned_wire_shape() {
+        let cases = [
+            (
+                PatchSession::Rename(RenameSession { title: "t".into() }),
+                r#"{"op":"rename","title":"t"}"#,
+            ),
+            (
+                PatchSession::SetSection(SetSection { section: None }),
+                r#"{"op":"set_section","section":null}"#,
+            ),
+            (
+                PatchSession::ChangeProgram(ChangeProgram {
+                    program: "claude".into(),
+                }),
+                r#"{"op":"change_program","program":"claude"}"#,
+            ),
+        ];
+        for (patch, json) in cases {
+            assert_eq!(serde_json::to_string(&patch).unwrap(), json);
+            let back: PatchSession = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+        assert_eq!(
+            serde_json::to_string(&MarkUnread {
+                ids: vec!["a".into()]
+            })
+            .unwrap(),
+            r#"{"ids":["a"]}"#
+        );
+    }
 
     #[test]
     fn create_session_opts_minimal_body_deserializes() {
@@ -952,6 +1154,16 @@ mod tests {
             assert_eq!(back.new_base_branch, "main");
             assert_eq!(back.old_base_branch.as_deref(), Some("feat"));
         }
+    }
+
+    /// Clients read the envelope leniently: a body with a `message` but no
+    /// `kind` (an older server, a proxy's own JSON error) still yields the
+    /// message instead of falling back to a bare status line.
+    #[test]
+    fn error_body_without_a_kind_still_parses() {
+        let body: ApiErrorBody = serde_json::from_str(r#"{"error":{"message":"busy"}}"#).unwrap();
+        assert_eq!(body.error.message, "busy");
+        assert_eq!(body.error.kind, "");
     }
 
     #[test]

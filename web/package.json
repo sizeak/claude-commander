@@ -1,0 +1,26 @@
+{
+  "name": "claude-commander-web-ui",
+  "private": true,
+  "description": "Claude Commander's browser UI (served by claude-commander-server) and its Playwright e2e suite.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "check": "biome check .",
+    "typecheck": "tsc -p . --noEmit && tsc -p e2e --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "e2e": "./e2e/run.sh"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.9",
+    "@playwright/test": "1.61.1",
+    "@types/node": "^24.0.0",
+    "esbuild": "0.28.2",
+    "typescript": "^5.9.0"
+  }
+}

@@ -2352,7 +2352,7 @@ impl CommanderService {
             let mut detector = AgentStateDetector::new(tmux.clone(), cache_ttl);
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
             let mut last_commander_running = false;
-            let sentinel = crate::commander::commander_sentinel_id();
+            let sentinel = claude_commander_protocol::session::COMMANDER_SENTINEL_ID;
             loop {
                 interval.tick().await;
                 let sessions: Vec<(SessionId, String, String)> = {
@@ -2830,7 +2830,7 @@ fn with_commander_target(
 ) -> Vec<(SessionId, String, String)> {
     if commander_running {
         active.push((
-            crate::commander::commander_sentinel_id(),
+            claude_commander_protocol::session::COMMANDER_SENTINEL_ID,
             crate::commander::COMMANDER_TMUX_NAME.to_string(),
             commander_program.to_string(),
         ));
@@ -5693,7 +5693,7 @@ mod tests {
         // The detector treats the sentinel like any other id, so a commander
         // Working→Idle WOULD be reported; the poll loop filters it out (the
         // commander has no `WorktreeSession` to mark unread).
-        let sentinel = crate::commander::commander_sentinel_id();
+        let sentinel = claude_commander_protocol::session::COMMANDER_SENTINEL_ID;
         let prev = BTreeMap::from([(sentinel, AgentState::Working)]);
         let new = BTreeMap::from([(sentinel, AgentState::Idle)]);
         assert_eq!(detect_unread_transitions(&prev, &new), vec![sentinel]);
@@ -5810,7 +5810,7 @@ mod tests {
         // The poll loop and the fresh rebuild both include the commander's
         // sentinel target when it's live, so a fresh `agent_states(true)` after
         // an attach carries the commander's own state (no one-tick chip blink).
-        let sentinel = crate::commander::commander_sentinel_id();
+        let sentinel = claude_commander_protocol::session::COMMANDER_SENTINEL_ID;
 
         let running = with_commander_target(Vec::new(), true, "claude");
         assert_eq!(running.len(), 1, "the sentinel target must be appended");

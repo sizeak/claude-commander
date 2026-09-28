@@ -274,6 +274,92 @@ jobs:
             | jq -r '.packages[] | select(.name == "claude-commander") | .version')
           "$RUNNER_TEMP/brew-prefix/bin/claude-commander" --version | grep -F "$version"
 
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    # The e2e lane bounds itself (CC_WEB_E2E_TIMEOUT), but a cold Nix store or
+    # cargo cache can hang elsewhere; don't hold a runner for GitHub's 6h default.
+    timeout-minutes: 45
+    permissions:
+      # cache purging
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v30
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+
+      # Its own cache, because this job needs two closures at once: `.#web`
+      # (node, biome, nixpkgs' Playwright Chromium) and the default dev shell,
+      # which the lanes re-enter for cargo (the protocol drift test, and
+      # web/e2e/run.sh's server build). One store cache can only be restored
+      # once, so neither the `nix-devshell-` entry Clippy owns nor a web-only one
+      # would cover it. Keyed like that entry and for the same reason: both
+      # closures are built from flake.nix + flake.lock alone.
+      - name: Restore Nix Store Cache
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-web-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-web-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          purge: true
+          purge-prefixes: nix-web-${{ runner.os }}-
+          purge-created: 0
+          purge-last-accessed: P1DT12H
+          purge-primary-key: never
+
+      # Restore-only; Build & Test owns the save. Same dependency graph and dev
+      # profile, so the server binary the e2e serves from builds incrementally.
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-workspace
+          save-if: false
+
+      - name: Restore npm Cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      # Through verify.sh rather than restating its lanes as steps: the web lane
+      # (npm ci, check, typecheck, test, build-is-fresh, protocol TS drift) and
+      # the web-e2e lane (web/e2e/run.sh, headless Chromium against a hermetic
+      # server) have no other definition, so CI cannot drift from a local
+      # `scripts/verify.sh --web`. verify.sh also applies the poisoned git
+      # signing config and DO_NOT_TRACK/TERM pinning the other test steps set by
+      # hand. Unlike the Flutter e2e, this one needs no display, so CI runs it.
+      - name: Run Web Lanes
+        env:
+          # Lane logs go to target/verify-logs (uploaded below on failure); print
+          # more than the local default tail so most failures read from here.
+          CC_FAIL_TAIL: "200"
+        run: nix develop .#web -c scripts/verify.sh --web
+
+      # Playwright keeps a trace per failed test (`trace: "retain-on-failure"`)
+      # under web/test-results, beside the fixture's server and tmux logs that
+      # web/e2e/run.sh copies into test-results/fixture-logs; under CI the
+      # config adds an HTML report in web/playwright-report; the whole lane
+      # logs are in target/verify-logs. All die with the runner otherwise.
+      # Open a trace with `npx playwright show-trace <zip>`.
+      - name: Upload Web Failure Artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-failures
+          path: |
+            web/test-results/
+            web/playwright-report/
+            target/verify-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
   client:
     name: Client Tests
     runs-on: ubuntu-latest
@@ -371,7 +457,7 @@ jobs:
       - name: Run cdylib Integration Tests
         env:
           GIT_CONFIG_GLOBAL: ${{ runner.temp }}/poisoned-gitconfig
-        run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test'
+        run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test --locked'
 
       # DISABLED for this PR: the headless Linux GUI e2e (flutter test
       # integration_test under xvfb) builds fine but the app fails to *launch*

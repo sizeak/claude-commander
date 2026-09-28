@@ -16,7 +16,7 @@ use claude_commander_core::Error as CoreError;
 use claude_commander_core::backend::RunLocalError;
 use claude_commander_core::error::{GitError, SessionError, TmuxError};
 use claude_commander_core::session::SetBaseRejection;
-use serde_json::json;
+use claude_commander_protocol::api::ApiErrorBody;
 
 /// An error returned from an API handler. Wraps a [`CoreError`] and maps it to
 /// an HTTP status + JSON body via [`IntoResponse`].
@@ -145,13 +145,7 @@ impl IntoResponse for ApiError {
 /// including a 401 from the auth layer, which isn't backed by a [`CoreError`] —
 /// carries the same envelope a client can parse.
 pub fn error_response(status: StatusCode, kind: &str, message: impl Into<String>) -> Response {
-    let body = Json(json!({
-        "error": {
-            "kind": kind,
-            "message": message.into(),
-        }
-    }));
-    (status, body).into_response()
+    (status, Json(ApiErrorBody::new(kind, message))).into_response()
 }
 
 #[cfg(test)]

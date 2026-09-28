@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 /// A backend's connection health, rendered in its server header. The local
 /// backend is always [`Connected`](ConnectionState::Connected).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum ConnectionState {
     /// The initial handshake / first snapshot hasn't landed yet.
     Connecting,

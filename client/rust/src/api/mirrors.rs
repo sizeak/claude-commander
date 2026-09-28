@@ -32,6 +32,7 @@ use claude_commander_protocol::api::{
 };
 use claude_commander_protocol::connection::ConnectionState;
 use claude_commander_protocol::github::{CloneJob, CloneRequest, CloneSource, CloneStatus};
+use claude_commander_protocol::session::COMMANDER_SENTINEL_ID;
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 // All three id newtypes are a single `Uuid`, so one mirror covers them all.
@@ -372,25 +373,13 @@ pub struct AgentStatesSnapshotDto {
     pub commander_running: bool,
 }
 
-/// The commander's fixed sentinel id. Mirrors core's `commander_sentinel_id()`
-/// (`crates/claude-commander-core/src/commander.rs`): a reserved `SessionId`
-/// the server injects into the agent-state map to carry the commander chip's
-/// live state. It maps to no real session/worktree, so per-session rows must
-/// skip it. Replicated here because the cdylib can't depend on core.
-fn commander_sentinel_id() -> SessionId {
-    SessionId::from_uuid(Uuid::from_u128(
-        0xc0_3a_de_cc_00_00_00_00_00_00_00_00_00_00_00_00,
-    ))
-}
-
 impl From<AgentStatesSnapshot> for AgentStatesSnapshotDto {
     fn from(s: AgentStatesSnapshot) -> Self {
-        let sentinel = commander_sentinel_id();
         Self {
             states: s
                 .states
                 .into_iter()
-                .filter(|(id, _)| *id != sentinel)
+                .filter(|(id, _)| *id != COMMANDER_SENTINEL_ID)
                 .map(|(session_id, state)| AgentStateEntryDto { session_id, state })
                 .collect(),
             commander_running: s.commander_running,
@@ -666,7 +655,7 @@ mod tests {
         let real = SessionId::new();
         let mut states = BTreeMap::new();
         states.insert(real, AgentState::Working);
-        states.insert(commander_sentinel_id(), AgentState::Idle);
+        states.insert(COMMANDER_SENTINEL_ID, AgentState::Idle);
         let dto: AgentStatesSnapshotDto = AgentStatesSnapshot {
             states,
             commander_running: true,

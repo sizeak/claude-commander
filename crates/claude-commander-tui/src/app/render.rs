@@ -725,7 +725,7 @@ impl App {
         let commander_agent_state = self
             .ui_state
             .agent_states
-            .get(&claude_commander_core::commander::commander_sentinel_id())
+            .get(&claude_commander_protocol::session::COMMANDER_SENTINEL_ID)
             .copied();
         let commander_chip_shown =
             match commander_chip_label(self.ui_state.commander_running, commander_agent_state) {

@@ -20,6 +20,7 @@ pub mod extract;
 pub mod handlers;
 pub mod router;
 pub mod state;
+pub mod webui;
 pub mod ws;
 
 pub use auth::AuthConfig;

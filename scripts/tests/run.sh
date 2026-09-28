@@ -94,6 +94,8 @@ assert_eq "31" "$(cc_exit_code_for_lane packaging)" "packaging -> 31"
 assert_eq "32" "$(cc_exit_code_for_lane shellcheck)" "shellcheck -> 32"
 assert_eq "33" "$(cc_exit_code_for_lane selftest)" "selftest -> 33"
 assert_eq "34" "$(cc_exit_code_for_lane nix-src-filter)" "nix-src-filter -> 34"
+assert_eq "27" "$(cc_exit_code_for_lane web)" "web -> 27"
+assert_eq "28" "$(cc_exit_code_for_lane web-e2e)" "web-e2e -> 28"
 assert_fails "unknown lane is rejected" cc_exit_code_for_lane notalane
 
 # Every lane must own a distinct code: a duplicate would make the exit status
@@ -116,14 +118,14 @@ assert_eq "$lane_count" "$uniq_count" "every lane in every tier has a distinct e
 # Counted from the `all` tier alone, not the widened union above: this pins what
 # CI's mirror covers, which is a different question from code uniqueness.
 all_tier_count=$(cc_lanes_for_tier all | tr ' ' '\n' | grep -c .)
-assert_eq "15" "$all_tier_count" "the all tier covers 15 lanes"
-assert_eq "16" "$lane_count" "the run order covers 16 lanes (all + goldens)"
+assert_eq "17" "$all_tier_count" "the all tier covers 17 lanes"
+assert_eq "18" "$lane_count" "the run order covers 18 lanes (all + goldens)"
 
 # The runner walks cc_lane_run_order, so a lane missing from it can never execute
 # however it is selected -- which is exactly how the goldens lane was first
 # silently skipped. Assert containment rather than trusting the two lists to agree.
 missing_from_run_order=""
-for lane in $(cc_lanes_for_tier all) $(cc_lanes_for_tier goldens); do
+for lane in $(cc_lanes_for_tier all) $(cc_lanes_for_tier goldens) $(cc_lanes_for_tier web); do
   case " $(cc_lane_run_order) " in
     *" $lane "*) : ;;
     *) missing_from_run_order+="$lane " ;;
@@ -153,7 +155,7 @@ assert_eq "pub-get dart-format analyze flutter-test cdylib" "$(cc_lanes_for_tier
 
 assert_eq "pub-get goldens" "$(cc_lanes_for_tier goldens)" \
   "goldens tier resolves packages, then rasterises only test/goldens"
-assert_eq "fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter e2e nix-build packaging" \
+assert_eq "fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter web e2e web-e2e nix-build packaging" \
   "$(cc_lanes_for_tier all)" "all tier is every lane, cheap-to-slow"
 
 # pub-get is not a check but a precondition: `dart format` reads each file's
@@ -185,6 +187,31 @@ for tier in client all; do
   esac
 done
 assert_fails "unknown tier is rejected" cc_lanes_for_tier notatier
+
+# The web tier is the page's own loop: its two lanes, both also in `all` (the CI
+# mirror -- CI runs both, headless), and the cheap checks before the browser run.
+assert_eq "web web-e2e" "$(cc_lanes_for_tier web)" "web tier is the web checks, then the browser e2e"
+for lane in web web-e2e; do
+  case " $(cc_lanes_for_tier all) " in
+    *" $lane "*) in_all=yes ;;
+    *) in_all=no ;;
+  esac
+  assert_eq "yes" "$in_all" "the all tier includes $lane"
+done
+
+echo "== cc_missing_words =="
+# shellcheck disable=SC2086  # split on purpose, exactly as verify.sh's lane does
+assert_eq "" "$(cc_missing_words "e2e check typecheck test build" $CC_WEB_NPM_SCRIPTS)" \
+  "a package.json with every contracted script is missing none"
+assert_eq "check test build" "$(cc_missing_words "e2e typecheck lint" check typecheck test build)" \
+  "the missing scripts are reported in contract order"
+# Substring matches must not count: a `build:watch` or `test:e2e` script is not
+# the `build`/`test` the lane runs.
+assert_eq "build test" "$(cc_missing_words "build:watch test:e2e" build test)" \
+  "a script is only present under its exact name"
+assert_eq "build" "$(cc_missing_words "" build)" "an empty scripts table is missing everything"
+assert_eq "check typecheck test build" "$CC_WEB_NPM_SCRIPTS" \
+  "the web lane's npm contract is check, typecheck, test, build"
 
 # The rust lanes must lead the `all` list: a fmt or clippy failure is seconds
 # away, and finding it after a multi-minute `nix build` wastes the run.
@@ -485,6 +512,43 @@ cc_tree_leaks_test_support <<<"$leaky_tree" || leak_rc=$?
 assert_eq "0" "$leak_rc" "a tree enabling core's test-support is a leak"
 assert_eq "cargo tree --offline --workspace -e normal,build,features -i claude-commander-core" \
   "$CC_CORE_FEATURE_TREE_CMD" "the guard inspects normal+build edges only, offline"
+
+echo "== cc_kill_process_groups =="
+# dev-run.sh web's cleanup. It runs from an EXIT trap under `set -u`, handed
+# pids that may be empty (a helper that never started) or already gone.
+group_rc=0
+(set -u && cc_kill_process_groups "" "" 2>/dev/null) || group_rc=$?
+assert_eq "0" "$group_rc" "empty pids are skipped under set -u"
+setsid sleep 300 &
+group_leader=$!
+# A leader with a child in its group: killing the group must take both.
+setsid bash -c 'sleep 300 & wait' &
+group_tree=$!
+sleep 0.2
+group_child="$(pgrep -g "$group_tree" -x sleep || true)"
+assert_eq "1" "$(printf '%s\n' "$group_child" | grep -c .)" "the fixture group has one child"
+group_rc=0
+cc_kill_process_groups "$group_leader" "" "$group_tree" 2>/dev/null || group_rc=$?
+assert_eq "0" "$group_rc" "killing live groups succeeds"
+# Poll rather than `wait`, which would hang on a group the helper missed.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  group_alive=""
+  for p in "$group_leader" "$group_tree" "$group_child"; do
+    # A reaped-but-unwaited child is a zombie, which kill -0 still sees.
+    [ "$(ps -o stat= -p "$p" 2>/dev/null | cut -c1)" = "" ] ||
+      [ "$(ps -o stat= -p "$p" 2>/dev/null | cut -c1)" = "Z" ] ||
+      group_alive="$group_alive $p"
+  done
+  [ -z "$group_alive" ] && break
+  sleep 0.2
+done
+assert_eq "" "$group_alive" "every process in each group is gone"
+# Whatever the helper left, don't leak it past the test.
+kill -KILL -- "-$group_leader" "-$group_tree" 2>/dev/null || true
+wait "$group_leader" "$group_tree" 2>/dev/null || true
+group_rc=0
+cc_kill_process_groups "$group_leader" 2>/dev/null || group_rc=$?
+assert_eq "0" "$group_rc" "a group that is already gone is not an error"
 
 echo
 printf '%s passed, %s failed\n' "$pass_count" "$fail_count"
