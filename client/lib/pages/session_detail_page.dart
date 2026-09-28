@@ -1,16 +1,24 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
+import '../chrome/chrome_forms.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
+import '../theme/tokens.dart';
+import '../util/error_text.dart';
 import '../widgets/session_chips.dart';
 import 'review_page.dart';
 import 'terminal_page.dart';
 
+/// The low-frequency management actions, tucked into the detail header's
+/// overflow (⋮) menu rather than spending a button each.
+enum _ManageAction { rename, section, keepAlive }
+
 /// Detail view for a single session, layout-agnostic (no Scaffold, no route).
 /// Live status and agent state come straight from the [CommanderStore] (refreshed
 /// off the change feed — no local timer); the pane snapshot and diff stat, which
-/// the workspace snapshot doesn't carry, are fetched on demand and re-fetched
+/// the snapshot doesn't carry, are fetched on demand and re-fetched
 /// whenever the store ticks.
 ///
 /// The narrow [SessionDetailPage] wraps this in a Scaffold and pushes
@@ -36,6 +44,12 @@ class SessionDetailBody extends StatefulWidget {
   /// Called from the gone-state's dismiss button (narrow: pop; wide: clear).
   final VoidCallback onDismiss;
 
+  /// Whether to render the on-demand terminal-snapshot preview card. Phones
+  /// hide it (the live terminal is one tap away and far more useful in a small
+  /// viewport); the wide landscape layout keeps it. When false, the detail
+  /// fetch also skips capturing pane lines, so the server does no tmux capture.
+  final bool showPanePreview;
+
   const SessionDetailBody({
     super.key,
     required this.session,
@@ -43,6 +57,7 @@ class SessionDetailBody extends StatefulWidget {
     required this.onOpenReview,
     required this.onDeleted,
     required this.onDismiss,
+    required this.showPanePreview,
   });
 
   @override
@@ -139,7 +154,12 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     if (store == null || _busy || _fetching || _gone) return;
     _fetching = true;
     try {
-      final detail = await store.sessionDetail(_id, lines: 200);
+      // Only capture pane lines when the preview card will render them; a null
+      // `lines` tells the server to skip the tmux capture entirely.
+      final detail = await store.sessionDetail(
+        _id,
+        lines: widget.showPanePreview ? 200 : null,
+      );
       if (!mounted) return;
       if (detail == null) {
         setState(() {
@@ -154,7 +174,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.toString());
+      setState(() => _error = errorText(e));
     } finally {
       _fetching = false;
     }
@@ -232,17 +252,19 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed: ${errorText(e, capitalize: false)}')),
+      );
     }
   }
 
   void _kill() => _runAction(
     title: 'Kill session?',
-    message: 'Stops the running program. The worktree is kept.',
+    message:
+        'Stops the running program. The worktree is kept and the '
+        'conversation resumes on next attach.',
     confirmLabel: 'Kill',
-    confirmColor: Colors.orange,
+    confirmColor: CommanderTokens.of(context).attention,
     successMessage: 'Session killed',
     action: () => _store!.killSession(_id),
   );
@@ -251,7 +273,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     title: 'Restart session?',
     message: 'Restarts the program in this session.',
     confirmLabel: 'Restart',
-    confirmColor: Colors.teal,
+    confirmColor: CommanderTokens.of(context).working,
     successMessage: 'Session restarted',
     action: () => _store!.restartSession(_id),
   );
@@ -262,7 +284,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
         'Removes the session, its branch, and its worktree. '
         'This cannot be undone.',
     confirmLabel: 'Delete',
-    confirmColor: Colors.red,
+    confirmColor: CommanderTokens.of(context).danger,
     successMessage: 'Session deleted',
     leaveOnSuccess: true,
     action: () => _store!.deleteSession(_id),
@@ -296,9 +318,9 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed: ${errorText(e, capitalize: false)}')),
+      );
     }
   }
 
@@ -325,17 +347,15 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     try {
       await action();
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(ok)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok)));
       setState(() => _busy = false);
       await _fetchDetail();
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed: ${errorText(e, capitalize: false)}')),
+      );
     }
   }
 
@@ -425,120 +445,105 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   }
 
   Widget _liveBody(BuildContext context, SessionInfo info) {
+    final waiting =
+        info.status == SessionStatus.running &&
+        _agentState == AgentState.waitingForInput;
     return RefreshIndicator(
       onRefresh: _refresh,
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           _header(context, info),
-          const SizedBox(height: 12),
-          _viewButtons(context),
-          const SizedBox(height: 12),
-          _manage(context, info),
+          if (waiting) ...[const SizedBox(height: 12), _waitingHint(context)],
+          const SizedBox(height: 16),
+          _agentHero(context),
           const SizedBox(height: 12),
           if (_error != null) _errorBanner(context, _error!),
           _detailSection(context),
-          const SizedBox(height: 16),
-          _paneSection(context, info),
+          if (widget.showPanePreview) ...[
+            const SizedBox(height: 16),
+            _paneSection(context, info),
+          ],
           const SizedBox(height: 24),
-          _actions(context, info),
+          _lifecycleBar(info),
         ],
       ),
     );
   }
 
   Widget _header(BuildContext context, SessionInfo info) {
-    return Column(
+    final t = CommanderTokens.of(context);
+    final section = info.sectionOverride ?? info.currentSection;
+    return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          '${info.projectName} · ${info.branch}',
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-        const SizedBox(height: 4),
-        Text(info.program, style: Theme.of(context).textTheme.labelSmall),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 6,
-          runSpacing: 4,
-          children: [
-            statusChip(context, info.status),
-            if (info.status == SessionStatus.running)
-              agentStateChip(context, _agentState),
-            if (info.prNumber != null)
-              prChip(context, info.prNumber!, info.prState),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _viewButtons(BuildContext context) {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 8,
-      children: [
-        OutlinedButton.icon(
-          onPressed: () => widget.onOpenTerminal(AttachKind.agent),
-          icon: const Icon(Icons.terminal, size: 18),
-          label: const Text('Terminal'),
-        ),
-        OutlinedButton.icon(
-          onPressed: () => widget.onOpenTerminal(AttachKind.shell),
-          icon: const Icon(Icons.code, size: 18),
-          label: const Text('Shell'),
-        ),
-        OutlinedButton.icon(
-          onPressed: widget.onOpenReview,
-          icon: const Icon(Icons.rate_review, size: 18),
-          label: const Text('Review'),
-        ),
-      ],
-    );
-  }
-
-  /// Management actions available regardless of run state: rename, section, and
-  /// the keep-alive toggle (which stops the server hibernating an idle session).
-  Widget _manage(BuildContext context, SessionInfo info) {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 8,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        OutlinedButton.icon(
-          onPressed: _busy ? null : () => _rename(info),
-          icon: const Icon(Icons.edit, size: 18),
-          label: const Text('Rename'),
-        ),
-        OutlinedButton.icon(
-          onPressed: _busy ? null : () => _section(info),
-          icon: const Icon(Icons.folder_outlined, size: 18),
-          label: Text(
-            info.sectionOverride ?? info.currentSection ?? 'Section',
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Mono meta line: project · branch · program.
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  '${info.projectName} · ${info.branch} · ${info.program}',
+                  style: t.meta(size: 12, color: t.textMuted),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  statusChip(context, info.status),
+                  if (info.status == SessionStatus.running)
+                    agentStateChip(context, _agentState),
+                  if (info.prNumber != null)
+                    prChip(context, info.prNumber!, info.prState),
+                  if (section != null) sectionChip(context, section),
+                  if (info.keepAlive) keepAliveChip(context),
+                ],
+              ),
+            ],
           ),
         ),
-        FilterChip(
-          label: const Text('Keep alive'),
-          selected: info.keepAlive,
-          onSelected: _busy ? null : (_) => _toggleKeepAlive(),
-        ),
+        _manageMenu(context, info),
       ],
     );
   }
 
-  Widget _detailSection(BuildContext context) {
-    final diffStat = _detail?.diffStat;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
+  /// A slim attention-tinted banner shown only while the agent is blocked on a
+  /// prompt, nudging the user into the Agent terminal (the only place the
+  /// prompt can be answered). We don't have the prompt text on the client, so
+  /// the copy is generic.
+  ///
+  /// The tint comes from [SessionTone.waiting] rather than being derived here,
+  /// so the hint and the row of the session it describes can never drift apart:
+  /// one amber-tinted box in Mission Control, a salmon-top-bordered panel in
+  /// LCARS.
+  Widget _waitingHint(BuildContext context) {
+    final t = CommanderTokens.of(context);
+    final tone = t.toneStyle(SessionTone.waiting);
+    return ChromePanel(
+      ChromePanelSpec(
+        tone: SessionTone.waiting,
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Changes', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 6),
             Text(
-              diffStat == null || diffStat.isEmpty ? 'No changes' : diffStat,
-              style: Theme.of(context).textTheme.bodySmall,
+              '?',
+              style: t.meta(
+                size: 12,
+                weight: FontWeight.w700,
+                color: tone.accent,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Waiting for input — answer in the Agent terminal.',
+                style: t.meta(size: 11.5, color: tone.onTint, height: 1.4),
+              ),
             ),
           ],
         ),
@@ -546,10 +551,145 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     );
   }
 
+  /// The overflow (⋮) menu of low-frequency management actions: rename, set
+  /// section, and the keep-alive toggle (which stops the server hibernating an
+  /// idle session). Disabled while a mutation is in flight.
+  Widget _manageMenu(BuildContext context, SessionInfo info) {
+    return PopupMenuButton<_ManageAction>(
+      enabled: !_busy,
+      tooltip: 'Manage session',
+      icon: const Icon(Icons.more_vert),
+      onSelected: (action) {
+        switch (action) {
+          case _ManageAction.rename:
+            _rename(info);
+          case _ManageAction.section:
+            _section(info);
+          case _ManageAction.keepAlive:
+            _toggleKeepAlive();
+        }
+      },
+      itemBuilder: (_) => [
+        _menuItem(_ManageAction.rename, Icons.edit, 'Rename'),
+        _menuItem(_ManageAction.section, Icons.folder_outlined, 'Set section'),
+        _menuItem(
+          _ManageAction.keepAlive,
+          info.keepAlive ? Icons.check_box : Icons.check_box_outline_blank,
+          'Keep alive',
+        ),
+      ],
+    );
+  }
+
+  PopupMenuItem<_ManageAction> _menuItem(
+    _ManageAction value,
+    IconData icon,
+    String label,
+  ) {
+    return PopupMenuItem(
+      value: value,
+      child: Row(
+        children: [
+          Icon(icon, size: 20),
+          const SizedBox(width: 12),
+          Text(label),
+        ],
+      ),
+    );
+  }
+
+  /// The single dominant action: a full-width accent button into the live agent
+  /// terminal. Shell / review / lifecycle are all reachable below, so the agent
+  /// pane — the primary interaction — gets the hero treatment. The Changes card
+  /// below is the diff entry point; Shell lives in the lifecycle bar.
+  ///
+  /// Deliberately **not** a chrome form. No form element expresses a full-width
+  /// prominent call to action: [ChromePanel] would flatten it to a bordered card
+  /// and [ChromeButtonBar]'s Mission Control cell is a 38px icon over a caption.
+  /// It needs neither — `filledButtonTheme` already resolves shape and colour
+  /// from the tokens, so this renders as a violet 12px-radius button in Mission
+  /// Control and a hard-cornered amber block in LCARS.
+  Widget _agentHero(BuildContext context) {
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton.icon(
+        onPressed: () => widget.onOpenTerminal(AttachKind.agent),
+        icon: const Icon(Icons.terminal, size: 18),
+        label: const Text('Open Agent terminal'),
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(vertical: 15),
+        ),
+      ),
+    );
+  }
+
+  /// The diffstat card, which doubles as the review entry point: tapping it
+  /// opens the diff (the review view). Stays tappable even with no changes —
+  /// the review view is then simply empty, and this keeps it reachable on the
+  /// phone layout, which has no review tab.
+  Widget _detailSection(BuildContext context) {
+    final t = CommanderTokens.of(context);
+    final diffStat = _detail?.diffStat;
+    // The Semantics wrapper stays outside the panel: the chrome's tappable panel
+    // carries a tap handler, but only LCARS marks it as a button, so the flag is
+    // asserted here for both.
+    return Semantics(
+      button: true,
+      child: ChromePanel(
+        ChromePanelSpec(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
+          onTap: widget.onOpenReview,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          'Changes',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                        const SizedBox(width: 7),
+                        Icon(
+                          Icons.rate_review_outlined,
+                          size: 14,
+                          color: t.textFaint,
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          'review',
+                          style: t.meta(size: 11, color: t.textFaint),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      diffStat == null || diffStat.isEmpty
+                          ? 'No changes'
+                          : diffStat,
+                      style: t.meta(color: t.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, color: t.textFaint),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The on-demand terminal snapshot. Only the frame is themed: the captured
+  /// output itself stays `t.mono` on `t.terminalFg` over `t.terminalBg` in every
+  /// theme, because it is real agent output rather than chrome.
   Widget _paneSection(BuildContext context, SessionInfo info) {
+    final t = CommanderTokens.of(context);
     final pane = _detail?.paneContent;
-    return Card(
-      child: Padding(
+    return ChromePanel(
+      ChromePanelSpec(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -572,19 +712,16 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
             Container(
               width: double.infinity,
               constraints: const BoxConstraints(maxHeight: 320),
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: Colors.black,
-                borderRadius: BorderRadius.circular(6),
+                color: t.terminalBg,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: t.borderSubtle),
               ),
               child: SingleChildScrollView(
                 child: SelectableText(
                   (pane == null || pane.isEmpty) ? '(no output)' : pane,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    color: Colors.greenAccent,
-                  ),
+                  style: t.meta(size: 12, color: t.terminalFg, height: 1.5),
                 ),
               ),
             ),
@@ -594,41 +731,60 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     );
   }
 
-  Widget _actions(BuildContext context, SessionInfo info) {
+  /// The session lifecycle controls: the common shell/kill/restart/cascade/push
+  /// first, with the destructive delete last. Shell is pure navigation (always
+  /// enabled); Kill needs a running session; the rest are gated only by the busy
+  /// flag.
+  ///
+  /// The bar's shape is the chrome's — a labelled icon bar in Mission Control
+  /// (which pushes the destructive action to the trailing edge itself, so the
+  /// `Spacer` this used to place is no longer ours to position), one contiguous
+  /// run of lettered blocks in LCARS.
+  Widget _lifecycleBar(SessionInfo info) {
+    final t = CommanderTokens.of(context);
     final running = info.status == SessionStatus.running;
-    return Wrap(
-      spacing: 12,
-      runSpacing: 8,
-      children: [
-        FilledButton.tonalIcon(
-          onPressed: _busy || !running ? null : _kill,
-          icon: const Icon(Icons.stop),
-          label: const Text('Kill'),
-        ),
-        FilledButton.tonalIcon(
-          onPressed: _busy ? null : _restart,
-          icon: const Icon(Icons.restart_alt),
-          label: const Text('Restart'),
-        ),
-        FilledButton.tonalIcon(
-          onPressed: _busy ? null : _cascadeMerge,
-          icon: const Icon(Icons.merge_type),
-          label: const Text('Cascade merge'),
-        ),
-        FilledButton.tonalIcon(
-          onPressed: _busy ? null : _pushStack,
-          icon: const Icon(Icons.publish),
-          label: const Text('Push stack'),
-        ),
-        FilledButton.tonalIcon(
-          onPressed: _busy ? null : _delete,
-          style: FilledButton.styleFrom(
-            foregroundColor: Theme.of(context).colorScheme.error,
+    return ChromeButtonBar(
+      ChromeButtonBarSpec(
+        buttons: [
+          ChromeBarButton(
+            label: 'Shell',
+            icon: Icons.code,
+            onPressed: () => widget.onOpenTerminal(AttachKind.shell),
           ),
-          icon: const Icon(Icons.delete_outline),
-          label: const Text('Delete'),
-        ),
-      ],
+          ChromeBarButton(
+            label: 'Kill',
+            icon: Icons.stop,
+            // Amber and teal respectively, as before the chrome layer: these two
+            // read as distinct from the neutral Shell/Cascade/Push.
+            accent: t.attentionOn,
+            onPressed: _busy || !running ? null : _kill,
+          ),
+          ChromeBarButton(
+            label: 'Restart',
+            icon: Icons.restart_alt,
+            accent: t.working,
+            onPressed: _busy ? null : _restart,
+          ),
+          ChromeBarButton(
+            label: 'Cascade',
+            icon: Icons.merge_type,
+            tooltip: 'Cascade merge',
+            onPressed: _busy ? null : _cascadeMerge,
+          ),
+          ChromeBarButton(
+            label: 'Push',
+            icon: Icons.publish,
+            tooltip: 'Push stack',
+            onPressed: _busy ? null : _pushStack,
+          ),
+          ChromeBarButton(
+            label: 'Delete',
+            icon: Icons.delete_outline,
+            kind: ChromeActionKind.destructive,
+            onPressed: _busy ? null : _delete,
+          ),
+        ],
+      ),
     );
   }
 
@@ -653,6 +809,8 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
             Expanded(
               child: Text(
                 error,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onErrorContainer,
                 ),
@@ -665,7 +823,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   }
 }
 
-/// The phone (stacked-navigation) detail screen: a Scaffold titled by the
+/// The phone (stacked-navigation) detail screen: a [ChromePage] titled by the
 /// session, wrapping a [SessionDetailBody] whose terminal/review actions push
 /// routes and whose delete/dismiss pop back to the list.
 class SessionDetailPage extends StatelessWidget {
@@ -681,11 +839,18 @@ class SessionDetailPage extends StatelessWidget {
   ) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => TerminalPage(
-          api: store.api,
-          handle: store.handle!,
-          session: session,
-          kind: kind,
+        // Re-provide the owning scope: route builders don't inherit the pushing
+        // widget's context, and TerminalPage registers its active attach with
+        // the store (so reconnect/dispose can detach before releasing the
+        // handle) via CommanderStoreScope.of.
+        builder: (_) => CommanderStoreScope(
+          store: store,
+          child: TerminalPage(
+            api: store.api,
+            handle: store.handle!,
+            session: session,
+            kind: kind,
+          ),
         ),
       ),
     );
@@ -694,10 +859,13 @@ class SessionDetailPage extends StatelessWidget {
   void _openReview(BuildContext context, CommanderStore store) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => ReviewPage(
-          api: store.api,
-          handle: store.handle!,
-          session: session,
+        builder: (_) => CommanderStoreScope(
+          store: store,
+          child: ReviewPage(
+            api: store.api,
+            handle: store.handle!,
+            session: session,
+          ),
         ),
       ),
     );
@@ -706,16 +874,18 @@ class SessionDetailPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = CommanderStoreScope.of(context)!;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(session.title, overflow: TextOverflow.ellipsis),
-      ),
+    return ChromePage(
+      code: '47-D',
+      title: session.title,
       body: SessionDetailBody(
         session: session,
         onOpenTerminal: (kind) => _openTerminal(context, store, kind),
         onOpenReview: () => _openReview(context, store),
         onDeleted: () => Navigator.of(context).pop(true),
         onDismiss: () => Navigator.of(context).maybePop(),
+        // Phone form factor: drop the static snapshot in favour of the live
+        // terminal, which is a single tap away.
+        showPanePreview: false,
       ),
     );
   }

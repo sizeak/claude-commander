@@ -21,7 +21,7 @@ use claude_commander_client::{
 use claude_commander_core::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    WorkspaceSnapshot,
+    SetSessionBaseOutcome, Snapshot,
 };
 use claude_commander_core::backend::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
@@ -29,6 +29,8 @@ use claude_commander_core::backend::{
 };
 use claude_commander_core::comment::{ApplyOutcome, Comment};
 use claude_commander_core::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::workspace::SetWorkspacesRequest;
 use claude_commander_protocol::ws::AttachKind as WsAttachKind;
 use uuid::Uuid;
 
@@ -90,16 +92,17 @@ impl CommanderBackend for RemoteBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         // Every capability here is an operator-local affordance the server host
-        // can't satisfy: opening the operator's editor, a `tmux display-popup`
-        // switcher on the server, a dedicated commander tmux session, and
-        // *project* shells (a local tmux affordance keyed on a local project id).
+        // can't satisfy: opening the operator's editor, a dedicated commander
+        // tmux session, and *project* shells (a local tmux affordance keyed on a
+        // local project id). The in-session switcher used to be one of these,
+        // back when it was a `tmux display-popup` on the operator's own server;
+        // the TUI now draws it itself, so it works here too.
         // Note `shell_toggle` gates only the project-shell path — the in-session
         // Ctrl+\ toggle to a session's own shell pane works fine over WS
         // (e2e-tested) via a separate `AttachKind::Shell`, independent of this
         // flag. The name reads broader than it acts; left unchanged this round.
         BackendCapabilities {
             open_editor: false,
-            switcher_popup: false,
             commander_session: false,
             shell_toggle: false,
             // The agent runs on the server host: the operator's clipboard image
@@ -124,9 +127,9 @@ impl CommanderBackend for RemoteBackend {
     }
 
     // `startup_reconcile`, `reconcile_sections`, `reconcile_one_section`,
-    // `record_feature`, `flush_telemetry`, `restart_session_fresh`, and
-    // `apply_pr_results` all keep the trait defaults: the server reconciles and
-    // records telemetry itself, and applying PR results is a local-only loop.
+    // `record_feature`, `flush_telemetry`, and `apply_pr_results` all keep the
+    // trait defaults: the server reconciles and records telemetry itself, and
+    // applying PR results is a local-only loop.
 
     /// Ask the server to re-check PR metadata (it runs the PR-status loop).
     async fn request_pr_refresh(&self) -> BResult<()> {
@@ -138,11 +141,8 @@ impl CommanderBackend for RemoteBackend {
 
     // -- Queries --
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
-        self.client
-            .workspace_snapshot()
-            .await
-            .map_err(into_backend_error)
+    async fn snapshot(&self) -> BResult<Snapshot> {
+        self.client.snapshot().await.map_err(into_backend_error)
     }
 
     async fn agent_states(&self, fresh: bool) -> BResult<AgentStatesSnapshot> {
@@ -229,6 +229,13 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
+    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()> {
+        self.client
+            .restart_session_fresh(id)
+            .await
+            .map_err(into_backend_error)
+    }
+
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
         self.client
             .delete_session(id)
@@ -246,6 +253,16 @@ impl CommanderBackend for RemoteBackend {
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()> {
         self.client
             .set_section(id, section)
+            .await
+            .map_err(into_backend_error)
+    }
+    async fn set_session_base(
+        &self,
+        id: SessionId,
+        parent: Option<SessionId>,
+    ) -> BResult<SetSessionBaseOutcome> {
+        self.client
+            .set_session_base(id, parent)
             .await
             .map_err(into_backend_error)
     }
@@ -282,9 +299,44 @@ impl CommanderBackend for RemoteBackend {
 
     // -- Projects --
 
-    async fn add_project(&self, path: PathBuf) -> BResult<ProjectId> {
+    async fn add_project(&self, path: PathBuf, workspace: Option<String>) -> BResult<ProjectId> {
         self.client
-            .add_project(path)
+            .add_project(path, workspace)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn ensure_project(&self, path: PathBuf, workspace: Option<String>) -> BResult<ProjectId> {
+        self.client
+            .ensure_project(path, workspace)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn set_workspaces(&self, req: SetWorkspacesRequest) -> BResult<()> {
+        self.client
+            .set_workspaces(req)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn rename_workspace(&self, from: String, to: String) -> BResult<()> {
+        self.client
+            .rename_workspace(from, to)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn delete_workspace(&self, name: String) -> BResult<()> {
+        self.client
+            .delete_workspace(name)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn set_project_workspace(&self, id: ProjectId, workspace: Option<String>) -> BResult<()> {
+        self.client
+            .set_project_workspace(id, workspace)
             .await
             .map_err(into_backend_error)
     }
@@ -296,18 +348,44 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
-    async fn scan_directory(&self, dir: PathBuf) -> BResult<ScanResult> {
+    async fn scan_directory(&self, dir: PathBuf, workspace: Option<String>) -> BResult<ScanResult> {
         // The wire response mirrors `ScanResult`'s fields (which isn't
         // `Deserialize`); rebuild the core type from it.
         let body = self
             .client
-            .scan_directory(dir)
+            .scan_directory(dir, workspace)
             .await
             .map_err(into_backend_error)?;
         Ok(ScanResult {
             added: body.added,
             skipped: body.skipped,
         })
+    }
+
+    // -- Repository clone --
+    //
+    // The clone runs on the *server* host: it is the machine whose projects dir
+    // the checkout lands in and whose `gh` account decides the repo list. So these
+    // are plain delegations, with no local fallback to blur which host acted.
+
+    async fn list_github_repos(&self) -> BResult<Vec<GithubRepo>> {
+        self.client.github_repos().await.map_err(into_backend_error)
+    }
+
+    async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
+        // The 202 body *is* a `CloneJob`, so there is nothing to rebuild here —
+        // the trait's return shape was chosen to match it. `req.source` is never
+        // logged: it routinely carries a credential.
+        self.client
+            .start_clone(req)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn clone_job(&self, id: CloneJobId) -> BResult<Option<CloneJob>> {
+        // The client turns the server's 404 into `Ok(None)`, keeping "pruned or
+        // never issued" distinct from a transport failure.
+        self.client.clone_job(id).await.map_err(into_backend_error)
     }
 
     // -- Cascade / push-stack --
@@ -444,6 +522,7 @@ mod tests {
     use claude_commander_core::session::{Project, WorktreeSession};
     use claude_commander_core::telemetry::FrontendInfo;
     use claude_commander_core::tmux::TmuxExecutor;
+    use claude_commander_protocol::github::{CloneSource, CloneStatus};
     use claude_commander_server::{AppState, AuthConfig};
     use claude_commander_test_support::{
         create_test_repo, spawn_server, test_state, tmux_available,
@@ -487,6 +566,9 @@ mod tests {
         let mut config = Config {
             worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
             tmux_tmpdir: Some(tmux_tmpdir),
+            // `projects_dir` defaults to the user's REAL `~/Projects`, which
+            // the repo-clone paths write into. Pin it under `data_dir`.
+            projects_dir: Some(data_dir.path().join("projects")),
             ..Config::default()
         };
         config.telemetry.enabled = false;
@@ -554,7 +636,6 @@ mod tests {
             let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
             let caps = backend.capabilities();
             assert!(!caps.open_editor);
-            assert!(!caps.switcher_popup);
             assert!(!caps.commander_session);
             assert!(!caps.shell_toggle);
             // Image paste is the exception: a remote agent can't read the
@@ -567,7 +648,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_round_trips_seeded_state() {
+    async fn snapshot_round_trips_seeded_state() {
         let (addr, service, _d, _w) = serve_disabled().await;
         let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
         let pid = project.id;
@@ -589,7 +670,7 @@ mod tests {
             .unwrap();
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        let snap = backend.workspace_snapshot().await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.projects[0].id, pid);
         assert_eq!(snap.sessions.len(), 1);
@@ -659,7 +740,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snap = backend.workspace_snapshot().await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
         let s = snap
             .sessions
             .iter()
@@ -696,7 +777,7 @@ mod tests {
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
         // Precondition: not unread.
-        let before = backend.workspace_snapshot().await.unwrap();
+        let before = backend.snapshot().await.unwrap();
         assert!(
             !before
                 .sessions
@@ -708,7 +789,7 @@ mod tests {
 
         backend.mark_unread(vec![sid]).await.unwrap();
 
-        let after = backend.workspace_snapshot().await.unwrap();
+        let after = backend.snapshot().await.unwrap();
         assert!(
             after
                 .sessions
@@ -741,7 +822,7 @@ mod tests {
 
         let backend =
             RemoteBackend::with_config(spec(addr, Some("the-wrong-token")), idle_config()).unwrap();
-        let err = backend.workspace_snapshot().await.unwrap_err();
+        let err = backend.snapshot().await.unwrap_err();
         assert!(matches!(err, BackendError::Auth), "got {err:?}");
     }
 
@@ -759,7 +840,7 @@ mod tests {
 
         let backend =
             RemoteBackend::with_config(spec(addr, Some("the-real-token")), idle_config()).unwrap();
-        let snap = backend.workspace_snapshot().await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
         assert!(snap.projects.is_empty());
     }
 
@@ -767,11 +848,98 @@ mod tests {
     async fn connection_refused_is_unavailable() {
         let addr = unused_addr().await;
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        let err = backend.workspace_snapshot().await.unwrap_err();
+        let err = backend.snapshot().await.unwrap_err();
         assert!(
             matches!(err, BackendError::Unavailable { .. }),
             "got {err:?}"
         );
+    }
+
+    /// Every workspace route over real HTTP: define, move a project (which
+    /// self-heals the definition), rename (rewrites the tag), delete (back to
+    /// Main) — each visible in the server's own snapshot afterwards.
+    #[tokio::test]
+    async fn workspace_edits_round_trip_over_http() {
+        use claude_commander_protocol::workspace::{StartupWorkspace, WorkspaceDef};
+        let (addr, service, _d, _w) = serve_disabled().await;
+        let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
+        let pid = project.id;
+        service
+            .store()
+            .mutate(move |state| state.add_project(project))
+            .await
+            .unwrap();
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+
+        backend
+            .set_workspaces(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("Play")],
+                main: Some(WorkspaceDef::named("Home")),
+                startup_workspace: Some(StartupWorkspace::Main),
+            })
+            .await
+            .unwrap();
+        backend
+            .set_project_workspace(pid, Some("Work".to_string()))
+            .await
+            .unwrap();
+        let snap = backend.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace.as_deref(), Some("Work"));
+        let names: Vec<_> = snap.workspaces.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Play", "Work"], "the move defined Work server-side");
+        assert_eq!(snap.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(snap.startup_workspace, StartupWorkspace::Main);
+
+        backend
+            .rename_workspace("Work".to_string(), "Job".to_string())
+            .await
+            .unwrap();
+        let snap = backend.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace.as_deref(), Some("Job"));
+
+        backend.delete_workspace("Job".to_string()).await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace, None);
+        // Idempotent on a server without the workspace.
+        backend.delete_workspace("Job".to_string()).await.unwrap();
+
+        let err = backend
+            .set_project_workspace(ProjectId::new(), Some("Work".to_string()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::NotFound), "got {err:?}");
+        let err = backend
+            .set_workspaces(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("last")],
+                main: None,
+                startup_workspace: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidRequest(_)),
+            "got {err:?}"
+        );
+    }
+
+    /// `ensure_project` carries the workspace to the server, which tags the
+    /// project it registers.
+    #[tokio::test]
+    async fn ensure_project_over_http_lands_in_the_requested_workspace() {
+        let (addr, service, _d, _w) = serve_disabled().await;
+        let (_repo_dir, repo_path) = create_test_repo().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let id = backend
+            .ensure_project(repo_path, Some("Work".to_string()))
+            .await
+            .unwrap();
+        let tag = service
+            .list_projects()
+            .await
+            .into_iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.workspace);
+        assert_eq!(tag.as_deref(), Some("Work"));
     }
 
     #[tokio::test]
@@ -820,6 +988,143 @@ mod tests {
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
         let err = backend
             .paste_image(SessionId::new(), b"not an image".to_vec())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidRequest(_)),
+            "got {err:?}"
+        );
+    }
+
+    // -- Projects --
+
+    /// `ensure_project` is idempotent *across the wire*: registering a path the
+    /// server already knows must answer with the existing id rather than a second
+    /// project for the same checkout.
+    ///
+    /// This is what `add_project` cannot do — it registers unconditionally — and
+    /// the reason the trait carries both. Asserted on the id **and** on the
+    /// server's project list, because an equal id alone would also hold if the
+    /// route had somehow returned the right id while still adding a duplicate.
+    #[tokio::test]
+    async fn ensure_project_is_idempotent_over_http() {
+        let (addr, service, _d, _w) = serve_disabled().await;
+        let (_repo, repo_path) = create_test_repo().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+
+        let first = backend
+            .ensure_project(repo_path.clone(), None)
+            .await
+            .unwrap();
+        let second = backend
+            .ensure_project(repo_path.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            first, second,
+            "the second ensure must return the id the first created"
+        );
+
+        // Projects are stored under `repo_identity` — the *canonicalized* repo
+        // root — so compare against that spelling, not the raw `TempDir` path.
+        // They differ wherever the temp dir sits behind a symlink, e.g. macOS's
+        // `/tmp` → `/private/tmp`.
+        let canonical = tokio::fs::canonicalize(&repo_path).await.unwrap();
+        let projects = service.list_projects().await;
+        let matching: Vec<_> = projects
+            .iter()
+            .filter(|p| p.repo_path == canonical)
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            matching,
+            vec![first],
+            "exactly one project must exist for the path, got {projects:?}"
+        );
+    }
+
+    // -- Repository clone --
+    //
+    // `list_github_repos` is not exercised over HTTP: the server shells out to
+    // `gh`, so the result would depend on whether the machine running the tests
+    // has it installed and authenticated — and if it does, the call reaches the
+    // GitHub API. The delegation is one line; the parsing lives in core.
+
+    /// Start → poll → terminal status over real HTTP, network-free: an occupied
+    /// destination is the one clone outcome the server reaches without running
+    /// `git`, so it proves the whole remote surface (202 body, poll route,
+    /// terminal status) offline.
+    #[tokio::test]
+    async fn clone_round_trips_over_http() {
+        let (addr, service, _d, _w) = serve_disabled().await;
+        // `test_state` pins the server's projects dir into the temp data dir, so
+        // occupying a destination here cannot touch the real `~/Projects`.
+        let projects = service.read_config().projects_dir().unwrap();
+        std::fs::create_dir_all(projects.join("widget")).unwrap();
+
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let job = backend
+            .start_clone(CloneRequest {
+                source: CloneSource::Url {
+                    url: "https://example.invalid/octo/widget.git".to_string(),
+                },
+                dest_name: None,
+                workspace: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(job.dest, projects.join("widget"));
+
+        let mut status = job.status.clone();
+        for _ in 0..2_000 {
+            let polled = backend
+                .clone_job(job.id)
+                .await
+                .unwrap()
+                .expect("a job started a moment ago must still be readable");
+            status = polled.status;
+            if !matches!(status, CloneStatus::Running) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            matches!(
+                status,
+                CloneStatus::DestinationExists {
+                    is_git_repo: false,
+                    ..
+                }
+            ),
+            "expected DestinationExists for an occupied dir, got {status:?}"
+        );
+    }
+
+    /// The server's 404 for an unknown job must arrive as `Ok(None)`, not an
+    /// error: a poll loop distinguishes "pruned/never existed" from "the link is
+    /// broken", and only one of those should stop it retrying.
+    #[tokio::test]
+    async fn an_unknown_clone_job_is_absent_not_an_error() {
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        assert_eq!(backend.clone_job(CloneJobId::new()).await.unwrap(), None);
+    }
+
+    /// The server's 400 for a refused source arrives as `InvalidRequest` — the
+    /// same category `LocalBackend` produces from core's `CloneSourceRejected`,
+    /// so a frontend renders one message regardless of transport.
+    #[tokio::test]
+    async fn a_refused_clone_source_is_an_invalid_request() {
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let err = backend
+            .start_clone(CloneRequest {
+                source: CloneSource::Url {
+                    url: "--upload-pack=evil".to_string(),
+                },
+                dest_name: None,
+                workspace: None,
+            })
             .await
             .unwrap_err();
         assert!(
@@ -906,7 +1211,7 @@ mod tests {
         // Connection refused → Unavailable.
         let dead = unused_addr().await;
         let refused = RemoteBackend::with_config(spec(dead, Some(SECRET)), idle_config()).unwrap();
-        assert_clean(&refused.workspace_snapshot().await.unwrap_err());
+        assert_clean(&refused.snapshot().await.unwrap_err());
 
         // 401 from a token server we hold the wrong secret for → Auth.
         let data_dir = TempDir::new().unwrap();
@@ -918,7 +1223,7 @@ mod tests {
         );
         let addr = spawn_server(state).await;
         let authed = RemoteBackend::with_config(spec(addr, Some(SECRET)), idle_config()).unwrap();
-        let auth_err = authed.workspace_snapshot().await.unwrap_err();
+        let auth_err = authed.snapshot().await.unwrap_err();
         assert!(matches!(auth_err, BackendError::Auth));
         assert_clean(&auth_err);
 
@@ -1033,7 +1338,7 @@ mod tests {
         let addr = spawn_server(state).await;
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        backend.add_project(repo_path.clone()).await.unwrap();
+        backend.add_project(repo_path.clone(), None).await.unwrap();
         let sid = backend
             .create_session(CreateSessionOpts {
                 project_path: repo_path.clone(),
@@ -1050,7 +1355,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snap = backend.workspace_snapshot().await.unwrap();
+        let snap = backend.snapshot().await.unwrap();
         assert!(
             snap.sessions.iter().any(|s| s.session_id == sid),
             "created session should appear in the snapshot"
@@ -1124,7 +1429,7 @@ mod tests {
         let addr = spawn_server(state).await;
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        backend.add_project(repo_path.clone()).await.unwrap();
+        backend.add_project(repo_path.clone(), None).await.unwrap();
         let sid = backend
             .create_session(CreateSessionOpts {
                 project_path: repo_path.clone(),
@@ -1155,8 +1460,16 @@ mod tests {
             mut reader,
             mut writer,
             resizer,
+            refresher: _,
             mut terminator,
+            local_client_tty,
         } = conn.split();
+
+        // A remote attach's tmux client lives on the server, so there is no
+        // local client here. The in-session switcher reads exactly this to decide
+        // whether it may `tmux switch-client` in place; a stray `Some` would send
+        // a local switch at a session this attach can't be moved to.
+        assert_eq!(local_client_tty, None);
 
         // Type a command; bash echoes the marker back through the PTY.
         writer.write_all(b"echo cc_remote_marker\n").await.unwrap();
@@ -1216,7 +1529,7 @@ mod tests {
         let addr = spawn_server(state).await;
 
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
-        backend.add_project(repo_path.clone()).await.unwrap();
+        backend.add_project(repo_path.clone(), None).await.unwrap();
         let sid = backend
             .create_session(CreateSessionOpts {
                 project_path: repo_path.clone(),
@@ -1241,8 +1554,16 @@ mod tests {
             reader,
             writer,
             resizer,
+            refresher: _,
             mut terminator,
+            local_client_tty,
         } = conn.split();
+
+        // A remote attach's tmux client lives on the server, so there is no
+        // local client here. The in-session switcher reads exactly this to decide
+        // whether it may `tmux switch-client` in place; a stray `Some` would send
+        // a local switch at a session this attach can't be moved to.
+        assert_eq!(local_client_tty, None);
 
         // The shell pane's tmux session is the agent name + `-sh`.
         let shell_name = service

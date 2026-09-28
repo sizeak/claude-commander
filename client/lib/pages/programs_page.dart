@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
+import '../theme/tokens.dart';
+import '../util/error_text.dart';
 
 /// Edits the server's launch-program list (`PUT /api/config/programs`). Each row
 /// is a `{label, command}` pair the create-session form offers as a choice.
@@ -93,48 +96,43 @@ class _ProgramsPageState extends State<ProgramsPage> {
     try {
       await widget.api.setPrograms(handle: widget.handle, programs: programs);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Programs saved')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Programs saved')));
       Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Save failed: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Save failed: ${errorText(e, capitalize: false)}'),
+        ),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Programs'),
-        actions: [
-          if (_rows != null)
-            _saving
-                ? const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  )
-                : IconButton(
-                    onPressed: _save,
-                    icon: const Icon(Icons.save),
-                    tooltip: 'Save',
-                  ),
-        ],
-      ),
-      floatingActionButton: _rows == null
+    return ChromePage(
+      title: 'Programs',
+      code: '47-G',
+      actions: [
+        // An in-flight save disables the action rather than swapping it for a
+        // spinner: a ChromeAction is an icon + label, not a widget, and the
+        // themes render it themselves.
+        if (_rows != null)
+          ChromeButtonAction(
+            icon: Icons.save,
+            label: 'Save',
+            onPressed: _saving ? null : _save,
+          ),
+      ],
+      primaryAction: _rows == null
           ? null
-          : FloatingActionButton(
+          : ChromeButtonAction(
+              icon: Icons.add,
+              label: 'Add program',
               onPressed: _add,
-              tooltip: 'Add program',
-              child: const Icon(Icons.add),
             ),
       body: _body(context),
     );
@@ -142,7 +140,7 @@ class _ProgramsPageState extends State<ProgramsPage> {
 
   Widget _body(BuildContext context) {
     if (_loadError != null) {
-      return _ErrorView(error: _loadError.toString(), onRetry: _load);
+      return _ErrorView(error: errorText(_loadError!), onRetry: _load);
     }
     final rows = _rows;
     if (rows == null) {
@@ -163,9 +161,13 @@ class _ProgramsPageState extends State<ProgramsPage> {
     return ReorderableListView.builder(
       padding: const EdgeInsets.only(bottom: 88),
       itemCount: rows.length,
-      onReorder: (from, to) {
+      // `onReorderItem`, not the deprecated `onReorder`: it hands over a
+      // `to` already decremented for the item removed at `from`, and is only
+      // called when the two still differ after that adjustment
+      // (flutter/lib/src/widgets/reorderable_list.dart:1016-1030). So the
+      // caller no longer compensates.
+      onReorderItem: (from, to) {
         setState(() {
-          if (to > from) to -= 1;
           final r = rows.removeAt(from);
           rows.insert(to, r);
         });
@@ -194,6 +196,7 @@ class _ProgramRowTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Card(
@@ -215,6 +218,7 @@ class _ProgramRowTile extends StatelessWidget {
                     const SizedBox(height: 8),
                     TextField(
                       controller: row.command,
+                      style: t.meta(size: 13, color: t.text),
                       decoration: const InputDecoration(
                         labelText: 'Command',
                         isDense: true,
@@ -261,7 +265,12 @@ class _ErrorView extends StatelessWidget {
         const SizedBox(height: 12),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Text(error, textAlign: TextAlign.center),
+          child: Text(
+            error,
+            textAlign: TextAlign.center,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
         const SizedBox(height: 16),
         Center(

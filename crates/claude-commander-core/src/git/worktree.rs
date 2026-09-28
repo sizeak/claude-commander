@@ -5,6 +5,7 @@
 //! - Remove worktree
 //! - List worktrees
 
+use crate::git::{git_command, git_command_std};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -182,7 +183,7 @@ impl WorktreeManager {
     /// Remove a worktree
     #[instrument(skip(self))]
     pub async fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<()> {
-        let mut cmd = Command::new("git");
+        let mut cmd = git_command();
         cmd.current_dir(self.backend.path())
             .arg("worktree")
             .arg("remove");
@@ -215,7 +216,7 @@ impl WorktreeManager {
     /// List all worktrees
     #[instrument(skip(self))]
     pub async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
-        let output = Command::new("git")
+        let output = git_command()
             .current_dir(self.backend.path())
             .args(["worktree", "list", "--porcelain"])
             .stdin(Stdio::null())
@@ -240,7 +241,7 @@ impl WorktreeManager {
 
     /// Get HEAD commit of a worktree
     async fn get_worktree_head_static(worktree_path: &Path) -> Result<String> {
-        let output = Command::new("git")
+        let output = git_command()
             .current_dir(worktree_path)
             .args(["rev-parse", "HEAD"])
             .stdin(Stdio::null())
@@ -259,7 +260,7 @@ impl WorktreeManager {
 
     /// Prune stale worktree references
     pub async fn prune(&self) -> Result<()> {
-        let output = Command::new("git")
+        let output = git_command()
             .current_dir(self.backend.path())
             .args(["worktree", "prune"])
             .stdin(Stdio::null())
@@ -295,7 +296,7 @@ fn build_worktree_add_command(
     start_point: Option<&str>,
     skip_lfs_smudge: bool,
 ) -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = git_command_std();
     cmd.current_dir(repo_path).arg("worktree").arg("add");
 
     if branch_exists {
@@ -324,6 +325,74 @@ fn build_worktree_add_command(
     }
 
     cmd
+}
+
+/// List a repository's worktrees via the `git` CLI, without opening a gix
+/// [`GitBackend`].
+///
+/// This standalone subprocess variant of [`WorktreeManager::list_worktrees`]
+/// exists so callers on a `Send` future (notably the spawned PR-status loop's
+/// branch reconciliation) can read every worktree's live branch without holding
+/// a `!Send` gix repository across an `.await`. Detached worktrees carry the
+/// synthetic branch `"HEAD"` (matching [`parse_worktree_list`]).
+pub async fn list_worktrees_at(repo_path: &Path) -> Result<Vec<WorktreeInfo>> {
+    let output = git_command()
+        .current_dir(repo_path)
+        .args(["worktree", "list", "--porcelain"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| GitError::WorktreeError(format!("Failed to list worktrees: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(
+            GitError::WorktreeError(format!("git worktree list failed: {}", stderr)).into(),
+        );
+    }
+
+    parse_worktree_list(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Return `true` if `ref_name` (a full ref like `refs/heads/foo` or
+/// `refs/remotes/origin/foo`) resolves in the repo at `repo_path`, via
+/// `git show-ref --verify --quiet`.
+///
+/// A subprocess counterpart to [`GitBackend::ref_exists`] for use on `Send`
+/// futures. Callers use this only to *suppress* a branch reconcile, so it fails
+/// **safe**: a spawn error or any fatal (non-"not-found") git exit maps to
+/// `true`, erring toward leaving the stored branch untouched. See
+/// [`show_ref_indicates_exists`] for the exit-code mapping.
+pub async fn ref_exists_cli(repo_path: &Path, ref_name: &str) -> bool {
+    match git_command()
+        .current_dir(repo_path)
+        .args(["show-ref", "--verify", "--quiet", ref_name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+    {
+        Ok(status) => show_ref_indicates_exists(status.code()),
+        // Spawn/exec failure → fail safe (assume the ref exists → suppress).
+        Err(_) => true,
+    }
+}
+
+/// Interpret a `git show-ref --verify` exit code as ref existence, failing safe.
+///
+/// `show-ref` exits `0` when the ref exists and `1` when it genuinely does not;
+/// any other code (`128` for a fatal error — corrupt repo, not a git dir — or
+/// `None` when killed by a signal) is ambiguous and maps to `true`, so a
+/// transient failure suppresses the reconcile rather than triggering it.
+fn show_ref_indicates_exists(exit_code: Option<i32>) -> bool {
+    match exit_code {
+        Some(0) => true,
+        Some(1) => false,
+        _ => true,
+    }
 }
 
 /// Parse git worktree list --porcelain output
@@ -417,6 +486,16 @@ branch refs/heads/feature-branch
     fn test_parse_worktree_list_empty() {
         let worktrees = parse_worktree_list("").unwrap();
         assert!(worktrees.is_empty());
+    }
+
+    #[test]
+    fn test_show_ref_indicates_exists_fails_safe() {
+        assert!(show_ref_indicates_exists(Some(0)), "0 → exists");
+        assert!(!show_ref_indicates_exists(Some(1)), "1 → genuinely absent");
+        // Fatal / ambiguous outcomes must err toward "exists" so a transient
+        // failure suppresses (never triggers) a branch reconcile.
+        assert!(show_ref_indicates_exists(Some(128)), "128 → fail safe");
+        assert!(show_ref_indicates_exists(None), "signal-killed → fail safe");
     }
 
     fn worktree_add_env(skip_lfs_smudge: bool) -> Vec<(String, Option<String>)> {

@@ -1,6 +1,6 @@
 //! An in-memory [`CommanderBackend`] test double.
 //!
-//! [`MockBackend`] serves a fixed [`WorkspaceSnapshot`] + agent states and
+//! [`MockBackend`] serves a fixed [`Snapshot`] + agent states and
 //! exposes a drivable connection watch + change feed, so multi-backend TUI tests
 //! can stand up a fake remote server without any network or tmux. Mutations are
 //! accepted as no-ops (tests assert on rendering/selection, not persistence);
@@ -8,6 +8,7 @@
 //! [`Unavailable`](BackendError::Unavailable) so a degraded backend can be
 //! exercised.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -17,20 +18,39 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    WorkspaceSnapshot,
+    SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::github::{
+    CloneJob, CloneJobId, CloneRequest, CloneSource, CloneStatus, GithubRepo, redact_credentials,
+};
+use claude_commander_protocol::workspace::{SetWorkspacesRequest, WorkspaceDef};
 
 use super::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
     BackendDescriptor, BackendError, BackendKind, CommanderBackend, ConnectionState,
 };
 
+/// One workspace mutation a [`MockBackend`] received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MockWorkspaceCall {
+    SetWorkspaces(SetWorkspacesRequest),
+    Rename {
+        from: String,
+        to: String,
+    },
+    Delete(String),
+    SetProject {
+        id: ProjectId,
+        workspace: Option<String>,
+    },
+}
+
 /// See the module docs.
 pub struct MockBackend {
     descriptor: BackendDescriptor,
-    snapshot: Mutex<WorkspaceSnapshot>,
+    snapshot: Mutex<Snapshot>,
     states: Mutex<AgentStatesSnapshot>,
     branches: Mutex<Vec<BranchInfo>>,
     fail: Mutex<bool>,
@@ -42,9 +62,14 @@ pub struct MockBackend {
     reconciled: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::restart_session`], for routing asserts.
     restarted: Mutex<Vec<SessionId>>,
+    /// Sessions passed to [`Self::restart_session_fresh`], for routing asserts.
+    /// Kept separate from `restarted` so a test can tell a fresh (no-resume)
+    /// restart from a resuming one — the whole point of the Reset command.
+    reset: Mutex<Vec<SessionId>>,
     /// `(session, program)` pairs passed to [`Self::change_program`], for
     /// call-recording asserts.
     program_changes: Mutex<Vec<(SessionId, String)>>,
+    base_changes: Mutex<Vec<(SessionId, Option<SessionId>)>>,
     /// Count of [`Self::request_pr_refresh`] calls, for call-recording asserts.
     pr_refresh_calls: Mutex<usize>,
     /// Sessions passed to [`Self::mark_read`], for call-recording asserts.
@@ -64,6 +89,41 @@ pub struct MockBackend {
     toggled_reviewed: Mutex<Vec<(SessionId, String)>>,
     /// `(session, side, path)` passed to [`Self::fetch_diff_blob`].
     fetched_blobs: Mutex<Vec<(SessionId, DiffSide, String)>>,
+    /// Overrides the `open_editor` capability (default `false`, matching a
+    /// remote backend). Set by [`Self::set_open_editor`] so a test can exercise
+    /// the local-editor launch path through the review view.
+    open_editor: Mutex<bool>,
+    /// Repo list served by [`Self::list_github_repos`], set by
+    /// [`Self::set_github_repos`].
+    github_repos: Mutex<Vec<GithubRepo>>,
+    /// Requests passed to [`Self::start_clone`], for call-recording asserts.
+    clone_requests: Mutex<Vec<CloneRequest>>,
+    /// Jobs [`Self::start_clone`] has issued, served back by
+    /// [`Self::clone_job`]. Nothing ever advances their status: a mock has no
+    /// clone to finish, and a test that wants a terminal status sets one with
+    /// [`Self::set_clone_status`].
+    clone_jobs: Mutex<Vec<CloneJob>>,
+    /// Paths passed to [`Self::add_project`], for call-recording asserts — the
+    /// "register the existing checkout" answer to an occupied clone destination
+    /// has to be shown to hit the right backend's disk.
+    added_projects: Mutex<Vec<std::path::PathBuf>>,
+    /// Paths passed to [`Self::ensure_project`], one entry per call (so a test can
+    /// see a repeat), kept separate from `added_projects` because *which* of the
+    /// two a caller used is the thing worth asserting: only `ensure_project`
+    /// deduplicates.
+    ensured_projects: Mutex<Vec<std::path::PathBuf>>,
+    /// The id [`Self::ensure_project`] issued for each distinct path, so a repeat
+    /// answers with the first id rather than a fresh one — the contract a real
+    /// backend's `POST /projects/ensure` provides.
+    ensured_ids: Mutex<HashMap<std::path::PathBuf, ProjectId>>,
+    /// The `workspace` argument of every [`Self::add_project`] /
+    /// [`Self::ensure_project`] call, in call order (both methods share one
+    /// log, parallel to call order across the two).
+    project_add_workspaces: Mutex<Vec<Option<String>>>,
+    /// Every workspace mutation, in call order. The mock also *applies* each
+    /// one to its snapshot (and bumps the change feed), so a test sees the
+    /// effect a real backend would have.
+    workspace_calls: Mutex<Vec<MockWorkspaceCall>>,
     conn_tx: watch::Sender<ConnectionState>,
     conn_rx: watch::Receiver<ConnectionState>,
     gen_tx: watch::Sender<u64>,
@@ -72,7 +132,7 @@ pub struct MockBackend {
 
 impl MockBackend {
     /// A remote-kind mock named `name` serving `snapshot`, initially connected.
-    pub fn new(name: impl Into<String>, snapshot: WorkspaceSnapshot) -> Self {
+    pub fn new(name: impl Into<String>, snapshot: Snapshot) -> Self {
         let (conn_tx, conn_rx) = watch::channel(ConnectionState::Connected);
         let (gen_tx, gen_rx) = watch::channel(0u64);
         Self {
@@ -91,7 +151,9 @@ impl MockBackend {
             created: Mutex::new(Vec::new()),
             reconciled: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
+            reset: Mutex::new(Vec::new()),
             program_changes: Mutex::new(Vec::new()),
+            base_changes: Mutex::new(Vec::new()),
             pr_refresh_calls: Mutex::new(0),
             read_marked: Mutex::new(Vec::new()),
             mark_read_gate: Mutex::new(None),
@@ -101,6 +163,15 @@ impl MockBackend {
             applied_comments: Mutex::new(Vec::new()),
             toggled_reviewed: Mutex::new(Vec::new()),
             fetched_blobs: Mutex::new(Vec::new()),
+            open_editor: Mutex::new(false),
+            github_repos: Mutex::new(Vec::new()),
+            clone_requests: Mutex::new(Vec::new()),
+            clone_jobs: Mutex::new(Vec::new()),
+            added_projects: Mutex::new(Vec::new()),
+            ensured_projects: Mutex::new(Vec::new()),
+            ensured_ids: Mutex::new(HashMap::new()),
+            project_add_workspaces: Mutex::new(Vec::new()),
+            workspace_calls: Mutex::new(Vec::new()),
             conn_tx,
             conn_rx,
             gen_tx,
@@ -118,6 +189,12 @@ impl MockBackend {
     /// Make every query fail with `Unavailable` (a downed server).
     pub fn set_failing(&self, fail: bool) {
         *self.fail.lock().unwrap() = fail;
+    }
+
+    /// Advertise the `open_editor` capability, so the review view will drive the
+    /// operator's local editor for this backend's sessions rather than toasting.
+    pub fn set_open_editor(&self, on: bool) {
+        *self.open_editor.lock().unwrap() = on;
     }
 
     /// Set the branch list served by [`Self::list_branches`].
@@ -140,6 +217,12 @@ impl MockBackend {
         self.reconciled.lock().unwrap().clone()
     }
 
+    /// `(session, new parent)` pairs passed to [`Self::set_session_base`], in
+    /// call order. `None` is an unstack onto the project's main branch.
+    pub fn base_changes(&self) -> Vec<(SessionId, Option<SessionId>)> {
+        self.base_changes.lock().unwrap().clone()
+    }
+
     /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
     pub fn program_changes(&self) -> Vec<(SessionId, String)> {
         self.program_changes.lock().unwrap().clone()
@@ -148,6 +231,11 @@ impl MockBackend {
     /// Sessions passed to [`Self::restart_session`], in call order.
     pub fn restarted_sessions(&self) -> Vec<SessionId> {
         self.restarted.lock().unwrap().clone()
+    }
+
+    /// Sessions passed to [`Self::restart_session_fresh`], in call order.
+    pub fn reset_sessions(&self) -> Vec<SessionId> {
+        self.reset.lock().unwrap().clone()
     }
 
     /// How many times [`Self::request_pr_refresh`] has been called.
@@ -199,6 +287,60 @@ impl MockBackend {
         self.fetched_blobs.lock().unwrap().clone()
     }
 
+    /// Set the repo list served by [`Self::list_github_repos`].
+    pub fn set_github_repos(&self, repos: Vec<GithubRepo>) {
+        *self.github_repos.lock().unwrap() = repos;
+    }
+
+    /// Requests passed to [`Self::start_clone`], in call order.
+    pub fn clone_requests(&self) -> Vec<CloneRequest> {
+        self.clone_requests.lock().unwrap().clone()
+    }
+
+    /// Paths passed to [`Self::add_project`], in call order.
+    pub fn added_projects(&self) -> Vec<std::path::PathBuf> {
+        self.added_projects.lock().unwrap().clone()
+    }
+
+    /// The `workspace` passed to each `add_project` / `ensure_project` call, in
+    /// call order.
+    pub fn project_add_workspaces(&self) -> Vec<Option<String>> {
+        self.project_add_workspaces.lock().unwrap().clone()
+    }
+
+    /// Every workspace mutation received, in call order.
+    pub fn workspace_calls(&self) -> Vec<MockWorkspaceCall> {
+        self.workspace_calls.lock().unwrap().clone()
+    }
+
+    /// Record a workspace call, apply `f` to the served snapshot, and bump the
+    /// change feed.
+    fn workspace_mutation(&self, call: MockWorkspaceCall, f: impl FnOnce(&mut Snapshot)) {
+        self.workspace_calls.lock().unwrap().push(call);
+        f(&mut self.snapshot.lock().unwrap());
+        self.gen_tx.send_modify(|g| *g = g.wrapping_add(1));
+    }
+
+    /// Paths passed to [`Self::ensure_project`], in call order (repeats included).
+    pub fn ensured_projects(&self) -> Vec<std::path::PathBuf> {
+        self.ensured_projects.lock().unwrap().clone()
+    }
+
+    /// Force an issued job's status, so a test can drive a poll loop to a
+    /// terminal outcome (success, failure, occupied destination) without a real
+    /// clone. Ignores an id this mock never issued.
+    pub fn set_clone_status(&self, id: CloneJobId, status: CloneStatus) {
+        if let Some(job) = self
+            .clone_jobs
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|j| j.id == id)
+        {
+            job.status = status;
+        }
+    }
+
     fn guard(&self) -> BResult<()> {
         if *self.fail.lock().unwrap() {
             Err(BackendError::Unavailable {
@@ -226,8 +368,7 @@ impl CommanderBackend for MockBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
-            open_editor: false,
-            switcher_popup: false,
+            open_editor: *self.open_editor.lock().unwrap(),
             commander_session: false,
             shell_toggle: false,
             client_side_image_paste: false,
@@ -246,7 +387,7 @@ impl CommanderBackend for MockBackend {
         Some(self.conn_rx.clone())
     }
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
+    async fn snapshot(&self) -> BResult<Snapshot> {
         self.guard()?;
         Ok(self.snapshot.lock().unwrap().clone())
     }
@@ -333,6 +474,12 @@ impl CommanderBackend for MockBackend {
         Ok(())
     }
 
+    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()> {
+        self.guard()?;
+        self.reset.lock().unwrap().push(id);
+        Ok(())
+    }
+
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
         self.guard()?;
         self.deleted.lock().unwrap().push(id);
@@ -351,6 +498,20 @@ impl CommanderBackend for MockBackend {
 
     async fn set_section(&self, _id: SessionId, _section: Option<String>) -> BResult<()> {
         self.guard()
+    }
+
+    async fn set_session_base(
+        &self,
+        id: SessionId,
+        parent: Option<SessionId>,
+    ) -> BResult<SetSessionBaseOutcome> {
+        self.guard()?;
+        self.base_changes.lock().unwrap().push((id, parent));
+        Ok(SetSessionBaseOutcome {
+            new_base_branch: "main".to_string(),
+            old_base_branch: None,
+            pr: claude_commander_protocol::api::PrRetarget::NoPr,
+        })
     }
 
     async fn toggle_keep_alive(&self, _id: SessionId) -> BResult<bool> {
@@ -378,17 +539,146 @@ impl CommanderBackend for MockBackend {
         Ok(())
     }
 
-    async fn add_project(&self, _path: std::path::PathBuf) -> BResult<ProjectId> {
+    async fn add_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId> {
         self.guard()?;
+        self.added_projects.lock().unwrap().push(path);
+        self.project_add_workspaces.lock().unwrap().push(workspace);
         Ok(ProjectId::new())
+    }
+
+    async fn ensure_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId> {
+        self.guard()?;
+        self.ensured_projects.lock().unwrap().push(path.clone());
+        self.project_add_workspaces.lock().unwrap().push(workspace);
+        // Idempotent like the route it stands in for: a repeated path answers with
+        // the id issued the first time. A mock that returned a fresh id each call
+        // would let a caller that used the *non*-idempotent `add_project` pass a
+        // test about not duplicating.
+        Ok(*self.ensured_ids.lock().unwrap().entry(path).or_default())
     }
 
     async fn remove_project(&self, _id: ProjectId) -> BResult<()> {
         self.guard()
     }
 
-    async fn scan_directory(&self, _dir: std::path::PathBuf) -> BResult<ScanResult> {
+    async fn set_workspaces(&self, req: SetWorkspacesRequest) -> BResult<()> {
+        self.guard()?;
+        self.workspace_mutation(MockWorkspaceCall::SetWorkspaces(req.clone()), |snap| {
+            snap.workspaces = req.workspaces;
+            if let Some(main) = req.main {
+                snap.main_workspace = Some(main);
+            }
+            if let Some(startup) = req.startup_workspace {
+                snap.startup_workspace = startup;
+            }
+        });
+        Ok(())
+    }
+
+    async fn rename_workspace(&self, from: String, to: String) -> BResult<()> {
+        self.guard()?;
+        let call = MockWorkspaceCall::Rename {
+            from: from.clone(),
+            to: to.clone(),
+        };
+        self.workspace_mutation(call, |snap| {
+            for def in snap.workspaces.iter_mut().filter(|d| d.name == from) {
+                def.name = to.clone();
+            }
+            for p in &mut snap.projects {
+                if p.workspace.as_deref() == Some(from.as_str()) {
+                    p.workspace = Some(to.clone());
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn delete_workspace(&self, name: String) -> BResult<()> {
+        self.guard()?;
+        self.workspace_mutation(MockWorkspaceCall::Delete(name.clone()), |snap| {
+            snap.workspaces.retain(|d| d.name != name);
+            for p in &mut snap.projects {
+                if p.workspace.as_deref() == Some(name.as_str()) {
+                    p.workspace = None;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn set_project_workspace(&self, id: ProjectId, workspace: Option<String>) -> BResult<()> {
+        self.guard()?;
+        let call = MockWorkspaceCall::SetProject {
+            id,
+            workspace: workspace.clone(),
+        };
+        self.workspace_mutation(call, |snap| {
+            if let Some(name) = &workspace
+                && !snap.workspaces.iter().any(|d| &d.name == name)
+            {
+                snap.workspaces.push(WorkspaceDef::named(name));
+            }
+            if let Some(p) = snap.projects.iter_mut().find(|p| p.id == id) {
+                p.workspace = workspace;
+            }
+        });
+        Ok(())
+    }
+
+    async fn scan_directory(
+        &self,
+        _dir: std::path::PathBuf,
+        _workspace: Option<String>,
+    ) -> BResult<ScanResult> {
         self.unimpl()
+    }
+
+    async fn list_github_repos(&self) -> BResult<Vec<GithubRepo>> {
+        self.guard()?;
+        Ok(self.github_repos.lock().unwrap().clone())
+    }
+
+    async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
+        self.guard()?;
+        // The label goes through the protocol's redaction like a real backend's:
+        // `req.source` may be a credentialed URL, and a mock that echoed it raw
+        // would make it the one path in the codebase where that is fine to do.
+        let source_label = redact_credentials(match &req.source {
+            CloneSource::Github { full_name } => full_name,
+            CloneSource::Url { url } => url,
+        });
+        let job = CloneJob {
+            id: CloneJobId::new(),
+            source_label,
+            // No filesystem is touched, so this is a plausible destination rather
+            // than a resolved one — nothing in the mock reads it back.
+            dest: std::path::PathBuf::from("/mock/projects")
+                .join(req.dest_name.as_deref().unwrap_or("clone")),
+            status: CloneStatus::Running,
+        };
+        self.clone_requests.lock().unwrap().push(req);
+        self.clone_jobs.lock().unwrap().push(job.clone());
+        Ok(job)
+    }
+
+    async fn clone_job(&self, id: CloneJobId) -> BResult<Option<CloneJob>> {
+        self.guard()?;
+        Ok(self
+            .clone_jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|j| j.id == id)
+            .cloned())
     }
 
     async fn cascade_merge(&self, _id: SessionId) -> BResult<OperationStatus> {

@@ -29,6 +29,12 @@ use crate::auth::AuthConfig;
 use crate::state::AppState;
 
 /// Build a hermetic [`AppState`] backed by empty core state under `dir`.
+///
+/// Authentication is disabled, which is what every handler test wants: they
+/// drive the router directly via `oneshot`. A test that needs the token actually
+/// enforced goes through `embed::start`, which builds its own `AppState` from
+/// this one's service and the `AuthConfig` it is handed — so there is nothing for
+/// an `auth` parameter here to do.
 pub fn test_state(dir: &TempDir) -> AppState {
     // Telemetry is opt-out by default with a baked ingest token, so a plain
     // `CommanderService::new` would post events to the production OpenObserve
@@ -41,6 +47,17 @@ pub fn test_state(dir: &TempDir) -> AppState {
     let tmux_tmpdir = dir.path().join("tmux");
     std::fs::create_dir_all(&tmux_tmpdir).expect("create isolated tmux socket dir");
     config.tmux_tmpdir = Some(tmux_tmpdir);
+    // Same reasoning for the agent's temp files (pasted images, comment-apply
+    // briefs): the paste-image handler tests only exercise the reject paths
+    // (which never write), but pinning the base dir keeps the fixture safe if
+    // one ever reaches the store — whose prune *deletes* files — or Apply,
+    // instead of the real OS temp dir.
+    config.agent_temp_dir = Some(dir.path().join("agent-temp"));
+    // And the same for cloned repositories, where the default is the user's
+    // REAL `~/Projects`: a clone route reached from a test would check a
+    // repository out into the developer's own projects directory. Pin it under
+    // `dir` so the fixture can only ever write inside the temp tree.
+    config.projects_dir = Some(dir.path().join("projects"));
     let config_store = Arc::new(ConfigStore::with_path(
         config,
         dir.path().join("config.toml"),
@@ -75,6 +92,21 @@ pub fn json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
             String::from_utf8_lossy(bytes)
         )
     })
+}
+
+/// Guard: the test fixture must pin the projects directory into the temp dir.
+/// `projects_dir` defaults to the user's REAL `~/Projects`, and the repo-clone
+/// paths write there — so an unpinned fixture would clone into the developer's
+/// own projects directory from `cargo test` / CI. Fails if the knob is dropped.
+#[tokio::test]
+async fn test_state_pins_projects_dir_into_tempdir() {
+    let dir = TempDir::new().unwrap();
+    let state = test_state(&dir);
+    let projects_dir = state.service.read_config().projects_dir().unwrap();
+    assert!(
+        projects_dir.starts_with(dir.path()),
+        "test fixtures must not clone into the real ~/Projects (got {projects_dir:?})"
+    );
 }
 
 /// Guard: the test fixture must NOT emit telemetry. Telemetry is opt-out by

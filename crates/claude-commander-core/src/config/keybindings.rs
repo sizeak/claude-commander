@@ -29,36 +29,42 @@ pub enum BindableAction {
     PreviousGroup,
     NavigateFirst,
     NavigateLast,
+    NavigateLeft,
+    NavigateRight,
+    ListPageUp,
+    ListPageDown,
     Select,
     SelectShell,
     NewSession,
     NewStackedSession,
+    SetSessionBase,
     CascadeMergeMain,
     CascadeResume,
     CascadeAbandon,
     PushStack,
     NewProject,
+    CloneRepository,
     CheckoutBranch,
     DeleteSession,
     DeleteMergedPrSessions,
     RenameSession,
     RestartSession,
+    ResetSession,
     ChangeProgram,
     ToggleKeepAlive,
     RemoveProject,
     OpenInEditor,
+    OpenInfo,
     OpenPullRequest,
     RefreshPrStatus,
     OpenCommander,
     ToggleConversationOverlay,
     ToggleVoiceInput,
+    ToggleDictation,
     OpenReviewDiff,
-    TogglePane,
-    TogglePaneReverse,
-    ShrinkLeftPane,
-    GrowLeftPane,
     ShowHelp,
     ShowSettings,
+    CopyServerToken,
     Quit,
     ScrollUp,
     ScrollDown,
@@ -67,8 +73,17 @@ pub enum BindableAction {
     GenerateSummary,
     ScanDirectory,
     MoveToSection,
-    ToggleSection,
     ToggleViewMode,
+    ToggleSection,
+    NextWorkspace,
+    PreviousWorkspace,
+    WorkspacePicker,
+    NewWorkspace,
+    MoveProjectToWorkspace,
+    TogglePane,
+    TogglePaneReverse,
+    ShrinkLeftPane,
+    GrowLeftPane,
     AddRemoteServer,
     RemoveRemoteServer,
     EditServerPrograms,
@@ -86,24 +101,32 @@ impl BindableAction {
         Self::PreviousGroup,
         Self::NavigateFirst,
         Self::NavigateLast,
+        Self::NavigateLeft,
+        Self::NavigateRight,
+        Self::ListPageUp,
+        Self::ListPageDown,
         // Sessions
         Self::Select,
         Self::SelectShell,
         Self::NewSession,
         Self::RenameSession,
         Self::RestartSession,
+        Self::ResetSession,
         Self::ChangeProgram,
         Self::ToggleKeepAlive,
         Self::DeleteSession,
         Self::OpenInEditor,
+        Self::OpenInfo,
         // Stacked & Cascade
         Self::NewStackedSession,
+        Self::SetSessionBase,
         Self::PushStack,
         Self::CascadeMergeMain,
         Self::CascadeResume,
         Self::CascadeAbandon,
         // Projects
         Self::NewProject,
+        Self::CloneRepository,
         Self::CheckoutBranch,
         Self::ScanDirectory,
         Self::RemoveProject,
@@ -115,21 +138,28 @@ impl BindableAction {
         Self::AddRemoteServer,
         Self::RemoveRemoteServer,
         Self::EditServerPrograms,
-        // Sections & View
-        Self::ToggleViewMode,
+        // Sections
         Self::MoveToSection,
+        Self::ToggleViewMode,
         Self::ToggleSection,
+        // Workspaces
+        Self::NextWorkspace,
+        Self::PreviousWorkspace,
+        Self::WorkspacePicker,
+        Self::NewWorkspace,
+        Self::MoveProjectToWorkspace,
+        // Right pane (list views)
+        Self::TogglePane,
+        Self::TogglePaneReverse,
+        Self::ShrinkLeftPane,
+        Self::GrowLeftPane,
         // Review & AI
         Self::OpenReviewDiff,
         Self::GenerateSummary,
         Self::OpenCommander,
         Self::ToggleConversationOverlay,
         Self::ToggleVoiceInput,
-        // Layout
-        Self::TogglePane,
-        Self::TogglePaneReverse,
-        Self::ShrinkLeftPane,
-        Self::GrowLeftPane,
+        Self::ToggleDictation,
         // Scrolling
         Self::ScrollUp,
         Self::ScrollDown,
@@ -138,6 +168,7 @@ impl BindableAction {
         // Application
         Self::ShowHelp,
         Self::ShowSettings,
+        Self::CopyServerToken,
         Self::Quit,
     ];
 
@@ -150,36 +181,42 @@ impl BindableAction {
             Self::PreviousGroup => "previous_group",
             Self::NavigateFirst => "navigate_first",
             Self::NavigateLast => "navigate_last",
+            Self::NavigateLeft => "navigate_left",
+            Self::NavigateRight => "navigate_right",
+            Self::ListPageUp => "list_page_up",
+            Self::ListPageDown => "list_page_down",
             Self::Select => "select",
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
             Self::NewStackedSession => "new_stacked_session",
+            Self::SetSessionBase => "set_session_base",
             Self::CascadeMergeMain => "cascade_merge_main",
             Self::CascadeResume => "cascade_resume",
             Self::CascadeAbandon => "cascade_abandon",
             Self::PushStack => "push_stack",
             Self::NewProject => "new_project",
+            Self::CloneRepository => "clone_repository",
             Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
             Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
             Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
+            Self::ResetSession => "reset_session",
             Self::ChangeProgram => "change_program",
             Self::ToggleKeepAlive => "toggle_keep_alive",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
+            Self::OpenInfo => "open_info",
             Self::OpenPullRequest => "open_pull_request",
             Self::RefreshPrStatus => "refresh_pr_status",
             Self::OpenCommander => "open_commander",
             Self::ToggleConversationOverlay => "toggle_conversation_overlay",
             Self::ToggleVoiceInput => "toggle_voice_input",
+            Self::ToggleDictation => "toggle_dictation",
             Self::OpenReviewDiff => "open_review_diff",
-            Self::TogglePane => "toggle_pane",
-            Self::TogglePaneReverse => "toggle_pane_reverse",
-            Self::ShrinkLeftPane => "shrink_left_pane",
-            Self::GrowLeftPane => "grow_left_pane",
             Self::ShowHelp => "show_help",
             Self::ShowSettings => "show_settings",
+            Self::CopyServerToken => "copy_server_token",
             Self::Quit => "quit",
             Self::ScrollUp => "scroll_up",
             Self::ScrollDown => "scroll_down",
@@ -188,8 +225,17 @@ impl BindableAction {
             Self::GenerateSummary => "generate_summary",
             Self::ScanDirectory => "scan_directory",
             Self::MoveToSection => "move_to_section",
-            Self::ToggleSection => "toggle_section",
             Self::ToggleViewMode => "toggle_view_mode",
+            Self::ToggleSection => "toggle_section",
+            Self::NextWorkspace => "next_workspace",
+            Self::PreviousWorkspace => "previous_workspace",
+            Self::WorkspacePicker => "workspace_picker",
+            Self::NewWorkspace => "new_workspace",
+            Self::MoveProjectToWorkspace => "move_project_to_workspace",
+            Self::TogglePane => "toggle_pane",
+            Self::TogglePaneReverse => "toggle_pane_reverse",
+            Self::ShrinkLeftPane => "shrink_left_pane",
+            Self::GrowLeftPane => "grow_left_pane",
             Self::EditServerPrograms => "edit_server_programs",
             Self::AddRemoteServer => "add_remote_server",
             Self::RemoveRemoteServer => "remove_remote_server",
@@ -201,50 +247,65 @@ impl BindableAction {
         match self {
             Self::NavigateUp => "Navigate up",
             Self::NavigateDown => "Navigate down",
-            Self::NextGroup => "Jump to next project/section",
-            Self::PreviousGroup => "Jump to previous project/section",
-            Self::NavigateFirst => "Jump to first item",
-            Self::NavigateLast => "Jump to last item",
+            Self::NextGroup => "Next column / project-section group",
+            Self::PreviousGroup => "Previous column / project-section group",
+            Self::NavigateFirst => "Jump to first card/item",
+            Self::NavigateLast => "Jump to last card/item",
+            Self::NavigateLeft => "Previous column",
+            Self::NavigateRight => "Next column",
+            Self::ListPageUp => "Move up a screenful in the list",
+            Self::ListPageDown => "Move down a screenful in the list",
             Self::Select => "Attach to selected session",
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
             Self::NewStackedSession => "New stacked session on selected branch",
+            Self::SetSessionBase => "Set session base (restack)\u{2026}",
             Self::CascadeMergeMain => "Cascade merge main through stack",
             Self::CascadeResume => "Resume paused cascade merge",
             Self::CascadeAbandon => "Abandon paused cascade merge",
             Self::PushStack => "Push stack to remote (base → leaf)",
             Self::NewProject => "New project (add git repo)",
+            Self::CloneRepository => "Clone a GitHub repository…",
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
             Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
             Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
+            Self::ResetSession => "Reset session (restart without resuming)",
             Self::ChangeProgram => "Change program (agent)…",
             Self::ToggleKeepAlive => "Toggle keep-alive (never auto-hibernate)",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
+            Self::OpenInfo => "Show session info",
             Self::OpenPullRequest => "Open PR in browser",
             Self::RefreshPrStatus => "Refresh PR status",
             Self::OpenCommander => "Open commander session",
             Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
             Self::ToggleVoiceInput => "Voice input: record / send (STT)",
+            Self::ToggleDictation => "Dictate into session: record / type transcript (STT)",
             Self::OpenReviewDiff => "Review diff & comment",
-            Self::TogglePane => "Toggle preview/diff/shell view",
-            Self::TogglePaneReverse => "Toggle view (reverse)",
-            Self::ShrinkLeftPane => "Shrink left pane",
-            Self::GrowLeftPane => "Grow left pane",
             Self::ShowHelp => "Show help",
             Self::ShowSettings => "Settings",
+            Self::CopyServerToken => "Copy server token (pair a client)",
             Self::Quit => "Quit",
             Self::ScrollUp => "Scroll up",
             Self::ScrollDown => "Scroll down",
-            Self::PageUp => "Page up",
-            Self::PageDown => "Page down",
+            Self::PageUp => "First card in column / page up in modals",
+            Self::PageDown => "Last card in column / page down in modals",
             Self::GenerateSummary => "Generate AI summary",
             Self::ScanDirectory => "Scan directory for repos",
             Self::MoveToSection => "Move session to section…",
+            Self::ToggleViewMode => "Cycle view: project / sections / stacks / board",
             Self::ToggleSection => "Collapse/expand section",
-            Self::ToggleViewMode => "Cycle project / sections / section stacks view",
+            Self::NextWorkspace => "Next workspace",
+            Self::PreviousWorkspace => "Previous workspace",
+            Self::WorkspacePicker => "Switch workspace…",
+            Self::NewWorkspace => "New workspace…",
+            Self::MoveProjectToWorkspace => "Move project to workspace…",
+            Self::TogglePane => "Cycle right pane: preview / info / shell",
+            Self::TogglePaneReverse => "Cycle right pane (reverse)",
+            Self::ShrinkLeftPane => "Narrow the session list",
+            Self::GrowLeftPane => "Widen the session list",
             Self::EditServerPrograms => "Edit server's program list…",
             Self::AddRemoteServer => "Add remote server",
             Self::RemoveRemoteServer => "Remove remote server",
@@ -262,50 +323,65 @@ impl BindableAction {
         match self {
             Self::NavigateUp => "up",
             Self::NavigateDown => "down",
-            Self::NextGroup => "next group",
-            Self::PreviousGroup => "prev group",
+            Self::NextGroup => "next column",
+            Self::PreviousGroup => "prev column",
             Self::NavigateFirst => "first",
             Self::NavigateLast => "last",
+            Self::NavigateLeft => "prev column",
+            Self::NavigateRight => "next column",
+            Self::ListPageUp => "list page up",
+            Self::ListPageDown => "list page down",
             Self::Select => "attach",
             Self::SelectShell => "shell",
             Self::NewSession => "new session",
             Self::NewStackedSession => "stacked",
+            Self::SetSessionBase => "base",
             Self::CascadeMergeMain => "merge stack",
             Self::CascadeResume => "resume cascade",
             Self::CascadeAbandon => "abandon cascade",
             Self::PushStack => "push stack",
             Self::NewProject => "new project",
+            Self::CloneRepository => "clone repo",
             Self::CheckoutBranch => "checkout",
             Self::DeleteSession => "delete",
             Self::DeleteMergedPrSessions => "delete merged",
             Self::RenameSession => "rename",
             Self::RestartSession => "restart",
+            Self::ResetSession => "reset",
             Self::ChangeProgram => "program",
             Self::ToggleKeepAlive => "keep alive",
             Self::RemoveProject => "remove project",
             Self::OpenInEditor => "edit",
+            Self::OpenInfo => "info",
             Self::OpenPullRequest => "open PR",
             Self::RefreshPrStatus => "refresh PR",
             Self::OpenCommander => "commander",
             Self::ToggleConversationOverlay => "conversation",
             Self::ToggleVoiceInput => "voice",
+            Self::ToggleDictation => "dictate",
             Self::OpenReviewDiff => "review",
-            Self::TogglePane => "view",
-            Self::TogglePaneReverse => "view back",
-            Self::ShrinkLeftPane => "shrink",
-            Self::GrowLeftPane => "grow",
             Self::ShowHelp => "help",
             Self::ShowSettings => "settings",
+            Self::CopyServerToken => "copy token",
             Self::Quit => "quit",
             Self::ScrollUp => "scroll up",
             Self::ScrollDown => "scroll down",
-            Self::PageUp => "page up",
-            Self::PageDown => "page down",
+            Self::PageUp => "first card",
+            Self::PageDown => "last card",
             Self::GenerateSummary => "summary",
             Self::ScanDirectory => "scan",
             Self::MoveToSection => "move",
-            Self::ToggleSection => "toggle section",
-            Self::ToggleViewMode => "view mode",
+            Self::ToggleViewMode => "view",
+            Self::ToggleSection => "collapse",
+            Self::NextWorkspace => "next workspace",
+            Self::PreviousWorkspace => "previous workspace",
+            Self::WorkspacePicker => "Workspaces",
+            Self::NewWorkspace => "new workspace",
+            Self::MoveProjectToWorkspace => "move project",
+            Self::TogglePane => "pane",
+            Self::TogglePaneReverse => "pane back",
+            Self::ShrinkLeftPane => "narrower",
+            Self::GrowLeftPane => "wider",
             Self::EditServerPrograms => "server programs",
             Self::AddRemoteServer => "add server",
             Self::RemoveRemoteServer => "remove server",
@@ -323,42 +399,59 @@ impl BindableAction {
             | Self::NextGroup
             | Self::PreviousGroup
             | Self::NavigateFirst
-            | Self::NavigateLast => "Navigation",
+            | Self::NavigateLast
+            | Self::NavigateLeft
+            | Self::NavigateRight
+            | Self::ListPageUp
+            | Self::ListPageDown => "Navigation",
             Self::Select
             | Self::SelectShell
             | Self::NewSession
             | Self::RenameSession
             | Self::RestartSession
+            | Self::ResetSession
             | Self::ChangeProgram
             | Self::ToggleKeepAlive
             | Self::DeleteSession
-            | Self::OpenInEditor => "Sessions",
+            | Self::OpenInEditor
+            | Self::OpenInfo => "Sessions",
             Self::NewStackedSession
+            | Self::SetSessionBase
             | Self::PushStack
             | Self::CascadeMergeMain
             | Self::CascadeResume
             | Self::CascadeAbandon => "Stacked & Cascade",
-            Self::NewProject | Self::CheckoutBranch | Self::ScanDirectory | Self::RemoveProject => {
-                "Projects"
-            }
+            Self::NewProject
+            | Self::CloneRepository
+            | Self::CheckoutBranch
+            | Self::ScanDirectory
+            | Self::RemoveProject => "Projects",
             Self::OpenPullRequest | Self::RefreshPrStatus | Self::DeleteMergedPrSessions => {
                 "Pull Requests"
             }
             Self::AddRemoteServer | Self::RemoveRemoteServer | Self::EditServerPrograms => {
                 "Remote Servers"
             }
-            Self::ToggleViewMode | Self::MoveToSection | Self::ToggleSection => "Sections & View",
+            Self::MoveToSection | Self::ToggleViewMode | Self::ToggleSection => "Sections",
+            Self::NextWorkspace
+            | Self::PreviousWorkspace
+            | Self::WorkspacePicker
+            | Self::NewWorkspace
+            | Self::MoveProjectToWorkspace => "Workspaces",
+            Self::TogglePane
+            | Self::TogglePaneReverse
+            | Self::ShrinkLeftPane
+            | Self::GrowLeftPane => "Right Pane",
             Self::OpenReviewDiff
             | Self::GenerateSummary
             | Self::OpenCommander
             | Self::ToggleConversationOverlay
-            | Self::ToggleVoiceInput => "Review & AI",
-            Self::TogglePane
-            | Self::TogglePaneReverse
-            | Self::ShrinkLeftPane
-            | Self::GrowLeftPane => "Layout",
+            | Self::ToggleVoiceInput
+            | Self::ToggleDictation => "Review & AI",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
-            Self::ShowHelp | Self::ShowSettings | Self::Quit => "Application",
+            Self::ShowHelp | Self::ShowSettings | Self::CopyServerToken | Self::Quit => {
+                "Application"
+            }
         }
     }
 }
@@ -374,36 +467,42 @@ impl FromStr for BindableAction {
             "previous_group" => Ok(Self::PreviousGroup),
             "navigate_first" => Ok(Self::NavigateFirst),
             "navigate_last" => Ok(Self::NavigateLast),
+            "navigate_left" => Ok(Self::NavigateLeft),
+            "navigate_right" => Ok(Self::NavigateRight),
+            "list_page_up" => Ok(Self::ListPageUp),
+            "list_page_down" => Ok(Self::ListPageDown),
             "select" => Ok(Self::Select),
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
             "new_stacked_session" => Ok(Self::NewStackedSession),
+            "set_session_base" => Ok(Self::SetSessionBase),
             "cascade_merge_main" => Ok(Self::CascadeMergeMain),
             "cascade_resume" => Ok(Self::CascadeResume),
             "cascade_abandon" => Ok(Self::CascadeAbandon),
             "push_stack" => Ok(Self::PushStack),
             "new_project" => Ok(Self::NewProject),
+            "clone_repository" => Ok(Self::CloneRepository),
             "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
             "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
             "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
+            "reset_session" => Ok(Self::ResetSession),
             "change_program" => Ok(Self::ChangeProgram),
             "toggle_keep_alive" => Ok(Self::ToggleKeepAlive),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
+            "open_info" => Ok(Self::OpenInfo),
             "open_pull_request" => Ok(Self::OpenPullRequest),
             "refresh_pr_status" => Ok(Self::RefreshPrStatus),
             "open_commander" => Ok(Self::OpenCommander),
             "toggle_conversation_overlay" => Ok(Self::ToggleConversationOverlay),
             "toggle_voice_input" => Ok(Self::ToggleVoiceInput),
+            "toggle_dictation" => Ok(Self::ToggleDictation),
             "open_review_diff" => Ok(Self::OpenReviewDiff),
-            "toggle_pane" => Ok(Self::TogglePane),
-            "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
-            "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
-            "grow_left_pane" => Ok(Self::GrowLeftPane),
             "show_help" => Ok(Self::ShowHelp),
             "show_settings" => Ok(Self::ShowSettings),
+            "copy_server_token" => Ok(Self::CopyServerToken),
             "quit" => Ok(Self::Quit),
             "scroll_up" => Ok(Self::ScrollUp),
             "scroll_down" => Ok(Self::ScrollDown),
@@ -412,8 +511,17 @@ impl FromStr for BindableAction {
             "generate_summary" => Ok(Self::GenerateSummary),
             "scan_directory" => Ok(Self::ScanDirectory),
             "move_to_section" => Ok(Self::MoveToSection),
-            "toggle_section" => Ok(Self::ToggleSection),
             "toggle_view_mode" => Ok(Self::ToggleViewMode),
+            "toggle_section" => Ok(Self::ToggleSection),
+            "next_workspace" => Ok(Self::NextWorkspace),
+            "previous_workspace" => Ok(Self::PreviousWorkspace),
+            "workspace_picker" => Ok(Self::WorkspacePicker),
+            "new_workspace" => Ok(Self::NewWorkspace),
+            "move_project_to_workspace" => Ok(Self::MoveProjectToWorkspace),
+            "toggle_pane" => Ok(Self::TogglePane),
+            "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
+            "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
+            "grow_left_pane" => Ok(Self::GrowLeftPane),
             "edit_server_programs" => Ok(Self::EditServerPrograms),
             "add_remote_server" => Ok(Self::AddRemoteServer),
             "remove_remote_server" => Ok(Self::RemoveRemoteServer),
@@ -698,6 +806,21 @@ impl Default for KeyBindings {
         );
         bindings.insert(BindableAction::NavigateFirst, vec![kb(KeyCode::Home, none)]);
         bindings.insert(BindableAction::NavigateLast, vec![kb(KeyCode::End, none)]);
+        bindings.insert(
+            BindableAction::NavigateLeft,
+            vec![kb(KeyCode::Char('h'), none), kb(KeyCode::Left, none)],
+        );
+        bindings.insert(
+            BindableAction::NavigateRight,
+            vec![kb(KeyCode::Char('l'), none), kb(KeyCode::Right, none)],
+        );
+        // PgUp/PgDn page the session list / board column; `PageUp`/`PageDown`
+        // (Ctrl-u/Ctrl-d) jump to the column's first/last card instead.
+        bindings.insert(BindableAction::ListPageUp, vec![kb(KeyCode::PageUp, none)]);
+        bindings.insert(
+            BindableAction::ListPageDown,
+            vec![kb(KeyCode::PageDown, none)],
+        );
         bindings.insert(BindableAction::Select, vec![kb(KeyCode::Enter, none)]);
 
         // Session management
@@ -732,6 +855,10 @@ impl Default for KeyBindings {
             BindableAction::RestartSession,
             vec![kb(KeyCode::Char('R'), shift)],
         );
+        // ResetSession has no default key — it's reachable via the command
+        // palette and can be bound explicitly in config. It throws away the
+        // agent's conversation, so keeping it off Shift-R's neighbouring keys is
+        // deliberate: a mistyped restart should not be a destructive one.
         // ToggleKeepAlive has no default key — it's reachable via the command
         // palette and can be bound explicitly in config. Keep-alive is a rarely
         // toggled, opt-in control, so it doesn't claim a top-level hotkey.
@@ -747,6 +874,7 @@ impl Default for KeyBindings {
             BindableAction::OpenPullRequest,
             vec![kb(KeyCode::Char('o'), none)],
         );
+        bindings.insert(BindableAction::OpenInfo, vec![kb(KeyCode::Char('i'), none)]);
         bindings.insert(
             BindableAction::OpenCommander,
             vec![kb(KeyCode::Char('C'), shift)],
@@ -759,6 +887,15 @@ impl Default for KeyBindings {
             BindableAction::ToggleVoiceInput,
             vec![kb(KeyCode::Char('v'), alt)],
         );
+        // Alt-t is intercepted on a *shell* pane too, unlike Alt-v — dictation
+        // types into whatever pane is attached, so it has to be reachable from
+        // both. That costs two things the user may want back, and both are
+        // rebindable here: readline's `transpose-words` (Alt-t in a shell) and
+        // Claude Code's own Alt+T thinking toggle.
+        bindings.insert(
+            BindableAction::ToggleDictation,
+            vec![kb(KeyCode::Char('t'), alt)],
+        );
         bindings.insert(
             BindableAction::OpenReviewDiff,
             vec![kb(KeyCode::Char('r'), none), kb(KeyCode::Char('r'), alt)],
@@ -767,13 +904,36 @@ impl Default for KeyBindings {
             BindableAction::MoveToSection,
             vec![kb(KeyCode::Char('m'), none)],
         );
+        bindings.insert(
+            BindableAction::ToggleViewMode,
+            vec![kb(KeyCode::Char('v'), none)],
+        );
+        bindings.insert(BindableAction::ToggleSection, vec![]);
 
-        // Pane control
+        // Workspaces. `w` cycles (wrapping), `W` opens the picker; the rest are
+        // palette-only. Deliberately not Ctrl-w (a terminal's delete-word),
+        // Ctrl-Tab (rarely delivered by terminals) or Alt-1..9 (tab switching
+        // in most terminal emulators).
+        bindings.insert(
+            BindableAction::NextWorkspace,
+            vec![kb(KeyCode::Char('w'), none)],
+        );
+        bindings.insert(
+            BindableAction::WorkspacePicker,
+            vec![kb(KeyCode::Char('W'), shift)],
+        );
+        bindings.insert(BindableAction::PreviousWorkspace, vec![]);
+        bindings.insert(BindableAction::NewWorkspace, vec![]);
+        bindings.insert(BindableAction::MoveProjectToWorkspace, vec![]);
+
+        // Right pane (list views only)
         bindings.insert(BindableAction::TogglePane, vec![kb(KeyCode::Tab, none)]);
         bindings.insert(
             BindableAction::TogglePaneReverse,
             vec![kb(KeyCode::BackTab, shift)],
         );
+        // `<` / `>` need both modifier forms registered: they are shifted
+        // characters, and terminals disagree on whether they also report SHIFT.
         bindings.insert(
             BindableAction::ShrinkLeftPane,
             vec![kb(KeyCode::Char('<'), shift), kb(KeyCode::Char('<'), none)],
@@ -786,23 +946,12 @@ impl Default for KeyBindings {
         // Scrolling
         bindings.insert(BindableAction::ScrollUp, vec![]);
         bindings.insert(BindableAction::ScrollDown, vec![]);
-        bindings.insert(
-            BindableAction::PageUp,
-            vec![kb(KeyCode::Char('u'), ctrl), kb(KeyCode::PageUp, none)],
-        );
-        bindings.insert(
-            BindableAction::PageDown,
-            vec![kb(KeyCode::Char('d'), ctrl), kb(KeyCode::PageDown, none)],
-        );
+        bindings.insert(BindableAction::PageUp, vec![kb(KeyCode::Char('u'), ctrl)]);
+        bindings.insert(BindableAction::PageDown, vec![kb(KeyCode::Char('d'), ctrl)]);
 
         bindings.insert(
             BindableAction::ScanDirectory,
             vec![kb(KeyCode::Char('S'), shift)],
-        );
-        bindings.insert(BindableAction::ToggleSection, vec![]);
-        bindings.insert(
-            BindableAction::ToggleViewMode,
-            vec![kb(KeyCode::Char('v'), none)],
         );
 
         // Info Pane
@@ -1000,6 +1149,17 @@ pub fn review_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
 /// attach — the attach loop swallows them and toggles the mic in place.
 pub fn voice_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
     trigger_bytes_for(bindings, BindableAction::ToggleVoiceInput)
+}
+
+/// Raw stdin byte patterns that toggle dictation mid-attach (from the
+/// [`ToggleDictation`](BindableAction::ToggleDictation) binding — `Alt-t` by
+/// default, encoded as the `ESC t` metaSendsEscape sequence). See
+/// [`trigger_bytes_for`]. Like the voice trigger these don't exit the attach —
+/// the attach loop swallows them and arms the mic in place — but unlike it they
+/// are intercepted on a shell pane as well as an agent one, because dictation
+/// types into whichever pane is on screen.
+pub fn dictation_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
+    trigger_bytes_for(bindings, BindableAction::ToggleDictation)
 }
 
 /// Whether a binding survives the [`trigger_bytes_for`] filter: a Ctrl- or
@@ -1212,6 +1372,46 @@ mod tests {
     }
 
     #[test]
+    fn test_navigate_left_right_default_bindings() {
+        let kb = KeyBindings::default();
+        for (code, action) in [
+            (KeyCode::Char('h'), BindableAction::NavigateLeft),
+            (KeyCode::Left, BindableAction::NavigateLeft),
+            (KeyCode::Char('l'), BindableAction::NavigateRight),
+            (KeyCode::Right, BindableAction::NavigateRight),
+        ] {
+            let key = KeyEvent::new(code, KeyModifiers::NONE);
+            assert_eq!(kb.resolve(&key), Some(action), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn test_navigate_left_right_config_names_round_trip() {
+        for action in [BindableAction::NavigateLeft, BindableAction::NavigateRight] {
+            assert_eq!(
+                BindableAction::from_str(action.config_name()).unwrap(),
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn test_open_info_default_bound_to_i() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::OpenInfo));
+    }
+
+    #[test]
+    fn test_open_info_config_name_round_trips() {
+        assert_eq!(
+            BindableAction::from_str(BindableAction::OpenInfo.config_name()).unwrap(),
+            BindableAction::OpenInfo
+        );
+        assert_eq!(BindableAction::OpenInfo.config_name(), "open_info");
+    }
+
+    #[test]
     fn test_default_move_to_section_bound_to_m() {
         let kb = KeyBindings::default();
         let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
@@ -1258,6 +1458,25 @@ mod tests {
         assert_eq!(
             BindableAction::ToggleVoiceInput.config_name(),
             "toggle_voice_input"
+        );
+    }
+
+    #[test]
+    fn test_toggle_dictation_default_bound_to_alt_t() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::ToggleDictation));
+    }
+
+    #[test]
+    fn test_toggle_dictation_config_name_roundtrips() {
+        assert_eq!(
+            "toggle_dictation".parse::<BindableAction>().unwrap(),
+            BindableAction::ToggleDictation
+        );
+        assert_eq!(
+            BindableAction::ToggleDictation.config_name(),
+            "toggle_dictation"
         );
     }
 
@@ -1336,6 +1555,48 @@ mod tests {
     }
 
     #[test]
+    fn test_copy_server_token_palette_only() {
+        // Palette-only: pairing a client is a once-per-device action, and the
+        // palette is this project's canonical command surface. It still has to
+        // round-trip through TOML so a user who binds it doesn't hit "unknown
+        // action".
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::CopyServerToken).is_empty());
+        assert_eq!(
+            "copy_server_token".parse::<BindableAction>().unwrap(),
+            BindableAction::CopyServerToken
+        );
+        assert_eq!(
+            BindableAction::CopyServerToken.config_name(),
+            "copy_server_token"
+        );
+        assert_eq!(BindableAction::CopyServerToken.section(), "Application");
+        assert!(BindableAction::ALL.contains(&BindableAction::CopyServerToken));
+    }
+
+    #[test]
+    fn test_clone_repository_palette_only() {
+        // Palette-only, and deliberately so: the repo picker is a rare,
+        // deliberate action, and the palette is this project's canonical
+        // command surface. It must still round-trip through TOML so a user who
+        // binds it doesn't hit "unknown action".
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::CloneRepository).is_empty());
+        assert_eq!(
+            "clone_repository".parse::<BindableAction>().unwrap(),
+            BindableAction::CloneRepository
+        );
+        assert_eq!(
+            BindableAction::CloneRepository.config_name(),
+            "clone_repository"
+        );
+        // Grouped with the other project-level actions so the help screen and
+        // the settings Keybindings tab list it where a user would look.
+        assert_eq!(BindableAction::CloneRepository.section(), "Projects");
+        assert!(BindableAction::ALL.contains(&BindableAction::CloneRepository));
+    }
+
+    #[test]
     fn test_defaults_match_current_bindings() {
         let kb = KeyBindings::default();
 
@@ -1407,7 +1668,7 @@ mod tests {
     fn test_toml_deserialization_override() {
         let toml = r#"
             quit = ["Esc"]
-            navigate_up = "w"
+            navigate_up = "y"
         "#;
 
         let kb: KeyBindings = toml::from_str(toml).unwrap();
@@ -1420,8 +1681,8 @@ mod tests {
         let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         assert_ne!(kb.resolve(&q), Some(BindableAction::Quit));
 
-        // Overridden: navigate_up is now 'w' (single string, not array)
-        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        // Overridden: navigate_up is now 'y' (single string, not array)
+        let w = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&w), Some(BindableAction::NavigateUp));
 
         // Non-overridden defaults still work
@@ -1452,11 +1713,11 @@ mod tests {
         // silently ignored so old configs don't break.
         let toml = r#"
             nonexistent_action = ["k"]
-            navigate_up = "w"
+            navigate_up = "y"
         "#;
         let kb: KeyBindings = toml::from_str(toml).unwrap();
         // Recognised override still applied
-        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        let w = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&w), Some(BindableAction::NavigateUp));
     }
 
@@ -1487,9 +1748,10 @@ mod tests {
                 "Projects",
                 "Pull Requests",
                 "Remote Servers",
-                "Sections & View",
+                "Sections",
+                "Workspaces",
+                "Right Pane",
                 "Review & AI",
-                "Layout",
                 "Scrolling",
                 "Application",
             ],
@@ -1572,6 +1834,15 @@ mod tests {
     }
 
     #[test]
+    fn test_dictation_trigger_bytes_default_is_alt_t() {
+        // Default ToggleDictation is Alt-t, interceptable mid-attach as the
+        // metaSendsEscape sequence `ESC t` so it can arm the mic in place — on a
+        // shell pane as well as an agent one, unlike Alt-v.
+        let kb = KeyBindings::default();
+        assert_eq!(dictation_trigger_bytes(&kb), vec![vec![0x1b, b't']]);
+    }
+
+    #[test]
     fn test_review_toggle_binding_default_is_alt_r() {
         // The bare `r` binding is skipped (not interceptable mid-attach); the
         // Alt-r binding is the toggle, and its display drives the footer hint.
@@ -1641,6 +1912,29 @@ mod tests {
     }
 
     #[test]
+    fn test_reset_session_unbound_by_default() {
+        // Reset is palette-only: no default hotkey. Shift-R stays the *resuming*
+        // restart, so a mistyped restart can never discard a conversation.
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::ResetSession).is_empty());
+        let shift_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_r), Some(BindableAction::RestartSession));
+    }
+
+    #[test]
+    fn test_reset_session_config_name_round_trips() {
+        // The `[keybindings]` key operators write in config.toml.
+        assert_eq!(BindableAction::ResetSession.config_name(), "reset_session");
+        assert_eq!(
+            "reset_session".parse::<BindableAction>(),
+            Ok(BindableAction::ResetSession)
+        );
+        // Listed in ALL, so the palette and the help modal both surface it
+        // despite having no key.
+        assert!(BindableAction::ALL.contains(&BindableAction::ResetSession));
+    }
+
+    #[test]
     fn test_toggle_keep_alive_unbound_by_default() {
         // Keep-alive is palette-only: no default hotkey, and Shift-K resolves
         // to nothing so the key stays free.
@@ -1648,5 +1942,67 @@ mod tests {
         assert!(kb.keys_for(BindableAction::ToggleKeepAlive).is_empty());
         let shift_k = KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT);
         assert_eq!(kb.resolve(&shift_k), None);
+    }
+
+    /// The binding id documented in `docs/configuration.md` must actually parse
+    /// — a doc example that silently no-ops is worse than none.
+    #[test]
+    fn test_set_session_base_config_name_roundtrips() {
+        let action = BindableAction::SetSessionBase;
+        assert_eq!(action.config_name(), "set_session_base");
+        assert_eq!(
+            "set_session_base".parse::<BindableAction>().unwrap(),
+            action
+        );
+    }
+
+    #[test]
+    fn test_set_session_base_unbound_by_default() {
+        // Restacking is a deliberate, infrequent repair — palette-only, so it
+        // costs no key and can't be triggered by a slip.
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::SetSessionBase).is_empty());
+    }
+
+    #[test]
+    fn test_workspace_keys_default_to_w_and_shift_w() {
+        let kb = KeyBindings::default();
+        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&w), Some(BindableAction::NextWorkspace));
+        let shift_w = KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_w), Some(BindableAction::WorkspacePicker));
+    }
+
+    #[test]
+    fn test_palette_only_workspace_actions_are_unbound_but_listed() {
+        let kb = KeyBindings::default();
+        for action in [
+            BindableAction::PreviousWorkspace,
+            BindableAction::NewWorkspace,
+            BindableAction::MoveProjectToWorkspace,
+        ] {
+            assert!(kb.keys_for(action).is_empty(), "{action:?} must be unbound");
+            assert!(BindableAction::ALL.contains(&action));
+            assert_eq!(action.section(), "Workspaces");
+        }
+        assert_eq!(BindableAction::NextWorkspace.section(), "Workspaces");
+        assert_eq!(BindableAction::WorkspacePicker.section(), "Workspaces");
+    }
+
+    #[test]
+    fn test_workspace_config_names_roundtrip() {
+        for (action, name) in [
+            (BindableAction::NextWorkspace, "next_workspace"),
+            (BindableAction::PreviousWorkspace, "previous_workspace"),
+            (BindableAction::WorkspacePicker, "workspace_picker"),
+            (BindableAction::NewWorkspace, "new_workspace"),
+            (
+                BindableAction::MoveProjectToWorkspace,
+                "move_project_to_workspace",
+            ),
+        ] {
+            assert_eq!(action.config_name(), name);
+            assert_eq!(name.parse::<BindableAction>().unwrap(), action);
+        }
     }
 }

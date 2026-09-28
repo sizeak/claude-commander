@@ -1,0 +1,19 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+assertion_line: 1254
+expression: terminal.backend()
+---
+"╭ Preview · Info · Shell ────────────────────────────────────────────╮"
+"│ Session: test-session                                              │"
+"│ Branch:  test-branch                                               │"
+"│ Created: 2026-04-01 12:00 UTC                                      │"
+"│ Status:  ● running                                                 │"
+"│ Program: claude                                                    │"
+"│ Path:    /tmp/wt                                                   │"
+"│ Changes: No changes                                                │"
+"│                                                                    │"
+"│ ─────────────────────────────────                                  │"
+"│                                                                    │"
+"│ PR: None                                                           │"
+"│                                                                    │"
+"╰────────────────────────────────────────────────────────────────────╯"

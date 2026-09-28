@@ -7,7 +7,7 @@ import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/simple.dart' show ScanResultDto;
 
-/// One project paired with the sessions that belong to it, in the workspace's
+/// One project paired with the sessions that belong to it, in the snapshot's
 /// project order. Used by the grouped session view.
 class ProjectSessions {
   final ProjectInfoDto project;
@@ -21,7 +21,7 @@ class ProjectSessions {
 /// it — so a handle can never be abandoned in the cdylib registry.
 ///
 /// State is refreshed off the poller's change feed rather than a wall-clock
-/// timer: every generation bump re-fetches the workspace snapshot and agent
+/// timer: every generation bump re-fetches the snapshot and agent
 /// states (mirroring the TUI), and every connection-feed event updates
 /// [connection]. Widgets listen via `ListenableBuilder`.
 class CommanderStore extends ChangeNotifier {
@@ -43,8 +43,18 @@ class CommanderStore extends ChangeNotifier {
   /// a [reconnect] is in flight.
   String? get handle => _handle;
 
-  WorkspaceSnapshotDto? _workspace;
-  WorkspaceSnapshotDto? get workspace => _workspace;
+  /// Monotonic connect generation. Bumped at the start of every [connect] (and
+  /// [reconnect]) so an earlier in-flight connect, on resuming after an await,
+  /// can detect it has been superseded — release the handle it just acquired and
+  /// bail rather than leaking it and orphaning its feeds. Closes the
+  /// connect-vs-connect race (e.g. a double-tapped retry, or an edit while a
+  /// slow connect is still parked). [reconnect] checks it for the same reason
+  /// before adopting its config, so a superseded reconnect can't roll the store
+  /// back to an older edit than the one on disk.
+  int _connectEpoch = 0;
+
+  SnapshotDto? _snapshot;
+  SnapshotDto? get snapshot => _snapshot;
 
   final Map<String, AgentState> _agentStates = {};
   bool _commanderRunning = false;
@@ -81,11 +91,11 @@ class CommanderStore extends ChangeNotifier {
 
   // --- convenience getters the pages render from ---------------------------
 
-  List<SessionInfo> get sessions => _workspace?.sessions ?? const [];
+  List<SessionInfo> get sessions => _snapshot?.sessions ?? const [];
 
-  /// Sessions grouped under their project, in the workspace's project order.
+  /// Sessions grouped under their project, in the snapshot's project order.
   List<ProjectSessions> get sessionsByProject {
-    final ws = _workspace;
+    final ws = _snapshot;
     if (ws == null) return const [];
     final byProject = <ProjectId, List<SessionInfo>>{};
     for (final s in ws.sessions) {
@@ -97,18 +107,56 @@ class CommanderStore extends ChangeNotifier {
     ];
   }
 
-  List<OperationStatusDto> get operations =>
-      _workspace?.operations ?? const [];
+  List<OperationStatusDto> get operations => _snapshot?.operations ?? const [];
 
   List<SessionId> get pendingCommentSessions =>
-      _workspace?.pendingCommentSessions ?? const [];
+      _snapshot?.pendingCommentSessions ?? const [];
 
   /// The session whose cascade is currently paused awaiting a decision, or null
   /// when no cascade is paused. Drives the resume/abandon banner.
-  SessionId? get cascadePaused => _workspace?.cascadePaused;
+  SessionId? get cascadePaused => _snapshot?.cascadePaused;
 
-  /// The projects known to the server, in workspace order.
-  List<ProjectInfoDto> get projects => _workspace?.projects ?? const [];
+  /// The projects known to the server, in snapshot order.
+  List<ProjectInfoDto> get projects => _snapshot?.projects ?? const [];
+
+  // --- workspace scoping ---------------------------------------------------
+  //
+  // A workspace is a label on a project (`ProjectInfoDto.workspace`, null =
+  // Main), and a session belongs to its project's workspace. Membership is plain
+  // equality of the two names — `viewmodel::workspace::in_workspace` — so it is
+  // compared here rather than bridged per row.
+
+  /// The workspace [projectId] is tagged with, or null for Main — including for
+  /// a project this snapshot does not know, which reads as Main like it does in
+  /// `viewmodel::workspace::project_workspace`.
+  String? workspaceOfProject(ProjectId projectId) {
+    for (final p in projects) {
+      if (p.id == projectId) return p.workspace;
+    }
+    return null;
+  }
+
+  /// The workspace a session belongs to (its project's), or null for Main.
+  String? workspaceOfSession(SessionInfo session) =>
+      workspaceOfProject(session.projectId);
+
+  /// The projects in [workspace] (null = Main), in snapshot order.
+  List<ProjectInfoDto> projectsIn(String? workspace) => [
+    for (final p in projects)
+      if (p.workspace == workspace) p,
+  ];
+
+  /// The sessions in [workspace] (null = Main), in snapshot order.
+  List<SessionInfo> sessionsIn(String? workspace) => [
+    for (final s in sessions)
+      if (workspaceOfSession(s) == workspace) s,
+  ];
+
+  /// [sessionsByProject] limited to the projects in [workspace].
+  List<ProjectSessions> sessionsByProjectIn(String? workspace) => [
+    for (final g in sessionsByProject)
+      if (g.project.workspace == workspace) g,
+  ];
 
   /// The agent state for a session id (the [SessionInfo.id] string form), or
   /// [AgentState.unknown] if the snapshot has no entry for it.
@@ -127,14 +175,23 @@ class CommanderStore extends ChangeNotifier {
 
   /// Acquire the handle, wire up the feeds, and load the first snapshot.
   Future<void> connect() async {
+    final epoch = ++_connectEpoch;
     _loading = true;
     _error = null;
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     try {
       final h = await _api.connectServer(
         baseUrl: _config.baseUrl,
         token: _config.token,
       );
+      // While connectServer was in flight the store may have been disposed
+      // (server removed) or superseded by a newer connect/reconnect (double-tap,
+      // edit). Release the freshly-acquired handle and bail rather than
+      // subscribing feeds that would never be torn down.
+      if (_disposed || epoch != _connectEpoch) {
+        unawaited(_api.disconnectServer(handle: h));
+        return;
+      }
       _handle = h;
       _changeSub = _api
           .changeFeed(handle: h)
@@ -144,10 +201,14 @@ class CommanderStore extends ChangeNotifier {
           .listen(_onConnection, onError: (_) {});
       await _refresh();
     } catch (e) {
-      _error = e;
+      if (epoch == _connectEpoch) _error = e;
     } finally {
-      _loading = false;
-      if (!_disposed) notifyListeners();
+      // Only the live connect owns the shared state; a superseded one must not
+      // clobber the newer connect's loading flag / error.
+      if (epoch == _connectEpoch) {
+        _loading = false;
+        if (!_disposed) notifyListeners();
+      }
     }
   }
 
@@ -156,9 +217,16 @@ class CommanderStore extends ChangeNotifier {
   /// connect afresh. This is the fix for the reconnect leak — the store owns the
   /// handle so a settings change can't abandon it.
   Future<void> reconnect(ServerConfig next) async {
-    await _teardownSubs();
+    // Supersede any in-flight connect immediately (before our own awaits) so it
+    // releases its handle when it resumes instead of racing this reconnect.
+    final epoch = ++_connectEpoch;
+    // Claim the old handle synchronously too, for the same reason: a reconnect
+    // that starts while this one is tearing down must see no handle to release
+    // (this one owns it) and must not have the handle it later acquires nulled
+    // out from under it here.
     final old = _handle;
     _handle = null;
+    await _teardownSubs();
     if (old != null) {
       // Detach any open terminal before releasing the handle so the persistent
       // pane doesn't outlive its server.
@@ -169,16 +237,32 @@ class CommanderStore extends ChangeNotifier {
         // Best-effort: a failed disconnect must not block the new connection.
       }
     }
+    // Releasing the old handle involves network calls (terminal detach,
+    // disconnect), so a second server edit can land while we are parked in them.
+    // If it did, it owns `_config` and the live connection now: adopting `next`
+    // here would roll the config back to this (older) edit while the persisted
+    // list holds the newer one, and our `connect()` would supersede its. The old
+    // handle is already released above, so bailing leaks nothing.
+    if (_disposed || epoch != _connectEpoch) return;
     _config = next;
-    _workspace = null;
+    _snapshot = null;
     _agentStates.clear();
     _commanderRunning = false;
     _connection = const ConnectionStateDto(
       kind: ConnectionStateKind.connecting,
       reason: '',
     );
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     await connect();
+  }
+
+  /// Update the stored config (name/URL/token) synchronously, ahead of a
+  /// [reconnect]. Lets the fleet persist the edited config immediately —
+  /// `reconnect` only assigns `_config` after several awaits, so a concurrent
+  /// save would otherwise write the pre-edit config back to disk.
+  void applyConfig(ServerConfig config) {
+    _config = config;
+    if (!_disposed) notifyListeners();
   }
 
   /// Force a snapshot refetch (pull-to-refresh); a no-op reconnect if the handle
@@ -229,28 +313,88 @@ class CommanderStore extends ChangeNotifier {
       _api.cascadeResume(handle: _requireHandle);
 
   /// Abandon a paused cascade, leaving the stack where it stopped.
-  Future<void> cascadeAbandon() =>
-      _api.cascadeAbandon(handle: _requireHandle);
+  Future<void> cascadeAbandon() => _api.cascadeAbandon(handle: _requireHandle);
 
-  /// Register a new project by its server-side repo path; returns its new id.
-  Future<String> addProject(String path) =>
-      _api.addProject(handle: _requireHandle, path: path);
+  /// Register a new project by its server-side repo path, tagged with
+  /// [workspace] (null = Main); returns its new id.
+  Future<String> addProject(String path, {String? workspace}) =>
+      _api.addProject(handle: _requireHandle, path: path, workspace: workspace);
 
   /// Deregister a project by id (does not touch the repo on disk).
   Future<void> removeProject(String id) =>
       _api.removeProject(handle: _requireHandle, id: id);
 
-  /// Scan a server-side directory for git repos and register any it finds.
-  Future<ScanResultDto> scanDirectory(String path) =>
-      _api.scanDirectory(handle: _requireHandle, path: path);
+  /// Scan a server-side directory for git repos and register any it finds,
+  /// each new one tagged with [workspace] (null = Main).
+  Future<ScanResultDto> scanDirectory(String path, {String? workspace}) => _api
+      .scanDirectory(handle: _requireHandle, path: path, workspace: workspace);
 
-  /// List a project's branches (local, plus remotes when [fetch] is set).
-  Future<List<BranchInfo>> listBranches(String projectId, {bool fetch = false}) =>
-      _api.listBranches(
+  /// Register a project by its server-side repo path, or return the id of the
+  /// project already registered for it.
+  ///
+  /// The idempotent counterpart to [addProject]: `POST /projects/ensure` rather
+  /// than `POST /projects`. The dedupe stays on the server, which is the only
+  /// side that can resolve a path to a repository root — so this never compares
+  /// paths itself, and there is no second copy of the rule to drift.
+  ///
+  /// [workspace] tags the project only if this call newly registers it.
+  Future<String> ensureProject(String path, {String? workspace}) => _api
+      .ensureProject(handle: _requireHandle, path: path, workspace: workspace);
+
+  /// Replace this server's workspace definitions (see
+  /// [CommanderApi.setWorkspaces]). Fleet-wide edits go through
+  /// `FleetStore`, which sends the same request to every server.
+  Future<void> setWorkspaces(SetWorkspacesRequestDto request) =>
+      _api.setWorkspaces(handle: _requireHandle, request: request);
+
+  /// Rename a workspace on this server, rewriting its projects' tags.
+  Future<void> renameWorkspace(String from, String to) =>
+      _api.renameWorkspace(handle: _requireHandle, from: from, to: to);
+
+  /// Delete a workspace on this server, moving its projects to Main.
+  Future<void> deleteWorkspace(String name) =>
+      _api.deleteWorkspace(handle: _requireHandle, name: name);
+
+  /// Move a project to [workspace] (null = Main) on this server.
+  Future<void> setProjectWorkspace(String projectId, String? workspace) =>
+      _api.setProjectWorkspace(
         handle: _requireHandle,
         projectId: projectId,
-        fetch: fetch,
+        workspace: workspace,
       );
+
+  /// Every repo the server-side `gh` user can clone, for the repo picker.
+  /// Throws when the server has no `gh`, or when listing outruns the client's
+  /// request ceiling — the picker words both inline.
+  Future<List<GithubRepo>> githubRepos() =>
+      _api.githubRepos(handle: _requireHandle);
+
+  /// Start a clone. The returned job's status is not terminal; poll [cloneJob].
+  Future<CloneJobDto> startClone(CloneRequestDto request) =>
+      _api.startClone(handle: _requireHandle, request: request);
+
+  /// One poll of a clone job. Null means the server has pruned it, which is a
+  /// normal answer rather than a failure.
+  Future<CloneJobDto?> cloneJob(CloneJobId id) =>
+      _api.cloneJob(handle: _requireHandle, id: id);
+
+  /// A clone source's stable `host/owner/name` identity, or null when it has
+  /// none. No handle: it is pure string work in the shared protocol crate.
+  ///
+  /// **A null on either side of a comparison is never a match.** See
+  /// [CommanderApi.canonicalRepoSlug].
+  Future<String?> canonicalRepoSlug(String url) =>
+      _api.canonicalRepoSlug(url: url);
+
+  /// List a project's branches (local, plus remotes when [fetch] is set).
+  Future<List<BranchInfo>> listBranches(
+    String projectId, {
+    bool fetch = false,
+  }) => _api.listBranches(
+    handle: _requireHandle,
+    projectId: projectId,
+    fetch: fetch,
+  );
 
   /// Fetch a single session's detail (pane snapshot / diff stat) — data the
   /// snapshot doesn't carry, so the detail page fetches it on demand.
@@ -305,9 +449,9 @@ class CommanderStore extends ChangeNotifier {
     }
     _refreshing = true;
     try {
-      final ws = await _api.workspaceSnapshot(handle: h);
+      final ws = await _api.snapshot(handle: h);
       final states = await _api.agentStates(handle: h, fresh: false);
-      _workspace = ws;
+      _snapshot = ws;
       _agentStates
         ..clear()
         ..addEntries(
@@ -322,16 +466,28 @@ class CommanderStore extends ChangeNotifier {
       if (!_disposed) notifyListeners();
       if (_refreshQueued && !_disposed) {
         _refreshQueued = false;
-        await _refresh();
+        // Fire-and-forget: the coalesced follow-up must not extend THIS call's
+        // await. Awaiting it chains a fresh refresh onto every tick that landed
+        // mid-fetch, so on a server whose state keeps moving (the poller bumps
+        // its generation every couple of seconds) the chain re-arms faster than
+        // it unwinds and the awaited refresh never returns — stranding
+        // `connect()`/`reconnect()` and any UI spinner waiting on them.
+        unawaited(_refresh());
       }
     }
   }
 
+  /// Cancel and forget both feeds. Claims the fields synchronously before the
+  /// first await for the same reason [reconnect] claims the handle: a cancel that
+  /// parks here must not resume to read — and cancel — a NEWER connect's feeds,
+  /// nor null out the fields that reference them.
   Future<void> _teardownSubs() async {
-    await _changeSub?.cancel();
-    await _connectionSub?.cancel();
+    final change = _changeSub;
+    final connection = _connectionSub;
     _changeSub = null;
     _connectionSub = null;
+    await change?.cancel();
+    await connection?.cancel();
   }
 
   @override

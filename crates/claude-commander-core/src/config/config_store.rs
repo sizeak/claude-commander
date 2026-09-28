@@ -25,6 +25,9 @@ struct InitSnapshot {
     commander_enabled: bool,
     hibernate_enabled: bool,
     hibernate_check_interval_secs: u64,
+    /// The whole `[server]` table: the embedded/standalone server binds once at
+    /// startup, so every one of these is an init-time value.
+    server: crate::config::ServerConfig,
 }
 
 impl InitSnapshot {
@@ -38,6 +41,7 @@ impl InitSnapshot {
             commander_enabled: config.commander_enabled,
             hibernate_enabled: config.hibernate_enabled,
             hibernate_check_interval_secs: config.hibernate_check_interval_secs,
+            server: config.server.clone(),
         }
     }
 
@@ -50,6 +54,7 @@ impl InitSnapshot {
             && self.commander_enabled == config.commander_enabled
             && self.hibernate_enabled == config.hibernate_enabled
             && self.hibernate_check_interval_secs == config.hibernate_check_interval_secs
+            && self.server == config.server
     }
 }
 
@@ -70,6 +75,7 @@ impl InitSnapshot {
 /// - `hibernate_enabled` / `hibernate_check_interval_secs` (the hibernation
 ///   loop is spawned once, with a fixed interval, at construction; the idle
 ///   *threshold* is read live each tick and is not restart-required)
+/// - the whole `[server]` table (the HTTP listener is bound once at startup)
 ///
 /// Call [`restart_required`](Self::restart_required) to check whether any of
 /// those init-time values have diverged from the running config. The flag
@@ -444,7 +450,6 @@ mod tests {
                     label: "Different".to_string(),
                     command: "different".to_string(),
                 }];
-                c.dim_unfocused_preview = false;
                 c.leader_key = "f1".to_string();
             })
             .unwrap();
@@ -488,5 +493,174 @@ mod tests {
         assert!(!migrated.contains("default_program"));
         assert!(migrated.contains("command = \"codex\""));
         assert!(!store.reload_if_changed().unwrap());
+    }
+
+    /// A `[server]` table must survive an unrelated settings edit.
+    ///
+    /// Regression test. `mutate` persists by re-serialising the whole `Config`,
+    /// so any table core does not model is dropped on the next write: before
+    /// `[server]` moved into `Config`, one toggle in the settings modal silently
+    /// deleted the operator's bind address and bearer token, and the next launch
+    /// generated a fresh token that every paired client would reject.
+    #[test]
+    fn mutate_preserves_the_server_table() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[server]\nauto_start = true\nbind = \"0.0.0.0\"\nport = 9999\ntoken = \"sekret\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        let store = ConfigStore::with_path(config, config_path.clone());
+
+        // Exactly what the settings modal does: mutate one unrelated field.
+        store.mutate(|c| c.ui_refresh_fps = 30).unwrap();
+
+        let reloaded = Config::load_from_path(&config_path).unwrap();
+        assert!(reloaded.server.auto_start);
+        assert_eq!(reloaded.server.bind.to_string(), "0.0.0.0");
+        assert_eq!(reloaded.server.port, 9999);
+        assert_eq!(reloaded.server.token.as_deref(), Some("sekret"));
+        assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
+    }
+
+    /// `[[workspaces]]`, `[main_workspace]` and `startup_workspace` must survive
+    /// an unrelated settings edit — the same whole-`Config` re-serialisation
+    /// that once deleted `[server]` would otherwise drop every definition.
+    #[test]
+    fn mutate_preserves_the_workspaces_table() {
+        use claude_commander_protocol::workspace::{StartupWorkspace, WorkspaceDef};
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "startup_workspace = \"Work\"\n\
+             [[workspaces]]\nname = \"Work\"\n\
+             [[workspaces]]\nname = \"Play\"\n\
+             [main_workspace]\nname = \"Home\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        let store = ConfigStore::with_path(config, config_path.clone());
+        store.mutate(|c| c.ui_refresh_fps = 30).unwrap();
+
+        let reloaded = Config::load_from_path(&config_path).unwrap();
+        assert_eq!(
+            reloaded.workspaces,
+            vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")]
+        );
+        assert_eq!(reloaded.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(
+            reloaded.startup_workspace,
+            StartupWorkspace::Named("Work".into())
+        );
+        assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
+    }
+
+    /// `[workspace_themes."<name>"]` (and Main's reserved key) must survive an
+    /// unrelated settings edit, like every other table core models — this is
+    /// the whole-`Config` re-serialisation that once deleted `[server]`.
+    #[test]
+    fn mutate_preserves_the_workspace_themes_table() {
+        use crate::config::MAIN_WORKSPACE_THEME_KEY;
+        use crate::config::theme::ColorValue;
+        use ratatui_core::style::Color;
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[theme]\npreset = \"indexed\"\n\
+             [workspace_themes.\"Side Gig\"]\npreset = \"basic\"\ntext_accent = \"#ff8800\"\n\
+             [workspace_themes.main]\nborder_focused = \"red\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        let store = ConfigStore::with_path(config, config_path.clone());
+        store.mutate(|c| c.ui_refresh_fps = 30).unwrap();
+
+        let reloaded = Config::load_from_path(&config_path).unwrap();
+        assert_eq!(
+            reloaded.workspace_themes.len(),
+            2,
+            "{:?}",
+            reloaded.workspace_themes
+        );
+        let side = &reloaded.workspace_themes["Side Gig"];
+        assert_eq!(side.preset.as_deref(), Some("basic"));
+        assert_eq!(
+            side.text_accent,
+            Some(ColorValue(Color::Rgb(0xff, 0x88, 0x00)))
+        );
+        assert_eq!(
+            reloaded.workspace_themes[MAIN_WORKSPACE_THEME_KEY].border_focused,
+            Some(ColorValue(Color::Red))
+        );
+        assert_eq!(reloaded.theme.preset.as_deref(), Some("indexed"));
+        assert_eq!(reloaded.ui_refresh_fps, 30, "the edit itself must land");
+    }
+
+    /// No per-workspace themes → no `[workspace_themes]` table written, and an
+    /// absent table loads empty.
+    #[test]
+    fn workspace_themes_round_trip_and_stay_absent_when_empty() {
+        let empty = toml::to_string(&Config::default()).unwrap();
+        assert!(!empty.contains("workspace_themes"), "{empty}");
+
+        let mut config = Config::default();
+        config.workspace_themes.insert(
+            "Work".into(),
+            crate::config::ThemeOverrides {
+                preset: Some("truecolor".into()),
+                ..Default::default()
+            },
+        );
+        let text = toml::to_string(&config).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.workspace_themes, config.workspace_themes);
+    }
+
+    /// Main's theme key must be one no user workspace can be called, or a
+    /// workspace named like it would share Main's theme.
+    #[test]
+    fn mains_theme_key_is_a_reserved_workspace_name() {
+        use claude_commander_protocol::workspace::validate_workspace_name;
+        let key = crate::config::MAIN_WORKSPACE_THEME_KEY;
+        assert!(validate_workspace_name(key).is_err());
+        assert!(validate_workspace_name(&key.to_uppercase()).is_err());
+    }
+
+    /// Absent workspace keys load as "only Main, open on the last one".
+    #[test]
+    fn a_config_without_workspaces_has_only_main() {
+        use claude_commander_protocol::workspace::StartupWorkspace;
+        let config = Config::default();
+        assert!(config.workspaces.is_empty());
+        assert!(config.main_workspace.is_none());
+        assert_eq!(config.startup_workspace, StartupWorkspace::Last);
+    }
+
+    /// Changing anything under `[server]` needs a restart: the listener is bound
+    /// once at startup, so the settings tab has to say so rather than implying a
+    /// live rebind.
+    #[test]
+    fn changing_the_server_port_requires_a_restart() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = Config::default();
+        write_config(&config_path, &config);
+
+        let store = ConfigStore::with_path(config, config_path);
+        assert!(!store.restart_required());
+
+        store.mutate(|c| c.server.port = 9999).unwrap();
+        assert!(store.restart_required());
+
+        // Self-heals when put back, like every other init-time value.
+        store.mutate(|c| c.server.port = 7878).unwrap();
+        assert!(!store.restart_required());
     }
 }

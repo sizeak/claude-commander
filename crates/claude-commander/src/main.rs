@@ -10,20 +10,27 @@ use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use claude_commander_core::{
-    VERSION,
-    cli_args::{Cli, Commands, cli_command},
     config::{AppState, Config, ConfigStore, StateStore},
     tmux::{AttachResult, attach_to_session},
-    tui::App,
 };
+use claude_commander_tui::App;
+
+use crate::cli_args::{Cli, Commands, cli_reference};
+
+mod cli_args;
+mod serve;
+
+/// This binary's name and version. Everything user-facing (`--version`, the
+/// startup log line, the telemetry frontend) comes from this package's
+/// metadata, never from `claude_commander_core::VERSION`, which is the
+/// library's.
+const NAME: &str = env!("CARGO_PKG_NAME");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Identify this binary to the telemetry layer. Required by
 /// `CommanderService`/`App` — they panic if a frontend isn't supplied.
 fn frontend() -> claude_commander_core::telemetry::FrontendInfo {
-    claude_commander_core::telemetry::FrontendInfo::new(
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
-    )
+    claude_commander_core::telemetry::FrontendInfo::new(NAME, VERSION)
 }
 
 /// The remote-backend factory injected into the TUI. Keeps core free of a
@@ -87,8 +94,11 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
     let filter = if debug {
         EnvFilter::new("debug")
     } else {
-        // Use info level for our crate, warn for dependencies
+        // Use info level for our crate, warn for dependencies. The embedded
+        // server shares this subscriber — installing its own would panic on the
+        // second global init — so its target is named explicitly here.
         EnvFilter::new("info")
+            .add_directive("claude_commander_server=info".parse()?)
             .add_directive("gix=warn".parse()?)
             .add_directive("tokio=warn".parse()?)
     };
@@ -168,11 +178,7 @@ fn raise_fd_limit() {
 fn raise_fd_limit() {}
 
 /// Execute async PTY-based attach to a tmux session
-async fn execute_attach(
-    session_name: &str,
-    editor_triggers: Vec<Vec<u8>>,
-    switcher_revive: Option<claude_commander_core::tmux::SwitcherRevive>,
-) {
+async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
     // CLI `attach` resolves a Claude session by title/ID, never a shell. The
     // review toggle has no standalone UI here, so it's disabled (empty triggers).
     // Voice input needs the TUI's conversation runtime, so it's disabled here too.
@@ -184,7 +190,6 @@ async fn execute_attach(
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         true,
-        switcher_revive,
     )
     .await
     {
@@ -192,7 +197,11 @@ async fn execute_attach(
             AttachResult::Detached
             | AttachResult::SwitchToShell
             | AttachResult::SwitchToReview
-            | AttachResult::OpenEditor => {
+            | AttachResult::OpenEditor
+            // The CLI attach sets `switcher_enabled: false`, so Ctrl+Space
+            // reaches the pane and this never fires; it is here so adding a
+            // frontend-serviced result can't silently fall through.
+            | AttachResult::OpenSwitcher => {
                 info!("Detached from session");
             }
             AttachResult::SessionEnded => {
@@ -223,7 +232,8 @@ async fn execute_remote_attach(
             AttachResult::Detached
             | AttachResult::SwitchToShell
             | AttachResult::SwitchToReview
-            | AttachResult::OpenEditor => info!("Detached from remote session"),
+            | AttachResult::OpenEditor
+            | AttachResult::OpenSwitcher => info!("Detached from remote session"),
             AttachResult::SessionEnded => info!("Remote session ended"),
             AttachResult::Error(e) => eprintln!("Attach error: {e}"),
         },
@@ -260,27 +270,95 @@ async fn main() -> Result<()> {
             setup_logging(cli.debug, true)?;
             info!("Starting Claude Commander TUI v{}", VERSION);
 
+            // Settle the server plan (and persist any generated token) before
+            // the config store exists — see `serve::prepare`.
+            let mut config = config;
+            let plan = serve::prepare(
+                &mut config,
+                &Config::config_file_path()?,
+                cli.serve,
+                cli.no_serve,
+            );
+
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
             let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
-            let mut app = App::new(config_store, store, frontend(), remote_backend_factory());
+            let mut app = App::new(
+                config_store,
+                store,
+                frontend(),
+                remote_backend_factory(),
+                cli_reference(),
+            );
+
+            // Held for the rest of `main`: dropping the guard stops the server,
+            // so the listener goes away exactly when the TUI does.
+            //
+            // This binds before `app.run()`, which means a client can be served
+            // during the TUI's startup reconciliation (dropping stale `Creating`
+            // sessions, syncing status against live tmux) and briefly see
+            // pre-reconcile state. Accepted deliberately: the window is a few
+            // milliseconds, it self-corrects on the client's next poll, and
+            // closing it would mean either delaying the listener behind the TUI's
+            // startup or plumbing the server into `App::run` — which would make
+            // the terminal frontend depend on axum.
+            let _server = match plan {
+                Some(plan) => {
+                    let (guard, status) = serve::start(app.service_handle(), plan).await;
+                    app.set_embedded_server(status);
+                    guard
+                }
+                None => None,
+            };
+
             app.run().await?;
         }
 
-        Some(Commands::List { all, json }) => {
+        Some(Commands::List {
+            all,
+            json,
+            workspace,
+        }) => {
             setup_logging(cli.debug, false)?;
 
             if json {
-                let service =
-                    claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+                let service = claude_commander_core::api::CommanderService::for_cli(
+                    config.clone(),
+                    frontend(),
+                )?;
+                let projects = service.list_projects().await;
+                let workspaces = claude_commander_core::cli::CliWorkspaces::resolve(
+                    &config,
+                    projects.iter().filter_map(|p| p.workspace.as_deref()),
+                    workspace.as_deref(),
+                )?;
+                let tag_of = |id| {
+                    projects
+                        .iter()
+                        .find(|p| p.id == id)
+                        .and_then(|p| p.workspace.clone())
+                };
                 let sessions = service.list_sessions(all).await?;
                 let entries: Vec<_> = sessions
                     .iter()
-                    .map(claude_commander_core::cli::SessionJsonEntry::from_info)
+                    .map(|s| (s, tag_of(s.project_id)))
+                    .filter(|(_, tag)| workspaces.includes(tag.as_deref()))
+                    .map(|(s, tag)| {
+                        claude_commander_core::cli::SessionJsonEntry::from_info(s)
+                            .with_workspace(tag)
+                    })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
                 let app_state = AppState::load_or_exit();
+                let workspaces = claude_commander_core::cli::CliWorkspaces::resolve(
+                    &config,
+                    app_state
+                        .projects
+                        .values()
+                        .filter_map(|p| p.workspace.as_deref()),
+                    workspace.as_deref(),
+                )?;
 
                 println!("Sessions:");
                 println!();
@@ -290,8 +368,21 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
 
-                for project in app_state.projects.values() {
-                    println!("  {} ({})", project.name, project.main_branch);
+                for project in app_state
+                    .projects
+                    .values()
+                    .filter(|p| workspaces.includes(p.workspace.as_deref()))
+                {
+                    if workspaces.show_column() {
+                        println!(
+                            "  {} ({})  [{}]",
+                            project.name,
+                            project.main_branch,
+                            workspaces.label(project.workspace.as_deref())
+                        );
+                    } else {
+                        println!("  {} ({})", project.name, project.main_branch);
+                    }
 
                     let sessions: Vec<_> = project
                         .worktrees
@@ -365,13 +456,13 @@ async fn main() -> Result<()> {
                 claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
 
             let info = match service.find_session_exact(&session).await? {
-                claude_commander_core::cli::SessionLookup::Found(i) => i,
-                claude_commander_core::cli::SessionLookup::NotFound => {
+                claude_commander_core::session::SessionLookup::Found(i) => i,
+                claude_commander_core::session::SessionLookup::NotFound => {
                     eprintln!("Session not found: {}", session);
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                     std::process::exit(1);
                 }
-                claude_commander_core::cli::SessionLookup::Ambiguous(n) => {
+                claude_commander_core::session::SessionLookup::Ambiguous(n) => {
                     eprintln!(
                         "\"{}\" matches {} sessions. Use the exact title or full ID to delete.",
                         session, n
@@ -416,13 +507,13 @@ async fn main() -> Result<()> {
                 claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
 
             let info = match service.find_session_exact(&session).await? {
-                claude_commander_core::cli::SessionLookup::Found(i) => i,
-                claude_commander_core::cli::SessionLookup::NotFound => {
+                claude_commander_core::session::SessionLookup::Found(i) => i,
+                claude_commander_core::session::SessionLookup::NotFound => {
                     eprintln!("Session not found: {}", session);
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                     std::process::exit(1);
                 }
-                claude_commander_core::cli::SessionLookup::Ambiguous(n) => {
+                claude_commander_core::session::SessionLookup::Ambiguous(n) => {
                     eprintln!(
                         "\"{}\" matches {} sessions. Use the exact title or full ID.",
                         session, n
@@ -479,6 +570,7 @@ async fn main() -> Result<()> {
             base_branch,
             section,
             remote,
+            workspace,
         }) => {
             setup_logging(cli.debug, false)?;
 
@@ -493,8 +585,8 @@ async fn main() -> Result<()> {
             // `--project` and `--path` are mutually exclusive (clap-enforced).
             let project_path = match (project, path, remote.as_deref()) {
                 (Some(name), _, _) => {
-                    let snapshot = backend.workspace_snapshot().await?;
-                    claude_commander_core::cli::resolve_project_path(&snapshot.projects, &name)?
+                    let snapshot = backend.snapshot().await?;
+                    claude_commander_core::session::resolve_project_path(&snapshot.projects, &name)?
                 }
                 (None, Some(p), _) => p,
                 (None, None, None) => std::env::current_dir().unwrap_or_default(),
@@ -505,6 +597,36 @@ async fn main() -> Result<()> {
                     std::process::exit(2);
                 }
             };
+
+            // `--workspace` (clap-bound to `--path`): register the project in that
+            // workspace first, so `create_session`'s own ensure finds it. An
+            // existing project keeps its workspace — say so rather than
+            // silently ignoring the flag.
+            if let Some(typed) = workspace.as_deref() {
+                let snapshot = backend.snapshot().await?;
+                let tag =
+                    claude_commander_core::cli::resolve_new_session_workspace(&snapshot, typed);
+                let id = match backend
+                    .ensure_project(project_path.clone(), tag.clone())
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(claude_commander_core::backend::BackendError::InvalidRequest(msg)) => {
+                        clap::Error::raw(clap::error::ErrorKind::InvalidValue, format!("{msg}\n"))
+                            .exit();
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if let Some(existing) = snapshot.projects.iter().find(|p| p.id == id)
+                    && existing.workspace != tag
+                {
+                    eprintln!(
+                        "Note: project '{}' is already registered in workspace '{}'; it was not moved.",
+                        existing.name,
+                        existing.workspace.as_deref().unwrap_or("main")
+                    );
+                }
+            }
 
             match &remote {
                 Some(server) => println!("Creating session '{name}' on remote '{server}'..."),
@@ -560,19 +682,10 @@ async fn main() -> Result<()> {
                 None => {
                     let app_state = AppState::load_or_exit();
 
-                    match claude_commander_core::cli::find_session(&app_state, &session) {
+                    match claude_commander_core::session::find_session(&app_state, &session) {
                         Some(s) => {
                             let tmux_name = s.tmux_session_name.clone();
-                            // Give the Ctrl+Space switcher revive-on-switch; a service
-                            // construction failure just degrades to switching without
-                            // reviving, as before.
-                            let revive = claude_commander_core::api::CommanderService::for_cli(
-                                config,
-                                frontend(),
-                            )
-                            .ok()
-                            .map(|svc| svc.switcher_revive_hook());
-                            execute_attach(&tmux_name, triggers, revive).await;
+                            execute_attach(&tmux_name, triggers).await;
                         }
                         None => {
                             eprintln!("Session not found: {}", session);
@@ -591,18 +704,12 @@ async fn main() -> Result<()> {
             // enable gate lives in `ensure_session`, so the disabled case
             // surfaces as a typed error rather than an inline check here.
             let tmux = claude_commander_core::tmux::TmuxExecutor::new();
-            let cmd = cli_command();
-            match claude_commander_core::commander::ensure_session(&config, &tmux, &cmd).await {
+            match claude_commander_core::commander::ensure_session(&config, &tmux, &cli_reference())
+                .await
+            {
                 Ok(name) => {
                     let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
-                    // Best-effort revive hook for the Ctrl+Space switcher: the
-                    // commander must stay usable even when state.json is
-                    // unreadable, so a `for_cli` failure means no hook.
-                    let revive =
-                        claude_commander_core::api::CommanderService::for_cli(config, frontend())
-                            .ok()
-                            .map(|svc| svc.switcher_revive_hook());
-                    execute_attach(&name, triggers, revive).await;
+                    execute_attach(&name, triggers).await;
                 }
                 Err(
                     e @ claude_commander_core::Error::Session(
@@ -639,11 +746,6 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::PickSession { out, current }) => {
-            // No logging — the popup terminal is the picker's UI.
-            claude_commander_core::picker::run_session_picker(&out, current.as_deref())?;
-        }
-
         Some(Commands::Config { init }) => {
             setup_logging(cli.debug, false)?;
 
@@ -678,5 +780,15 @@ mod tests {
         // drift back to the core crate's name (claude-commander-core).
         assert_eq!(frontend.name, "claude-commander");
         assert_eq!(frontend.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn cli_and_telemetry_report_one_identity() {
+        // The CLI tree, the telemetry frontend, and the startup log line all
+        // describe the same program, so they must agree — and on this package,
+        // not on the library crate behind it.
+        assert_eq!(cli_args::cli_command().get_name(), NAME);
+        assert_eq!(frontend().name, NAME);
+        assert_ne!(NAME, "claude-commander-core");
     }
 }

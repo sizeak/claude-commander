@@ -22,6 +22,7 @@ use std::sync::Arc;
 use claude_commander_core::api::CommanderService;
 use claude_commander_core::config::storage::AppState as CoreState;
 use claude_commander_core::config::{Config, ConfigStore, StateStore};
+use claude_commander_core::git::git_command;
 use claude_commander_core::telemetry::FrontendInfo;
 use claude_commander_server::{AppState, AuthConfig, build_router};
 use tempfile::TempDir;
@@ -38,9 +39,32 @@ pub async fn tmux_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Run a git command in `dir`, asserting it succeeds.
+/// The config every harness git forces on, as `key=value` pairs, so a fixture
+/// commit never signs whatever the developer's global config says.
+///
+/// Deliberately a copy of core's `git::fixture::FIXTURE_GIT_CONFIG` rather than
+/// a use of it: that module is gated on core's `test-support` feature, and this
+/// crate is a *normal* dependency of its dependents, so enabling the feature
+/// here would unify it into every `cargo build --workspace` -- silencing
+/// telemetry and compiling `MockBackend` into the release binaries. Core's
+/// `test-support` is enabled from `[dev-dependencies]` only.
+/// `scripts/tests/run.sh` pins that no normal edge enables it.
+pub const NO_SIGN_GIT_CONFIG: [&str; 2] = ["commit.gpgsign=false", "tag.gpgsign=false"];
+
+/// Core's [`git_command`] with signing forced off by `-c`, which outranks every
+/// config file (global, repo-local, and `GIT_CONFIG_GLOBAL`).
+pub fn harness_git() -> tokio::process::Command {
+    let mut cmd = git_command();
+    for pair in NO_SIGN_GIT_CONFIG {
+        cmd.args(["-c", pair]);
+    }
+    cmd
+}
+
+/// Run a git command in `dir`, asserting it succeeds. Never signs: it goes
+/// through [`harness_git`], so the developer's signing setup is irrelevant.
 pub async fn run_git(dir: &Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
+    let output = harness_git()
         .current_dir(dir)
         .args(args)
         .output()
@@ -61,6 +85,13 @@ pub async fn create_test_repo() -> (TempDir, PathBuf) {
     run_git(&repo_path, &["init"]).await;
     run_git(&repo_path, &["config", "user.email", "test@test.com"]).await;
     run_git(&repo_path, &["config", "user.name", "Test User"]).await;
+    // Tests drive production code that commits in this repo and its worktrees
+    // (cascade's `merge --no-ff`), which `run_git`'s `-c` cannot reach, so the
+    // opt-out also goes into the repo-local config (which outranks the global).
+    for pair in NO_SIGN_GIT_CONFIG {
+        let (key, value) = pair.split_once('=').expect("key=value");
+        run_git(&repo_path, &["config", key, value]).await;
+    }
     tokio::fs::write(repo_path.join("README.md"), "# Test Repository\n")
         .await
         .unwrap();
@@ -83,6 +114,16 @@ pub fn test_state(data_dir: &TempDir, worktrees_dir: &TempDir) -> AppState {
     let mut config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         tmux_tmpdir: Some(tmux_tmpdir),
+        // Keep the temp files handed to the agent — pasted images (whose store
+        // *prunes*, i.e. deletes, files in this directory) and comment-apply
+        // briefs — under `data_dir` rather than the real OS temp dir. Without
+        // this, any suite exercising the paste-image route or Apply would litter
+        // (and prune) the developer's `/tmp`.
+        agent_temp_dir: Some(data_dir.path().join("agent-temp")),
+        // And the same for cloned repositories, where the default is the user's
+        // REAL `~/Projects`: a suite exercising the clone routes would check
+        // repositories out into the developer's own projects directory.
+        projects_dir: Some(data_dir.path().join("projects")),
         ..Config::default()
     };
     // Telemetry is opt-out by default with a baked ingest token, so a plain
@@ -119,6 +160,27 @@ pub async fn spawn_server(state: AppState) -> SocketAddr {
 mod tests {
     use super::*;
 
+    /// The repo-local opt-out is what covers git the code under test spawns
+    /// (e.g. cascade's merge), which `harness_git`'s `-c` cannot reach.
+    #[tokio::test]
+    async fn create_test_repo_opts_out_of_signing_repo_locally() {
+        let (_tmp, repo) = create_test_repo().await;
+        for key in ["commit.gpgsign", "tag.gpgsign"] {
+            let out = git_command()
+                .current_dir(&repo)
+                .args(["config", "--local", "--get", key])
+                .output()
+                .await
+                .unwrap();
+            assert!(out.status.success(), "{key} not set repo-locally");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                "false",
+                "{key}"
+            );
+        }
+    }
+
     /// Guard: the harness must NOT emit telemetry. Telemetry is opt-out by
     /// default with a baked ingest token, so an un-disabled test service would
     /// post events to the production OpenObserve instance from every suite that
@@ -140,6 +202,24 @@ mod tests {
         assert!(
             !state.service.telemetry().is_active(),
             "test-support fixtures must not emit telemetry (would pollute production OpenObserve)"
+        );
+    }
+
+    /// Guard: the harness must pin the projects directory into `data_dir`.
+    /// `projects_dir` defaults to the user's REAL `~/Projects`, and the
+    /// repo-clone paths write there — so an unpinned harness would clone into
+    /// the developer's own projects directory from `cargo test` / CI. Mirrors
+    /// the guard on the server's in-crate `handlers/test_support.rs` fixture;
+    /// fails if someone drops the knob here.
+    #[tokio::test]
+    async fn test_state_pins_projects_dir_into_tempdir() {
+        let data_dir = TempDir::new().unwrap();
+        let worktrees_dir = TempDir::new().unwrap();
+        let state = test_state(&data_dir, &worktrees_dir);
+        let projects_dir = state.service.read_config().projects_dir().unwrap();
+        assert!(
+            projects_dir.starts_with(data_dir.path()),
+            "test-support fixtures must not clone into the real ~/Projects (got {projects_dir:?})"
         );
     }
 

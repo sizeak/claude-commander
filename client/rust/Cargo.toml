@@ -3,6 +3,20 @@ name = "rust_lib_claude_commander_client"
 version = "0.1.0"
 edition = "2021"
 
+# This crate is its own workspace root — it already behaves as one (it is
+# `exclude`d from the repo-root workspace and keeps its own `Cargo.lock`), and
+# stating it stops cargo's upward search for a workspace manifest here.
+#
+# Not cosmetic: cargo walks *past* a workspace that excludes the package and
+# keeps looking further up. So when the repo is checked out inside another copy of
+# itself — which is exactly what a `git worktree` under `.claude/worktrees/`
+# is — cargo skips this checkout's root (whose `exclude = ["client"]` matches) and
+# binds to the OUTER repo's root (whose `exclude` does not match a path of the
+# form `.claude/worktrees/<id>/client/rust`), then fails with "current package
+# believes it's in a workspace when it's not". With this table, `cargo test` here
+# works from any checkout location.
+[workspace]
+
 # `rlib` is added so the crate's own integration tests (client/rust/tests) can
 # link against it as a normal Rust library; `cdylib`/`staticlib` are what
 # cargokit/flutter_rust_bridge link into the Flutter app. The extra rlib is inert
@@ -18,6 +32,12 @@ flutter_rust_bridge = { version = "=2.11.1", features = ["chrono", "uuid"] }
 # responses into these exact types, so drift fails loudly in Rust. The mirrors
 # in `api::mirrors` re-export these for flutter_rust_bridge.
 claude-commander-protocol = { path = "../../crates/claude-commander-protocol" }
+# Session matching/ranking, shared with the TUI so both frontends rank a session
+# list identically — the Dart port of this had drifted from the Rust original.
+# Its whole dependency tree is `fuzzy-matcher` (pure Rust), so it is safe for the
+# mobile cross-build, and it does NOT depend on `claude-commander-core`, so the
+# no-core rule for this crate still holds.
+claude-commander-viewmodel = { path = "../../crates/claude-commander-viewmodel" }
 # The pure HTTP + WebSocket transport (RemoteClient + Poller + attach). The
 # cdylib now drives this instead of hand-rolling reqwest/tungstenite, so the
 # whole server surface reaches Dart through one wrapped, opaque per-server handle.
@@ -25,6 +45,15 @@ claude-commander-client = { path = "../../crates/claude-commander-client" }
 # Same major versions as the protocol crate so the `Uuid`/`DateTime` in the
 # mirrors are the *same* types cargo resolves for the protocol DTOs.
 uuid = { version = "1.23", features = ["v4"] }
+# The diff view-model + layout engine the TUI also renders through, so both
+# frontends derive rows, word-diff emphasis and gap expansion from one
+# implementation. `default-features = false` drops the `wrap` module: it lays
+# text out into fixed terminal cells, and Flutter's `RichText` wraps for itself.
+#
+# Safe for the mobile cross-build — diffgrid pulls in diffy/similar/unicode-*
+# and nothing platform-specific — and it does NOT breach the
+# `claude-commander-client` rule against depending on core.
+diffgrid = { git = "https://github.com/sizeak/diffgrid", rev = "83698a53458868c7c691d89dbb21e89fbc905afa", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1"
 anyhow = "1"

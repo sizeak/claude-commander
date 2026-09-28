@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:claude_commander_client/pages/review_page.dart';
 import 'package:claude_commander_client/pages/session_detail_page.dart';
 import 'package:claude_commander_client/pages/terminal_page.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
@@ -10,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'support/fake_commander_api.dart';
 import 'support/fixtures.dart';
+import 'theme/mission_control_reference.dart';
 
 void main() {
   late FakeCommanderApi api;
@@ -22,10 +24,13 @@ void main() {
 
   tearDown(() => store.dispose());
 
-  Widget scope(Widget child) =>
-      CommanderStoreScope(store: store, child: MaterialApp(home: child));
+  Widget scope(Widget child) => CommanderStoreScope(
+    store: store,
+    child: MaterialApp(home: child),
+  );
 
-  Widget wrap(SessionInfo session) => scope(SessionDetailPage(session: session));
+  Widget wrap(SessionInfo session) =>
+      scope(SessionDetailPage(session: session));
 
   /// Connect the store (so the page has a live handle), then pump the page and
   /// let the initial on-demand detail fetch resolve.
@@ -39,13 +44,97 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(
       info: sessionInfo(title: 'Detail me', status: SessionStatus.running),
       diffStat: '3 files changed',
-      paneContent: 'hello world',
     );
     await pump(tester, sessionInfo(title: 'Detail me'));
 
     expect(find.text('Detail me'), findsWidgets);
     expect(find.text('3 files changed'), findsOneWidget);
-    expect(find.text('hello world'), findsOneWidget);
+  });
+
+  testWidgets('the header surfaces section and keep-alive as chips', (
+    tester,
+  ) async {
+    // Section + keep-alive moved into the ⋮ menu, so their state is shown as
+    // read-only chips instead. An explicit section override wins over the
+    // current section (matching the menu/edit precedence).
+    final info = sessionInfo(
+      keepAlive: true,
+      currentSection: 'auto',
+      sectionOverride: 'review',
+    );
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    expect(find.text('▤ review'), findsOneWidget);
+    expect(find.text('▤ auto'), findsNothing);
+    expect(find.text('✓ keep-alive'), findsOneWidget);
+  });
+
+  testWidgets('the header omits the chips when unset', (tester) async {
+    final info = sessionInfo(); // keepAlive false, no section
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    expect(find.textContaining('▤'), findsNothing);
+    expect(find.text('✓ keep-alive'), findsNothing);
+  });
+
+  /// Build an agent-states snapshot marking [info]'s session with [state], so
+  /// the store's live agent state (not the detail fixture) drives the header.
+  AgentStatesSnapshotDto agentStates(SessionInfo info, AgentState state) =>
+      AgentStatesSnapshotDto(
+        states: [AgentStateEntryDto(sessionId: info.sessionId, state: state)],
+        commanderRunning: true,
+      );
+
+  testWidgets('a waiting agent shows the amber waiting-input hint', (
+    tester,
+  ) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    api.agentStatesResponse = agentStates(info, AgentState.waitingForInput);
+    await pump(tester, info);
+
+    expect(find.textContaining('answer in the Agent terminal'), findsOneWidget);
+  });
+
+  testWidgets('a non-waiting agent omits the waiting-input hint', (
+    tester,
+  ) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    api.agentStatesResponse = agentStates(info, AgentState.working);
+    await pump(tester, info);
+
+    expect(find.textContaining('answer in the Agent terminal'), findsNothing);
+  });
+
+  testWidgets('the phone detail hides the terminal-snapshot preview', (
+    tester,
+  ) async {
+    // Even when the server would return pane content, the phone layout does
+    // not render the snapshot card — the live terminal is one tap away and far
+    // more useful in a small viewport.
+    api.getSessionDetailResponse = sessionDetail(
+      info: sessionInfo(title: 'Detail me', status: SessionStatus.running),
+      paneContent: 'hello world',
+    );
+    await pump(tester, sessionInfo(title: 'Detail me'));
+
+    expect(find.text('Terminal snapshot'), findsNothing);
+    expect(find.text('hello world'), findsNothing);
+  });
+
+  testWidgets('the phone detail fetch skips pane capture (lines null)', (
+    tester,
+  ) async {
+    // With no preview to render, the phone must not ask the server to capture
+    // pane lines — `lines: null` tells the server to skip the tmux capture.
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    expect(api.lastCall('getSessionDetail')!.args['lines'], isNull);
   });
 
   testWidgets('a deleted session shows a gone state and stops fetching', (
@@ -56,10 +145,10 @@ void main() {
     await pump(tester, sessionInfo(title: 'Gone one'));
 
     expect(find.textContaining('no longer exists'), findsOneWidget);
-    // The lifecycle actions are gone (or disabled) — no live controls.
-    expect(find.widgetWithText(FilledButton, 'Kill'), findsNothing);
-    expect(find.widgetWithText(FilledButton, 'Restart'), findsNothing);
-    expect(find.widgetWithText(FilledButton, 'Delete'), findsNothing);
+    // The lifecycle action bar is gone — no live controls.
+    expect(find.byTooltip('Kill'), findsNothing);
+    expect(find.byTooltip('Restart'), findsNothing);
+    expect(find.byTooltip('Delete'), findsNothing);
 
     // Once gone, a change-feed tick must not fetch detail again.
     final callsSoFar = api.countOf('getSessionDetail');
@@ -70,10 +159,10 @@ void main() {
 
   Future<void> confirmAction(
     WidgetTester tester, {
-    required String button,
+    required Finder trigger,
     required String confirmLabel,
   }) async {
-    await tester.tap(find.widgetWithText(FilledButton, button));
+    await tester.tap(trigger);
     await tester.pump();
     // The confirm dialog is up.
     expect(find.byType(AlertDialog), findsOneWidget);
@@ -96,7 +185,11 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    await confirmAction(tester, button: 'Kill', confirmLabel: 'Kill');
+    await confirmAction(
+      tester,
+      trigger: find.byTooltip('Kill'),
+      confirmLabel: 'Kill',
+    );
     expect(api.countOf('killSession'), 1);
   });
 
@@ -107,7 +200,11 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    await confirmAction(tester, button: 'Restart', confirmLabel: 'Restart');
+    await confirmAction(
+      tester,
+      trigger: find.byTooltip('Restart'),
+      confirmLabel: 'Restart',
+    );
     expect(api.countOf('restartSession'), 1);
   });
 
@@ -138,7 +235,11 @@ void main() {
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
-    await confirmAction(tester, button: 'Delete', confirmLabel: 'Delete');
+    await confirmAction(
+      tester,
+      trigger: find.byTooltip('Delete'),
+      confirmLabel: 'Delete',
+    );
     expect(api.countOf('deleteSession'), 1);
     // popOnSuccess: true → the page is gone, back to the placeholder home.
     await tester.pumpAndSettle();
@@ -168,7 +269,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // Confirm kill; the completer is not yet complete, so the action hangs.
-    await tester.tap(find.widgetWithText(FilledButton, 'Kill'));
+    await tester.tap(find.byTooltip('Kill'));
     await tester.pump();
     await tester.tap(
       find.descendant(
@@ -178,12 +279,13 @@ void main() {
     );
     await tester.pump();
 
-    // _busy is set → Restart/Delete are disabled (onPressed null).
-    final restart = tester.widget<FilledButton>(
-      find.widgetWithText(FilledButton, 'Restart'),
+    // _busy is set → the Restart/Delete icon buttons are disabled (onPressed
+    // null).
+    final restart = tester.widget<IconButton>(
+      find.widgetWithIcon(IconButton, Icons.restart_alt),
     );
-    final delete = tester.widget<FilledButton>(
-      find.widgetWithText(FilledButton, 'Delete'),
+    final delete = tester.widget<IconButton>(
+      find.widgetWithIcon(IconButton, Icons.delete_outline),
     );
     expect(restart.onPressed, isNull);
     expect(delete.onPressed, isNull);
@@ -200,12 +302,11 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    await tester.tap(find.widgetWithText(OutlinedButton, 'Rename'));
+    await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
-    await tester.enterText(
-      find.widgetWithText(TextField, 'Title'),
-      'New name',
-    );
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextField, 'Title'), 'New name');
     await tester.tap(
       find.descendant(
         of: find.byType(AlertDialog),
@@ -223,12 +324,11 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    await tester.tap(find.widgetWithText(OutlinedButton, 'Section'));
+    await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
-    await tester.enterText(
-      find.widgetWithText(TextField, 'Section'),
-      'review',
-    );
+    await tester.tap(find.text('Set section'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextField, 'Section'), 'review');
     await tester.tap(
       find.descendant(
         of: find.byType(AlertDialog),
@@ -245,7 +345,9 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    await tester.tap(find.widgetWithText(FilterChip, 'Keep alive'));
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Keep alive'));
     await tester.pumpAndSettle();
 
     expect(api.countOf('toggleKeepAlive'), 1);
@@ -289,7 +391,11 @@ void main() {
     );
     await pump(tester, info);
 
-    await confirmAction(tester, button: 'Cascade merge', confirmLabel: 'Cascade');
+    await confirmAction(
+      tester,
+      trigger: find.byTooltip('Cascade merge'),
+      confirmLabel: 'Cascade',
+    );
     expect(api.countOf('cascadeMerge'), 1);
     expect(find.textContaining('Cascade merge succeeded'), findsOneWidget);
   });
@@ -309,11 +415,48 @@ void main() {
     );
     await pump(tester, info);
 
-    await confirmAction(tester, button: 'Cascade merge', confirmLabel: 'Cascade');
+    await confirmAction(
+      tester,
+      trigger: find.byTooltip('Cascade merge'),
+      confirmLabel: 'Cascade',
+    );
     expect(
       find.textContaining('Cascade merge paused: conflict in foo.rs'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('the lifecycle bar keeps Kill amber and Restart teal', (
+    tester,
+  ) async {
+    // The *call site* assertion. `bar_button_accent_test.dart` proves the chrome
+    // honours an accent; this proves this bar still passes one. Without it,
+    // deleting `accent:` from `_lifecycleBar` flattens both icons to the neutral
+    // textBright and every other test still passes — which is how that regression
+    // reached review in the first place.
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    // IconButton builds its Tooltip *inside* itself, so the button is the
+    // tooltip's ancestor, not its descendant.
+    Color? iconColour(String tooltip) => tester
+        .widget<IconButton>(
+          find
+              .ancestor(
+                of: find.byTooltip(tooltip),
+                matching: find.byType(IconButton),
+              )
+              .first,
+        )
+        .color;
+
+    // Only these two: they are the pair that regressed. That a *normal* button
+    // stays neutral is covered by `chrome/bar_button_accent_test.dart`, and the
+    // other lifecycle labels appear elsewhere in this page's tree, so matching
+    // them by tooltip here is ambiguous.
+    expect(iconColour('Kill'), McRef.amberText);
+    expect(iconColour('Restart'), McRef.teal);
   });
 
   testWidgets('push stack confirms then calls pushStack', (tester) async {
@@ -321,7 +464,11 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    await confirmAction(tester, button: 'Push stack', confirmLabel: 'Push');
+    await confirmAction(
+      tester,
+      trigger: find.byTooltip('Push stack'),
+      confirmLabel: 'Push',
+    );
     expect(api.countOf('pushStack'), 1);
   });
 
@@ -330,7 +477,8 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    await tester.tap(find.widgetWithText(OutlinedButton, 'Shell'));
+    // Shell now lives in the lifecycle icon bar rather than as its own button.
+    await tester.tap(find.byTooltip('Shell'));
     await tester.pump();
     // Let the pushed route build (and TerminalBody attach); avoid pumpAndSettle
     // because the terminal's 1s throughput timer never settles.
@@ -338,6 +486,42 @@ void main() {
 
     expect(find.byType(TerminalPage), findsOneWidget);
     expect(api.lastCall('attachTerminal')!.args['kind'], AttachKind.shell);
+  });
+
+  testWidgets('the Agent hero opens an agent terminal attach', (tester) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Open Agent terminal'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(TerminalPage), findsOneWidget);
+    expect(api.lastCall('attachTerminal')!.args['kind'], AttachKind.agent);
+  });
+
+  testWidgets('the Changes card opens the review view (no Review button)', (
+    tester,
+  ) async {
+    // The standalone Review button is gone; the Changes card is the diff entry
+    // point.
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(
+      info: info,
+      diffStat: '3 files changed',
+    );
+    api.openReviewResponse = reviewSnapshot();
+    await pump(tester, info);
+
+    expect(find.widgetWithText(OutlinedButton, 'Review'), findsNothing);
+
+    await tester.tap(find.text('Changes'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(ReviewPage), findsOneWidget);
+    expect(api.countOf('openReview'), 1);
   });
 }
 

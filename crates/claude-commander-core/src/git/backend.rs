@@ -169,6 +169,20 @@ impl GitBackend {
         short.strip_prefix("origin/").map(|s| s.to_string())
     }
 
+    /// The URL of the `origin` remote, or `None` when the repo has no `origin`
+    /// (or its URL is unusable).
+    ///
+    /// This is the *effective* URL — gix applies `url.<base>.insteadOf`
+    /// rewrites, same as git does when it talks to the remote — so a repo
+    /// configured with a shorthand still yields the real host/owner/name that
+    /// [`canonical_repo_slug`](claude_commander_protocol::github::canonical_repo_slug)
+    /// can match a GitHub clone URL against.
+    pub fn origin_url(&self) -> Option<String> {
+        let remote = self.repo.try_find_remote("origin")?.ok()?;
+        let url = remote.url(gix::remote::Direction::Fetch)?;
+        Some(url.to_bstring().to_string())
+    }
+
     /// List all local and remote branches in the repository.
     ///
     /// Returns entries as `(short_name, is_remote)` where:
@@ -286,7 +300,23 @@ impl GitBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::fixture::fixture_git_std;
     use tempfile::TempDir;
+
+    /// Run a fixture git in `dir`, asserting it succeeds, so a setup step that
+    /// fails is reported as itself rather than as a confusing later assertion.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = fixture_git_std()
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
     fn init_test_repo() -> (TempDir, GitBackend) {
         let temp_dir = TempDir::new().unwrap();
@@ -336,30 +366,23 @@ mod tests {
         let repo_path = temp_dir.path();
 
         // Initialize repo with an initial commit (required for worktree add)
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+        git(repo_path, &["init"]);
+        git(repo_path, &["config", "user.email", "test@example.com"]);
+        git(repo_path, &["config", "user.name", "Test"]);
+        git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
 
         // Create a linked worktree
         let wt_path = temp_dir.path().join("my-worktree");
-        std::process::Command::new("git")
-            .args([
+        git(
+            repo_path,
+            &[
                 "worktree",
                 "add",
                 wt_path.to_str().unwrap(),
                 "-b",
                 "wt-branch",
-            ])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+            ],
+        );
         assert!(wt_path.exists(), "worktree should have been created");
 
         // Discover from the worktree path — should resolve to the main repo root
@@ -374,15 +397,6 @@ mod tests {
 
     #[test]
     fn test_detect_main_branch_detached_head_does_not_leak_placeholder() {
-        fn git(dir: &Path, args: &[&str]) {
-            let status = std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .status()
-                .unwrap();
-            assert!(status.success(), "git {args:?} failed");
-        }
-
         let temp_dir = TempDir::new().unwrap();
         let repo_path = temp_dir.path();
 
@@ -391,7 +405,6 @@ mod tests {
         git(repo_path, &["init", "-b", "trunk"]);
         git(repo_path, &["config", "user.email", "test@example.com"]);
         git(repo_path, &["config", "user.name", "Test"]);
-        git(repo_path, &["config", "commit.gpgsign", "false"]);
         git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
         git(repo_path, &["checkout", "--detach", "HEAD"]);
 

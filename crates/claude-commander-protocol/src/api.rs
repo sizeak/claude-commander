@@ -20,6 +20,7 @@ use crate::comment::{Comment, CommentSide};
 use crate::diff::ParsedDiff;
 use crate::pr::{PrState, ReviewDecision};
 use crate::session::{AgentState, ProjectId, SessionId, SessionStatus};
+use crate::workspace::{StartupWorkspace, WorkspaceDef};
 
 /// A session as returned by the list/find/detail endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +141,28 @@ pub struct ReviewSnapshot {
     /// open review view can cheaply tell whether a re-compose actually changed
     /// anything before rebuilding.
     pub content_hash: u64,
+    /// Comments discarded while building this snapshot because the file they
+    /// were written against had left the diff entirely (the change was
+    /// reverted), leaving nothing to anchor them to and no row to render them
+    /// on. Reported so a frontend can tell the user their feedback was dropped
+    /// instead of silently deleting it.
+    ///
+    /// `#[serde(default)]`: an older server omits the field entirely.
+    #[serde(default)]
+    pub dropped_comments: Vec<Comment>,
+    /// The raw unified diff [`Self::diff`] was parsed from, so a client can
+    /// re-parse it locally with a richer model than [`ParsedDiff`] carries
+    /// (`\ No newline at EOF`, CRLF, rename similarity) and lay it out itself.
+    /// This is what lets the Flutter client render word-diff emphasis,
+    /// side-by-side and context expansion in its own cdylib rather than asking
+    /// the server for pre-rendered rows.
+    ///
+    /// `#[serde(default)]` + `Option`: an older server omits the field, and a
+    /// client that gets `None` falls back to converting [`Self::diff`] — which
+    /// is lossier, but still enough to lay out. An empty diff is
+    /// `Some(String::new())`, never `None`.
+    #[serde(default)]
+    pub raw: Option<String>,
 }
 
 /// Options for creating a session (request body for `POST /sessions`). Optional
@@ -180,6 +203,36 @@ pub struct ProjectInfo {
     pub main_branch: String,
     /// Session ids belonging to this project (order as stored).
     pub session_ids: Vec<SessionId>,
+    /// URL of the repo's `origin` remote, or `None` when it has none. Clients
+    /// compare it against a candidate clone URL via
+    /// [`canonical_repo_slug`](crate::github::canonical_repo_slug) to tell which
+    /// repos are already registered — never by string equality, since the same
+    /// repo has several spellings. Additive; older servers omit it.
+    #[serde(default)]
+    pub origin_url: Option<String>,
+    /// Name of the workspace this project is tagged with; `None` is the
+    /// built-in Main workspace. Additive: an older server omits it (every
+    /// project reads as Main), and an older client ignores it.
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+/// Body for `POST /projects`, `POST /projects/ensure` and `POST
+/// /projects/scan` (where `path` is the directory to scan).
+///
+/// `workspace` tags a *newly registered* project (so it lands in the caller's
+/// active workspace); `ensure` and `scan` never re-tag a project that already
+/// exists.
+/// Additive: an older client sends only `path`, and the project lands in Main.
+///
+/// FLUTTER: mirror this DTO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddProjectRequest {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// Why a background fast-forward of a project's main branch was held back.
@@ -236,7 +289,7 @@ pub enum OperationOutcome {
 }
 
 /// One entry in the service's in-memory ring ledger of recent cascade /
-/// push-stack operations, surfaced through [`WorkspaceSnapshot`].
+/// push-stack operations, surfaced through [`Snapshot`].
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,7 +323,7 @@ pub struct ServerStatus {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceSnapshot {
+pub struct Snapshot {
     pub projects: Vec<ProjectInfo>,
     pub sessions: Vec<SessionInfo>,
     /// The session a paused cascade is stalled at, if any.
@@ -287,6 +340,23 @@ pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub operations: Vec<OperationStatus>,
     pub server: ServerStatus,
+    /// This server's workspace definitions, in configured order. Additive: an
+    /// older server omits it (it has only Main).
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceDef>,
+    /// Label of this server's built-in Main workspace; `None` means
+    /// the default label ([`MAIN_WORKSPACE_LABEL`](crate::workspace::MAIN_WORKSPACE_LABEL)).
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub main_workspace: Option<WorkspaceDef>,
+    /// This server's configured `startup_workspace`.
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub startup_workspace: StartupWorkspace,
 }
 
 /// Bulk agent-state snapshot for active sessions.
@@ -391,6 +461,48 @@ pub struct RenameSession {
 pub struct SetSection {
     #[serde(default)]
     pub section: Option<String>,
+}
+
+/// Request body for retargeting a session's stack base
+/// (`POST /sessions/{id}/base`). `parent_session_id: None` unstacks the session
+/// onto the project's main branch.
+///
+/// Only the *parent* crosses the wire, never a branch name: the host derives the
+/// branch from that session (or the project's main branch), so a client can
+/// never disagree with it about where the session actually landed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSessionBase {
+    #[serde(default)]
+    pub parent_session_id: Option<SessionId>,
+}
+
+/// What happened to the session's pull request during a base retarget.
+///
+/// Three-way rather than a bool: "there was no PR" and "we tried and failed"
+/// need different words, because only the second leaves work for the user. A
+/// failed edit is not cosmetic — the next PR sync overwrites the local mirror
+/// from GitHub, so an unreported failure silently reverts the retarget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PrRetarget {
+    /// The session has no PR, so there was nothing to retarget.
+    NoPr,
+    /// `gh pr edit --base` succeeded; the new base is durable on GitHub.
+    Retargeted { pr_number: u32 },
+    /// `gh pr edit --base` failed. The local metadata moved, but the next PR
+    /// sync will revert it unless the user fixes the base on GitHub.
+    Failed { pr_number: u32, message: String },
+}
+
+/// Result of retargeting a session's stack base.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSessionBaseOutcome {
+    /// The branch the session is now based on.
+    pub new_base_branch: String,
+    /// The branch it was based on before, when one was known.
+    #[serde(default)]
+    pub old_base_branch: Option<String>,
+    pub pr: PrRetarget,
 }
 
 /// Request body for changing a session's launch program (`PATCH /sessions/{id}`).
@@ -552,18 +664,20 @@ mod tests {
     }
 
     #[test]
-    fn workspace_snapshot_round_trips_with_maps() {
+    fn snapshot_round_trips_with_maps() {
         let pid = ProjectId::new();
         let sid = SessionId::new();
         let mut project_pull = BTreeMap::new();
         project_pull.insert(pid, PullStatus::UpToDate);
-        let snapshot = WorkspaceSnapshot {
+        let snapshot = Snapshot {
             projects: vec![ProjectInfo {
                 id: pid,
                 name: "repo".to_string(),
                 repo_path: PathBuf::from("/repo"),
                 main_branch: "main".to_string(),
                 session_ids: vec![sid],
+                origin_url: Some("git@github.com:sizeak/claude-commander.git".to_string()),
+                workspace: Some("Work".to_string()),
             }],
             sessions: vec![],
             cascade_paused: Some(sid),
@@ -575,29 +689,116 @@ mod tests {
                 tmux_ok: true,
                 version: "0.0.0".to_string(),
             },
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main_workspace: Some(WorkspaceDef::named("Home")),
+            startup_workspace: StartupWorkspace::Named("Work".to_string()),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
-        let back: WorkspaceSnapshot = serde_json::from_str(&json).unwrap();
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(back.workspaces, snapshot.workspaces);
+        assert_eq!(back.main_workspace, snapshot.main_workspace);
+        assert_eq!(back.startup_workspace, snapshot.startup_workspace);
         assert_eq!(back.projects.len(), 1);
+        assert_eq!(
+            back.projects[0].origin_url.as_deref(),
+            Some("git@github.com:sizeak/claude-commander.git")
+        );
         assert_eq!(back.cascade_paused, Some(sid));
         assert!(back.project_pull.contains_key(&pid));
         assert!(back.server.gh_available);
     }
 
-    /// A `WorkspaceSnapshot` with the optional collections omitted still
+    /// A `Snapshot` with the optional collections omitted still
     /// deserializes (they default to empty).
     #[test]
-    fn workspace_snapshot_defaults_optional_collections() {
+    fn snapshot_defaults_optional_collections() {
         let json = r#"{
             "projects": [],
             "sessions": [],
             "server": {"gh_available": false, "tmux_ok": false, "version": "x"}
         }"#;
-        let snap: WorkspaceSnapshot = serde_json::from_str(json).unwrap();
+        let snap: Snapshot = serde_json::from_str(json).unwrap();
         assert!(snap.cascade_paused.is_none());
         assert!(snap.pending_comment_sessions.is_empty());
         assert!(snap.project_pull.is_empty());
         assert!(snap.operations.is_empty());
+        // An older server has no workspaces: only Main, default label, `last`.
+        assert!(snap.workspaces.is_empty());
+        assert!(snap.main_workspace.is_none());
+        assert_eq!(snap.startup_workspace, StartupWorkspace::Last);
+    }
+
+    /// The other direction of wire compatibility: an *older client* decoding a
+    /// new server's payload. Its structs lack the workspace fields, and serde's
+    /// default (no `deny_unknown_fields`) must let it ignore them — pinned with
+    /// a stand-in for the pre-workspace shapes so adding `deny_unknown_fields`
+    /// to either DTO would fail here.
+    #[test]
+    fn an_older_client_ignores_the_workspace_fields() {
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldProjectInfo {
+            id: ProjectId,
+            name: String,
+            repo_path: PathBuf,
+            main_branch: String,
+            session_ids: Vec<SessionId>,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldSnapshot {
+            projects: Vec<OldProjectInfo>,
+            sessions: Vec<serde_json::Value>,
+            server: ServerStatus,
+        }
+        let json = r##"{
+            "projects": [{
+                "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+                "name": "repo", "repo_path": "/repo", "main_branch": "main",
+                "session_ids": [], "workspace": "Work"
+            }],
+            "sessions": [],
+            "server": {"gh_available": false, "tmux_ok": false, "version": "x"},
+            "workspaces": [{"name": "Work"}],
+            "main_workspace": {"name": "Home"},
+            "startup_workspace": "last"
+        }"##;
+        let old: OldSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(old.projects[0].name, "repo");
+    }
+
+    /// `POST /projects` from an older client (path only) lands in Main; the
+    /// field is skipped on the way out when absent, so a new client talking to
+    /// an old server sends exactly the old body.
+    #[test]
+    fn add_project_request_workspace_is_optional_both_ways() {
+        let old: AddProjectRequest = serde_json::from_str(r#"{"path":"/repo"}"#).unwrap();
+        assert_eq!(old.workspace, None);
+        let body = serde_json::to_string(&AddProjectRequest {
+            path: PathBuf::from("/repo"),
+            workspace: None,
+        })
+        .unwrap();
+        assert_eq!(body, r#"{"path":"/repo"}"#);
+    }
+
+    /// `origin_url` is additive: a payload from a server that predates it must
+    /// still deserialize, with the field absent rather than the whole snapshot
+    /// failing.
+    #[test]
+    fn project_info_defaults_origin_url_from_an_older_server() {
+        let json = r#"{
+            "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+            "name": "repo",
+            "repo_path": "/repo",
+            "main_branch": "main",
+            "session_ids": []
+        }"#;
+        let info: ProjectInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.name, "repo");
+        assert_eq!(info.origin_url, None);
+        assert_eq!(info.workspace, None, "an older server's project is in Main");
     }
 
     #[test]
@@ -681,6 +882,76 @@ mod tests {
         // An empty list is a valid request (clears the picker to the fallback).
         let empty: SetProgramsRequest = serde_json::from_str(r#"{"programs":[]}"#).unwrap();
         assert!(empty.programs.is_empty());
+    }
+
+    /// A snapshot from a server predating the `raw` field still deserializes,
+    /// with `raw: None` telling the client to fall back to `diff`. Without the
+    /// `#[serde(default)]` this is a hard decode failure and the review view
+    /// goes blank against every older server.
+    #[test]
+    fn review_snapshot_tolerates_a_server_without_raw() {
+        let wire = r#"{
+            "base": "main",
+            "diff": {"files": []},
+            "comments": [],
+            "reviewed": [],
+            "content_hash": 7
+        }"#;
+        let snap: ReviewSnapshot = serde_json::from_str(wire).unwrap();
+        assert_eq!(snap.base, "main");
+        assert!(snap.raw.is_none());
+
+        // And a current server's `raw` survives the round trip. An empty diff
+        // is `Some("")` — distinguishable from "this server never sent one".
+        let snap = ReviewSnapshot {
+            raw: Some(String::new()),
+            ..snap
+        };
+        let back: ReviewSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+        assert_eq!(back.raw.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn set_session_base_body_roundtrips() {
+        // An explicit null unstacks onto main, and an absent field means the
+        // same — a client that omits it must not be read as naming a parent.
+        let unstack: SetSessionBase =
+            serde_json::from_str(r#"{"parent_session_id":null}"#).unwrap();
+        assert!(unstack.parent_session_id.is_none());
+        let absent: SetSessionBase = serde_json::from_str("{}").unwrap();
+        assert!(absent.parent_session_id.is_none());
+
+        let id = SessionId::new();
+        let body = SetSessionBase {
+            parent_session_id: Some(id),
+        };
+        let back: SetSessionBase =
+            serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
+        assert_eq!(back.parent_session_id, Some(id));
+    }
+
+    #[test]
+    fn set_session_base_outcome_roundtrips_each_pr_state() {
+        for pr in [
+            PrRetarget::NoPr,
+            PrRetarget::Retargeted { pr_number: 7 },
+            PrRetarget::Failed {
+                pr_number: 7,
+                message: "not found".to_string(),
+            },
+        ] {
+            let outcome = SetSessionBaseOutcome {
+                new_base_branch: "main".to_string(),
+                old_base_branch: Some("feat".to_string()),
+                pr: pr.clone(),
+            };
+            let back: SetSessionBaseOutcome =
+                serde_json::from_str(&serde_json::to_string(&outcome).unwrap()).unwrap();
+            assert_eq!(back.pr, pr);
+            assert_eq!(back.new_base_branch, "main");
+            assert_eq!(back.old_base_branch.as_deref(), Some("feat"));
+        }
     }
 
     #[test]

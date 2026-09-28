@@ -4,7 +4,7 @@
          rather than only in the debug/profile manifests. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="claude_commander_client"
+        android:label="Claude Commander"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

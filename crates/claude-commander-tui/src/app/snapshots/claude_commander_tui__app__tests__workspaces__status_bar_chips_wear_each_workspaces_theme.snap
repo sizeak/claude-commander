@@ -1,0 +1,14 @@
+---
+source: crates/claude-commander-tui/src/app/tests.rs
+assertion_line: 11375
+expression: "format!(\"In Main (truecolor):\\n{in_main}\\nIn Work (lcars):\\n{in_work}\")"
+---
+In Main (truecolor):
+bar: "  Main  Work ●1"
+Main: fg=Some(Black) bg=Some(Rgb(180, 190, 254)) bold=true
+Work: fg=Some(Rgb(204, 153, 204)) bg=Some(Rgb(49, 50, 68)) bold=false
+
+In Work (lcars):
+bar: "  Work  Main ●1"
+Work: fg=Some(Black) bg=Some(Rgb(204, 153, 204)) bold=true
+Main: fg=Some(Rgb(0, 0, 0)) bg=Some(Rgb(247, 160, 29)) bold=false

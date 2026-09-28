@@ -1,35 +1,49 @@
 //! Commander API — unified service layer for CLI and TUI consumers.
 
-use std::collections::BTreeMap;
+use crate::git::git_command;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use claude_commander_protocol::github::{
+    CloneJob, CloneJobId, CloneRequest, CloneSource, GithubRepo, validate_clone_url,
+    validate_dest_name, validate_repo_slug,
+};
+use claude_commander_protocol::workspace::{
+    SetWorkspacesRequest, WorkspaceRejection, validate_set_workspaces, validate_workspace_label,
+};
 use futures::StreamExt;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::agent::AgentKind;
+use crate::backend::{RunLocalError, run_local};
 use crate::comment::{
     ApplyOutcome, Comment, CommentStatus, CommentStore, SendDecision, compose_markdown,
     decide_send, reanchor_comments,
 };
 use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
-use crate::error::{Result, SessionError};
+use crate::error::{GitError, Result, SessionError};
 use crate::git::{
-    FileDiff, GitBackend, PrCheckResult, compose_review_diff, compute_branch_diff,
-    diff_stat_summary, effective_pr_state, enrich_binary_sizes, is_gh_available,
-    parse_unified_diff, prefer_remote_branch, read_base_blob, read_worktree_file,
+    CloneJobs, CloneOutcome, ComposedDiff, FileDiff, GitBackend, PrCheckResult,
+    clone_source_rejected, compose_review_diff, compute_branch_diff, diff_stat_summary,
+    effective_pr_state, enrich_binary_sizes, is_gh_available, list_repos, list_worktrees_at,
+    parse_unified_diff, prefer_remote_branch, read_base_blob, read_worktree_file, ref_exists_cli,
+    run_clone,
 };
 use crate::reviewed::ReviewedStore;
+use crate::session::workspace;
 use crate::session::{
-    AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus,
-    WorktreeSession, apply_assignment, clear_override_and_reassign, program_with_agent_flags,
+    AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionLookup, SessionManager,
+    SessionStatus, WorktreeSession, apply_assignment, clear_override_and_reassign,
+    decide_branch_reconcile, find_session, find_session_exact, program_with_agent_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
+use crate::term_caps::ColorMode;
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
-use crate::tui::theme::Theme;
 
 /// High-level service that wraps `SessionManager`, state stores, and agent
 /// detection into a single entry point. Both the CLI and TUI route through
@@ -47,13 +61,13 @@ pub struct CommanderService {
     reviewed: Arc<ReviewedStore>,
     telemetry: Telemetry,
     /// Bounded in-memory ledger of recent cascade / push-stack operations,
-    /// surfaced through [`Self::workspace_snapshot`]. Capped at
+    /// surfaced through [`Self::snapshot`]. Capped at
     /// [`OPERATION_LEDGER_CAP`]; oldest entries are evicted.
     operations: Arc<std::sync::Mutex<std::collections::VecDeque<OperationStatus>>>,
     /// Monotonic id source for ledger entries (stable for the process lifetime).
     next_op_id: Arc<std::sync::atomic::AtomicU64>,
     /// Cached `gh --version` availability. Computed once (fork/exec is not free)
-    /// and reused for every `workspace_snapshot`.
+    /// and reused for every `snapshot`.
     gh_available: Arc<tokio::sync::OnceCell<bool>>,
     /// Shared agent-state detector with a short TTL cache, reused across
     /// non-`fresh` [`Self::agent_states`] calls so repeated polls don't
@@ -71,7 +85,7 @@ pub struct CommanderService {
     /// falls back to on-demand detection.
     agent_states_primed: Arc<std::sync::atomic::AtomicBool>,
     /// Most recent per-project background-pull status, maintained by the pull
-    /// loop and surfaced in [`WorkspaceSnapshot::project_pull`].
+    /// loop and surfaced in [`Snapshot::project_pull`].
     pull_status: Arc<std::sync::Mutex<BTreeMap<ProjectId, PullStatus>>>,
     /// Last PR-status fan-out time, for debouncing manual refresh bursts.
     last_pr_check: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
@@ -81,9 +95,13 @@ pub struct CommanderService {
     /// once per service, even if both a local TUI and an embedded caller ask.
     background_started: Arc<std::sync::atomic::AtomicBool>,
     /// Short-TTL cache of the last `tmux -V` probe result, so per-client
-    /// [`Self::workspace_snapshot`] polling (~2s cadence) doesn't fork a
+    /// [`Self::snapshot`] polling (~2s cadence) doesn't fork a
     /// subprocess on every poll. See [`Self::cached_tmux_ok`].
     tmux_ok_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
+    /// Running and recently-finished repository clones, started by
+    /// [`Self::start_clone`] and polled through [`Self::clone_job`]. In-memory
+    /// only — see [`CloneJobs`] for why a clone cannot outlive its process.
+    clone_jobs: CloneJobs,
 }
 
 /// Max entries kept in the operation ledger before the oldest are evicted.
@@ -93,7 +111,7 @@ const OPERATION_LEDGER_CAP: usize = 32;
 /// `agent_states` polls.
 const AGENT_STATE_CACHE_TTL: Duration = Duration::from_millis(1000);
 
-/// TTL for the [`CommanderService::workspace_snapshot`] tmux-availability cache.
+/// TTL for the [`CommanderService::snapshot`] tmux-availability cache.
 /// Long enough that a 2s client poll reuses the last probe rather than forking
 /// `tmux -V` every time, short enough that tmux coming up/going down surfaces
 /// within a few seconds.
@@ -111,7 +129,7 @@ impl CommanderService {
         let manager = SessionManager::new(
             config_store.clone(),
             store.clone(),
-            Theme::default().tmux_status_style(),
+            ColorMode::detect().tmux_status_style(),
         );
         // Comments and reviewed marks live beside state.json under the same
         // data dir the `StateStore` resolved — *not* a freshly recomputed
@@ -153,6 +171,7 @@ impl CommanderService {
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
+            clone_jobs: CloneJobs::new(),
         }
     }
 
@@ -206,6 +225,48 @@ impl CommanderService {
         self.config_store.mutate(|c| *c = config)
     }
 
+    /// Rename a configured section, migrating every session that refers to it
+    /// (by `current_section` or `section_override`) in the same operation.
+    ///
+    /// Renaming via a plain config write is *not* equivalent: sessions store
+    /// their section by name, so the config write alone strands them — see
+    /// [`crate::session::rename_section`]. Exposed as its own method so no
+    /// caller can perform half of the rename.
+    ///
+    /// Returns `false` (leaving everything untouched) when the rename is a
+    /// no-op or `new` isn't an available name (see
+    /// [`section_name_available`](crate::session::section_name_available)), or
+    /// when `old` isn't a configured section.
+    pub async fn rename_section(&self, old: &str, new: &str) -> Result<bool> {
+        let new = new.trim();
+        if new == old {
+            return Ok(false);
+        }
+        let renamed = self.config_store.mutate(|c| {
+            let Some(idx) = c.sections.iter().position(|s| s.name == old) else {
+                return false;
+            };
+            if !crate::session::section_name_available(new, &c.sections) {
+                return false;
+            }
+            c.sections[idx].name = new.to_string();
+            true
+        })?;
+        if !renamed {
+            return Ok(false);
+        }
+        self.telemetry.feature("section.rename");
+        let (old, new) = (old.to_string(), new.to_string());
+        self.store
+            .mutate(move |state| {
+                for session in state.sessions.values_mut() {
+                    crate::session::rename_section(session, &old, &new);
+                }
+            })
+            .await?;
+        Ok(true)
+    }
+
     /// Replace the configured program list (the new-session picker options) and
     /// persist it. Exposed as its own method — and, for remotes, its own HTTP
     /// endpoint — so the picker list can be edited without opening up the general
@@ -214,6 +275,155 @@ impl CommanderService {
     pub fn set_programs(&self, programs: Vec<ProgramEntry>) -> Result<()> {
         self.telemetry.feature("programs.set");
         self.config_store.mutate(|c| c.programs = programs)
+    }
+
+    // -- Workspaces --
+
+    /// Replace the workspace definitions (order = display order), and — when
+    /// given — Main's label and the startup choice. Never re-tags a
+    /// project: [`Self::rename_workspace`] and [`Self::delete_workspace`] do
+    /// that, because a replace cannot tell a rename from a delete + create.
+    /// Validated against the protocol's rules first, so nothing is written for
+    /// a refused list.
+    ///
+    /// `main: None` leaves Main's label alone, so names are checked against
+    /// the label this server already stores — otherwise a replace that omits
+    /// `main` (every create/reorder edit, and any older client) could
+    /// define a workspace named like Main, which a rename is refused for.
+    pub fn set_workspace_defs(&self, req: SetWorkspacesRequest) -> Result<()> {
+        let touches_main = req.main.is_some();
+        let checked = SetWorkspacesRequest {
+            // Only the stored label takes part (it is not written back), and
+            // a hand-edited invalid one must not block every edit.
+            main: req.main.or_else(|| {
+                self.read_config()
+                    .main_workspace
+                    .filter(|m| validate_workspace_label(&m.name).is_ok())
+            }),
+            ..req
+        };
+        let mut req = validate_set_workspaces(&checked).map_err(|e| {
+            let name = match &e {
+                WorkspaceRejection::Reserved { name }
+                | WorkspaceRejection::Duplicate { name }
+                | WorkspaceRejection::UnknownStartup { name } => name.clone(),
+                _ => "workspaces".to_string(),
+            };
+            workspace::workspace_rejected(&name, e)
+        })?;
+        if !touches_main {
+            // Validated against the stored label only; nothing to write back.
+            req.main = None;
+        }
+        self.telemetry.feature("workspace.update_defs");
+        self.config_store.mutate(|c| {
+            c.workspaces = req.workspaces;
+            if let Some(main) = req.main {
+                c.main_workspace = Some(main);
+            }
+            if let Some(startup) = req.startup_workspace {
+                c.startup_workspace = startup;
+            }
+        })
+    }
+
+    /// Rename workspace `from` to `to`: the definition, a startup pin on it,
+    /// this host's local theme for it (`[workspace_themes]`), and every project
+    /// tagged with it, in that order. Returns `false` when this host neither
+    /// defines `from` nor tags a project with it — so a rename sent eagerly to
+    /// every server is a harmless no-op on the ones that never had the
+    /// workspace. The theme moves even then: it is local config, and the TUI
+    /// keeps themes for workspaces that live only on a remote server.
+    pub async fn rename_workspace(&self, from: &str, to: &str) -> Result<bool> {
+        let renamed_def = self
+            .config_store
+            .mutate(|c| {
+                let renamed = workspace::rename_workspace_def(c, from, to)?;
+                // `to` is valid and unclaimed once the def rename accepted it.
+                workspace::rename_workspace_theme(c, from, to.trim());
+                Ok(renamed)
+            })?
+            .map_err(|e| workspace::workspace_rejected(to, e))?;
+        let to = claude_commander_protocol::workspace::validate_workspace_name(to)
+            .map_err(|e| workspace::workspace_rejected(to, e))?;
+        let (from_owned, to_tag) = (from.to_string(), to.clone());
+        let moved = self
+            .store
+            .mutate(move |state| workspace::retag_projects(state, &from_owned, Some(&to_tag)))
+            .await?;
+        if !renamed_def && moved == 0 {
+            return Ok(false);
+        }
+        if !renamed_def {
+            // Tags existed without a definition (lost to an older binary's
+            // write); give the new name one so it keeps its place.
+            self.config_store
+                .mutate(|c| workspace::ensure_workspace_defined(c, &to))?;
+        }
+        self.telemetry.feature("workspace.rename");
+        Ok(true)
+    }
+
+    /// Delete workspace `name`: drop its definition (a startup pin on it
+    /// becomes Main) and its local theme, and move its projects to Main.
+    /// Returns `false` when there was no definition or tag to delete (a theme
+    /// alone is still dropped). Main itself has no name and cannot be deleted.
+    pub async fn delete_workspace(&self, name: &str) -> Result<bool> {
+        let removed_def = self.config_store.mutate(|c| {
+            workspace::delete_workspace_theme(c, name);
+            workspace::delete_workspace_def(c, name)
+        })?;
+        let owned = name.to_string();
+        let moved = self
+            .store
+            .mutate(move |state| workspace::retag_projects(state, &owned, None))
+            .await?;
+        if !removed_def && moved == 0 {
+            return Ok(false);
+        }
+        self.telemetry.feature("workspace.delete");
+        Ok(true)
+    }
+
+    /// Move project `id` into `workspace` (`None` = Main). A name this host
+    /// has no definition for gets one appended — the self-heal that lets a
+    /// client move a project into a workspace it created on another server.
+    pub async fn set_project_workspace(
+        &self,
+        id: &ProjectId,
+        workspace: Option<String>,
+    ) -> Result<()> {
+        let tag = workspace::validate_tag(workspace.as_deref())?;
+        let id = *id;
+        let exists = self.store.read().await.projects.contains_key(&id);
+        if !exists {
+            return Err(SessionError::ProjectNotFound(id.to_string()).into());
+        }
+        self.telemetry.feature("workspace.move_project");
+        if let Some(name) = &tag {
+            self.config_store
+                .mutate(|c| workspace::ensure_workspace_defined(c, name))?;
+        }
+        self.store
+            .mutate(move |state| match state.projects.get_mut(&id) {
+                Some(project) => {
+                    project.workspace = tag;
+                    Ok(())
+                }
+                None => Err(SessionError::ProjectNotFound(id.to_string()).into()),
+            })
+            .await?
+    }
+
+    /// Validate `workspace` for a project about to be registered and make sure
+    /// it is defined, returning the tag to store.
+    fn prepare_new_project_workspace(&self, workspace: Option<String>) -> Result<Option<String>> {
+        let tag = workspace::validate_tag(workspace.as_deref())?;
+        if let Some(name) = &tag {
+            self.config_store
+                .mutate(|c| workspace::ensure_workspace_defined(c, name))?;
+        }
+        Ok(tag)
     }
 
     /// Reload config from disk if the file changed since the last read.
@@ -228,16 +438,153 @@ impl CommanderService {
 
     // -- Projects --
 
-    /// Register a git repository as a project.
-    pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
+    /// Register a git repository as a project, tagged with `workspace`
+    /// (`None` = Main) — how a new project lands in the caller's active
+    /// workspace. An undefined workspace name is defined on the way.
+    pub async fn add_project(
+        &self,
+        repo_path: PathBuf,
+        workspace: Option<String>,
+    ) -> Result<ProjectId> {
         self.telemetry.feature("project.add");
-        self.manager.add_project(repo_path).await
+        let tag = self.prepare_new_project_workspace(workspace)?;
+        self.manager.add_project(repo_path, tag).await
     }
 
-    /// Scan a directory for git repositories and register them as projects.
-    pub async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
+    /// Scan a directory for git repositories and register them as projects,
+    /// each tagged with `workspace` (`None` = Main) like [`Self::add_project`].
+    /// Repositories that are already projects keep their tag.
+    pub async fn scan_directory(
+        &self,
+        dir: &Path,
+        workspace: Option<String>,
+    ) -> Result<ScanResult> {
         self.telemetry.feature("project.scan_directory");
-        self.manager.scan_directory(dir).await
+        let tag = self.prepare_new_project_workspace(workspace)?;
+        self.manager.scan_directory(dir, tag).await
+    }
+
+    // -- Repository clone --
+
+    /// Every GitHub repo the authenticated user can clone, for the repo picker.
+    ///
+    /// Failures propagate rather than becoming an empty list — see
+    /// [`crate::git::list_repos`], which also owns the `gh` availability probe.
+    /// The [`Self::gh_available`] cache is deliberately *not* consulted here: it
+    /// is computed once per process, so a user who installs `gh` and reopens the
+    /// picker would keep being told it is missing. This call is user-initiated and
+    /// infrequent, so it can afford a fresh probe.
+    ///
+    /// Bounded by `Config::repo_list_timeout_secs`: `gh api --paginate` is
+    /// open-ended, and an unbounded run leaked a `gh` per abandoned request.
+    /// Overrunning it is [`GitError::RepoListTimedOut`](crate::error::GitError::RepoListTimedOut),
+    /// distinct from a missing `gh`.
+    pub async fn list_github_repos(&self) -> Result<Vec<GithubRepo>> {
+        self.telemetry.feature("github.list_repos");
+        let timeout = Duration::from_secs(self.config_store.read().repo_list_timeout_secs);
+        list_repos(timeout).await
+    }
+
+    /// Start cloning a repository into the projects directory, returning the
+    /// created job — poll it with [`Self::clone_job`] until its status leaves
+    /// [`CloneStatus::Running`](claude_commander_protocol::github::CloneStatus::Running).
+    ///
+    /// **The whole job rather than just its id** because that is what both callers
+    /// need: the server answers `POST /projects/clone` with a 202 carrying this
+    /// body, and the [`CommanderBackend`](crate::backend::CommanderBackend) seam
+    /// mirrors that shape so a TUI gets the id, the destination and the redacted
+    /// label in one call whichever transport it is on. Returning the id alone
+    /// would leave every caller doing the same follow-up read.
+    ///
+    /// **The status in the returned job is not a terminal status.** Every outcome
+    /// — including the occupied destination this method detects before it returns
+    /// — is reported through the job registry, and the spawned future has not been
+    /// scheduled yet, so this reads `Running` essentially always. Use it for the
+    /// id and the destination; take the *outcome* from [`Self::clone_job`].
+    ///
+    /// A repeat call for a destination already being cloned returns the *in-flight*
+    /// job: `CloneJobs::spawn` dedupes by destination, so a double-submit joins the
+    /// running clone rather than starting a second one.
+    ///
+    /// Returns `Err` for what is wrong with the *request* — an unusable source or
+    /// destination name, or a projects directory that cannot be created (plus one
+    /// unreachable internal case noted at the read below). Everything that can only
+    /// go wrong once the clone is running is reported through the job, because a
+    /// clone takes minutes and no caller can wait for it.
+    ///
+    /// Three things happen before a subprocess does:
+    ///
+    /// 1. **The source is validated** (`validate_repo_slug` for a
+    ///    [`CloneSource::Github`] slug, `validate_clone_url` otherwise) — it
+    ///    becomes an argv element, and a rejection message is redacted at
+    ///    construction by [`clone_source_rejected`].
+    /// 2. **The destination name is resolved and checked.** A caller-supplied
+    ///    `dest_name` clears the same bar as a derived one
+    ///    ([`validate_dest_name`]); otherwise a `..` override would escape the
+    ///    projects directory the derived-name rules exist to protect.
+    /// 3. **The destination is pre-flighted.** An occupied path short-circuits to
+    ///    a terminal [`CloneStatus::DestinationExists`] job rather than starting a
+    ///    doomed clone, carrying the `is_git_repo` flag that lets a frontend offer
+    ///    "register the existing checkout" instead of only "pick another name".
+    ///
+    /// [`CloneStatus::DestinationExists`]: claude_commander_protocol::github::CloneStatus::DestinationExists
+    pub async fn start_clone(&self, req: CloneRequest) -> Result<CloneJob> {
+        let dir_name = clone_dir_name(&req)?;
+        // Checked up front like the destination: `clone_then_register` would
+        // only refuse it after the whole clone, then delete the checkout.
+        workspace::validate_tag(req.workspace.as_deref())?;
+        let config = self.read_config();
+        let projects_dir = config.projects_dir()?;
+        // `projects_dir()` only *resolves* a path (as `worktrees_dir()` does), so
+        // the first clone on a fresh machine has to create it.
+        std::fs::create_dir_all(&projects_dir).map_err(|e| {
+            GitError::OperationFailed(format!(
+                "could not create projects directory {}: {e}",
+                projects_dir.display()
+            ))
+        })?;
+        let dest = projects_dir.join(dir_name);
+        self.telemetry.feature("clone_project");
+
+        // The label is raw user input; `CloneJobs::spawn` redacts it. Never
+        // logged here — the destination is safe to log, the source is not.
+        let source_label = clone_source_label(&req.source).to_string();
+
+        let id = if let Some(is_git_repo) = occupied_destination(&dest) {
+            debug!("clone destination {} already exists", dest.display());
+            let occupied = dest.clone();
+            self.clone_jobs
+                .spawn(dest, source_label, async move {
+                    CloneOutcome::destination_exists(occupied, is_git_repo)
+                })
+                .await
+        } else {
+            let service = self.clone();
+            let timeout = Duration::from_secs(config.clone_timeout_secs);
+            let job_dest = dest.clone();
+            self.clone_jobs
+                .spawn(dest, source_label, async move {
+                    clone_then_register(service, req.source, req.workspace, job_dest, timeout).await
+                })
+                .await
+        };
+
+        // Unreachable in practice: the registry only misses an id that was never
+        // issued or has been pruned, and pruning is TTL-based on *finished* jobs,
+        // so a job spawned a moment ago is still there. An error rather than an
+        // `expect` because an internal failure is the honest answer if that ever
+        // stops holding — the server renders it as a 500, the backend seam as
+        // `BackendError::Local`.
+        self.clone_job(id).await.ok_or_else(|| {
+            GitError::OperationFailed(format!("clone job {id} vanished before it could be read"))
+                .into()
+        })
+    }
+
+    /// The clone job with this id, as a frontend polls it, or `None` once it has
+    /// been pruned (or never existed).
+    pub async fn clone_job(&self, id: CloneJobId) -> Option<CloneJob> {
+        self.clone_jobs.get(id).await
     }
 
     /// Clear the paused cascade state without merging.
@@ -265,22 +612,19 @@ impl CommanderService {
     /// Resolve a session by an *exact* title or full ID, surfacing ambiguity
     /// rather than picking arbitrarily. Used by destructive commands where a
     /// loose prefix match could act on the wrong session.
-    pub async fn find_session_exact(
-        &self,
-        query: &str,
-    ) -> Result<crate::cli::SessionLookup<SessionInfo>> {
+    pub async fn find_session_exact(&self, query: &str) -> Result<SessionLookup<SessionInfo>> {
         let state = self.store.read().await;
-        Ok(match crate::cli::find_session_exact(&state, query) {
-            crate::cli::SessionLookup::Found(session) => {
+        Ok(match find_session_exact(&state, query) {
+            SessionLookup::Found(session) => {
                 let project_name = state
                     .projects
                     .get(&session.project_id)
                     .map(|p| p.name.as_str())
                     .unwrap_or("unknown");
-                crate::cli::SessionLookup::Found(session_info_from_session(session, project_name))
+                SessionLookup::Found(session_info_from_session(session, project_name))
             }
-            crate::cli::SessionLookup::NotFound => crate::cli::SessionLookup::NotFound,
-            crate::cli::SessionLookup::Ambiguous(n) => crate::cli::SessionLookup::Ambiguous(n),
+            SessionLookup::NotFound => SessionLookup::NotFound,
+            SessionLookup::Ambiguous(n) => SessionLookup::Ambiguous(n),
         })
     }
 
@@ -291,7 +635,7 @@ impl CommanderService {
     ) -> Result<Option<SessionDetail>> {
         let (found, project_name) = {
             let state = self.store.read().await;
-            let Some(session) = crate::cli::find_session(&state, query) else {
+            let Some(session) = find_session(&state, query) else {
                 return Ok(None);
             };
             let pname = state
@@ -328,7 +672,7 @@ impl CommanderService {
         };
 
         let pane_content = if found.status.is_active() && lines.is_some() {
-            let n = lines.map(crate::cli::clamp_log_lines);
+            let n = lines.map(clamp_log_lines);
             capture_pane(&self.manager.tmux, &found.tmux_session_name, n).await?
         } else {
             None
@@ -348,13 +692,13 @@ impl CommanderService {
         lines: Option<usize>,
     ) -> Result<Option<String>> {
         let state = self.store.read().await;
-        let Some(session) = crate::cli::find_session(&state, query) else {
+        let Some(session) = find_session(&state, query) else {
             return Ok(None);
         };
         let tmux_name = session.tmux_session_name.clone();
         drop(state);
 
-        let n = lines.map(crate::cli::clamp_log_lines);
+        let n = lines.map(clamp_log_lines);
         capture_pane(&self.manager.tmux, &tmux_name, n).await
     }
 
@@ -364,7 +708,7 @@ impl CommanderService {
     /// session, reusing the same `find_session` matching the CLI/HTTP API use.
     pub async fn resolve_tmux_session(&self, query: &str) -> Result<Option<String>> {
         let state = self.store.read().await;
-        Ok(crate::cli::find_session(&state, query).map(|s| s.tmux_session_name.clone()))
+        Ok(find_session(&state, query).map(|s| s.tmux_session_name.clone()))
     }
 
     /// Resolve a session query to its **shell** pane's tmux session name,
@@ -377,7 +721,7 @@ impl CommanderService {
     pub async fn resolve_shell_tmux_session(&self, query: &str) -> Result<Option<String>> {
         let session_id = {
             let state = self.store.read().await;
-            crate::cli::find_session(&state, query).map(|s| s.id)
+            find_session(&state, query).map(|s| s.id)
         };
         match session_id {
             Some(id) => Ok(Some(self.manager.ensure_shell_session(&id).await?)),
@@ -400,7 +744,7 @@ impl CommanderService {
     ) -> Result<Option<String>> {
         let session_id = {
             let state = self.store.read().await;
-            crate::cli::find_session(&state, query).map(|s| s.id)
+            find_session(&state, query).map(|s| s.id)
         };
         let Some(id) = session_id else {
             return Ok(None);
@@ -419,7 +763,9 @@ impl CommanderService {
     /// session is revived (agent resumed, status bar reconfigured) and
     /// `last_attached_at` is stamped for MRU ordering. Returns the primary
     /// tmux name to attach or switch to. Used by the in-session Ctrl+Space
-    /// switcher, whose picker knows sessions only by tmux name.
+    /// switcher, which reaches a local session by `tmux switch-client` and so
+    /// never goes through the backend's `attach` (where that work usually
+    /// happens).
     pub async fn ensure_attachable_by_tmux_name(&self, tmux_name: &str) -> Result<String> {
         let session_id = {
             let state = self.store.read().await;
@@ -434,18 +780,6 @@ impl CommanderService {
         let name = self.manager.ensure_attachable(&id).await?;
         self.mark_attached(&id).await?;
         Ok(name)
-    }
-
-    /// Wrap this service as the [`crate::tmux::SwitcherRevive`] hook the
-    /// attach loop invokes before `tmux switch-client`, so the in-session
-    /// switcher revives a dead pick the same way the tree-view attach path
-    /// does (via [`Self::ensure_attachable_by_tmux_name`]).
-    pub fn switcher_revive_hook(&self) -> crate::tmux::SwitcherRevive {
-        let service = self.clone();
-        Arc::new(move |name: String| {
-            let service = service.clone();
-            Box::pin(async move { service.ensure_attachable_by_tmux_name(&name).await })
-        })
     }
 
     /// Store a pasted image for a remote session and inject its file path into
@@ -464,26 +798,16 @@ impl CommanderService {
     pub async fn paste_image(&self, query: &str, bytes: &[u8]) -> Result<PathBuf> {
         // Validate the bytes up front so junk/oversized input is a clean 400
         // regardless of whether the session exists (and before any disk write).
-        crate::paste_image::validate(bytes)?;
+        claude_commander_protocol::paste::validate(bytes)?;
 
         let tmux_name = self
             .resolve_tmux_session(query)
             .await?
             .ok_or_else(|| SessionError::TmuxSessionNotFound(query.to_string()))?;
 
-        // Store under the OS temp dir, not the data dir: the temp dir is
-        // space-free on every platform (macOS's data dir under `~/Library/
-        // Application Support/…` contains spaces, which the CLI would mis-parse
-        // in an unquoted injected path), and it's the same location
-        // `write_apply_brief` uses for comment-apply briefs — proven readable by
-        // the agent without a permission prompt. Tests override the base via
-        // `paste_images_dir` to keep writes (and the store's prune) off the real
-        // `/tmp`, per the repo's test-isolation rule.
-        let base = self
-            .read_config()
-            .paste_images_dir
-            .unwrap_or_else(std::env::temp_dir);
-        let store = crate::paste_image::PasteImageStore::new(&base);
+        // Store under the agent temp dir (see `Self::agent_temp_dir`), the same
+        // base comment-apply briefs use.
+        let store = crate::paste_image::PasteImageStore::new(&self.agent_temp_dir());
         let path = store.store(bytes)?;
 
         // Inject the path with `send-keys -l` (no Enter). Unlike automated
@@ -505,12 +829,27 @@ impl CommanderService {
         Ok(path)
     }
 
+    /// Base directory for the temp files handed to the agent by path (pasted
+    /// images, comment-apply briefs).
+    ///
+    /// The OS temp dir, not the data dir: it is space-free on every platform
+    /// (macOS's data dir under `~/Library/Application Support/…` contains
+    /// spaces, which the CLI would mis-parse in an unquoted injected path), and
+    /// it is proven readable by the agent without a permission prompt. Tests
+    /// override it via [`Config::agent_temp_dir`] to keep writes (and the paste
+    /// store's prune) off the real `/tmp`, per the repo's test-isolation rule.
+    fn agent_temp_dir(&self) -> PathBuf {
+        self.read_config()
+            .agent_temp_dir
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     pub async fn check_tmux(&self) -> Result<()> {
         self.manager.check_tmux().await
     }
 
     /// tmux availability with a short-TTL cache ([`TMUX_OK_CACHE_TTL`]) so a
-    /// per-client `workspace_snapshot` poll doesn't fork `tmux -V` every call.
+    /// per-client `snapshot` poll doesn't fork `tmux -V` every call.
     /// The lock is never held across the probe `.await`; two concurrent stale
     /// callers may both re-probe once (a benign, self-healing race).
     async fn cached_tmux_ok(&self) -> bool {
@@ -551,7 +890,10 @@ impl CommanderService {
             backend.path().to_path_buf()
         };
 
-        let project_id = self.ensure_project(path).await?;
+        // A session on an unregistered repo registers it in Main; a caller that
+        // wants it elsewhere ensures the project with a workspace first (the
+        // CLI's `new -d <path> --workspace`).
+        let project_id = self.ensure_project(path, None).await?;
 
         let session_id = self
             .manager
@@ -560,7 +902,8 @@ impl CommanderService {
 
         if let Some(section) = &opts.section {
             let section = section.clone();
-            let sections = self.config_store.read().sections.clone();
+            let sections =
+                crate::session::effective_sections(&self.config_store.read().sections).into_owned();
             let now = chrono::Utc::now();
             self.store
                 .mutate(move |state| {
@@ -683,40 +1026,52 @@ impl CommanderService {
         }
 
         // 3. Sync session status against live tmux, then sync worktrees.
-        let session_ids: Vec<(SessionId, String)> = {
+        // Stopped sessions are probed too: the sync runs both ways, so a live
+        // pane whose session was wrongly flagged stopped comes back (see
+        // [`reconciled_status`]).
+        let session_ids: Vec<(SessionId, String, SessionStatus)> = {
             let state = self.store.read().await;
             state
                 .sessions
                 .values()
-                .filter(|s| s.status.is_active() && s.status != SessionStatus::Creating)
-                .map(|s| (s.id, s.tmux_session_name.clone()))
+                .filter(|s| s.status != SessionStatus::Creating)
+                .map(|s| (s.id, s.tmux_session_name.clone(), s.status))
                 .collect()
         };
-        for (session_id, tmux_name) in session_ids {
-            let should_mark_stopped =
-                if let Ok(exists) = self.manager.tmux.session_exists(&tmux_name).await {
-                    if !exists {
-                        true
-                    } else {
-                        self.manager
-                            .tmux
-                            .is_pane_dead(&tmux_name)
-                            .await
-                            .unwrap_or(false)
-                    }
-                } else {
-                    false
-                };
-            if should_mark_stopped {
+        let probed: Vec<(SessionId, String, SessionStatus, PaneProbe)> =
+            futures::stream::iter(session_ids.into_iter().map(
+                |(id, tmux_name, status)| async move {
+                    let probe = self.probe_pane(&tmux_name).await;
+                    (id, tmux_name, status, probe)
+                },
+            ))
+            .buffer_unordered(PANE_PROBE_CONCURRENCY)
+            .collect()
+            .await;
+        for (session_id, tmux_name, status, probe) in probed {
+            let Some(next) = reconciled_status(status, probe) else {
+                continue;
+            };
+            if next == SessionStatus::Stopped {
+                // A dead pane leaves its tmux session behind; drop it so the
+                // next attach recreates the session cleanly.
                 let _ = self.manager.tmux.kill_session(&tmux_name).await;
-                self.store
-                    .mutate(move |state| {
-                        if let Some(session) = state.get_session_mut(&session_id) {
-                            session.set_status(SessionStatus::Stopped);
-                        }
-                    })
-                    .await?;
+            } else {
+                info!("Reviving session {session_id}: its tmux pane is live");
             }
+            self.store
+                .mutate(move |state| {
+                    if let Some(session) = state.get_session_mut(&session_id) {
+                        session.set_status(next);
+                        if next == SessionStatus::Running {
+                            // A live pane holds the agent's conversation, so
+                            // there is nothing to resume into — upholds the
+                            // "live pane ⇒ not hibernated" invariant.
+                            session.hibernated = false;
+                        }
+                    }
+                })
+                .await?;
         }
         let project_ids: Vec<ProjectId> = {
             let state = self.store.read().await;
@@ -728,6 +1083,12 @@ impl CommanderService {
             }
         }
 
+        // 3b. Adopt any branch renames so PR polling, cascade-merge, and PR
+        // retargeting key off the live branch name rather than a stale one.
+        if let Err(e) = self.reconcile_session_branches().await {
+            debug!("Failed to reconcile session branches: {e}");
+        }
+
         // 4. Reconcile section assignments against current config.
         self.reconcile_all_section_assignments().await?;
 
@@ -736,17 +1097,14 @@ impl CommanderService {
 
     /// Re-run section assignment over every session against the current
     /// `[[sections]]` config. Used at startup and after a live config change.
-    /// A no-op when no sections are configured and none are currently pinned.
+    /// With no `[[sections]]` configured, the baked-in default board sections
+    /// apply (see [`crate::session::effective_sections`]).
     pub async fn reconcile_all_section_assignments(&self) -> Result<()> {
-        let sections = self.config_store.read().sections.clone();
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
-                if sections.is_empty()
-                    && state.sessions.values().all(|s| s.current_section.is_none())
-                {
-                    return;
-                }
                 for session in state.sessions.values_mut() {
                     crate::session::apply_assignment(session, &sections, now);
                 }
@@ -757,17 +1115,171 @@ impl CommanderService {
 
     /// Re-run section assignment for a single session against current config.
     /// Used after creating a session, where the rest of the set is already
-    /// reconciled. No-op when no sections are configured.
+    /// reconciled. With no `[[sections]]` configured, the baked-in default
+    /// board sections apply.
     pub async fn reconcile_one_section_assignment(&self, session_id: SessionId) -> Result<()> {
-        let sections = self.config_store.read().sections.clone();
-        if sections.is_empty() {
-            return Ok(());
-        }
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&session_id) {
                     crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Reconcile each session's stored `branch` with its worktree's live git
+    /// HEAD, adopting the live name only when the stored branch was **renamed**
+    /// away (see [`decide_branch_reconcile`] for the exact rule).
+    ///
+    /// A stale `session.branch` silently breaks PR polling (`gh pr list --head`
+    /// queries a branch that no longer has a PR, so PR + stack topology vanish),
+    /// cascade-merge (merges by branch name), and delete-time PR retargeting.
+    /// Running this at the top of every PR-poll tick keeps the one stored name
+    /// authoritative.
+    ///
+    /// Subprocess-only (no gix repository held across an `.await`) so the future
+    /// stays `Send` for the spawned PR-status loop. Idempotent: a pass with no
+    /// renames performs no writes.
+    pub async fn reconcile_session_branches(&self) -> Result<()> {
+        // Snapshot each project's repo path + main branch under the read lock,
+        // plus its reconcile candidates (non-Creating sessions) and the branch
+        // names of *all* its sessions (the collision set — a rename must not be
+        // adopted onto a name any session, including a Creating one whose branch
+        // is reserved, already holds).
+        struct Cand {
+            id: SessionId,
+            worktree_path: PathBuf,
+            stored: String,
+        }
+        struct ProjectSnapshot {
+            repo_path: PathBuf,
+            main_branch: String,
+            cands: Vec<Cand>,
+            all_branches: Vec<(SessionId, String)>,
+        }
+        let projects: Vec<ProjectSnapshot> = {
+            let state = self.store.read().await;
+            state
+                .projects
+                .values()
+                .map(|project| {
+                    let sessions = || {
+                        project
+                            .worktrees
+                            .iter()
+                            .filter_map(|sid| state.get_session(sid))
+                    };
+                    let cands = sessions()
+                        .filter(|s| s.status != SessionStatus::Creating)
+                        .map(|s| Cand {
+                            id: s.id,
+                            worktree_path: s.worktree_path.clone(),
+                            stored: s.branch.clone(),
+                        })
+                        .collect();
+                    let all_branches = sessions().map(|s| (s.id, s.branch.clone())).collect();
+                    ProjectSnapshot {
+                        repo_path: project.repo_path.clone(),
+                        main_branch: project.main_branch.clone(),
+                        cands,
+                        all_branches,
+                    }
+                })
+                .collect()
+        };
+
+        // Off-lock: per project, map each worktree's canonical path to its live
+        // branch, then decide per session. Each update carries the expected old
+        // branch so the write is a compare-and-set (below).
+        let mut updates: Vec<(SessionId, String, String)> = Vec::new();
+        for ProjectSnapshot {
+            repo_path,
+            main_branch,
+            cands,
+            all_branches,
+        } in &projects
+        {
+            if cands.is_empty() {
+                continue;
+            }
+            let worktrees = match list_worktrees_at(repo_path).await {
+                Ok(w) => w,
+                Err(e) => {
+                    debug!("branch reconcile: list_worktrees_at({repo_path:?}) failed: {e}");
+                    continue;
+                }
+            };
+            // Canonicalize worktree paths so symlinked/relative session paths
+            // match git's absolute output.
+            let mut live_by_path: HashMap<PathBuf, String> = HashMap::new();
+            for wt in &worktrees {
+                let key = tokio::fs::canonicalize(&wt.path)
+                    .await
+                    .unwrap_or_else(|_| wt.path.clone());
+                live_by_path.insert(key, wt.branch.clone());
+            }
+
+            for cand in cands {
+                let canonical = tokio::fs::canonicalize(&cand.worktree_path)
+                    .await
+                    .unwrap_or_else(|_| cand.worktree_path.clone());
+                let live = live_by_path.get(&canonical).map(String::as_str);
+                // Only pay for ref-existence checks once there is a real
+                // candidate (live branch present, differs, not detached).
+                if !matches!(live, Some(b) if b != cand.stored && b != "HEAD") {
+                    continue;
+                }
+                let local = ref_exists_cli(repo_path, &format!("refs/heads/{}", cand.stored)).await;
+                let remote =
+                    ref_exists_cli(repo_path, &format!("refs/remotes/origin/{}", cand.stored))
+                        .await;
+                // Collision set: every *other* session's branch in this project
+                // (including Creating sessions, whose branch names are reserved).
+                let siblings: Vec<&str> = all_branches
+                    .iter()
+                    .filter(|(id, _)| *id != cand.id)
+                    .map(|(_, b)| b.as_str())
+                    .collect();
+                if let Some(new_branch) = decide_branch_reconcile(
+                    &cand.stored,
+                    live,
+                    local,
+                    remote,
+                    main_branch,
+                    &siblings,
+                ) {
+                    debug!(
+                        "branch reconcile: session {} '{}' -> '{}'",
+                        cand.id, cand.stored, new_branch
+                    );
+                    updates.push((cand.id, cand.stored.clone(), new_branch));
+                }
+            }
+        }
+
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let adopted_at = Utc::now();
+        self.store
+            .mutate(move |state| {
+                for (id, expected_old, new_branch) in updates {
+                    if let Some(session) = state.get_session_mut(&id) {
+                        // Compare-and-set: only adopt if the branch still matches
+                        // what we based the decision on, so a concurrent writer
+                        // between snapshot and mutate is never clobbered.
+                        if session.branch == expected_old {
+                            session.branch = new_branch;
+                            // Stamp the adoption so the PR poll doesn't credit
+                            // this session with a PR that settled on the new
+                            // name before it held it.
+                            session.branch_adopted_at = Some(adopted_at);
+                        }
+                    }
                 }
             })
             .await?;
@@ -780,7 +1292,8 @@ impl CommanderService {
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
-        let sections = self.config_store.read().sections.clone();
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
@@ -854,18 +1367,41 @@ impl CommanderService {
             .await
     }
 
-    pub async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
+    /// Register `path` as a project, or answer with the id of the project already
+    /// registered for it.
+    ///
+    /// The idempotent counterpart to [`Self::add_project`], and what both
+    /// frontends' "register this existing checkout" offer calls: the destination
+    /// they hand over is frequently one that *is* already a project, and
+    /// `add_project` would register it a second time.
+    ///
+    /// The lookup is by
+    /// [`repo_identity`](crate::session::repo_identity), not by the
+    /// caller's string — see there for why comparing raw paths silently
+    /// duplicates.
+    ///
+    /// `workspace` tags the project only when this call registers it; an
+    /// existing project keeps its workspace.
+    pub async fn ensure_project(
+        &self,
+        path: PathBuf,
+        workspace: Option<String>,
+    ) -> Result<ProjectId> {
+        let identity = crate::session::repo_identity(&path).await;
         let existing = {
             let state = self.store.read().await;
             state
                 .projects
                 .values()
-                .find(|p| p.repo_path == path)
+                .find(|p| p.repo_path == identity)
                 .map(|p| p.id)
         };
         match existing {
             Some(id) => Ok(id),
-            None => self.manager.add_project(path).await,
+            None => {
+                let tag = self.prepare_new_project_workspace(workspace)?;
+                self.manager.add_project(path, tag).await
+            }
         }
     }
 
@@ -914,8 +1450,8 @@ impl CommanderService {
         self.telemetry.feature("review.open");
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
-        let raw = compose_review_diff(&worktree_path, &base).await?;
-        self.snapshot_from_raw(session_id, &worktree_path, base, raw)
+        let composed = compose_review_diff(&worktree_path, &base).await?;
+        self.snapshot_from_raw(session_id, &worktree_path, base, composed)
             .await
     }
 
@@ -932,12 +1468,12 @@ impl CommanderService {
     ) -> Result<Option<ReviewSnapshot>> {
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
-        let raw = compose_review_diff(&worktree_path, &base).await?;
-        if xxhash_rust::xxh3::xxh3_64(raw.as_bytes()) == prev_hash {
+        let composed = compose_review_diff(&worktree_path, &base).await?;
+        if xxhash_rust::xxh3::xxh3_64(composed.raw.as_bytes()) == prev_hash {
             return Ok(None);
         }
         Ok(Some(
-            self.snapshot_from_raw(session_id, &worktree_path, base, raw)
+            self.snapshot_from_raw(session_id, &worktree_path, base, composed)
                 .await?,
         ))
     }
@@ -954,31 +1490,48 @@ impl CommanderService {
         Ok((session.worktree_path.clone(), ReviewBase::of(session)))
     }
 
-    /// Build a [`ReviewSnapshot`] from an already-composed raw unified diff:
-    /// hash it for staleness detection, parse it, then re-anchor the session's
-    /// comments and prune stale reviewed marks against the parsed diff
+    /// Build a [`ReviewSnapshot`] from an already-composed unified diff: hash it
+    /// for staleness detection, parse it, then drop orphaned comments, re-anchor
+    /// the rest, and prune stale reviewed marks against the parsed diff
     /// (persisting any changes).
     async fn snapshot_from_raw(
         &self,
         session_id: &SessionId,
         worktree_path: &Path,
         base: String,
-        raw: String,
+        composed: ComposedDiff,
     ) -> Result<ReviewSnapshot> {
-        let content_hash = xxhash_rust::xxh3::xxh3_64(raw.as_bytes());
-        let mut diff = parse_unified_diff(&raw);
+        let content_hash = xxhash_rust::xxh3::xxh3_64(composed.raw.as_bytes());
+        let mut diff = parse_unified_diff(&composed.raw);
         // Binary files carry metadata only; fill in the blob sizes the parser
         // can't know. Bytes are lazy-loaded via `fetch_diff_blob`.
         enrich_binary_sizes(&mut diff, worktree_path).await;
 
+        // Deleting per-file state is only sound when the diff can actually prove
+        // the file is gone; a degraded or incomplete composition omits files that
+        // are still under review (see `absence_is_authoritative`).
+        let can_prune = composed.absence_is_authoritative();
+
         let mut comments = self.comments.load(*session_id).await?;
+        // A comment whose file left the diff has nothing left to anchor to and
+        // no row to render on, so it is dropped rather than left blocking Apply
+        // from somewhere the user can't reach.
+        let dropped_comments = if can_prune {
+            crate::comment::prune_orphaned(&mut comments, &diff)
+        } else {
+            Vec::new()
+        };
         reanchor_comments(&mut comments, &diff);
         self.comments.save(*session_id, &comments).await?;
 
         // Reviewed marks pinned to a file's diff content: drop any whose file
-        // changed or left the diff since they were set.
+        // changed or left the diff since they were set. Gated on the same proof
+        // as the comments above — a mark's file "vanishing" from a diff that
+        // simply omits it would silently throw away review progress (a stacked
+        // base that only exists remotely degrades on *every* open, so this is a
+        // persistent state, not a transient one).
         let mut marks = self.reviewed.load(*session_id).await?;
-        if crate::reviewed::prune_invalidated(&mut marks, &diff) {
+        if can_prune && crate::reviewed::prune_invalidated(&mut marks, &diff) {
             self.reviewed.save(*session_id, &marks).await?;
         }
         let reviewed = marks.into_iter().map(|m| m.file).collect();
@@ -989,6 +1542,10 @@ impl CommanderService {
             comments,
             reviewed,
             content_hash,
+            dropped_comments,
+            // Moved, not cloned: nothing below needs the composition again, and
+            // a remote client re-parses this instead of the lossier `diff`.
+            raw: Some(composed.raw),
         })
     }
 
@@ -1045,8 +1602,7 @@ impl CommanderService {
     ) -> Result<bool> {
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
-        let raw = compose_review_diff(&worktree_path, &base).await?;
-        let diff = parse_unified_diff(&raw);
+        let diff = parse_unified_diff(&compose_review_diff(&worktree_path, &base).await?.raw);
         let file = diff
             .files
             .iter()
@@ -1117,16 +1673,29 @@ impl CommanderService {
 
         // Re-anchor against a fresh diff so drift status is current.
         let base = review_base.git_ref(&worktree_path).await;
-        let raw = compose_review_diff(&worktree_path, &base).await?;
-        let parsed = parse_unified_diff(&raw);
+        let composed = compose_review_diff(&worktree_path, &base).await?;
+        let parsed = parse_unified_diff(&composed.raw);
         let mut comments = self.comments.load(*session_id).await?;
         reanchor_comments(&mut comments, &parsed);
         self.comments.save(*session_id, &comments).await?;
+
+        // A comment whose file left the diff since the view was composed takes no
+        // part in Apply: there is no code left to point the agent at, and it must
+        // not block the comments that *are* still live (the bug this replaced).
+        //
+        // Deliberately NOT deleted here. Deletion belongs to `snapshot_from_raw`,
+        // which is the only path that reports what it dropped — orphaning implies
+        // the diff moved, so the next compose is guaranteed to produce a snapshot
+        // (its hash differs) and announce the drop. Deleting here instead would
+        // leave the store already clean, so that notice would never fire and the
+        // user's comment would vanish silently mid-Apply.
+        let skip_orphans = composed.absence_is_authoritative();
 
         // Only not-yet-applied comments participate.
         let staged: Vec<Comment> = comments
             .iter()
             .filter(|a| a.status != CommentStatus::Applied)
+            .filter(|a| !(skip_orphans && crate::comment::is_orphaned(a, &parsed)))
             .cloned()
             .collect();
         if staged.is_empty() {
@@ -1142,7 +1711,12 @@ impl CommanderService {
         }
 
         // Compose the brief to an absolute temp path outside the worktree.
-        let path = write_apply_brief(*session_id, &compose_markdown(&title, &staged)).await?;
+        let path = write_apply_brief(
+            &self.agent_temp_dir(),
+            *session_id,
+            &compose_markdown(&title, &staged),
+        )
+        .await?;
         let count = staged.len();
 
         if !is_active {
@@ -1165,6 +1739,14 @@ impl CommanderService {
             path.display()
         );
         self.manager.tmux.send_keys(&tmux_name, &prompt).await?;
+        // Some harnesses (Codex) fold an Enter that arrives in the same terminal
+        // read as the preceding text into the paste instead of submitting it,
+        // leaving the prompt unsent in the composer; wait for the harness to
+        // drain the text so the Enter lands as its own keystroke. See
+        // AgentKind::submit_key_delay.
+        if let Some(delay) = kind.submit_key_delay() {
+            tokio::time::sleep(delay).await;
+        }
         self.manager.tmux.send_keys(&tmux_name, "Enter").await?;
 
         // Delivering a prompt flips an idle agent back to working without
@@ -1202,11 +1784,19 @@ impl CommanderService {
     /// `project_pull` reflects the background pull loop's latest per-project
     /// status ([`Self::spawn_background_tasks`]); it is empty until the loop has
     /// run (or when project auto-pull is disabled).
-    pub async fn workspace_snapshot(&self) -> Result<WorkspaceSnapshot> {
+    pub async fn snapshot(&self) -> Result<Snapshot> {
         let gh_available = self.gh_available().await;
         let tmux_ok = self.cached_tmux_ok().await;
         let pending = self.sessions_with_pending_comments().await?;
 
+        let (workspaces, main_workspace, startup_workspace) = {
+            let config = self.config_store.read();
+            (
+                config.workspaces.clone(),
+                config.main_workspace.clone(),
+                config.startup_workspace.clone(),
+            )
+        };
         let (projects, sessions, cascade_paused) = {
             let state = self.store.read().await;
             (
@@ -1219,7 +1809,7 @@ impl CommanderService {
         let mut pending_comment_sessions: Vec<SessionId> = pending.into_iter().collect();
         pending_comment_sessions.sort();
 
-        Ok(WorkspaceSnapshot {
+        Ok(Snapshot {
             projects,
             sessions,
             cascade_paused,
@@ -1235,11 +1825,14 @@ impl CommanderService {
                 tmux_ok,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
+            workspaces,
+            main_workspace,
+            startup_workspace,
         })
     }
 
     /// List projects (sorted by name), for clients that only need the project
-    /// set rather than a full [`Self::workspace_snapshot`].
+    /// set rather than a full [`Self::snapshot`].
     pub async fn list_projects(&self) -> Vec<ProjectInfo> {
         let state = self.store.read().await;
         build_project_info_list(&state)
@@ -1272,7 +1865,7 @@ impl CommanderService {
         if fetch {
             // Best-effort — a failed fetch (offline, no remote) just means we
             // list whatever refs already exist.
-            let _ = tokio::process::Command::new("git")
+            let _ = git_command()
                 .current_dir(&repo_path)
                 .args(["fetch", "origin"])
                 .output()
@@ -1433,7 +2026,8 @@ impl CommanderService {
     pub async fn set_section(&self, id: &SessionId, section: Option<String>) -> Result<()> {
         self.ensure_session_exists(id).await?;
         self.telemetry.feature("session.set_section");
-        let sections = self.config_store.read().sections.clone();
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
         let id = *id;
         self.store
@@ -1451,6 +2045,71 @@ impl CommanderService {
                 }
             })
             .await
+    }
+
+    /// Retarget a session's stack base: stack it onto `parent` (another session
+    /// in the same project), or unstack it onto the project's main branch when
+    /// `parent` is `None`.
+    ///
+    /// Metadata and PR base only — git history is deliberately untouched, so the
+    /// branch still carries its old base's commits and the review diff/PR will
+    /// show them until the user rebases or merges by hand.
+    ///
+    /// Validation and mutation happen inside one `try_mutate` closure
+    /// ([`AppState::set_session_base`]) because the store re-reads state from
+    /// disk under its lock: planning against an earlier snapshot could be stale
+    /// by the time it applied, letting a concurrent change close a cycle the
+    /// check had just rejected. A refused plan writes nothing.
+    pub async fn set_session_base(
+        &self,
+        id: &SessionId,
+        parent: Option<SessionId>,
+    ) -> Result<SetSessionBaseOutcome> {
+        self.telemetry.feature("session.set_base");
+        let session_id = *id;
+        let (plan, pr_retarget) = self
+            .store
+            .try_mutate(move |state| {
+                state
+                    .set_session_base(&session_id, parent)
+                    // An unknown session id is a 404 everywhere else in the API;
+                    // don't let it fall through the rejection's 400/409 mapping.
+                    .map_err(|e| match e {
+                        crate::session::SetBaseRejection::SessionNotFound => {
+                            SessionError::NotFound(session_id).into()
+                        }
+                        other => crate::Error::from(other),
+                    })
+            })
+            .await?;
+
+        // Durable half, best-effort. The local mirror already re-stacked the
+        // tree, but only this makes it survive the next PR sync — so a failure
+        // is reported rather than logged.
+        let pr = match pr_retarget {
+            None => PrRetarget::NoPr,
+            Some(r) => match crate::git::try_retarget_pr_base(
+                &r.repo_path,
+                r.pr_number,
+                &r.new_base_branch,
+            )
+            .await
+            {
+                Ok(()) => PrRetarget::Retargeted {
+                    pr_number: r.pr_number,
+                },
+                Err(message) => PrRetarget::Failed {
+                    pr_number: r.pr_number,
+                    message,
+                },
+            },
+        };
+
+        Ok(SetSessionBaseOutcome {
+            new_base_branch: plan.new_base_branch,
+            old_base_branch: plan.old_base_branch,
+            pr,
+        })
     }
 
     /// Stamp a session's `last_attached_at` to now, for MRU ordering in the
@@ -1489,7 +2148,10 @@ impl CommanderService {
         CreateOptions {
             default_program: config.default_session_program(),
             programs: config.programs.iter().map(ProgramInfo::from).collect(),
-            sections: config.sections.iter().map(|s| s.name.clone()).collect(),
+            sections: crate::session::effective_sections(&config.sections)
+                .iter()
+                .map(|s| s.name.clone())
+                .collect(),
         }
     }
 
@@ -1625,7 +2287,7 @@ impl CommanderService {
     /// Every loop drives the same observable surface the frontends read: the
     /// agent loop maintains [`Self::agent_states`]' cache and persists unread
     /// transitions; the PR loop persists results via [`Self::apply_pr_results`];
-    /// the pull loop feeds [`WorkspaceSnapshot::project_pull`]; the sync loop
+    /// the pull loop feeds [`Snapshot::project_pull`]; the sync loop
     /// reloads the state file. Each wakes the [`StateStore`] change-feed on a
     /// real change (either via a persisted mutation or [`StateStore::notify_change`]),
     /// so a subscriber (the TUI's per-backend change-feed task) re-reads the
@@ -1773,13 +2435,41 @@ impl CommanderService {
         })
     }
 
+    /// The `(session id, branch, repo path, branch-owned-since)` tuples the PR
+    /// poll fans out over: every non-`Creating` session paired with its project's
+    /// repo path. Reads a snapshot under the lock so the poll's per-branch `gh`
+    /// calls run off-lock. The timestamp is
+    /// [`WorktreeSession::branch_owned_since`], which lets the check discard PRs
+    /// that had already settled on this branch name before the session held it
+    /// (see [`crate::git::check_pr_for_branch`]).
+    ///
+    /// Extracted from the poll loop so the reconcile→poll ordering is testable:
+    /// after [`Self::reconcile_session_branches`] adopts a rename, the targets
+    /// returned here carry the corrected `--head` branch on the same tick.
+    async fn pr_poll_targets(&self) -> Vec<(SessionId, String, PathBuf, DateTime<Utc>)> {
+        let state = self.store.read().await;
+        state
+            .sessions
+            .values()
+            .filter(|s| s.status != SessionStatus::Creating)
+            .filter_map(|s| {
+                let project = state.projects.get(&s.project_id)?;
+                Some((
+                    s.id,
+                    s.branch.clone(),
+                    project.repo_path.clone(),
+                    s.branch_owned_since(),
+                ))
+            })
+            .collect()
+    }
+
     /// Fan out `gh pr list` across all sessions on a fixed cadence (and on
     /// [`Self::request_pr_refresh`]), then persist results via
     /// [`Self::apply_pr_results`]. When `interval_secs` is 0 the periodic tick is
     /// disabled but a manual refresh still runs.
     fn spawn_pr_status_loop(&self, interval_secs: u64) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
-        let store = self.store.clone();
         let notify = self.pr_refresh.clone();
         let last_check = self.last_pr_check.clone();
         tokio::spawn(async move {
@@ -1805,30 +2495,25 @@ impl CommanderService {
                     }
                     *lc = Some(now);
                 }
+                // Adopt any branch renames before polling, so this same tick
+                // queries GitHub with the corrected `--head` name.
+                if let Err(e) = service.reconcile_session_branches().await {
+                    debug!("reconcile_session_branches failed: {e}");
+                }
                 if !service.gh_available().await {
                     continue;
                 }
-                let sessions_to_check: Vec<(SessionId, String, PathBuf)> = {
-                    let state = store.read().await;
-                    state
-                        .sessions
-                        .values()
-                        .filter(|s| s.status != SessionStatus::Creating)
-                        .filter_map(|s| {
-                            let project = state.projects.get(&s.project_id)?;
-                            Some((s.id, s.branch.clone(), project.repo_path.clone()))
-                        })
-                        .collect()
-                };
+                let sessions_to_check = service.pr_poll_targets().await;
                 if sessions_to_check.is_empty() {
                     continue;
                 }
                 let results: Vec<(SessionId, PrCheckResult)> =
                     futures::stream::iter(sessions_to_check.into_iter().map(
-                        |(id, branch, repo_path)| async move {
+                        |(id, branch, repo_path, created_at)| async move {
                             (
                                 id,
-                                crate::git::check_pr_for_branch(&repo_path, &branch).await,
+                                crate::git::check_pr_for_branch(&repo_path, &branch, created_at)
+                                    .await,
                             )
                         },
                     ))
@@ -1844,7 +2529,7 @@ impl CommanderService {
 
     /// Fast-forward each project's main branch on a fixed cadence, recording the
     /// per-project outcome in [`Self::pull_status`] (surfaced through
-    /// [`WorkspaceSnapshot::project_pull`]) and waking the change-feed when any
+    /// [`Snapshot::project_pull`]) and waking the change-feed when any
     /// project's status changes. No-op loop when disabled or `interval_secs` 0.
     fn spawn_project_pull_loop(
         &self,
@@ -1940,6 +2625,28 @@ impl CommanderService {
             return Err(SessionError::NotFound(*id).into());
         }
         Ok(())
+    }
+
+    /// Ask tmux what state a session's pane is in, keeping a tmux *failure*
+    /// distinct from a genuine absence so [`reconciled_status`] can refuse to
+    /// act on it. `session_exists` already draws that line for `has-session`;
+    /// an `is_pane_dead` error gets the same treatment here.
+    async fn probe_pane(&self, tmux_name: &str) -> PaneProbe {
+        match self.manager.tmux.session_exists(tmux_name).await {
+            Ok(false) => PaneProbe::Absent,
+            Ok(true) => match self.manager.tmux.is_pane_dead(tmux_name).await {
+                Ok(true) => PaneProbe::Dead,
+                Ok(false) => PaneProbe::Live,
+                Err(e) => {
+                    debug!("Pane-liveness probe failed for {tmux_name}: {e}");
+                    PaneProbe::Unknown
+                }
+            },
+            Err(e) => {
+                debug!("Session-existence probe failed for {tmux_name}: {e}");
+                PaneProbe::Unknown
+            }
+        }
     }
 
     /// `(id, tmux_session_name, program)` tuples for active sessions, the input
@@ -2068,6 +2775,13 @@ const PR_FANOUT_CONCURRENCY: usize = 8;
 /// spawn one `git fetch` per project at the same instant.
 const PROJECT_PULL_FANOUT_CONCURRENCY: usize = 4;
 
+/// Cap concurrent pane probes in the startup reconcile. The reconcile probes
+/// *every* session (it syncs both ways), so on a long-lived workspace this is
+/// tens of `tmux has-session` calls on the pre-first-paint path — serially that
+/// is a visible startup stall. `TmuxExecutor`'s own semaphore is the real
+/// throttle; this just keeps the in-flight future count sane.
+const PANE_PROBE_CONCURRENCY: usize = 8;
+
 /// Minimum gap between PR-status fan-outs, debouncing rapid manual triggers
 /// (e.g. a double manual refresh). It sits far below `pr_check_interval_secs`,
 /// so a manual refresh is still effectively immediate.
@@ -2091,7 +2805,7 @@ fn pr_check_debounce_passed(
 /// now but [`AgentState::Working`] in the previous poll. Drives the unread
 /// marker. An empty `prev` (never polled, or cleared after an attach) yields no
 /// transitions, so a freshly-populated baseline can't produce false unread.
-pub(crate) fn detect_unread_transitions(
+pub fn detect_unread_transitions(
     prev: &BTreeMap<SessionId, AgentState>,
     new: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionId> {
@@ -2124,6 +2838,55 @@ fn with_commander_target(
     active
 }
 
+/// What tmux reports about one session's pane, as the startup reconciler sees
+/// it. Distinguishing [`Self::Unknown`] from [`Self::Absent`] is the whole
+/// point: a tmux *failure* tells us nothing about the session and must never
+/// move its status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneProbe {
+    /// The tmux session exists and its pane is running.
+    Live,
+    /// The tmux session exists but its pane has exited (held by
+    /// `remain-on-exit`).
+    Dead,
+    /// The tmux session genuinely does not exist.
+    Absent,
+    /// tmux itself failed (crashed server, timeout, spawn error).
+    Unknown,
+}
+
+/// The status a session should be moved to given what tmux reports, or `None`
+/// to leave it as it is.
+///
+/// Reconciliation is deliberately **bidirectional**. A live pane and a
+/// `Stopped` status contradict each other — every path that produces `Stopped`
+/// (kill, hibernate, this reconciler) kills the pane first — and the
+/// contradiction is reachable: a pass that read tmux as absent (a run pointed at
+/// a different `TMUX_TMPDIR`, or `no server running` from a server that has
+/// since restarted) marks sessions `Stopped`, and its cleanup kill no-ops on
+/// that same wrong socket, leaving live agents flagged stopped. Without the
+/// revive there is no way back: `Stopped` suppresses agent-state detection
+/// (gated on [`SessionStatus::is_active`]), so those rows render `○` forever.
+///
+/// Pure, so the policy can be tested without tmux.
+pub(crate) fn reconciled_status(stored: SessionStatus, probe: PaneProbe) -> Option<SessionStatus> {
+    match probe {
+        // A detection failure is not evidence of anything.
+        PaneProbe::Unknown => None,
+        // A live pane means Running, whatever we had recorded. Transient
+        // cascade states (`Merging`/`Pushing`/`CascadePaused`) are left alone —
+        // they imply a live pane already and carry extra meaning this reconciler
+        // must not erase.
+        PaneProbe::Live => (stored == SessionStatus::Stopped).then_some(SessionStatus::Running),
+        // No pane, or a pane whose program exited: Stopped, unless the session
+        // is mid-creation (a pane that does not exist *yet* is normal, and
+        // stale `Creating` records are dropped earlier in the reconcile).
+        PaneProbe::Absent | PaneProbe::Dead => (stored != SessionStatus::Creating
+            && stored != SessionStatus::Stopped)
+            .then_some(SessionStatus::Stopped),
+    }
+}
+
 /// Whether the agent-state poll tick can skip entirely: nothing to detect (no
 /// running sessions and the commander isn't running) AND the commander's
 /// running state has not changed since the last emitted update. Skipping keeps
@@ -2147,14 +2910,33 @@ fn poll_tick_should_send(
     !states_empty || commander_running != last_commander_running
 }
 
-/// Write the apply brief to a stable absolute path in the system temp dir
-/// (outside the worktree, so it's never committed). One file per session,
-/// overwritten on re-apply.
-async fn write_apply_brief(session_id: SessionId, markdown: &str) -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("cc-comments-{}.md", session_id.as_uuid()));
+/// Write the apply brief to a fresh absolute path under `base` (the OS temp
+/// dir in normal use, so it's outside the worktree and never committed).
+///
+/// The name carries the session id for legibility **and a per-apply UUID for
+/// uniqueness**: the path used to be session-stable and overwritten on
+/// re-apply, which lost the earlier batch whenever a second Apply landed before
+/// the agent opened the first file — and those comments were already marked
+/// `Applied`, so nothing brought them back. A brief must therefore outlive the
+/// next Apply.
+///
+/// The cost is one small file per Apply, left behind for whatever sweeps the
+/// OS temp dir (distro-dependent on Linux, so assume nothing does). It is
+/// deliberately not pruned here: nothing can distinguish a read brief from an
+/// unread one, so the only file a prune could target is exactly the unread
+/// brief this uniqueness exists to keep — and a brief is a few KB written at
+/// human rates, unlike the remote-triggerable images `PasteImageStore` prunes.
+async fn write_apply_brief(base: &Path, session_id: SessionId, markdown: &str) -> Result<PathBuf> {
+    let path = base.join(format!(
+        "cc-comments-{}-{}.md",
+        session_id.as_uuid(),
+        Uuid::new_v4()
+    ));
+    let save_failed = |e: std::io::Error| crate::error::ConfigError::SaveFailed(e.to_string());
+    tokio::fs::create_dir_all(base).await.map_err(save_failed)?;
     tokio::fs::write(&path, markdown)
         .await
-        .map_err(|e| crate::error::ConfigError::SaveFailed(e.to_string()))?;
+        .map_err(save_failed)?;
     Ok(path)
 }
 
@@ -2266,20 +3048,20 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         .into());
     }
     // An initial prompt is passed as a positional argument, which only
-    // harnesses that accept one (claude, codex) understand.
+    // harnesses that accept one (claude, codex, omp) understand.
     if opts.initial_prompt.is_some() && !kind.accepts_positional_prompt() {
         return Err(SessionError::InvalidProgram(format!(
             "--initial-prompt is only supported for programs that accept a \
-             positional prompt, e.g. claude or codex (got {:?})",
+             positional prompt, e.g. claude, codex, or omp (got {:?})",
             resolved_program
         ))
         .into());
     }
-    // `--model` is understood by Claude, Codex, and OpenCode.
+    // `--model` is understood by Claude, Codex, OpenCode, and omp.
     if opts.model.is_some() && !kind.supports_model_flag() {
         return Err(SessionError::InvalidProgram(format!(
             "--model is only supported for programs that accept it, e.g. \
-             claude, codex, or opencode (got {:?})",
+             claude, codex, opencode, or omp (got {:?})",
             resolved_program
         ))
         .into());
@@ -2305,8 +3087,8 @@ fn init_telemetry(
     let install_id = ensure_install_id(store);
     let telemetry = Telemetry::init(&config.telemetry, frontend, &install_id);
     if telemetry.is_active() {
-        let env = EnvFingerprint::collect(Some(crate::tui::theme::ColorMode::detect().name()));
-        let snapshot = ConfigSnapshot::from_config(&config, store.try_view_mode());
+        let env = EnvFingerprint::collect(Some(ColorMode::detect().name()));
+        let snapshot = ConfigSnapshot::from_config(&config);
         telemetry.session_start(&env, &snapshot);
     }
     telemetry
@@ -2314,33 +3096,26 @@ fn init_telemetry(
 
 /// Return the anonymous install id, generating one if none is stored yet.
 ///
-/// The in-memory read is uncontended at startup, so it normally reflects disk:
-/// when genuinely absent, the fresh id is persisted (via the flocked
-/// `set_install_id_if_absent`) and reused on every future launch. In the rare
-/// case the read missed because the lock was momentarily held — i.e. an id
-/// already exists — the persist leaves that existing id untouched, so this one
-/// session uses a throwaway id that won't match the persisted one. That's an
-/// acceptable edge case; we never clobber an existing id.
+/// When genuinely absent, the fresh id is persisted **synchronously** (a
+/// one-time, flocked, uncontended write via [`StateStore::persist_install_id_if_absent`])
+/// so it is durable before construction returns and reused on every future
+/// launch. A previous version spawned the persist as a fire-and-forget
+/// `tokio::spawn`, which short-lived callers (one-shot CLI, or a GUI that builds
+/// and drops a runtime per operation) tore down before it flushed — so every
+/// launch minted a new id and inflated unique-install telemetry. The persist
+/// never clobbers an existing id: if another writer won the race, its id is
+/// returned instead of ours.
 fn ensure_install_id(store: &Arc<StateStore>) -> String {
     if let Some(id) = store.try_install_id() {
         return id;
     }
-    let id = Uuid::new_v4().to_string();
-    // Persist this session's id in the background (so construction stays sync),
-    // but only when a runtime is present to host the task. The presence guard
-    // lives in `AppState::set_install_id_if_absent`, so it isn't duplicated here.
-    if tokio::runtime::Handle::try_current().is_ok() {
-        let id_for_persist = id.clone();
-        let store = store.clone();
-        tokio::spawn(async move {
-            let _ = store
-                .mutate(move |s| {
-                    s.set_install_id_if_absent(&id_for_persist);
-                })
-                .await;
-        });
-    }
-    id
+    let candidate = Uuid::new_v4().to_string();
+    store
+        .persist_install_id_if_absent(&candidate)
+        .unwrap_or_else(|e| {
+            warn!("failed to persist install id ({e}); using an ephemeral id this session");
+            candidate
+        })
 }
 
 // -- Response types --
@@ -2352,16 +3127,19 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
 // `session_info_from_session` below.
 pub use claude_commander_protocol::api::{
     AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions, CreateSessionOpts, DiffSide,
-    DiffStat, NewComment, OperationKind, OperationOutcome, OperationStatus, PreviewData,
-    ProgramInfo, ProjectInfo, PullBlockReason, PullStatus, RenameSession, ReviewSnapshot,
-    ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection, ToggleReviewed,
-    WorkspaceSnapshot,
+    DiffStat, NewComment, OperationKind, OperationOutcome, OperationStatus, PrRetarget,
+    PreviewData, ProgramInfo, ProjectInfo, PullBlockReason, PullStatus, RenameSession,
+    ReviewSnapshot, ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection,
+    SetSessionBase, SetSessionBaseOutcome, Snapshot, ToggleReviewed,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
 /// (Was `SessionInfo::from_session`; relocated here because `SessionInfo` is now
 /// a foreign type and this conversion needs core-only types.)
-fn session_info_from_session(session: &WorktreeSession, project_name: &str) -> SessionInfo {
+pub(crate) fn session_info_from_session(
+    session: &WorktreeSession,
+    project_name: &str,
+) -> SessionInfo {
     SessionInfo {
         id: session.id.as_uuid().to_string(),
         session_id: session.id,
@@ -2397,7 +3175,7 @@ fn session_info_from_session(session: &WorktreeSession, project_name: &str) -> S
 
 /// Build the [`ProjectInfo`] list from state, sorted by project name (stable
 /// ordering for the tree). Sessions are carried by id only; the full
-/// [`SessionInfo`] list rides alongside in [`WorkspaceSnapshot`].
+/// [`SessionInfo`] list rides alongside in [`Snapshot`].
 fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
     let mut projects: Vec<_> = state.projects.values().collect();
     projects.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2409,6 +3187,8 @@ fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
             repo_path: p.repo_path.clone(),
             main_branch: p.main_branch.clone(),
             session_ids: p.worktrees.clone(),
+            origin_url: p.origin_url.clone(),
+            workspace: p.workspace.clone(),
         })
         .collect()
 }
@@ -2442,16 +3222,16 @@ fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<Sessi
     entries.into_iter().map(|(_, info)| info).collect()
 }
 
-/// Build a [`WorkspaceSnapshot`] purely from persisted state, with no live
+/// Build a [`Snapshot`] purely from persisted state, with no live
 /// gh/tmux probing — the I/O-bearing fields ([`ServerStatus`], pending
 /// comments, operations) get cheap placeholders. The full
-/// [`CommanderService::workspace_snapshot`] is the production source of truth
+/// [`CommanderService::snapshot`] is the production source of truth
 /// (the change-feed cache reads it); this synchronous, allocation-only
 /// projection is retained for the tree-builder tests, which feed a
 /// hand-constructed `AppState` through the same DTO builders.
-#[cfg(test)]
-pub(crate) fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
-    WorkspaceSnapshot {
+#[cfg(any(test, feature = "test-support"))]
+pub fn snapshot_from_state(state: &AppState) -> Snapshot {
+    Snapshot {
         projects: build_project_info_list(state),
         sessions: build_session_info_list(state, true),
         cascade_paused: state.cascade_paused_at,
@@ -2463,11 +3243,14 @@ pub(crate) fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapsh
             tmux_ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
+        workspaces: Vec::new(),
+        main_workspace: None,
+        startup_workspace: Default::default(),
     }
 }
 
 fn find_session_info(state: &AppState, query: &str) -> Option<SessionInfo> {
-    let session = crate::cli::find_session(state, query)?;
+    let session = find_session(state, query)?;
     let project_name = state
         .projects
         .get(&session.project_id)
@@ -2493,11 +3276,148 @@ async fn capture_pane(
     Ok(Some(executor.execute(&args).await?))
 }
 
+/// Maximum lines allowed for a pane-capture line count (the CLI `log` command's
+/// `--lines` flag, and the HTTP API's equivalent query parameter).
+pub(crate) const LOG_MAX_LINES: usize = 10_000;
+
+/// Clamp a requested line count to the allowed range [1, LOG_MAX_LINES].
+pub(crate) fn clamp_log_lines(requested: usize) -> usize {
+    requested.clamp(1, LOG_MAX_LINES)
+}
+
+// -- Repository clone helpers --
+
+/// The directory name a clone lands in: the caller's `dest_name` when given,
+/// otherwise the name derived from the source.
+///
+/// The **source is validated either way**, before the override is even looked at:
+/// it becomes an argv element regardless of where the directory name comes from,
+/// and that is the hazard that is invisible when it goes wrong.
+fn clone_dir_name(req: &CloneRequest) -> Result<String> {
+    let derived = match &req.source {
+        CloneSource::Github { full_name } => {
+            validate_repo_slug(full_name).map_err(clone_source_rejected)?;
+            // `validate_repo_slug` has just guaranteed exactly one `/`; the
+            // fallback is unreachable rather than a policy.
+            full_name
+                .split_once('/')
+                .map_or(full_name.as_str(), |(_, name)| name)
+                .to_string()
+        }
+        CloneSource::Url { url } => {
+            validate_clone_url(url)
+                .map_err(clone_source_rejected)?
+                .default_dir_name
+        }
+    };
+    match req.dest_name.as_deref() {
+        Some(name) => Ok(validate_dest_name(name)
+            .map_err(clone_source_rejected)?
+            .to_string()),
+        None => Ok(derived),
+    }
+}
+
+/// What to show the user as a clone's source: the slug or the URL, as typed.
+///
+/// Raw user input — every consumer redacts (`CloneJobs::spawn` for the job label,
+/// [`clone_source_rejected`] for an error message), so this must not be logged or
+/// formatted into a message on its own.
+fn clone_source_label(source: &CloneSource) -> &str {
+    match source {
+        CloneSource::Github { full_name } => full_name,
+        CloneSource::Url { url } => url,
+    }
+}
+
+/// `Some(is_git_repo)` when `dest` is already occupied, `None` when it is free.
+///
+/// An `Option` rather than a pair of booleans because `is_git_repo` only means
+/// anything once something is there — which is exactly the shape
+/// `CloneStatus::DestinationExists` needs.
+///
+/// `symlink_metadata`, not `exists()`: a dangling symlink is an occupied path (git
+/// refuses to clone onto one) while `exists()` follows the link and would call it
+/// free. A `.git` entry decides the flag and is tested with `exists()` because it
+/// is a directory in an ordinary checkout and a *file* in a linked worktree or
+/// submodule. A **bare** repo at the destination reads as "occupied, not a repo" —
+/// it has no `.git`, and it is not something a user would want registered as a
+/// project anyway.
+fn occupied_destination(dest: &Path) -> Option<bool> {
+    dest.symlink_metadata().ok()?;
+    Some(dest.join(".git").exists())
+}
+
+/// Clone into `dest`, register the checkout as a project, and report which of the
+/// three terminal outcomes happened.
+///
+/// The fallible steps sit in **one `?`-scoped block with a single cleanup**, so a
+/// step added later (an LFS fetch, a hook install) inherits the
+/// remove-the-partial-clone path instead of repeating it. CLAUDE.md calls this out
+/// as a review-time rule precisely because clippy cannot see it.
+///
+/// `ensure_project` builds a non-`Send` `gix::Repository` and holds it across an
+/// await, so it cannot be driven directly by this `tokio::spawn`ed task;
+/// [`run_local`] hands it to a current-thread runtime on its own thread. Same
+/// reason the server's project handlers do it (`handlers/projects.rs`).
+async fn clone_then_register(
+    service: CommanderService,
+    source: CloneSource,
+    workspace: Option<String>,
+    dest: PathBuf,
+    timeout: Duration,
+) -> CloneOutcome {
+    let cloned = async {
+        run_clone(&source, &dest, timeout).await?;
+        let path = dest.clone();
+        run_local(move || async move { service.ensure_project(path, workspace).await })
+            .await
+            .map_err(|e| match e {
+                RunLocalError::Inner(err) => err,
+                RunLocalError::WorkerLost => GitError::OperationFailed(
+                    "the worker registering the cloned repository was lost".to_string(),
+                )
+                .into(),
+            })
+    }
+    .await;
+
+    match cloned {
+        Ok(project_id) => CloneOutcome::succeeded(project_id),
+        Err(e) => {
+            remove_partial_clone(&dest);
+            // `CloneOutcome::failed` redacts, so a message built from git's stderr
+            // cannot carry a credential into the registry.
+            CloneOutcome::failed(e.to_string())
+        }
+    }
+}
+
+/// Remove whatever a failed clone left at `dest`, so a retry into the same
+/// directory is not blocked by a half-written checkout.
+///
+/// Only ever called for a destination [`CommanderService::start_clone`] found free
+/// moments earlier, so this can only delete what this clone wrote — the same rule
+/// `run_clone`'s own cleanup follows. It overlaps with that cleanup for a failed
+/// clone (harmless: a missing directory is not an error) and is the *only* cleanup
+/// for a step that fails after the checkout exists.
+fn remove_partial_clone(dest: &Path) {
+    match std::fs::remove_dir_all(dest) {
+        Ok(()) => debug!("removed partial clone at {}", dest.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!("failed to remove partial clone at {}: {e}", dest.display()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::workspace::{StartupWorkspace, WorkspaceDef};
+
     use crate::comment::CommentSide;
     use crate::git::PrState;
+    use crate::git::fixture::{fixture_git, fixture_git_std};
     use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
     use std::path::PathBuf;
 
@@ -2526,6 +3446,54 @@ mod tests {
             state.sessions.insert(s.id, s);
         }
         state
+    }
+
+    // -- clamp_log_lines tests --
+
+    #[test]
+    fn clamp_log_lines_default_passthrough() {
+        assert_eq!(clamp_log_lines(100), 100);
+    }
+
+    #[test]
+    fn clamp_log_lines_zero_becomes_one() {
+        assert_eq!(clamp_log_lines(0), 1);
+    }
+
+    #[test]
+    fn clamp_log_lines_max_boundary() {
+        assert_eq!(clamp_log_lines(LOG_MAX_LINES), LOG_MAX_LINES);
+    }
+
+    #[test]
+    fn clamp_log_lines_over_max() {
+        assert_eq!(clamp_log_lines(LOG_MAX_LINES + 1), LOG_MAX_LINES);
+        assert_eq!(clamp_log_lines(usize::MAX), LOG_MAX_LINES);
+    }
+
+    #[test]
+    fn build_project_info_list_projects_origin_url() {
+        // The repo picker badges a row by comparing a project's origin against
+        // the API's clone url, so the persisted value has to reach the wire DTO.
+        // It is projected, never derived here: this is a pure sync projection of
+        // `AppState` on the workspace-poll path, with no repo to open.
+        let mut with_origin = make_project("with-origin");
+        with_origin.origin_url = Some("git@github.com:sizeak/claude-commander.git".to_string());
+        let without_origin = make_project("no-origin");
+
+        let mut state = AppState::new();
+        state.projects.insert(with_origin.id, with_origin.clone());
+        state
+            .projects
+            .insert(without_origin.id, without_origin.clone());
+
+        let infos = build_project_info_list(&state);
+        let find = |id: ProjectId| infos.iter().find(|i| i.id == id).unwrap();
+        assert_eq!(
+            find(with_origin.id).origin_url.as_deref(),
+            Some("git@github.com:sizeak/claude-commander.git")
+        );
+        assert_eq!(find(without_origin.id).origin_url, None);
     }
 
     #[test]
@@ -2829,24 +3797,11 @@ mod tests {
     /// injected one (test-isolation regression).
     #[tokio::test]
     async fn comment_writes_stay_under_injected_data_dir() {
-        use crate::config::storage::AppState as CoreState;
-        use crate::config::{ConfigStore, StateStore};
-
         let dir = tempfile::TempDir::new().unwrap();
-        // Telemetry is opt-out by default with a baked ingest token; disable it
-        // so this test never posts events to the production OpenObserve instance.
-        let mut config = Config::default();
-        config.telemetry.enabled = false;
-        let config_store = Arc::new(ConfigStore::with_path(
-            config,
-            dir.path().join("config.toml"),
-        ));
-        let store = Arc::new(StateStore::with_path(
-            CoreState::default(),
-            dir.path().join("state.json"),
-        ));
-        let frontend = FrontendInfo::new("test", "0.0.0");
-        let service = CommanderService::new(config_store, store, frontend);
+        // Built through the shared helper rather than by hand, so this test
+        // inherits every isolation knob it sets (telemetry off, tmux and
+        // projects dir pinned) instead of having to repeat them.
+        let service = service_with_config(&dir, Config::default());
 
         // Write a comment through the public API.
         let session_id = SessionId::new();
@@ -2886,13 +3841,23 @@ mod tests {
     use crate::config::{ConfigStore, StateStore};
 
     /// Build a hermetic service over TempDir-backed stores with the given
-    /// config. Telemetry is disabled and tmux is isolated onto a throwaway
-    /// socket dir, per the project's test-isolation rules.
+    /// config. Telemetry is disabled, tmux is isolated onto a throwaway socket
+    /// dir, and the projects dir is pinned under `dir`, per the project's
+    /// test-isolation rules. The knobs are applied *after* the caller's config
+    /// arrives, so an explicitly-passed `Config` can't silently lose them.
+    /// Guarded by `service_with_config_pins_projects_dir`.
     fn service_with_config(dir: &tempfile::TempDir, mut config: Config) -> CommanderService {
         config.telemetry.enabled = false;
         let tmux_tmpdir = dir.path().join("tmux");
         std::fs::create_dir_all(&tmux_tmpdir).unwrap();
         config.tmux_tmpdir = Some(tmux_tmpdir);
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it so no service built here can
+        // clone outside the temp tree.
+        config.projects_dir = Some(dir.path().join("projects"));
+        // Same for the agent temp files (apply briefs, pasted images), which
+        // otherwise land in the real `/tmp`.
+        config.agent_temp_dir = Some(dir.path().join("agent-temp"));
         let config_store = Arc::new(ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),
@@ -2906,6 +3871,31 @@ mod tests {
 
     fn service(dir: &tempfile::TempDir) -> CommanderService {
         service_with_config(dir, Config::default())
+    }
+
+    /// Guard: the core service helper must pin the projects directory into the
+    /// temp dir. `projects_dir` defaults to the user's REAL `~/Projects` and the
+    /// repo-clone paths write there, so an unpinned helper would check
+    /// repositories out into the developer's own projects directory from
+    /// `cargo test` / CI. The caller-supplied config must not be able to defeat
+    /// the pin either, so this asserts it for an explicitly-passed `Config` too.
+    #[test]
+    fn service_with_config_pins_projects_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for config in [
+            Config::default(),
+            Config {
+                projects_dir: Some(PathBuf::from("/definitely/not/a/temp/dir")),
+                ..Config::default()
+            },
+        ] {
+            let svc = service_with_config(&dir, config);
+            let projects_dir = svc.read_config().projects_dir().unwrap();
+            assert!(
+                projects_dir.starts_with(dir.path()),
+                "core test services must not clone into the real ~/Projects (got {projects_dir:?})"
+            );
+        }
     }
 
     /// Seed one project with one session and return their ids.
@@ -2928,6 +3918,399 @@ mod tests {
             .await
             .unwrap();
         (pid, sid)
+    }
+
+    /// Seed a project + session over a real one-commit git repo in `dir`, with
+    /// `changed.txt` modified in the working tree and `reverted.txt` left exactly
+    /// as committed. The session's review base is the initial commit, so the
+    /// composed diff contains `changed.txt` and nothing else.
+    async fn seed_review_repo(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+    ) -> (SessionId, PathBuf) {
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = async |args: &[&str]| {
+            fixture_git()
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .await
+                .unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]).await;
+        git(&["config", "user.email", "t@example.com"]).await;
+        git(&["config", "user.name", "T"]).await;
+        std::fs::write(repo.join("changed.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("reverted.txt"), "stable\n").unwrap();
+        git(&["add", "."]).await;
+        git(&["commit", "-q", "-m", "base"]).await;
+        let head = git(&["rev-parse", "HEAD"]).await;
+        let base_commit = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+        // Only `changed.txt` differs from the base.
+        std::fs::write(repo.join("changed.txt"), "two\n").unwrap();
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let mut session = WorktreeSession::new(pid, "task", "branch-task", repo.clone(), "claude");
+        session.base_commit = Some(base_commit);
+        // Inactive, so `apply_comments` takes the Deferred path and never talks
+        // to tmux (these tests are about comment pruning, not delivery).
+        session.status = SessionStatus::Stopped;
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+        (sid, repo)
+    }
+
+    /// Regression: a comment whose file has left the diff entirely (the change it
+    /// was written against was reverted) used to survive as `Drifted` forever —
+    /// invisible in the review tree (file rows come from the diff, so it had no
+    /// row and no ⚠), unreachable by `d`, and blocking Apply with "review or
+    /// delete them" that the user had no way to obey. It must be dropped from the
+    /// store, reported, and must not block Apply.
+    #[tokio::test]
+    async fn open_review_drops_comment_whose_file_left_the_diff() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+
+        let orphan = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "reverted.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "gone from the diff".to_string(),
+                    comment: "this is unpleasant".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let live = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "changed.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "two".to_string(),
+                    comment: "why two".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let snapshot = svc.open_review(&sid).await.unwrap();
+
+        // The orphan is gone from the snapshot and reported as dropped...
+        let ids: Vec<Uuid> = snapshot.comments.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![live], "only the in-diff comment should survive");
+        assert_eq!(
+            snapshot
+                .dropped_comments
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![orphan],
+            "the dropped comment must be reported, not silently deleted"
+        );
+        // ...and the drop is persisted, so it can't come back to block Apply.
+        let stored = svc.list_comments(&sid).await.unwrap();
+        assert_eq!(stored.iter().map(|c| c.id).collect::<Vec<_>>(), vec![live]);
+
+        // Apply is no longer wedged by the unreachable comment. The session isn't
+        // active, so a clean run defers (writes the brief) rather than blocking.
+        match svc.apply_comments(&sid).await.unwrap() {
+            ApplyOutcome::Deferred { count, .. } => assert_eq!(count, 1),
+            other => panic!("expected Deferred, got {other:?}"),
+        }
+    }
+
+    /// A snapshot carries the composition it was parsed from, so a remote
+    /// client can lay the diff out itself (word diff, side-by-side, context
+    /// expansion) instead of re-deriving it from the lossier wire model.
+    #[tokio::test]
+    async fn open_review_carries_the_raw_composition() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+
+        let snapshot = svc.open_review(&sid).await.unwrap();
+        let raw = snapshot.raw.expect("the raw diff must reach the client");
+        assert!(
+            raw.contains("+++ b/changed.txt"),
+            "expected the composed unified diff, got: {raw}"
+        );
+        // It is the *same* text `content_hash` was taken over, so a client that
+        // re-parses it cannot disagree with the server's staleness check.
+        assert_eq!(
+            xxhash_rust::xxh3::xxh3_64(raw.as_bytes()),
+            snapshot.content_hash
+        );
+    }
+
+    /// The safety precondition for the drop: a diff that fell back to
+    /// working-tree-vs-HEAD is a *narrower* view than the session's real base
+    /// (committed work is missing from it), so a file's absence there proves
+    /// nothing. Pruning against it would delete live comments.
+    #[tokio::test]
+    async fn degraded_diff_does_not_drop_comments() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, repo) = seed_review_repo(&svc, &dir).await;
+
+        // Commit the change so a HEAD-relative diff is empty, then point the
+        // session at a base branch that cannot resolve (and drop the frozen SHA
+        // fallback, which `git_ref` would otherwise use). Composition degrades to
+        // working-tree-vs-HEAD, in which `changed.txt` no longer appears at all —
+        // exactly the false-orphan trap the guard exists for.
+        let git = async |args: &[&str]| {
+            fixture_git()
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .await
+                .unwrap()
+        };
+        git(&["commit", "-qam", "work"]).await;
+        svc.store()
+            .mutate(move |state| {
+                if let Some(s) = state.sessions.get_mut(&sid) {
+                    s.base_branch = Some("no-such-branch".to_string());
+                    s.base_commit = None;
+                }
+            })
+            .await
+            .unwrap();
+
+        let id = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "changed.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "two".to_string(),
+                    comment: "still live against the real base".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let snapshot = svc.open_review(&sid).await.unwrap();
+        assert!(
+            snapshot.dropped_comments.is_empty(),
+            "a degraded diff must never drop comments"
+        );
+        assert_eq!(
+            svc.list_comments(&sid)
+                .await
+                .unwrap()
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "the comment must survive on disk"
+        );
+    }
+
+    /// Reviewed marks are keyed on a file's diff content, so the same proof gates
+    /// them: on a degraded diff every committed file looks absent, and pruning
+    /// would throw away review progress. A stacked base that only exists remotely
+    /// degrades on *every* open, so this would recur until the marks were gone.
+    #[tokio::test]
+    async fn degraded_diff_does_not_prune_reviewed_marks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, repo) = seed_review_repo(&svc, &dir).await;
+
+        // Mark the file reviewed while the diff is healthy.
+        let marked = svc
+            .toggle_file_reviewed_by_path(&sid, "changed.txt")
+            .await
+            .unwrap();
+        assert!(marked, "expected the file to become marked");
+        assert_eq!(
+            svc.open_review(&sid).await.unwrap().reviewed,
+            ["changed.txt"]
+        );
+
+        // Now degrade: commit the work and point at an unresolvable base, so the
+        // composed diff no longer contains `changed.txt` at all.
+        fixture_git()
+            .current_dir(&repo)
+            .args(["commit", "-qam", "work"])
+            .output()
+            .await
+            .unwrap();
+        svc.store()
+            .mutate(move |state| {
+                if let Some(s) = state.sessions.get_mut(&sid) {
+                    s.base_branch = Some("no-such-branch".to_string());
+                    s.base_commit = None;
+                }
+            })
+            .await
+            .unwrap();
+
+        let snapshot = svc.open_review(&sid).await.unwrap();
+        assert!(
+            snapshot.diff.files.is_empty(),
+            "precondition: the degraded diff should be empty here"
+        );
+        assert_eq!(
+            snapshot.reviewed,
+            ["changed.txt"],
+            "a degraded diff must not prune reviewed marks"
+        );
+    }
+
+    /// Apply must not silently delete. When a file leaves the diff between the
+    /// last refresh and pressing Apply, the orphaned comment takes no part —
+    /// it neither blocks the live comments nor gets deleted here, because this is
+    /// the one path that cannot report a deletion. The next compose drops it and
+    /// announces it (see `refresh_after_apply`).
+    #[tokio::test]
+    async fn apply_skips_orphaned_comments_without_deleting_them() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, repo) = seed_review_repo(&svc, &dir).await;
+
+        // Both files are in the diff when the comments are written.
+        std::fs::write(repo.join("reverted.txt"), "temporarily changed\n").unwrap();
+        let orphan = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "reverted.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "temporarily changed".to_string(),
+                    comment: "about to be reverted".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let live = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "changed.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "two".to_string(),
+                    comment: "why two".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let snapshot = svc.open_review(&sid).await.unwrap();
+        assert!(
+            snapshot.dropped_comments.is_empty(),
+            "precondition: nothing orphaned yet"
+        );
+
+        // The agent reverts one file after the view was composed.
+        std::fs::write(repo.join("reverted.txt"), "stable\n").unwrap();
+
+        // Apply proceeds with only the live comment...
+        match svc.apply_comments(&sid).await.unwrap() {
+            ApplyOutcome::Deferred { count, .. } => {
+                assert_eq!(count, 1, "only the live comment should be delivered")
+            }
+            other => panic!("expected Deferred, got {other:?}"),
+        }
+        // ...and the orphan is still on disk, so the drop notice can still fire.
+        let stored = svc.list_comments(&sid).await.unwrap();
+        let orphan_stored = stored.iter().find(|c| c.id == orphan).expect(
+            "the orphaned comment must not be deleted by apply — only the reporting \
+             path may delete it",
+        );
+        // Both are still pending: a deferred brief hasn't been delivered, so
+        // nothing is marked Applied yet and a re-apply is possible.
+        assert_ne!(orphan_stored.status, CommentStatus::Applied);
+        assert!(
+            stored
+                .iter()
+                .any(|c| c.id == live && c.status != CommentStatus::Applied)
+        );
+
+        // The next compose is what drops it, with a report.
+        let after = svc.open_review(&sid).await.unwrap();
+        assert_eq!(
+            after
+                .dropped_comments
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![orphan]
+        );
+    }
+
+    /// Regression: the brief used to be written to one path per *session*
+    /// (`cc-comments-<session>.md`) and overwritten on every Apply, so a second
+    /// Apply before the agent had opened the first file replaced its contents —
+    /// the first batch of comments was silently lost (and, once delivered, they
+    /// were already marked Applied, so nothing brought them back). Each Apply
+    /// must leave its own brief on disk, untouched by the next one.
+    #[tokio::test]
+    async fn each_apply_writes_its_own_brief_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+
+        let comment = async |text: &str| {
+            svc.create_comment(
+                &sid,
+                NewComment {
+                    file: "changed.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "two".to_string(),
+                    comment: text.to_string(),
+                },
+            )
+            .await
+            .unwrap()
+        };
+        let apply = async || match svc.apply_comments(&sid).await.unwrap() {
+            ApplyOutcome::Deferred { path, .. } => path,
+            other => panic!("expected Deferred, got {other:?}"),
+        };
+
+        comment("first note").await;
+        let first = apply().await;
+        comment("second note").await;
+        let second = apply().await;
+
+        assert_ne!(
+            first, second,
+            "a second Apply must not reuse the first brief's path"
+        );
+        assert!(
+            first.starts_with(dir.path()),
+            "briefs must honour the pinned `agent_temp_dir`, not the real /tmp (got {first:?})"
+        );
+        let first_md = std::fs::read_to_string(&first)
+            .expect("the first brief must survive a second Apply, unread or not");
+        assert!(
+            first_md.contains("first note"),
+            "the first brief must keep its own comments, got: {first_md}"
+        );
+        assert!(
+            std::fs::read_to_string(&second)
+                .unwrap()
+                .contains("second note"),
+            "the second brief must carry the newly staged comment"
+        );
     }
 
     #[tokio::test]
@@ -2962,12 +4345,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_carries_projects_and_sessions() {
+    async fn snapshot_carries_projects_and_sessions() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (pid, sid) = seed_project_session(&svc).await;
 
-        let snap = svc.workspace_snapshot().await.unwrap();
+        let snap = svc.snapshot().await.unwrap();
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.projects[0].id, pid);
         assert_eq!(snap.projects[0].session_ids, vec![sid]);
@@ -3014,6 +4397,141 @@ mod tests {
             "stale Creating session should be dropped"
         );
         assert!(state.projects.contains_key(&pid), "project must survive");
+    }
+
+    /// Seed a project plus one session pinned to `tmux_name`, with the given
+    /// stored status and hibernation marker. Paths live under `dir` so nothing
+    /// touches the real filesystem.
+    async fn seed_session_for_tmux(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+        tmux_name: &str,
+        status: SessionStatus,
+        hibernated: bool,
+    ) -> SessionId {
+        let project = Project::new("repo", dir.path().join("repo"), "main");
+        let pid = project.id;
+        let mut session =
+            WorktreeSession::new(pid, "task", "branch-task", dir.path().join("wt"), "claude");
+        session.tmux_session_name = tmux_name.to_string();
+        session.set_status(status);
+        session.hibernated = hibernated;
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+        sid
+    }
+
+    /// Start a real tmux session with a live (long-sleeping) pane on the
+    /// service's isolated socket dir. Requires tmux, like the rest of the
+    /// tmux-backed tests.
+    async fn start_live_pane(svc: &CommanderService, dir: &tempfile::TempDir, tmux_name: &str) {
+        svc.session_manager()
+            .tmux
+            .create_session(tmux_name, dir.path(), Some("sleep 300"))
+            .await
+            .expect("isolated tmux server should accept a new session");
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_revives_stopped_session_with_a_live_pane() {
+        // `Stopped` with a live pane is an inconsistency: the only paths that
+        // produce Stopped (kill, hibernate, reconcile) all kill the pane first.
+        // It happens when a reconcile pass reads tmux as absent — a run pointed
+        // at a different socket dir, or `no server running` from a server that
+        // restarted — and its cleanup kill then no-ops on that same wrong
+        // socket, so live panes keep running while state says stopped.
+        // Reconciliation must therefore be bidirectional: without the revive,
+        // the row renders `○ stopped` forever and agent-state detection stays
+        // suppressed (it is gated on `status.is_active()`), so the spinner and
+        // waiting-for-input glyphs never appear again for that session.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let tmux_name = "cc-revive-live";
+        start_live_pane(&svc, &dir, tmux_name).await;
+        let sid = seed_session_for_tmux(&svc, &dir, tmux_name, SessionStatus::Stopped, true).await;
+
+        svc.startup_reconcile().await.unwrap();
+
+        {
+            let state = svc.store().read().await;
+            let session = state.get_session(&sid).unwrap();
+            assert_eq!(
+                session.status,
+                SessionStatus::Running,
+                "a Stopped session whose tmux pane is alive must be revived to Running"
+            );
+            assert!(
+                !session.hibernated,
+                "a live pane leaves nothing to resume into, so the hibernation \
+                 marker must be cleared with the revive"
+            );
+        }
+        let _ = svc.session_manager().tmux.kill_session(tmux_name).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_attachable_marks_a_live_stopped_session_running() {
+        // The attach path already probes `session_exists` + `is_pane_dead` and
+        // finds the pane alive, but only its *recreate* branch wrote the status
+        // back — so attaching to a wrongly-Stopped session left it Stopped, and
+        // its glyph stayed `○` while the user sat in the live agent pane.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let tmux_name = "cc-attach-live";
+        start_live_pane(&svc, &dir, tmux_name).await;
+        let sid = seed_session_for_tmux(&svc, &dir, tmux_name, SessionStatus::Stopped, true).await;
+
+        let resolved = svc
+            .session_manager()
+            .ensure_attachable(&sid)
+            .await
+            .expect("a live pane is attachable");
+        assert_eq!(resolved, tmux_name, "the live session must be reused as-is");
+
+        {
+            let state = svc.store().read().await;
+            let session = state.get_session(&sid).unwrap();
+            assert_eq!(
+                session.status,
+                SessionStatus::Running,
+                "attaching to a live pane must reflect that in the stored status"
+            );
+            assert!(!session.hibernated, "a live pane is not hibernated");
+        }
+        let _ = svc.session_manager().tmux.kill_session(tmux_name).await;
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_leaves_a_stopped_session_with_no_tmux_alone() {
+        // The other half of the bidirectional rule: absence must not be
+        // mistaken for a revive signal, and a genuinely hibernated session must
+        // keep its marker so the next wake still resumes its conversation.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_session_for_tmux(
+            &svc,
+            &dir,
+            "cc-no-such-session",
+            SessionStatus::Stopped,
+            true,
+        )
+        .await;
+
+        svc.startup_reconcile().await.unwrap();
+
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.status, SessionStatus::Stopped);
+        assert!(
+            session.hibernated,
+            "a hibernated session with no live pane must keep its resume marker"
+        );
     }
 
     #[tokio::test]
@@ -3090,8 +4608,615 @@ mod tests {
         assert!(s.pr_base_branch.is_none());
     }
 
+    /// Run `git` in `dir`, panicking on failure. Signing is forced off by
+    /// [`fixture_git_std`], so the developer's policy can't break isolated tests.
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = fixture_git_std()
+            .current_dir(dir)
+            .args(["-c", "gc.auto=0"])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("spawn git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    // -- Workspaces --
+
+    fn one_commit_repo(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let repo = dir.path().join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        repo
+    }
+
+    async fn project_tag(svc: &CommanderService, id: &ProjectId) -> Option<String> {
+        svc.store().read().await.projects[id].workspace.clone()
+    }
+
+    fn def_names(svc: &CommanderService) -> Vec<String> {
+        svc.read_config()
+            .workspaces
+            .into_iter()
+            .map(|d| d.name)
+            .collect()
+    }
+
     #[tokio::test]
-    async fn workspace_snapshot_reports_paused_cascade() {
+    async fn moving_a_project_tags_it_and_defines_a_missing_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+
+        svc.set_project_workspace(&pid, Some(" Work ".into()))
+            .await
+            .unwrap();
+        assert_eq!(project_tag(&svc, &pid).await.as_deref(), Some("Work"));
+        assert_eq!(
+            def_names(&svc),
+            ["Work"],
+            "the move self-heals the definition"
+        );
+
+        // Moving again neither duplicates the definition nor loses the tag.
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        assert_eq!(def_names(&svc), ["Work"]);
+
+        svc.set_project_workspace(&pid, None).await.unwrap();
+        assert_eq!(project_tag(&svc, &pid).await, None, "None is Main");
+        assert_eq!(def_names(&svc), ["Work"], "leaving a workspace keeps it");
+    }
+
+    #[tokio::test]
+    async fn moving_a_project_refuses_bad_names_and_unknown_projects() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        let err = svc
+            .set_project_workspace(&pid, Some("last".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Session(SessionError::InvalidName { .. })),
+            "{err:?}"
+        );
+        assert!(
+            def_names(&svc).is_empty(),
+            "nothing defined for a refused name"
+        );
+        let err = svc
+            .set_project_workspace(&ProjectId::new(), Some("Work".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Session(SessionError::ProjectNotFound(_))),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_workspace_rewrites_tags_definition_and_startup_pin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: Some(StartupWorkspace::Named("Work".into())),
+        })
+        .unwrap();
+
+        assert!(svc.rename_workspace("Work", "Job").await.unwrap());
+        assert_eq!(project_tag(&svc, &pid).await.as_deref(), Some("Job"));
+        assert_eq!(def_names(&svc), ["Job", "Play"], "order is kept");
+        assert_eq!(
+            svc.read_config().startup_workspace,
+            StartupWorkspace::Named("Job".into())
+        );
+
+        // Idempotent on a host that never had it — eager propagation is safe.
+        assert!(!svc.rename_workspace("Nope", "Other").await.unwrap());
+        assert!(
+            svc.rename_workspace("Job", "Play").await.is_err(),
+            "collision"
+        );
+    }
+
+    /// A tag whose definition was lost (an older binary rewrote config.toml)
+    /// still renames, and the new name gets a definition back.
+    #[tokio::test]
+    async fn rename_workspace_heals_an_orphaned_tag() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.store()
+            .mutate(move |s| s.projects.get_mut(&pid).unwrap().workspace = Some("Lost".into()))
+            .await
+            .unwrap();
+        assert!(svc.rename_workspace("Lost", "Found").await.unwrap());
+        assert_eq!(project_tag(&svc, &pid).await.as_deref(), Some("Found"));
+        assert_eq!(def_names(&svc), ["Found"]);
+    }
+
+    #[tokio::test]
+    async fn delete_workspace_moves_its_projects_to_main() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: None,
+            startup_workspace: Some(StartupWorkspace::Named("Work".into())),
+        })
+        .unwrap();
+
+        assert!(svc.delete_workspace("Work").await.unwrap());
+        assert_eq!(project_tag(&svc, &pid).await, None);
+        assert!(def_names(&svc).is_empty());
+        assert_eq!(svc.read_config().startup_workspace, StartupWorkspace::Main);
+        assert!(!svc.delete_workspace("Work").await.unwrap(), "idempotent");
+    }
+
+    fn seed_workspace_themes(svc: &CommanderService, names: &[&str]) {
+        svc.config_store
+            .mutate(|c| {
+                for (i, name) in names.iter().enumerate() {
+                    c.workspace_themes.insert(
+                        (*name).to_string(),
+                        crate::config::ThemeOverrides {
+                            preset: Some(format!("p{i}")),
+                            ..Default::default()
+                        },
+                    );
+                }
+            })
+            .unwrap();
+    }
+
+    fn theme_keys(svc: &CommanderService) -> Vec<String> {
+        svc.read_config().workspace_themes.into_keys().collect()
+    }
+
+    /// Renaming a workspace carries its local theme to the new name, and Main's
+    /// entry is untouched.
+    #[tokio::test]
+    async fn rename_workspace_moves_its_local_theme() {
+        use crate::config::MAIN_WORKSPACE_THEME_KEY;
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        seed_workspace_themes(&svc, &["Work", MAIN_WORKSPACE_THEME_KEY]);
+        let before = svc.read_config().workspace_themes["Work"].clone();
+
+        assert!(svc.rename_workspace("Work", "Job").await.unwrap());
+        assert_eq!(theme_keys(&svc), ["Job", MAIN_WORKSPACE_THEME_KEY]);
+        assert_eq!(svc.read_config().workspace_themes["Job"], before);
+
+        // A refused rename moves nothing.
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Job"), WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        assert!(svc.rename_workspace("Job", "play").await.is_err());
+        assert_eq!(theme_keys(&svc), ["Job", MAIN_WORKSPACE_THEME_KEY]);
+    }
+
+    /// The theme is local config, so it follows a rename even on a host that
+    /// has neither the definition nor a tagged project — the TUI's local
+    /// service, say, when the workspace lives only on a remote server.
+    #[tokio::test]
+    async fn rename_workspace_moves_a_theme_this_host_has_no_definition_for() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_workspace_themes(&svc, &["Remote"]);
+        svc.rename_workspace("Remote", "Elsewhere").await.unwrap();
+        assert_eq!(theme_keys(&svc), ["Elsewhere"]);
+    }
+
+    /// Deleting a workspace drops its theme; Main's reserved key cannot be
+    /// renamed or deleted through the workspace paths.
+    #[tokio::test]
+    async fn delete_workspace_removes_its_local_theme_but_never_mains() {
+        use crate::config::MAIN_WORKSPACE_THEME_KEY;
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        seed_workspace_themes(&svc, &["Work", "Orphan", MAIN_WORKSPACE_THEME_KEY]);
+
+        assert!(svc.delete_workspace("Work").await.unwrap());
+        assert_eq!(theme_keys(&svc), ["Orphan", MAIN_WORKSPACE_THEME_KEY]);
+        // No definition here, but the local theme still goes.
+        svc.delete_workspace("Orphan").await.unwrap();
+        assert_eq!(theme_keys(&svc), [MAIN_WORKSPACE_THEME_KEY]);
+
+        let _ = svc.delete_workspace(MAIN_WORKSPACE_THEME_KEY).await;
+        let _ = svc
+            .rename_workspace(MAIN_WORKSPACE_THEME_KEY, "Stolen")
+            .await;
+        assert_eq!(theme_keys(&svc), [MAIN_WORKSPACE_THEME_KEY]);
+    }
+
+    #[tokio::test]
+    async fn set_workspace_defs_validates_and_leaves_unset_fields_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: Some(StartupWorkspace::Main),
+        })
+        .unwrap();
+        // A later replace without main/startup keeps both.
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        let c = svc.read_config();
+        assert_eq!(def_names(&svc), ["Play"]);
+        assert_eq!(c.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(c.startup_workspace, StartupWorkspace::Main);
+
+        let err = svc
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("A"), WorkspaceDef::named("a")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidName { .. })
+        ));
+        assert_eq!(def_names(&svc), ["Play"], "a refused list writes nothing");
+    }
+
+    /// `main: None` means "leave Main's label alone", not "there is no Main
+    /// label": a replace from a client that sends no `main` (every create
+    /// and reorder, and any older client) must still be refused
+    /// when a name clashes with the label this server stores.
+    #[tokio::test]
+    async fn set_workspace_defs_checks_names_against_the_stored_main_label() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: None,
+        })
+        .unwrap();
+        let err = svc
+            .set_workspace_defs(SetWorkspacesRequest {
+                workspaces: vec![WorkspaceDef::named("home")],
+                main: None,
+                startup_workspace: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidName { .. })
+        ));
+        assert!(def_names(&svc).is_empty(), "a refused list writes nothing");
+        assert_eq!(
+            svc.read_config().main_workspace,
+            Some(WorkspaceDef::named("Home"))
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_carries_workspace_config_and_project_tags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: Some(StartupWorkspace::Named("Work".into())),
+        })
+        .unwrap();
+        let snap = svc.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(snap.workspaces, vec![WorkspaceDef::named("Work")]);
+        assert_eq!(snap.main_workspace, Some(WorkspaceDef::named("Home")));
+        assert_eq!(
+            snap.startup_workspace,
+            StartupWorkspace::Named("Work".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_project_lands_in_the_requested_workspace_but_ensure_never_retags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let repo = one_commit_repo(&dir, "repo");
+        let id = svc
+            .ensure_project(repo.clone(), Some("Work".into()))
+            .await
+            .unwrap();
+        assert_eq!(project_tag(&svc, &id).await.as_deref(), Some("Work"));
+        assert_eq!(def_names(&svc), ["Work"]);
+
+        let again = svc
+            .ensure_project(repo.clone(), Some("Play".into()))
+            .await
+            .unwrap();
+        assert_eq!(again, id);
+        assert_eq!(project_tag(&svc, &id).await.as_deref(), Some("Work"));
+        assert_eq!(def_names(&svc), ["Work"], "no definition for an unused tag");
+
+        let other = one_commit_repo(&dir, "other");
+        let added = svc.add_project(other, None).await.unwrap();
+        assert_eq!(project_tag(&svc, &added).await, None);
+        assert!(
+            svc.add_project(one_commit_repo(&dir, "bad"), Some("main".into()))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_session_branches_adopts_local_rename() {
+        // Regression: renaming a worktree's branch (`git branch -m`) left
+        // `session.branch` stale, so PR polling queried a branch with no PR and
+        // silently dropped the session's PR + stack topology. Reconcile must
+        // adopt the live branch when the old name no longer exists.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        // A real repo on `main` with one commit, plus a linked worktree on
+        // branch `feature`.
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt-feature");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        );
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(pid, "feature", "feature", wt.clone(), "claude");
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        // Rename the branch in the worktree; the old name ceases to exist.
+        run_git(&wt, &["branch", "-m", "feature", "renamed-feature"]);
+
+        svc.reconcile_session_branches().await.unwrap();
+
+        let state = svc.store().read().await;
+        assert_eq!(
+            state.get_session(&sid).unwrap().branch,
+            "renamed-feature",
+            "a renamed worktree branch must be adopted as the session's branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_then_pr_poll_targets_use_new_branch() {
+        // The property the whole fix exists to provide: reconciling a rename and
+        // then gathering PR-poll targets (as the poll tick does, in order) yields
+        // the corrected `--head` branch — so the same tick polls the right PR.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt-feature");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        );
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(pid, "feature", "feature", wt.clone(), "claude");
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        run_git(&wt, &["branch", "-m", "feature", "renamed-feature"]);
+
+        svc.reconcile_session_branches().await.unwrap();
+        let targets = svc.pr_poll_targets().await;
+
+        let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
+        assert_eq!(
+            target.1, "renamed-feature",
+            "the tick that reconciles must poll GitHub with the corrected branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_poll_targets_carry_branch_ownership_time() {
+        // The PR check discards PRs that had already settled on this branch name
+        // before the session held it, so the poll must hand it each session's
+        // `branch_owned_since` — not just the branch.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let repo = dir.path().join("repo");
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(pid, "feature", "feature", repo.join("wt"), "claude");
+        let sid = session.id;
+        let owned_since = session.created_at;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        let targets = svc.pr_poll_targets().await;
+        let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
+        assert_eq!(target.3, owned_since);
+    }
+
+    #[tokio::test]
+    async fn reconcile_stamps_branch_adoption_and_moves_the_pr_window() {
+        // Adopting a rename re-points the PR query at a name this session has
+        // only just taken. Without stamping the adoption, the poll would still
+        // vouch for the whole span back to session creation, so an unrelated PR
+        // that settled on the new name during that span would be adopted.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt-feature");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        );
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let mut session = WorktreeSession::new(pid, "feature", "feature", wt.clone(), "claude");
+        // Backdate creation so the adoption stamp is unambiguously later.
+        session.created_at = Utc::now() - chrono::Duration::days(30);
+        let sid = session.id;
+        let created_at = session.created_at;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        run_git(&wt, &["branch", "-m", "feature", "renamed-feature"]);
+        svc.reconcile_session_branches().await.unwrap();
+
+        let adopted_at = {
+            let state = svc.store().read().await;
+            state.get_session(&sid).unwrap().branch_adopted_at
+        };
+        let adopted_at = adopted_at.expect("adopting a rename must stamp branch_adopted_at");
+        assert!(
+            adopted_at > created_at,
+            "the adoption stamp must be the moment of adoption, not creation"
+        );
+
+        let targets = svc.pr_poll_targets().await;
+        let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
+        assert_eq!(target.1, "renamed-feature");
+        assert_eq!(
+            target.3, adopted_at,
+            "the poll must only vouch for PRs settling after the rename was adopted"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_session_branches_ignores_plain_switch() {
+        // Switching a worktree to another *existing* branch is transient — the
+        // session must stay anchored to its original branch, not follow.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt-feature");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        );
+        // A second branch exists to switch to; `feature` is kept.
+        run_git(&wt, &["branch", "other"]);
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(pid, "feature", "feature", wt.clone(), "claude");
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        run_git(&wt, &["switch", "other"]);
+
+        svc.reconcile_session_branches().await.unwrap();
+
+        let state = svc.store().read().await;
+        assert_eq!(
+            state.get_session(&sid).unwrap().branch,
+            "feature",
+            "a plain switch to an existing branch must not move the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_paused_cascade() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (_pid, sid) = seed_project_session(&svc).await;
@@ -3099,7 +5224,7 @@ mod tests {
             .mutate(move |state| state.cascade_paused_at = Some(sid))
             .await
             .unwrap();
-        let snap = svc.workspace_snapshot().await.unwrap();
+        let snap = svc.snapshot().await.unwrap();
         assert_eq!(snap.cascade_paused, Some(sid));
     }
 
@@ -3217,6 +5342,145 @@ mod tests {
         ));
     }
 
+    /// The happy path: a session with no PR is restacked onto a sibling, and the
+    /// outcome reports there was no PR to retarget.
+    #[tokio::test]
+    async fn set_session_base_restacks_and_reports_no_pr() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, sid) = seed_project_session(&svc).await;
+        let target = WorktreeSession::new(
+            pid,
+            "other",
+            "branch-other",
+            PathBuf::from("/tmp/wt2"),
+            "claude",
+        );
+        let target_id = target.id;
+        svc.store()
+            .mutate(move |state| state.add_session(target))
+            .await
+            .unwrap();
+
+        let outcome = svc.set_session_base(&sid, Some(target_id)).await.unwrap();
+        assert_eq!(outcome.new_base_branch, "branch-other");
+        assert_eq!(outcome.pr, PrRetarget::NoPr);
+
+        let state = svc.store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert_eq!(s.stack_parent_session_id, Some(target_id));
+        assert_eq!(s.base_branch.as_deref(), Some("branch-other"));
+    }
+
+    /// An unknown session must keep the API's 404 semantics rather than falling
+    /// through the rejection enum's 400/409 mapping.
+    #[tokio::test]
+    async fn set_session_base_on_missing_session_is_not_found() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let err = svc
+            .set_session_base(&SessionId::new(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::NotFound(_))
+        ));
+    }
+
+    /// A refused retarget surfaces as `InvalidBase` and writes nothing — the
+    /// whole validation runs inside the `try_mutate` closure, which discards the
+    /// state when the closure errors.
+    #[tokio::test]
+    async fn set_session_base_rejection_surfaces_and_writes_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+
+        let err = svc.set_session_base(&sid, Some(sid)).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidBase(
+                crate::session::SetBaseRejection::SelfParent
+            ))
+        ));
+
+        let state = svc.store().read().await;
+        assert!(state.get_session(&sid).unwrap().base_branch.is_none());
+    }
+
+    /// Characterisation: when `gh pr edit` fails, the next PR poll re-asserts
+    /// GitHub's base over the local mirror while `base_branch` keeps the new
+    /// value. This is exactly why a failed retarget is reported to the user
+    /// rather than logged — pinned here so the divergence cannot go unnoticed.
+    #[tokio::test]
+    async fn pr_poll_reverts_the_mirror_after_a_failed_retarget() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, sid) = seed_project_session(&svc).await;
+        let target = WorktreeSession::new(
+            pid,
+            "other",
+            "branch-other",
+            PathBuf::from("/tmp/wt2"),
+            "claude",
+        );
+        let target_id = target.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_session(target);
+                let s = state.get_session_mut(&sid).unwrap();
+                s.pr_number = Some(7);
+                s.pr_state = Some(crate::git::PrState::Open);
+                s.pr_base_branch = Some("main".to_string());
+            })
+            .await
+            .unwrap();
+
+        // The retarget applies locally regardless of whether `gh` is reachable.
+        svc.set_session_base(&sid, Some(target_id)).await.unwrap();
+        assert_eq!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_base_branch
+                .as_deref(),
+            Some("branch-other")
+        );
+
+        // GitHub still reports the old base (the edit never landed).
+        svc.apply_pr_results(vec![(
+            sid,
+            crate::git::PrCheckResult::Found(crate::git::PrInfo {
+                number: 7,
+                url: "https://example.invalid/pr/7".to_string(),
+                state: crate::git::PrState::Open,
+                is_draft: false,
+                labels: Vec::new(),
+                review_decision: None,
+                reviewers: Vec::new(),
+                base_ref_name: Some("main".to_string()),
+            }),
+        )])
+        .await
+        .unwrap();
+
+        let state = svc.store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert_eq!(
+            s.pr_base_branch.as_deref(),
+            Some("main"),
+            "the poll re-asserts GitHub's base over the local mirror"
+        );
+        assert_eq!(
+            s.base_branch.as_deref(),
+            Some("branch-other"),
+            "while base_branch keeps the retargeted value — the two diverge"
+        );
+    }
+
     #[tokio::test]
     async fn set_section_sets_override_and_clears_it() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -3247,6 +5511,90 @@ mod tests {
             let s = state.get_session(&sid).unwrap();
             assert!(s.section_override.is_none());
         }
+    }
+
+    /// Config with a single predicate-less section, a valid manual-override target.
+    fn config_with_section(name: &str) -> Config {
+        Config {
+            sections: vec![crate::session::SectionConfig {
+                name: name.to_string(),
+                ..Default::default()
+            }],
+            ..Config::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_section_carries_its_sessions_across() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service_with_config(&dir, config_with_section("Parking"));
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.set_section(&sid, Some("Parking".to_string()))
+            .await
+            .unwrap();
+        let stamp = {
+            let state = svc.store().read().await;
+            state.get_session(&sid).unwrap().entered_section_at
+        };
+
+        assert!(svc.rename_section("Parking", "Waiting").await.unwrap());
+
+        assert_eq!(
+            svc.read_config()
+                .sections
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["Waiting".to_string()]
+        );
+        let state = svc.store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert_eq!(s.current_section.as_deref(), Some("Waiting"));
+        assert_eq!(s.section_override.as_deref(), Some("Waiting"));
+        assert_eq!(s.entered_section_at, stamp, "a relabel is not a move");
+    }
+
+    #[tokio::test]
+    async fn rename_section_rejects_blank_unknown_duplicate_and_reserved_names() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = config_with_section("Parking");
+        config.sections.push(crate::session::SectionConfig {
+            name: "Drafts".to_string(),
+            ..Default::default()
+        });
+        let svc = service_with_config(&dir, config);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.set_section(&sid, Some("Parking".to_string()))
+            .await
+            .unwrap();
+
+        for (old, new) in [
+            ("Parking", "   "),
+            ("Parking", "Parking"),
+            ("Parking", "Drafts"),
+            ("Parking", crate::session::IN_PROGRESS),
+            ("Nonexistent", "Waiting"),
+        ] {
+            assert!(
+                !svc.rename_section(old, new).await.unwrap(),
+                "{old:?} → {new:?} should be refused"
+            );
+        }
+
+        // Config and the session's placement are both untouched.
+        assert_eq!(
+            svc.read_config()
+                .sections
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["Parking".to_string(), "Drafts".to_string()]
+        );
+        let state = svc.store().read().await;
+        assert_eq!(
+            state.get_session(&sid).unwrap().current_section.as_deref(),
+            Some("Parking")
+        );
     }
 
     #[tokio::test]
@@ -3369,6 +5717,75 @@ mod tests {
         assert!(poll_tick_should_send(true, false, true));
         assert!(!poll_tick_should_send(true, true, true));
         assert!(!poll_tick_should_send(true, false, false));
+    }
+
+    #[test]
+    fn reconciled_status_syncs_both_directions() {
+        use PaneProbe::*;
+        use SessionStatus::*;
+
+        // Gone or exited ⇒ Stopped.
+        assert_eq!(reconciled_status(Running, Absent), Some(Stopped));
+        assert_eq!(reconciled_status(Running, Dead), Some(Stopped));
+        // …and back again: a live pane under a Stopped record is the
+        // inconsistency this reconciler exists to repair.
+        assert_eq!(reconciled_status(Stopped, Live), Some(Running));
+
+        // Already agreeing: no write, no change-feed churn.
+        assert_eq!(reconciled_status(Running, Live), None);
+        assert_eq!(reconciled_status(Stopped, Absent), None);
+        assert_eq!(reconciled_status(Stopped, Dead), None);
+    }
+
+    #[test]
+    fn reconciled_status_never_acts_on_a_tmux_failure() {
+        // A crashed/timed-out tmux command says nothing about the session. Acting
+        // on it is what mass-stops live sessions, so every stored status must
+        // survive an Unknown probe untouched.
+        for stored in [
+            SessionStatus::Running,
+            SessionStatus::Stopped,
+            SessionStatus::Creating,
+            SessionStatus::Merging,
+            SessionStatus::Pushing,
+            SessionStatus::CascadePaused,
+        ] {
+            assert_eq!(
+                reconciled_status(stored, PaneProbe::Unknown),
+                None,
+                "{stored:?} must be left alone when tmux itself failed"
+            );
+        }
+    }
+
+    #[test]
+    fn reconciled_status_leaves_creating_and_cascade_states_alone() {
+        // A `Creating` session's pane does not exist *yet* — stale records are
+        // dropped by step 1 of the reconcile, not stopped here.
+        assert_eq!(
+            reconciled_status(SessionStatus::Creating, PaneProbe::Absent),
+            None
+        );
+        assert_eq!(
+            reconciled_status(SessionStatus::Creating, PaneProbe::Live),
+            None
+        );
+        // The transient cascade states already imply a live pane and carry
+        // meaning beyond "running" (step 2 resets the stale ones), so a live
+        // probe must not flatten them to Running.
+        for stored in [
+            SessionStatus::Merging,
+            SessionStatus::Pushing,
+            SessionStatus::CascadePaused,
+        ] {
+            assert_eq!(reconciled_status(stored, PaneProbe::Live), None);
+            // But a vanished pane still stops them — that is how a crashed
+            // mid-cascade session stops spinning.
+            assert_eq!(
+                reconciled_status(stored, PaneProbe::Absent),
+                Some(SessionStatus::Stopped)
+            );
+        }
     }
 
     #[test]
@@ -3501,20 +5918,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_snapshot_surfaces_project_pull_cache() {
+    async fn snapshot_surfaces_project_pull_cache() {
         use crate::api::{PullBlockReason, PullStatus};
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (pid, _sid) = seed_project_session(&svc).await;
         // The pull loop maintains this cache; inject an outcome directly to prove
-        // `workspace_snapshot` surfaces it in `project_pull`.
+        // `snapshot` surfaces it in `project_pull`.
         svc.pull_status.lock().unwrap().insert(
             pid,
             PullStatus::Blocked {
                 reason: PullBlockReason::Dirty,
             },
         );
-        let snap = svc.workspace_snapshot().await.unwrap();
+        let snap = svc.snapshot().await.unwrap();
         assert_eq!(
             snap.project_pull.get(&pid),
             Some(&PullStatus::Blocked {
@@ -3576,5 +5993,475 @@ mod tests {
             ),
             "shell-pair name should resolve to the session and hit its attach guard, got: {err}"
         );
+    }
+
+    // -- Repository clone (start_clone / clone_job) --
+
+    /// Seed a bare repo with one commit on `main` inside `dir`, network-free, and
+    /// return its **plain local path** — what a user pasting a path into the
+    /// clone box gives us, and what `validate_clone_url` admits absolute local
+    /// paths for.
+    ///
+    /// A second copy of `git::clone`'s fixture rather than a shared one: both live
+    /// in `#[cfg(test)]` modules, so neither is reachable from the other.
+    fn seed_bare_repo(dir: &tempfile::TempDir) -> PathBuf {
+        let remote = dir.path().join("remote.git");
+        let seed = dir.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        run_git(dir.path(), &["init", "--bare", "-b", "main", "remote.git"]);
+        run_git(&seed, &["init", "-b", "main"]);
+        run_git(&seed, &["config", "user.email", "t@t.t"]);
+        run_git(&seed, &["config", "user.name", "t"]);
+        std::fs::write(seed.join("README"), "v1\n").unwrap();
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        run_git(
+            &seed,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run_git(&seed, &["push", "origin", "main"]);
+        remote
+    }
+
+    /// Poll a clone job until it leaves `Running`, bounded so a job that never
+    /// finishes fails the test instead of hanging it.
+    ///
+    /// A short sleep rather than the bare `yield_now` spin `CloneJobs`' own tests
+    /// use: these jobs wait on a `git` **subprocess**, and a yield loop can burn
+    /// its whole iteration budget in milliseconds while the child is still
+    /// starting up. The budget below is ~10s of real time, reached only by a
+    /// genuinely stuck job.
+    async fn await_clone(svc: &CommanderService, id: CloneJobId) -> CloneJob {
+        for _ in 0..2_000 {
+            let job = svc.clone_job(id).await.expect("job disappeared");
+            if !matches!(job.status, CloneStatus::Running) {
+                return job;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("clone job {id} never reached a terminal status");
+    }
+
+    fn url_source(path: &Path) -> CloneSource {
+        CloneSource::Url {
+            url: path.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// The whole point of the flow: a finished clone is a *registered project*,
+    /// checked out under the configured projects dir, not just a directory on
+    /// disk.
+    #[tokio::test]
+    async fn clone_registers_the_result_as_a_project() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&remote),
+                dest_name: None,
+                workspace: None,
+            })
+            .await
+            .unwrap()
+            .id;
+
+        let job = await_clone(&svc, id).await;
+        let CloneStatus::Succeeded { project_id } = job.status else {
+            panic!("{:?}", job.status)
+        };
+        // The destination is derived from the source (`remote.git` → `remote`)
+        // and sits under the pinned projects dir.
+        let expected = svc.read_config().projects_dir().unwrap().join("remote");
+        assert_eq!(job.dest, expected);
+        assert_eq!(
+            std::fs::read_to_string(expected.join("README")).unwrap(),
+            "v1\n"
+        );
+        let projects = svc.list_projects().await;
+        assert!(
+            projects.iter().any(|p| p.id == project_id),
+            "the clone was not registered as a project: {projects:?}"
+        );
+    }
+
+    /// `dest_name` renames the checkout directory; nothing else about the clone
+    /// changes.
+    #[tokio::test]
+    async fn a_destination_name_override_is_honoured() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&remote),
+                dest_name: Some("renamed".to_string()),
+                workspace: None,
+            })
+            .await
+            .unwrap()
+            .id;
+
+        let job = await_clone(&svc, id).await;
+        assert!(matches!(job.status, CloneStatus::Succeeded { .. }));
+        assert_eq!(
+            job.dest,
+            svc.read_config().projects_dir().unwrap().join("renamed")
+        );
+    }
+
+    /// An occupied destination is a *terminal job*, not a started clone: the
+    /// frontend gets `DestinationExists` with the flag that decides whether the
+    /// sensible offer is "register the existing checkout" or "pick another name".
+    #[tokio::test]
+    async fn an_occupied_destination_short_circuits_without_cloning() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+        let projects_dir = svc.read_config().projects_dir().unwrap();
+
+        // A plain directory with a file in it: occupied, not a repo.
+        let plain = projects_dir.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("precious"), "mine\n").unwrap();
+
+        // An existing git checkout at the destination.
+        let checkout = projects_dir.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        run_git(&checkout, &["init", "-b", "main"]);
+
+        for (name, is_git_repo) in [("plain", false), ("checkout", true)] {
+            let id = svc
+                .start_clone(CloneRequest {
+                    source: url_source(&remote),
+                    dest_name: Some(name.to_string()),
+                    workspace: None,
+                })
+                .await
+                .unwrap()
+                .id;
+            let job = await_clone(&svc, id).await;
+            assert_eq!(
+                job.status,
+                CloneStatus::DestinationExists {
+                    dest: projects_dir.join(name),
+                    is_git_repo
+                },
+                "name: {name}"
+            );
+        }
+
+        // Nothing was cloned over either directory, and no project was created.
+        assert_eq!(
+            std::fs::read_to_string(plain.join("precious")).unwrap(),
+            "mine\n"
+        );
+        assert!(!plain.join(".git").exists());
+        assert!(svc.list_projects().await.is_empty());
+    }
+
+    /// A failed clone must leave nothing behind, so a retry into the same
+    /// directory is not blocked by a half-written checkout.
+    #[tokio::test]
+    async fn a_failed_clone_leaves_no_partial_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&dir.path().join("does-not-exist")),
+                dest_name: None,
+                workspace: None,
+            })
+            .await
+            .unwrap()
+            .id;
+
+        let job = await_clone(&svc, id).await;
+        let CloneStatus::Failed { message } = &job.status else {
+            panic!("{:?}", job.status)
+        };
+        // git's own message, which is already phrased for a human.
+        assert!(message.contains("does not exist"), "unhelpful: {message}");
+        assert!(
+            !job.dest.exists(),
+            "a failed clone left {} behind",
+            job.dest.display()
+        );
+        assert!(svc.list_projects().await.is_empty());
+    }
+
+    /// The cleanup is *shared*, which is the whole reason clone-then-register is
+    /// one `?`-scoped block: a step that fails **after** the checkout exists has to
+    /// remove it too, or a retry hits `DestinationExists` on a directory nothing
+    /// knows about.
+    ///
+    /// Registration is made to fail by putting a *directory* where `state.json`
+    /// belongs, so every persist errors — the one failure that can be injected
+    /// after a clone has genuinely succeeded (`GitBackend::discover` and
+    /// `detect_main_branch` both cope with whatever a real clone produces,
+    /// including an empty repo).
+    #[tokio::test]
+    async fn a_failure_after_the_clone_removes_the_checkout_too() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("state.json")).unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&remote),
+                dest_name: None,
+                workspace: None,
+            })
+            .await
+            .unwrap()
+            .id;
+
+        let job = await_clone(&svc, id).await;
+        assert!(
+            matches!(job.status, CloneStatus::Failed { .. }),
+            "{:?}",
+            job.status
+        );
+        assert!(
+            !job.dest.exists(),
+            "a checkout survived a failure after the clone: {}",
+            job.dest.display()
+        );
+    }
+
+    /// Validation happens before a job exists, so a doomed request is an error
+    /// the caller sees immediately rather than a job it has to poll.
+    #[tokio::test]
+    async fn an_invalid_source_is_rejected_before_a_job_is_created() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        for source in [
+            CloneSource::Url {
+                url: "ftp://example.com/o/r".to_string(),
+            },
+            // A leading `-` would be read by git as an option, not a source.
+            CloneSource::Url {
+                url: "--upload-pack=evil".to_string(),
+            },
+            CloneSource::Github {
+                full_name: "not-a-slug".to_string(),
+            },
+        ] {
+            assert!(
+                svc.start_clone(CloneRequest {
+                    source: source.clone(),
+                    dest_name: None,
+                    workspace: None,
+                })
+                .await
+                .is_err(),
+                "accepted {source:?}"
+            );
+        }
+        // Nothing landed in the projects dir, and no job is pollable.
+        let projects_dir = svc.read_config().projects_dir().unwrap();
+        assert!(!projects_dir.join("r").exists());
+    }
+
+    /// A caller-supplied `dest_name` gets the same directory-name rules as a
+    /// derived one — otherwise `..` would escape the projects dir entirely.
+    #[tokio::test]
+    async fn an_unsafe_destination_name_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+        let projects_dir = svc.read_config().projects_dir().unwrap();
+
+        for name in ["..", "../escaped", "sub/dir", "", "-flag"] {
+            assert!(
+                svc.start_clone(CloneRequest {
+                    source: url_source(&remote),
+                    dest_name: Some(name.to_string()),
+                    workspace: None,
+                })
+                .await
+                .is_err(),
+                "accepted dest_name {name:?}"
+            );
+        }
+        // The one that would have escaped: the parent of the projects dir is
+        // untouched.
+        assert!(!projects_dir.parent().unwrap().join("escaped").exists());
+    }
+
+    /// The security property carried through this whole feature: a pasted
+    /// `https://user:token@…` must not reach an error string, a log line or a job
+    /// label. `start_clone` builds one user-facing string from the source (the
+    /// rejection message), and it must be redacted.
+    #[tokio::test]
+    async fn a_credentialed_source_never_reaches_an_error_or_a_job() {
+        const SECRET: &str = "ghp_s3cr3tt0ken";
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        // A URL pasted into the slug field: always malformed, and the one path
+        // that echoes the caller's raw input back.
+        let err = svc
+            .start_clone(CloneRequest {
+                source: CloneSource::Github {
+                    full_name: format!("https://sizeak:{SECRET}@github.com/o/r"),
+                },
+                dest_name: None,
+                workspace: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains(SECRET), "token leaked: {err}");
+        assert!(
+            !format!("{err:?}").contains(SECRET),
+            "token leaked: {err:?}"
+        );
+
+        // A credentialed URL that *validates*: the job it creates is polled,
+        // rendered and logged, so its label must be redacted too. Network-free —
+        // git resolves a `file://` source on disk, and this one is not there, so
+        // the clone fails locally and its message is checked as well.
+        let missing = dir.path().join("missing.git");
+        let id = svc
+            .start_clone(CloneRequest {
+                source: CloneSource::Url {
+                    url: format!("file://sizeak:{SECRET}@{}", missing.display()),
+                },
+                dest_name: None,
+                workspace: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let job = svc.clone_job(id).await.unwrap();
+        assert_eq!(
+            job.source_label,
+            format!("file://***@{}", missing.display())
+        );
+        assert!(
+            !format!("{job:?}").contains(SECRET),
+            "token leaked: {job:?}"
+        );
+
+        // And the failure message git hands back, which quotes the source.
+        let job = await_clone(&svc, id).await;
+        assert!(
+            matches!(job.status, CloneStatus::Failed { .. }),
+            "{:?}",
+            job.status
+        );
+        assert!(
+            !format!("{job:?}").contains(SECRET),
+            "token leaked: {job:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_clone_job_id_is_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        assert!(svc.clone_job(CloneJobId::new()).await.is_none());
+    }
+
+    /// A directory scan registers what it finds into the caller's workspace,
+    /// the same way a single add does — so a scan run from the TUI and one run
+    /// from the Flutter app (through `POST /projects/scan`) land alike. A
+    /// refused name is refused before anything is registered.
+    #[tokio::test]
+    async fn scan_directory_tags_new_projects_with_the_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let root = dir.path().join("repos");
+        let repo = root.join("one");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("README"), "v1\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+
+        let err = svc
+            .scan_directory(&root, Some("last".into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::InvalidName { .. })
+        ));
+        assert!(svc.list_projects().await.is_empty(), "nothing registered");
+
+        let result = svc
+            .scan_directory(&root, Some("Work".into()))
+            .await
+            .unwrap();
+        assert_eq!(result.added, 1);
+        let projects = svc.list_projects().await;
+        assert_eq!(projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(def_names(&svc), ["Work"], "the workspace is defined");
+    }
+
+    /// A clone's `workspace` is checked before anything is cloned: a refused
+    /// name would otherwise only surface after the whole checkout, which
+    /// `clone_then_register` then deletes.
+    #[tokio::test]
+    async fn start_clone_refuses_a_bad_workspace_before_cloning() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+        for bad in ["main", &"x".repeat(41)] {
+            let err = svc
+                .start_clone(CloneRequest {
+                    source: url_source(&remote),
+                    dest_name: None,
+                    workspace: Some(bad.to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, crate::Error::Session(SessionError::InvalidName { .. })),
+                "{bad}: {err:?}"
+            );
+        }
+        assert!(
+            !svc.read_config().projects_dir().unwrap().exists(),
+            "nothing was cloned"
+        );
+    }
+
+    /// The projects directory is created on demand: `Config::projects_dir` only
+    /// *resolves* a path (matching `worktrees_dir`), so a first clone on a fresh
+    /// machine has nowhere to land unless `start_clone` creates it.
+    #[tokio::test]
+    async fn start_clone_creates_the_projects_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let remote = seed_bare_repo(&dir);
+        let projects_dir = svc.read_config().projects_dir().unwrap();
+        assert!(
+            !projects_dir.exists(),
+            "fixture pre-created the projects dir"
+        );
+
+        let id = svc
+            .start_clone(CloneRequest {
+                source: url_source(&remote),
+                dest_name: None,
+                workspace: None,
+            })
+            .await
+            .unwrap()
+            .id;
+
+        assert!(projects_dir.exists());
+        assert!(matches!(
+            await_clone(&svc, id).await.status,
+            CloneStatus::Succeeded { .. }
+        ));
     }
 }

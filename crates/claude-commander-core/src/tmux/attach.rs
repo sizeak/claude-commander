@@ -2,6 +2,12 @@
 //!
 //! Provides fully async terminal attachment that runs within the tokio runtime,
 //! avoiding the need to drop and recreate the runtime for each attach operation.
+//!
+//! The stdin pump owns the only writer to the pane, and it takes bytes from two
+//! places: the terminal it reads, and the [`PaneInjector`] channel that carries
+//! dictation transcripts in from a task that has no writer of its own. Both
+//! queue into the same `outbound` buffer, so injected text is delivered exactly
+//! as if it had been typed — over a local PTY or a remote WebSocket alike.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -9,11 +15,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tracing::{debug, info, warn};
 
-use crate::backend::{AttachEnd, AttachResizer, AttachStreams, AttachTerminator};
+use crate::backend::{AttachEnd, AttachRefresher, AttachResizer, AttachStreams, AttachTerminator};
+use crate::conversation::VoiceMode;
 use crate::error::Result;
+use crate::tmux::{PaneInjector, PaneInput};
 
 /// Classification of a raw stdin burst by the local attach's keystroke
 /// interception state machine. Pure — it performs no I/O and no side effects,
@@ -21,21 +29,28 @@ use crate::error::Result;
 /// variant to the corresponding action (forward bytes / break with an
 /// [`AttachResult`] / toggle voice / open the switcher).
 ///
-/// The classification order is significant and mirrors the historical inline
-/// branching exactly: popup passthrough first, then Ctrl+Q, Ctrl+\, Ctrl+Space,
-/// voice, review, editor, and finally plain forwarding (with optional Ctrl+Z
-/// stripping).
+/// The classification order is significant: Ctrl+Q, Ctrl+\, Ctrl+Space, voice,
+/// dictation, review, editor, and finally plain forwarding (with optional
+/// Ctrl+Z stripping).
 #[derive(Debug, PartialEq, Eq)]
 enum InputAction {
     /// Forward these bytes to the PTY verbatim and keep looping. An empty
     /// vec means "swallow entirely, forward nothing".
     Forward(Vec<u8>),
-    /// Ctrl+Space: open the in-session switcher popup, then forward the
-    /// remaining bytes (the 0x00 stripped out; may be empty).
+    /// Ctrl+Space: suspend the attach so the frontend can draw the switcher
+    /// over the pane, then forward the remaining bytes (the 0x00 stripped out;
+    /// may be empty).
     OpenSwitcher(Vec<u8>),
-    /// A voice trigger fired: toggle the mic, then forward the remaining bytes
-    /// (trigger bytes stripped out; may be empty).
-    ToggleVoice(Vec<u8>),
+    /// A voice trigger fired: toggle the mic for `mode`, then forward `rest`
+    /// (the trigger bytes stripped out; may be empty).
+    ///
+    /// One variant for both voice hotkeys rather than two, because the effect is
+    /// the same call with a different [`VoiceMode`] and a different on-screen
+    /// message — the *destination* of a transcript is data, not control flow.
+    /// `mode` is only consulted when this toggle happens to start a recording;
+    /// either hotkey stops one already running (see
+    /// [`apply_listen_action`](crate::conversation::apply_listen_action)).
+    ToggleVoice { mode: VoiceMode, rest: Vec<u8> },
     /// Ctrl+V during a remote attach: capture the local clipboard image and
     /// upload it. Carries the original burst verbatim (the `0x16` is *not*
     /// stripped here) so the effectful handler can forward it as a fallback when
@@ -59,22 +74,17 @@ pub trait ImagePasteSink: Send + Sync {
 /// Classify a raw stdin burst. See [`InputAction`] for the contract; this is the
 /// single source of truth for the local attach's keystroke interception and is
 /// covered by characterization tests.
+#[allow(clippy::too_many_arguments)]
 fn classify_input(
     data: &[u8],
-    popup_open: bool,
+    switcher_enabled: bool,
     voice_triggers: &[Vec<u8>],
+    dictation_triggers: &[Vec<u8>],
     review_triggers: &[Vec<u8>],
     editor_triggers: &[Vec<u8>],
     intercept_ctrl_z: bool,
     image_paste_enabled: bool,
 ) -> InputAction {
-    // While the in-session switcher popup is open, forward every byte to tmux
-    // verbatim. tmux routes keystrokes to the popup (which has its own PTY), and
-    // our hotkeys (Ctrl+Q etc.) shouldn't fire while the user is in the picker.
-    if popup_open {
-        return InputAction::Forward(data.to_vec());
-    }
-
     // Ctrl+Q (0x11) anywhere → detach.
     if data.contains(&0x11) {
         return InputAction::Break(AttachResult::Detached);
@@ -85,9 +95,13 @@ fn classify_input(
         return InputAction::Break(AttachResult::SwitchToShell);
     }
 
-    // Ctrl+Space (0x00) → open the switcher popup; swallow the 0x00 byte and
-    // forward the rest.
-    if data.contains(&0x00) {
+    // Ctrl+Space (0x00) → suspend so the frontend can draw the switcher over
+    // the pane; swallow the 0x00 byte and forward the rest.
+    //
+    // Gated here rather than at the effect site so that a frontend with no
+    // switcher to show (the bare `attach` CLI) forwards the NUL to the pane
+    // *verbatim*, which is what its config has always claimed to do.
+    if switcher_enabled && data.contains(&0x00) {
         let filtered: Vec<u8> = data.iter().copied().filter(|b| *b != 0x00).collect();
         return InputAction::OpenSwitcher(filtered);
     }
@@ -101,8 +115,25 @@ fn classify_input(
             .iter()
             .any(|pat| contains_subsequence(data, pat))
     {
-        let filtered = remove_subsequences(data, voice_triggers);
-        return InputAction::ToggleVoice(filtered);
+        return InputAction::ToggleVoice {
+            mode: VoiceMode::Conversation,
+            rest: remove_subsequences(data, voice_triggers),
+        };
+    }
+
+    // Dictation toggle (Alt-t by default) — the same interception, aimed at the
+    // pane instead of the conversation agent. Checked here, right after voice and
+    // *before* review, so a shell pane (where Ctrl+Z interception is off and
+    // conversation voice may not be configured at all) still gets it.
+    if !dictation_triggers.is_empty()
+        && dictation_triggers
+            .iter()
+            .any(|pat| contains_subsequence(data, pat))
+    {
+        return InputAction::ToggleVoice {
+            mode: VoiceMode::Dictation,
+            rest: remove_subsequences(data, dictation_triggers),
+        };
     }
 
     // Review-toggle trigger (Alt-r by default). Empty `review_triggers` disables
@@ -172,7 +203,7 @@ fn paste_decision(
     orig: &[u8],
 ) -> PasteDecision {
     match capture {
-        Ok(Some(png)) if png.len() <= crate::paste_image::MAX_IMAGE_BYTES => {
+        Ok(Some(png)) if png.len() <= claude_commander_protocol::paste::MAX_IMAGE_BYTES => {
             PasteDecision::Upload {
                 png,
                 forward: orig.iter().copied().filter(|b| *b != 0x16).collect(),
@@ -213,10 +244,10 @@ async fn handle_image_paste(orig: &[u8], sink: Option<&Arc<dyn ImagePasteSink>>)
     match &capture {
         Err(e) => warn!("clipboard image read failed: {e}"),
         Ok(None) => debug!("Ctrl+V with no clipboard image; forwarding verbatim"),
-        Ok(Some(png)) if png.len() > crate::paste_image::MAX_IMAGE_BYTES => warn!(
+        Ok(Some(png)) if png.len() > claude_commander_protocol::paste::MAX_IMAGE_BYTES => warn!(
             "clipboard image {} bytes exceeds {} limit; not uploading",
             png.len(),
-            crate::paste_image::MAX_IMAGE_BYTES
+            claude_commander_protocol::paste::MAX_IMAGE_BYTES
         ),
         Ok(Some(_)) => {}
     }
@@ -280,26 +311,39 @@ pub enum AttachResult {
     SwitchToReview,
     /// User pressed Ctrl+. to open the editor for the session's worktree
     OpenEditor,
+    /// The in-session switcher (Ctrl+Space). Only ever produced when
+    /// [`AttachConfig::switcher_enabled`] is set, and it means two different
+    /// things depending on where it is read:
+    ///
+    /// - from [`AttachSession::run`], the attach is **suspended, not ended** —
+    ///   the I/O pumps are parked and the frontend owns the terminal until it
+    ///   calls [`AttachSession::resume`];
+    /// - on an [`AttachOutcome`], the attach **is** over, and the switcher is
+    ///   why: the frontend ended it to act on the user's pick (a session on
+    ///   another backend, which `tmux switch-client` cannot reach) or on a
+    ///   command that needs the full UI back.
+    OpenSwitcher,
     /// The session/process ended
     SessionEnded,
     /// An error occurred during attachment
     Error(String),
 }
 
-/// Outcome of an attach. `final_session` is the tmux session the client
-/// was attached to when the attach loop exited — usually the same as the
-/// session passed in, but updated when the user picks a different
-/// session via the in-session switcher (Ctrl+Space), which runs `tmux
-/// switch-client` mid-attach.
+/// Outcome of an attach. `final_session` is the tmux session the client was
+/// attached to when the attach loop exited — usually the session passed in, but
+/// updated when the user picks a different one from the in-session switcher
+/// (Ctrl+Space), which reaches a local session by running `tmux switch-client`
+/// mid-attach rather than re-attaching.
 #[derive(Debug)]
 pub struct AttachOutcome {
     pub result: AttachResult,
     pub final_session: String,
 }
 
-/// Configuration for one interactive attach, driven by [`run_attach`]. Bundles
-/// the keystroke-interception policy and the local-only affordances (switcher
-/// popup, voice) so the transport-agnostic loop keeps a single signature.
+/// Configuration for one interactive attach, driven by [`run_attach`] or
+/// [`AttachSession`]. Bundles the keystroke-interception policy and the optional
+/// affordances (the in-session switcher, voice) so the transport-agnostic loop
+/// keeps a single signature.
 ///
 /// `editor_triggers` is a list of byte patterns that, when seen on stdin, cause
 /// the attach loop to exit with [`AttachResult::OpenEditor`]. Callers compute
@@ -308,19 +352,6 @@ pub struct AttachOutcome {
 /// sequences for `Ctrl-<non-letter>` bindings. Bindings that cannot be detected
 /// in raw stdin (e.g. a bare letter) should simply be omitted.
 ///
-/// Hook the attach loop calls with the switcher's picked tmux session name
-/// before running `tmux switch-client`: revives the session when its tmux
-/// session is missing or its pane died, returning the (primary) name to
-/// switch to. Supplied by frontends that own a `CommanderService` (see
-/// `CommanderService::switcher_revive_hook`) so the revive runs in the
-/// process that owns the state store; the attach loop itself stays
-/// transport-agnostic and holds no service handle.
-pub type SwitcherRevive = Arc<
-    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>
-        + Send
-        + Sync,
->;
-
 /// When `intercept_ctrl_z` is true, Ctrl+Z (`0x1A`) bytes are stripped from
 /// stdin before reaching the pane. Use this for Claude sessions where SIGTSTP
 /// would freeze the pane with no shell to recover from. Leave it false for
@@ -329,27 +360,29 @@ pub struct AttachConfig {
     pub editor_triggers: Vec<Vec<u8>>,
     pub review_triggers: Vec<Vec<u8>>,
     pub voice_triggers: Vec<Vec<u8>>,
+    /// Byte patterns that toggle **dictation** — the same mic, transcribed into
+    /// the attached pane instead of the conversation agent. Recognised in the
+    /// same way as `voice_triggers` and checked immediately after them; empty
+    /// (the CLI's setting) disables it.
+    pub dictation_triggers: Vec<Vec<u8>>,
     pub voice_listener: Option<crate::conversation::ListenerHandle>,
     pub recording: Arc<AtomicBool>,
     pub intercept_ctrl_z: bool,
-    /// Whether the in-session Ctrl+Space switcher popup is available. It's a
-    /// local capability (runs `tmux display-popup`/`switch-client` against the
-    /// operator's own server), so a remote attach sets this false and Ctrl+Space
-    /// is forwarded to the pane verbatim.
+    /// Whether Ctrl+Space suspends the attach so the frontend can draw the
+    /// switcher over the pane ([`AttachResult::OpenSwitcher`]). Requires a
+    /// frontend with a session list to show, so the TUI sets it and the bare
+    /// `attach` CLI does not — with it off, Ctrl+Space reaches the pane as a
+    /// plain NUL. Unlike the `tmux display-popup` switcher this replaced, it is
+    /// **not** a local-only capability: the frontend renders it, so it works
+    /// over a remote attach too.
     pub switcher_enabled: bool,
-    /// The tmux session name currently attached, for the switcher popup and the
-    /// voice feedback `tmux display-message`. The TUI sets this for remote
-    /// attaches too (the session's tmux name rides in on the wire), so it's
-    /// normally `Some`. The switcher is gated separately by `switcher_enabled`
-    /// (off for remote), and the voice `display-message` is best-effort — it
-    /// runs against the operator's local tmux, so for a remote session it may
-    /// simply target a name that isn't there. `None` disables both.
+    /// The tmux session name currently attached, for the switcher and the voice
+    /// feedback `tmux display-message`. The TUI sets this for remote attaches
+    /// too (the session's tmux name rides in on the wire), so it's normally
+    /// `Some`. The voice `display-message` is best-effort — it runs against the
+    /// operator's local tmux, so for a remote session it may simply target a
+    /// name that isn't there.
     pub session_name: Option<String>,
-    /// Revives the switcher's pick before `tmux switch-client` when its tmux
-    /// session died (e.g. after a reboot) — the same revive-on-attach the
-    /// tree view gets. `None` switches to the raw name, which fails for a
-    /// dead session.
-    pub switcher_revive: Option<SwitcherRevive>,
     /// Sink for clipboard-image paste, set only for a **remote** attach (the
     /// backend's `client_side_image_paste` capability). When `Some`, Ctrl+V is
     /// intercepted: the operator's local clipboard image is captured, encoded,
@@ -357,6 +390,11 @@ pub struct AttachConfig {
     /// `None` (local attach) forwards Ctrl+V so the co-located agent reads the
     /// clipboard directly, exactly as before.
     pub image_paste: Option<Arc<dyn ImagePasteSink>>,
+    /// The frontend's long-lived way in to whatever pane is attached. When
+    /// `Some`, this attach installs its own injection channel into it for the
+    /// duration; when `None`, nothing outside the loop can type into the pane.
+    /// See [`PaneInjector`].
+    pub injector: Option<PaneInjector>,
 }
 
 /// Async PTY attachment by tmux session name — the CLI/local entry point.
@@ -373,7 +411,6 @@ pub async fn attach_to_session(
     voice_listener: Option<crate::conversation::ListenerHandle>,
     recording: Arc<AtomicBool>,
     intercept_ctrl_z: bool,
-    switcher_revive: Option<SwitcherRevive>,
 ) -> Result<AttachOutcome> {
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     // Local TUI/CLI attach talks to the user's own tmux server, so no socket-dir
@@ -383,15 +420,20 @@ pub async fn attach_to_session(
         editor_triggers,
         review_triggers,
         voice_triggers,
+        // Dictation is a TUI affordance (it needs the frontend's long-lived
+        // injector to survive across attaches), so the bare CLI leaves it off.
+        dictation_triggers: Vec::new(),
         voice_listener,
         recording,
         intercept_ctrl_z,
-        switcher_enabled: true,
+        // The bare CLI attach has no session list to draw over the pane, so
+        // Ctrl+Space belongs to the agent running there.
+        switcher_enabled: false,
         session_name: Some(session_name.to_string()),
-        switcher_revive,
         // The CLI/local attach runs the agent on this machine, so it reads the
         // local clipboard itself — no client-side capture.
         image_paste: None,
+        injector: None,
     };
     run_attach(streams, cfg).await
 }
@@ -464,86 +506,224 @@ pub async fn attach_backend_session(
         editor_triggers,
         review_triggers: Vec::new(),
         voice_triggers: Vec::new(),
+        dictation_triggers: Vec::new(),
         voice_listener: None,
         recording: Arc::new(AtomicBool::new(false)),
         intercept_ctrl_z: true,
-        // Local-only affordance: the switcher popup runs `tmux display-popup`
-        // against the operator's own server, where the remote session isn't.
+        // Same as the local CLI attach: no session list to draw, so Ctrl+Space
+        // is the remote agent's.
         switcher_enabled: false,
         session_name: None,
-        switcher_revive: None,
         image_paste,
+        injector: None,
     };
 
     Ok(run_attach(streams, cfg).await?)
 }
 
-/// Drive one interactive attach over transport-agnostic [`AttachStreams`]
-/// (a local PTY, or a remote WebSocket via the backend). Enters raw mode, pumps
-/// stdin/stdout through the [`classify_input`] interception state machine,
-/// forwards SIGWINCH resizes to the [`AttachResizer`], and tears the attach down
-/// (via [`AttachTerminator::detach`]) on exit. The TUI supplies streams from
-/// `backend.attach(...)`; the CLI wraps a local PTY via [`attach_to_session`].
+/// Drive one interactive attach to completion over transport-agnostic
+/// [`AttachStreams`] (a local PTY, or a remote WebSocket via the backend).
+///
+/// The straight-through path for frontends that cannot suspend an attach: it
+/// starts an [`AttachSession`], runs it until something ends it, and tears it
+/// down. Callers that set [`AttachConfig::switcher_enabled`] must drive
+/// [`AttachSession`] themselves instead, since they have to *do* something when
+/// it yields [`AttachResult::OpenSwitcher`].
 pub async fn run_attach(streams: AttachStreams, cfg: AttachConfig) -> Result<AttachOutcome> {
-    let AttachStreams {
-        reader,
-        writer,
-        resizer,
-        mut terminator,
-    } = streams;
-
-    info!("Enabling raw mode for attach session");
-    enable_raw_mode()?;
-
-    // Shared state for the in-session switcher: the popup task updates
-    // `current_session` after a successful `tmux switch-client`, and the attach
-    // outcome reports it back to the caller so subsequent state (shell-toggle
-    // pair, editor open) uses the right session.
-    let current_session = Arc::new(Mutex::new(cfg.session_name.clone().unwrap_or_default()));
-    let popup_open = Arc::new(AtomicBool::new(false));
-
-    info!("Starting async I/O loop");
-    let result = run_async_loop(
-        reader,
-        writer,
-        resizer,
-        &mut terminator,
-        &cfg,
-        current_session.clone(),
-        popup_open,
-    )
-    .await;
-    info!("Async I/O loop ended with result: {:?}", result);
-
-    info!("Disabling raw mode");
-    let _ = disable_raw_mode();
-    let _ = std::io::stdout().flush();
-
-    // Flush any leftover input at the kernel level before teardown.
-    flush_stdin();
-    log_pending_stdin("after first tcflush");
-
-    // Deterministic teardown: kill the attach client (idempotent if it already
-    // exited). Detaches the client; the tmux session + program keep running.
-    info!("Detaching attach transport");
-    terminator.detach().await;
-
-    // Flush again after teardown to discard stale input.
-    flush_stdin();
-    log_pending_stdin("after second tcflush");
-
-    let final_session = current_session.lock().await.clone();
-    info!(
-        "Attach complete, result: {:?}, final session: {}, recording: {}",
-        result,
-        final_session,
-        cfg.recording.load(Ordering::Acquire)
+    debug_assert!(
+        !cfg.switcher_enabled,
+        "run_attach cannot service OpenSwitcher; drive AttachSession directly"
     );
+    let mut session = AttachSession::start(streams, cfg)?;
+    let result = session.run().await;
+    Ok(session.finish(result).await)
+}
 
-    Ok(AttachOutcome {
-        result,
-        final_session,
-    })
+/// One interactive attach, which the frontend can **suspend and resume**.
+///
+/// The in-session switcher draws the real palette over the live pane, so the
+/// attach has to hand the terminal back without dying: tearing the PTY down and
+/// re-attaching would cost a full detach/reattach round trip on what should be
+/// an Alt+Tab-speed keystroke, and would lose the ability to switch with `tmux
+/// switch-client`.
+///
+/// So [`run`](Self::run) returns [`AttachResult::OpenSwitcher`] with everything
+/// still alive and the I/O pumps parked. While parked:
+///
+/// - the **stdin pump stops reading** — it is the whole point. The pump and
+///   crossterm hold different descriptors (the pump reopens the terminal by
+///   name, see [`super::TtyReader`]; crossterm's `tty_fd()` is **fd 0** whenever
+///   stdin is a tty — both of its branches prefer stdin and open `/dev/tty` only
+///   otherwise, `crossterm-0.29.0/src/terminal/sys/file_descriptor.rs:124-127`
+///   under the `libc` feature and `:141-152` under rustix, which is what this
+///   workspace compiles) but they are one line discipline, and two readers on one terminal race for
+///   keystrokes: each burst goes to whichever `read()` the kernel wakes first,
+///   so an escape sequence can be split between them. Exactly one reader may
+///   be live at a time, and the frontend awaits `stop_input` before starting
+///   an attach for the same reason;
+/// - the **stdout pump keeps draining the transport but discards** what it
+///   reads, so the pane looks frozen under the palette rather than painting over
+///   it. It must not stop draining, or a blocked pipe would wedge the tmux
+///   client.
+///
+/// [`resume`](Self::resume) unparks both and repaints via the [`AttachRefresher`],
+/// which is what restores the region the palette covered.
+pub struct AttachSession {
+    cfg: AttachConfig,
+    terminator: Box<dyn AttachTerminator>,
+    refresher: AttachRefresher,
+    /// The tmux session the client is on *now*. The frontend updates this after
+    /// a `tmux switch-client`, and [`AttachOutcome::final_session`] reports it
+    /// back so the caller's later state (shell-toggle pair, editor open) follows
+    /// the user rather than where they started.
+    current_session: Arc<Mutex<String>>,
+    paused: Arc<AtomicBool>,
+    resume: Arc<Notify>,
+    shutdown_rx: mpsc::Receiver<AttachResult>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    local_client_tty: Option<String>,
+}
+
+impl AttachSession {
+    /// Enter raw mode and start the I/O pumps. The attach is live from here
+    /// until [`Self::finish`].
+    pub fn start(streams: AttachStreams, cfg: AttachConfig) -> Result<Self> {
+        let AttachStreams {
+            reader,
+            writer,
+            resizer,
+            refresher,
+            terminator,
+            local_client_tty,
+        } = streams;
+
+        info!("Enabling raw mode for attach session");
+        enable_raw_mode()?;
+
+        let current_session = Arc::new(Mutex::new(cfg.session_name.clone().unwrap_or_default()));
+        let paused = Arc::new(AtomicBool::new(false));
+        let resume = Arc::new(Notify::new());
+
+        info!("Starting async I/O pumps");
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<AttachResult>(1);
+        let tasks = spawn_pumps(
+            reader,
+            writer,
+            resizer,
+            &cfg,
+            shutdown_tx,
+            paused.clone(),
+            resume.clone(),
+            current_session.clone(),
+            // Not `tokio::io::stdin()`: its blocking read survives `abort()`
+            // ("impossible to cancel that read", `tokio-1.52.3/src/io/stdin.rs:16-19`)
+            // and eats the first burst after the attach ends. See `term_input.rs`.
+            super::term_input::terminal_input(),
+            tokio::io::stdout(),
+        );
+
+        Ok(Self {
+            cfg,
+            terminator,
+            refresher,
+            current_session,
+            paused,
+            resume,
+            shutdown_rx,
+            tasks,
+            local_client_tty,
+        })
+    }
+
+    /// Run until an intercepted hotkey fires or the transport ends. Returns
+    /// [`AttachResult::OpenSwitcher`] with the attach merely *suspended*; every
+    /// other variant means it is over and [`Self::finish`] should follow.
+    pub async fn run(&mut self) -> AttachResult {
+        tokio::select! {
+            result = self.shutdown_rx.recv() => result.unwrap_or(AttachResult::Detached),
+            end = self.terminator.wait() => match end {
+                AttachEnd::Detached => AttachResult::Detached,
+                AttachEnd::SessionEnded => AttachResult::SessionEnded,
+                AttachEnd::Error(e) => AttachResult::Error(e),
+            },
+        }
+    }
+
+    /// Un-park the pumps after a suspension and repaint the screen, restoring
+    /// whatever the frontend drew over. Safe to call when not suspended.
+    pub async fn resume(&mut self) {
+        // Discard anything typed at the overlay that the terminal driver still
+        // holds, so stray keys don't land in the pane the moment it wakes up.
+        flush_stdin();
+        self.paused.store(false, Ordering::Release);
+        // `notify_one` (not `notify_waiters`) because the stdin pump may not have
+        // reached its await yet; this leaves a permit rather than dropping the
+        // wake-up.
+        self.resume.notify_one();
+        self.refresher.refresh().await;
+    }
+
+    /// The tty of the operator's own tmux client backing this attach, if any.
+    ///
+    /// `Some` exactly when the attach is a local PTY one, so this doubles as the
+    /// switcher's permission to move the user with `tmux switch-client` — and as
+    /// the client to name when it does. See [`AttachStreams::local_client_tty`].
+    pub fn local_client_tty(&self) -> Option<&str> {
+        self.local_client_tty.as_deref()
+    }
+
+    /// The tmux session the client is on right now.
+    pub async fn current_session(&self) -> String {
+        self.current_session.lock().await.clone()
+    }
+
+    /// Record that the client has moved to `name` (after a `tmux switch-client`).
+    pub async fn set_current_session(&self, name: impl Into<String>) {
+        *self.current_session.lock().await = name.into();
+    }
+
+    /// End the attach: stop the pumps, leave raw mode, and detach the transport.
+    pub async fn finish(mut self, result: AttachResult) -> AttachOutcome {
+        info!("Attach ending with result: {:?}", result);
+        // `abort` only *requests* cancellation ("will return before the
+        // cancellation has completed", tokio-1.52.3 `src/task/mod.rs:146-149`);
+        // awaiting the handle is what guarantees the pump has let go of the
+        // terminal before raw mode is dropped and the frontend reads it again.
+        for task in self.tasks.drain(..) {
+            task.abort();
+            let _ = task.await;
+        }
+
+        info!("Disabling raw mode");
+        let _ = disable_raw_mode();
+        let _ = std::io::stdout().flush();
+
+        // Flush any leftover input at the kernel level before teardown.
+        flush_stdin();
+        log_pending_stdin("after first tcflush");
+
+        // Deterministic teardown: kill the attach client (idempotent if it already
+        // exited). Detaches the client; the tmux session + program keep running.
+        info!("Detaching attach transport");
+        self.terminator.detach().await;
+
+        // Flush again after teardown to discard stale input.
+        flush_stdin();
+        log_pending_stdin("after second tcflush");
+
+        let final_session = self.current_session.lock().await.clone();
+        info!(
+            "Attach complete, result: {:?}, final session: {}, recording: {}",
+            result,
+            final_session,
+            self.cfg.recording.load(Ordering::Acquire)
+        );
+
+        AttachOutcome {
+            result,
+            final_session,
+        }
+    }
 }
 
 /// Return true if `haystack` contains `needle` as a contiguous subsequence.
@@ -650,35 +830,114 @@ pub fn flush_stdin() {
 
 // Internal plumbing for the attach I/O loop. Generic over the transport: the
 // byte streams are boxed trait objects (a local PTY or a remote socket), and
-// termination is observed via the [`AttachTerminator`] rather than a concrete
-// child handle.
-async fn run_async_loop(
+// termination is observed by the owning [`AttachSession`] via its
+// [`AttachTerminator`] rather than a concrete child handle.
+//
+/// Upper bound on keystrokes queued for a pane that is not taking input. Past
+/// it the newest bytes are dropped, with a warning, rather than growing the
+/// queue without bound while the operator's Ctrl+Q still gets through.
+const MAX_PENDING_PANE_INPUT: usize = 64 * 1024;
+
+/// The `tmux display-message` argv for a status-line notice on `target`.
+/// `hold` asks for `-d 0`, which tmux(1) documents as "a delay of zero waits
+/// for a key press"; otherwise the session's `display-time` applies. Pure, so
+/// the two shapes are pinned by a test without spawning tmux.
+fn display_message_args(target: &str, text: &str, hold: bool) -> Vec<String> {
+    let mut args = vec![
+        "display-message".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ];
+    if hold {
+        args.push("-d".to_string());
+        args.push("0".to_string());
+    }
+    args.push(text.to_string());
+    args
+}
+
+/// Best-effort status-line feedback in the attached client. Spawned, never
+/// awaited: the pump must not wait on a tmux round-trip. Runs against the
+/// operator's *local* tmux, so for a remote attach it may target a name that
+/// isn't there — accepted, as for the voice toggle before it.
+fn show_status_notice(target: String, text: String, hold: bool) {
+    tokio::spawn(async move {
+        let _ = tokio::process::Command::new("tmux")
+            .args(display_message_args(&target, &text, hold))
+            .status()
+            .await;
+    });
+}
+
+/// Queue `bytes` for the pane, subject to [`MAX_PENDING_PANE_INPUT`].
+fn enqueue_pane_input(outbound: &mut Vec<u8>, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    if outbound.len() + bytes.len() > MAX_PENDING_PANE_INPUT {
+        warn!(
+            "pane is not taking input ({} bytes queued); dropping {} bytes",
+            outbound.len(),
+            bytes.len()
+        );
+        return;
+    }
+    outbound.extend_from_slice(bytes);
+}
+
+/// Write everything queued for the pane and flush. Awaits to completion, so
+/// only for paths that must not leave bytes behind (parking for the switcher).
+async fn drain_pane_input<W: tokio::io::AsyncWrite + Unpin + ?Sized>(
+    writer: &mut W,
+    outbound: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    if outbound.is_empty() {
+        return Ok(());
+    }
+    writer.write_all(outbound).await?;
+    outbound.clear();
+    writer.flush().await
+}
+
+// Returns the spawned pump tasks; the session aborts them on teardown.
+//
+// `term_in`/`term_out` are the *local* terminal's halves — process stdin/stdout
+// in production. They're parameters rather than `tokio::io::stdin()`/`stdout()`
+// baked into the body so the suspend/resume behaviour (the one piece of this
+// module with real concurrency in it) can be driven over in-memory pipes in a
+// test, with no tty and no tmux.
+#[allow(clippy::too_many_arguments)]
+fn spawn_pumps<R, W>(
     mut reader: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
     mut writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     resizer: AttachResizer,
-    terminator: &mut Box<dyn AttachTerminator>,
     cfg: &AttachConfig,
+    shutdown_tx: mpsc::Sender<AttachResult>,
+    paused: Arc<AtomicBool>,
+    resume: Arc<Notify>,
     current_session: Arc<Mutex<String>>,
-    popup_open: Arc<AtomicBool>,
-) -> AttachResult {
+    mut term_in: R,
+    mut term_out: W,
+) -> Vec<tokio::task::JoinHandle<()>>
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
     // Clone the interception policy out of `cfg` so the spawned tasks can own it.
     let editor_triggers = cfg.editor_triggers.clone();
     let review_triggers = cfg.review_triggers.clone();
     let voice_triggers = cfg.voice_triggers.clone();
+    let dictation_triggers = cfg.dictation_triggers.clone();
     let voice_listener = cfg.voice_listener.clone();
     let recording_flag = cfg.recording.clone();
     let intercept_ctrl_z = cfg.intercept_ctrl_z;
     let switcher_enabled = cfg.switcher_enabled;
-    let switcher_revive = cfg.switcher_revive.clone();
     let image_paste = cfg.image_paste.clone();
-
-    // Channel for shutdown signal
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<AttachResult>(1);
 
     // Task 1: transport output -> stdout
     let stdout_shutdown = shutdown_tx.clone();
+    let stdout_paused = paused.clone();
     let stdout_task = tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
         let mut buf = [0u8; 4096];
 
         loop {
@@ -687,11 +946,17 @@ async fn run_async_loop(
                     let _ = stdout_shutdown.send(AttachResult::SessionEnded).await;
                     break;
                 }
+                // While suspended, keep draining the transport but throw the
+                // bytes away: the frontend owns the screen, and `resume`'s
+                // repaint restores whatever we skipped. Draining (rather than
+                // parking) is deliberate — a full pipe would wedge the tmux
+                // client behind it.
+                Ok(_) if stdout_paused.load(Ordering::Acquire) => continue,
                 Ok(n) => {
-                    if stdout.write_all(&buf[..n]).await.is_err() {
+                    if term_out.write_all(&buf[..n]).await.is_err() {
                         break;
                     }
-                    let _ = stdout.flush().await;
+                    let _ = term_out.flush().await;
                 }
                 Err(e) => {
                     // EIO is expected when PTY closes
@@ -705,87 +970,109 @@ async fn run_async_loop(
         }
     });
 
-    // Task 2: stdin -> PTY (raw byte forwarding, no crossterm EventStream)
-    // We use raw stdin to avoid conflicting with TUI's EventStream
+    // Task 2: terminal -> PTY (raw byte forwarding, no crossterm EventStream).
+    // Raw bytes, because crossterm's parser would re-encode what it recognises
+    // and drop what it doesn't; the pane wants the terminal's bytes verbatim.
+    //
+    // Reading and forwarding are decoupled. Bytes for the pane queue in
+    // `outbound`, and the loop `select!`s between the next terminal read and the
+    // next pane write, so a pane that has stopped taking input — a tmux client
+    // blocked behind a terminal nobody is draining — cannot stop us reading,
+    // and the hotkeys (Ctrl+Q above all) keep working. The previous shape
+    // awaited each `write_all` before reading again, which wedged the escape
+    // hatch along with the pane; `ctrl_q_detaches_even_when_the_pane_is_not_draining`
+    // pins this one.
+    //
+    // The injection channel is the third source of pane bytes (dictation), and
+    // its receiver lives here on purpose: aborting this task is what makes
+    // `PaneInjector::send` start returning false, which is the only signal the
+    // dictation side has that there is no longer a pane to type into.
+    let (inject_tx, mut inject_rx) = mpsc::unbounded_channel::<PaneInput>();
+    // When no injector is installed, the pump keeps the sender alive itself
+    // rather than dropping it: a closed channel makes `recv()` resolve `None`
+    // immediately and forever, and that arm would then spin the select! loop.
+    let keepalive_inject_tx = match &cfg.injector {
+        Some(injector) => {
+            injector.install(inject_tx);
+            None
+        }
+        None => Some(inject_tx),
+    };
+
     let stdin_shutdown = shutdown_tx.clone();
     let stdin_task = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
+        let _keepalive_inject_tx = keepalive_inject_tx;
         let mut buf = [0u8; 1024];
+        let mut outbound: Vec<u8> = Vec::new();
 
         loop {
-            match stdin.read(&mut buf).await {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    let data = &buf[..n];
+            tokio::select! {
+                // Reads first: a hotkey must never wait behind a stalled write.
+                biased;
+
+                read = term_in.read(&mut buf) => {
+                    let data = match read {
+                        Ok(0) => {
+                            info!("terminal input closed; stdin pump exiting");
+                            break;
+                        }
+                        Ok(n) => &buf[..n],
+                        Err(e) => {
+                            warn!("terminal read error: {e}; stdin pump exiting");
+                            break;
+                        }
+                    };
 
                     // Classify the burst with the pure interception state
                     // machine; perform the matching side effect here. The order
-                    // of checks (popup passthrough → Ctrl+Q → Ctrl+\ →
-                    // Ctrl+Space → voice → review → editor → forward) lives in
+                    // of checks (Ctrl+Q → Ctrl+\ → Ctrl+Space → voice →
+                    // dictation → review → editor → forward) lives in
                     // `classify_input` and is characterization-tested.
                     match classify_input(
                         data,
-                        popup_open.load(Ordering::Acquire),
+                        switcher_enabled,
                         &voice_triggers,
+                        &dictation_triggers,
                         &review_triggers,
                         &editor_triggers,
                         intercept_ctrl_z,
                         image_paste.is_some(),
                     ) {
                         InputAction::Break(result) => {
-                            match &result {
-                                AttachResult::Detached => debug!("Ctrl+Q detected, detaching"),
-                                AttachResult::SwitchToShell => {
-                                    debug!("Ctrl+\\ detected, switching to shell")
-                                }
-                                AttachResult::SwitchToReview => {
-                                    debug!("Review trigger detected, switching to review")
-                                }
-                                AttachResult::OpenEditor => {
-                                    debug!("Editor trigger detected, opening editor")
-                                }
-                                _ => {}
-                            }
+                            info!("attach hotkey seen: {result:?}");
                             let _ = stdin_shutdown.send(result).await;
                             break;
                         }
                         InputAction::OpenSwitcher(filtered) => {
-                            // The in-session switcher is a local capability
-                            // (`tmux display-popup`/`switch-client` on the
-                            // operator's own server). When disabled (e.g. a
-                            // remote attach) Ctrl+Space is just forwarded.
-                            if switcher_enabled
-                                && popup_open
-                                    .compare_exchange(
-                                        false,
-                                        true,
-                                        Ordering::AcqRel,
-                                        Ordering::Acquire,
-                                    )
-                                    .is_ok()
-                            {
-                                // Open the switcher popup over the attached pane
-                                // and spawn the task that runs `tmux
-                                // display-popup` then `tmux switch-client` on
-                                // selection. The attach loop keeps running so
-                                // the user stays "in" the pane the whole time.
-                                debug!("Ctrl+Space detected, spawning switcher popup");
-                                let popup_open = popup_open.clone();
-                                let current_session = current_session.clone();
-                                let revive = switcher_revive.clone();
-                                tokio::spawn(async move {
-                                    run_switcher_popup(current_session, popup_open, revive).await;
-                                });
-                            }
-                            if filtered.is_empty() {
-                                continue;
-                            }
-                            if writer.write_all(&filtered).await.is_err() {
+                            // Forward whatever else was in the burst *before*
+                            // parking, so those keystrokes reach the pane rather
+                            // than being stranded behind the suspension. This is
+                            // the one place a write is awaited to completion: the
+                            // pane is about to be covered, and the queue is small.
+                            enqueue_pane_input(&mut outbound, &filtered);
+                            if let Err(e) = drain_pane_input(&mut writer, &mut outbound).await {
+                                warn!("pane write error: {e}; stdin pump exiting");
                                 break;
                             }
-                            let _ = writer.flush().await;
+
+                            // Suspend: stop reading the terminal so the frontend's
+                            // own reader (crossterm, on fd 0 — the same tty) has it
+                            // to itself, and tell the stdout pump to start
+                            // discarding. Both must be in place before the
+                            // frontend draws.
+                            debug!("Ctrl+Space detected, suspending attach for the switcher");
+                            paused.store(true, Ordering::Release);
+                            if stdin_shutdown
+                                .send(AttachResult::OpenSwitcher)
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            resume.notified().await;
+                            debug!("Attach resumed after the switcher");
                         }
-                        InputAction::ToggleVoice(filtered) => {
+                        InputAction::ToggleVoice { mode, rest } => {
                             // Toggle the mic via the listener channel and stay in
                             // the pane. A `tmux display-message` gives feedback
                             // since the TUI status bar isn't visible here.
@@ -794,27 +1081,27 @@ async fn run_async_loop(
                                     listener,
                                     &recording_flag,
                                     crate::conversation::ListenAction::Toggle,
+                                    mode,
                                 );
-                                let msg = if now_recording {
-                                    "🎙 Recording… (Alt-V to send)"
-                                } else {
-                                    "Transcribing…"
+                                // `●`/`✓`/`✗` rather than the 🎙 emoji: U+1F399 has
+                                // no glyph in many terminal fonts and renders as a
+                                // placeholder box in the tmux status line, where
+                                // there is no fallback font to rescue it.
+                                let msg = match (now_recording, mode) {
+                                    (true, VoiceMode::Conversation) => "● Recording… (Alt-V to send)",
+                                    (true, VoiceMode::Dictation) => "● Dictating… (Alt-t to type)",
+                                    (false, _) => "● Transcribing…",
                                 };
+                                // Both are states the user is *in*, so the notice
+                                // holds until the next keypress rather than
+                                // flashing for tmux's 750 ms `display-time`: the
+                                // keypress that ends recording dismisses the
+                                // first, and the transcript's arrival replaces
+                                // the second (see the injector's `Notice`).
                                 let target = current_session.lock().await.clone();
-                                tokio::spawn(async move {
-                                    let _ = tokio::process::Command::new("tmux")
-                                        .args(["display-message", "-t", &target, msg])
-                                        .status()
-                                        .await;
-                                });
+                                show_status_notice(target, msg.to_string(), true);
                             }
-                            if filtered.is_empty() {
-                                continue;
-                            }
-                            if writer.write_all(&filtered).await.is_err() {
-                                break;
-                            }
-                            let _ = writer.flush().await;
+                            enqueue_pane_input(&mut outbound, &rest);
                         }
                         InputAction::PasteImage(orig) => {
                             // Capture the local clipboard image and upload it.
@@ -822,31 +1109,52 @@ async fn run_async_loop(
                             // (Ctrl+V swallowed), or the original burst as a
                             // fallback when there's no image or the upload fails.
                             let to_forward = handle_image_paste(&orig, image_paste.as_ref()).await;
-                            if to_forward.is_empty() {
-                                continue;
-                            }
-                            if writer.write_all(&to_forward).await.is_err() {
-                                break;
-                            }
-                            let _ = writer.flush().await;
+                            enqueue_pane_input(&mut outbound, &to_forward);
                         }
                         InputAction::Forward(out) => {
                             if intercept_ctrl_z && out.len() != data.len() {
                                 debug!("Ctrl+Z stripped from input");
                             }
-                            if out.is_empty() {
-                                continue;
-                            }
-                            if writer.write_all(&out).await.is_err() {
-                                break;
-                            }
-                            let _ = writer.flush().await;
+                            enqueue_pane_input(&mut outbound, &out);
                         }
                     }
                 }
-                Err(e) => {
-                    warn!("stdin read error: {}", e);
-                    break;
+
+                // Dictation text, from a task with no writer of its own. Placed
+                // after the read arm (which is `biased;`, so it is polled first)
+                // and before the write arm: a hotkey must never wait behind an
+                // injection, but an injection should not wait on the pane either.
+                //
+                // While the pump is parked for the switcher it is awaiting
+                // `resume` *inside* the read arm, so this arm is not polled at
+                // all — injected bytes simply queue on the channel and land after
+                // the resume, which `injected_bytes_wait_behind_the_switcher_pause`
+                // pins.
+                Some(input) = inject_rx.recv() => match input {
+                    PaneInput::Bytes(bytes) => enqueue_pane_input(&mut outbound, &bytes),
+                    PaneInput::Notice { text, hold } => {
+                        let target = current_session.lock().await.clone();
+                        show_status_notice(target, text, hold);
+                    }
+                },
+
+                written = writer.write(&outbound), if !outbound.is_empty() => {
+                    match written {
+                        Ok(0) => {
+                            warn!("pane stopped accepting input; stdin pump exiting");
+                            break;
+                        }
+                        Ok(n) => {
+                            outbound.drain(..n);
+                            if outbound.is_empty() {
+                                let _ = writer.flush().await;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("pane write error: {e}; stdin pump exiting");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -873,134 +1181,297 @@ async fn run_async_loop(
         let _ = resizer;
     });
 
-    // Wait for a shutdown signal (an intercepted hotkey) or the transport
-    // ending on its own (PTY EOF / detach key / socket close).
-    let result = tokio::select! {
-        result = shutdown_rx.recv() => {
-            result.unwrap_or(AttachResult::Detached)
-        }
-        end = terminator.wait() => {
-            match end {
-                AttachEnd::Detached => AttachResult::Detached,
-                AttachEnd::SessionEnded => AttachResult::SessionEnded,
-                AttachEnd::Error(e) => AttachResult::Error(e),
-            }
-        }
-    };
-
-    // Abort spawned tasks
-    stdout_task.abort();
-    stdin_task.abort();
-    resize_task.abort();
-
-    result
-}
-
-/// Single-quote shell-escape `s` for embedding in a tmux `display-popup`
-/// shell command. Wraps in `'…'` and escapes any embedded single quotes
-/// as `'\''` (close-quote, literal quote, re-open-quote).
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Run the in-session switcher: spawn a `tmux display-popup` showing
-/// the picker subcommand, then on a non-empty result revive the chosen
-/// session if its tmux session died, `tmux switch-client` to it, and
-/// record it in `current_session`. Always clears `popup_open` before
-/// returning.
-async fn run_switcher_popup(
-    current_session: Arc<Mutex<String>>,
-    popup_open: Arc<AtomicBool>,
-    revive: Option<SwitcherRevive>,
-) {
-    let current_name = current_session.lock().await.clone();
-    let new_session = run_switcher_popup_inner(&current_name).await;
-    if let Some(name) = new_session {
-        info!("Switcher picked session: {}", name);
-        // Revive the pick before switching — its tmux session may have died
-        // (e.g. after a reboot), and `switch-client` can't create sessions.
-        // On a revive error fall back to the raw name: the pick may exist in
-        // tmux without being in commander state.
-        let target = match &revive {
-            Some(revive) => match revive(name.clone()).await {
-                Ok(target) => target,
-                Err(e) => {
-                    warn!("Failed to revive picked session {}: {}", name, e);
-                    name
-                }
-            },
-            None => name,
-        };
-        let switch_status = tokio::process::Command::new("tmux")
-            .args(["switch-client", "-t", &target])
-            .status()
-            .await;
-        match switch_status {
-            Ok(s) if s.success() => {
-                *current_session.lock().await = target;
-            }
-            Ok(s) => {
-                warn!("tmux switch-client exited with {:?}", s.code());
-                // Surface the failure in the pane the user is still on;
-                // without this a dead pick looks like the popup did nothing.
-                let _ = tokio::process::Command::new("tmux")
-                    .args([
-                        "display-message",
-                        "-t",
-                        &current_name,
-                        &format!("Could not switch to session {target}"),
-                    ])
-                    .status()
-                    .await;
-            }
-            Err(e) => warn!("Failed to spawn tmux switch-client: {}", e),
-        }
-    }
-    popup_open.store(false, Ordering::Release);
-}
-
-/// Spawn the popup and return the chosen session name, if any.
-async fn run_switcher_popup_inner(current_session: &str) -> Option<String> {
-    let exe = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "claude-commander".to_string());
-    let tmp = std::env::temp_dir().join(format!(
-        "cc-pick-{}-{}.txt",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-
-    let popup_cmd = format!(
-        "{} pick-session --out {} --current {}",
-        shell_quote(&exe),
-        shell_quote(&tmp.to_string_lossy()),
-        shell_quote(current_session),
-    );
-
-    let status = tokio::process::Command::new("tmux")
-        .args(["display-popup", "-E", "-h", "70%", "-w", "70%", &popup_cmd])
-        .status()
-        .await;
-
-    match status {
-        Ok(s) if !s.success() => {
-            warn!("tmux display-popup exited with {:?}", s.code());
-        }
-        Err(e) => {
-            warn!("Failed to spawn tmux display-popup: {}", e);
-        }
-        _ => {}
-    }
-
-    let pick = tokio::fs::read_to_string(&tmp).await.ok();
-    let _ = tokio::fs::remove_file(&tmp).await;
-    pick.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    vec![stdout_task, stdin_task, resize_task]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Suspend/resume: the pumps' behaviour while the switcher is up --
+    //
+    // Driven over in-memory duplex pipes standing in for the terminal and the
+    // transport, so there is no tty, no PTY and no tmux involved.
+
+    /// Minimal config for the pump tests: no triggers, switcher on (the TUI's
+    /// policy, and the only one where Ctrl+Space suspends).
+    fn pump_cfg() -> AttachConfig {
+        AttachConfig {
+            editor_triggers: Vec::new(),
+            review_triggers: Vec::new(),
+            voice_triggers: Vec::new(),
+            dictation_triggers: Vec::new(),
+            voice_listener: None,
+            recording: Arc::new(AtomicBool::new(false)),
+            intercept_ctrl_z: false,
+            switcher_enabled: true,
+            session_name: Some("cc-test".to_string()),
+            image_paste: None,
+            injector: None,
+        }
+    }
+
+    struct PumpHarness {
+        /// Writes here act as the attached pane's output.
+        transport_in: tokio::io::DuplexStream,
+        /// Writes here act as the user's keystrokes.
+        term_in: tokio::io::DuplexStream,
+        /// Reads here are what would have been painted on the user's terminal.
+        term_out: tokio::io::DuplexStream,
+        /// Reads here are the keystrokes forwarded on to the pane.
+        transport_out: tokio::io::DuplexStream,
+        shutdown_rx: mpsc::Receiver<AttachResult>,
+        paused: Arc<AtomicBool>,
+        resume: Arc<Notify>,
+        refreshes: Arc<std::sync::atomic::AtomicUsize>,
+        refresher: AttachRefresher,
+        tasks: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    impl PumpHarness {
+        /// Stop the pumps the way [`AttachSession::finish`] does — abort *and*
+        /// await, so the tasks (and everything they own, including the injection
+        /// receiver) are really gone when this returns.
+        async fn stop(&mut self) {
+            for task in self.tasks.drain(..) {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+
+    fn start_pumps() -> PumpHarness {
+        start_pumps_with(pump_cfg())
+    }
+
+    fn start_pumps_with(cfg: AttachConfig) -> PumpHarness {
+        let (transport_in, transport_far) = tokio::io::duplex(4096);
+        let (term_in, term_far) = tokio::io::duplex(4096);
+        let (term_out_far, term_out) = tokio::io::duplex(4096);
+        let (transport_out_far, transport_out) = tokio::io::duplex(4096);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let paused = Arc::new(AtomicBool::new(false));
+        let resume = Arc::new(Notify::new());
+        let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = refreshes.clone();
+        let refresher = AttachRefresher::new(move || {
+            counter.fetch_add(1, Ordering::Release);
+            std::future::ready(())
+        });
+
+        let tasks = spawn_pumps(
+            Box::new(transport_far),
+            Box::new(transport_out_far),
+            AttachResizer::new(|_, _| {}),
+            &cfg,
+            shutdown_tx,
+            paused.clone(),
+            resume.clone(),
+            Arc::new(Mutex::new("cc-test".to_string())),
+            term_far,
+            term_out_far,
+        );
+
+        PumpHarness {
+            transport_in,
+            term_in,
+            term_out,
+            transport_out,
+            shutdown_rx,
+            paused,
+            resume,
+            refreshes,
+            refresher,
+            tasks,
+        }
+    }
+
+    /// Read whatever lands on a pipe within `ms`, or nothing.
+    async fn read_term(term_out: &mut tokio::io::DuplexStream, ms: u64) -> Vec<u8> {
+        let mut buf = [0u8; 1024];
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(ms),
+            term_out.read(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok(n)) => buf[..n].to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ctrl_space_suspends_after_forwarding_the_rest_of_the_burst() {
+        let mut h = start_pumps();
+        // Ctrl+Space arriving mid-burst: the other keystrokes are the user's and
+        // belong to the pane, so they must go on ahead rather than being
+        // stranded behind the suspension.
+        h.term_in.write_all(b"a\x00b").await.unwrap();
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(500), h.shutdown_rx.recv())
+                .await
+                .expect("Ctrl+Space should signal promptly");
+        assert_eq!(result, Some(AttachResult::OpenSwitcher));
+        assert!(
+            h.paused.load(Ordering::Acquire),
+            "the pumps must be parked before the frontend draws"
+        );
+        assert_eq!(
+            read_term(&mut h.transport_out, 500).await,
+            b"ab",
+            "the rest of the burst reaches the pane, with the NUL swallowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn suspended_pane_output_is_discarded_then_flows_again_on_resume() {
+        let mut h = start_pumps();
+
+        // Baseline: while running, pane output reaches the terminal.
+        h.transport_in.write_all(b"before").await.unwrap();
+        assert_eq!(read_term(&mut h.term_out, 500).await, b"before");
+
+        // Suspend, exactly as the stdin pump does on Ctrl+Space.
+        h.paused.store(true, Ordering::Release);
+        h.transport_in.write_all(b"hidden").await.unwrap();
+        assert!(
+            read_term(&mut h.term_out, 200).await.is_empty(),
+            "output must not paint over the switcher while it is up"
+        );
+
+        // Resume: the transport keeps flowing again. (The bytes swallowed while
+        // suspended are not replayed — `refresh-client` repaints instead.)
+        h.paused.store(false, Ordering::Release);
+        h.resume.notify_one();
+        h.transport_in.write_all(b"after").await.unwrap();
+        assert_eq!(read_term(&mut h.term_out, 500).await, b"after");
+    }
+
+    #[tokio::test]
+    async fn suspended_stdin_is_left_for_the_frontends_reader() {
+        let mut h = start_pumps();
+
+        // Suspend via the real path so the stdin pump parks itself.
+        h.term_in.write_all(b"\x00").await.unwrap();
+        assert_eq!(h.shutdown_rx.recv().await, Some(AttachResult::OpenSwitcher));
+
+        // Keystrokes typed at the switcher must be left in the terminal for
+        // crossterm to read; the pump consuming them here is exactly the race
+        // the suspension exists to prevent.
+        h.term_in.write_all(b"query").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let mut peek = [0u8; 16];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            h.term_in.read(&mut peek),
+        )
+        .await
+        .map(|r| r.unwrap_or(0))
+        .unwrap_or(0);
+        assert_eq!(n, 0, "the parked pump must not consume terminal input");
+    }
+
+    /// Ctrl+Q is the escape hatch, so it has to work when the pane has stopped
+    /// taking input — a tmux client blocked behind a terminal nobody is
+    /// draining, say. A loop that awaits each forward before reading again
+    /// wedges its hotkeys along with the pane.
+    #[tokio::test]
+    async fn ctrl_q_detaches_even_when_the_pane_is_not_draining() {
+        use std::time::Duration;
+        let mut h = start_pumps();
+
+        // Never read `h.transport_out`: its 4 KiB duplex fills and the pane
+        // writer stalls. Push past that in bursts the pump reads whole. Each
+        // write is bounded because the failure mode is exactly that the pump
+        // stops reading and this pipe fills too.
+        for _ in 0..6 {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(500),
+                h.term_in.write_all(&[b'x'; 1024]),
+            )
+            .await;
+        }
+        tokio::time::timeout(Duration::from_millis(500), h.term_in.write_all(b"\x11"))
+            .await
+            .expect("the pump must keep reading the terminal while the pane is wedged")
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), h.shutdown_rx.recv()).await;
+        assert_eq!(
+            result.ok().flatten(),
+            Some(AttachResult::Detached),
+            "Ctrl+Q must detach while the pane is wedged"
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_bytes_reach_the_pane() {
+        // The dictation path: a task with no access to the pane writer queues
+        // bytes through the injector and they land where typed keystrokes do.
+        let injector = PaneInjector::default();
+        let mut cfg = pump_cfg();
+        cfg.injector = Some(injector.clone());
+        let mut h = start_pumps_with(cfg);
+
+        assert!(injector.send(b"hello"), "the attach installed its channel");
+        assert_eq!(read_term(&mut h.transport_out, 500).await, b"hello");
+    }
+
+    #[tokio::test]
+    async fn injected_bytes_wait_behind_the_switcher_pause() {
+        // While the pump is parked for the switcher it is awaiting `resume`
+        // inside the read arm, so the injection arm isn't being polled at all.
+        // The bytes queue on the channel rather than being lost, and land once
+        // the attach is unparked.
+        let injector = PaneInjector::default();
+        let mut cfg = pump_cfg();
+        cfg.injector = Some(injector.clone());
+        let mut h = start_pumps_with(cfg);
+
+        h.term_in.write_all(b"\x00").await.unwrap();
+        assert_eq!(h.shutdown_rx.recv().await, Some(AttachResult::OpenSwitcher));
+
+        assert!(injector.send(b"typed"));
+        assert!(
+            read_term(&mut h.transport_out, 200).await.is_empty(),
+            "nothing may reach the pane while the switcher owns the screen"
+        );
+
+        h.paused.store(false, Ordering::Release);
+        h.resume.notify_one();
+        assert_eq!(read_term(&mut h.transport_out, 500).await, b"typed");
+    }
+
+    #[tokio::test]
+    async fn inject_send_fails_once_the_pump_is_aborted() {
+        // `send` returning false *is* the "nothing is attached" signal — see
+        // `PaneInjector`. It becomes false because the receiver lives in the
+        // stdin pump, which `AttachSession::finish` aborts and awaits.
+        let injector = PaneInjector::default();
+        let mut cfg = pump_cfg();
+        cfg.injector = Some(injector.clone());
+        let mut h = start_pumps_with(cfg);
+        assert!(injector.send(b"live"));
+
+        h.stop().await;
+        assert!(
+            !injector.send(b"gone"),
+            "a finished attach must report itself as unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_refresh_runs_the_transport_hook_once() {
+        // Covers the refresher plumbing only. `AttachSession::resume` — which is
+        // what calls this in anger — can't be exercised here: constructing a
+        // session needs `enable_raw_mode`, and so a real tty.
+        let h = start_pumps();
+        assert_eq!(h.refreshes.load(Ordering::Acquire), 0);
+        h.refresher.refresh().await;
+        h.refresher.refresh().await;
+        assert_eq!(h.refreshes.load(Ordering::Acquire), 2);
+    }
 
     #[tokio::test]
     async fn attach_backend_session_unknown_query_is_not_found() {
@@ -1081,6 +1552,9 @@ mod tests {
     fn voice() -> Vec<Vec<u8>> {
         vec![vec![0x1b, b'v']]
     }
+    fn dictation() -> Vec<Vec<u8>> {
+        vec![vec![0x1b, b't']]
+    }
     fn review() -> Vec<Vec<u8>> {
         vec![vec![0x1b, b'r']]
     }
@@ -1088,13 +1562,30 @@ mod tests {
         vec![vec![0x05]]
     }
 
-    /// Classify with the standard trigger set and Ctrl+Z interception on. Image
-    /// paste is off (the local-attach default), matching the historical calls.
-    fn classify(data: &[u8], popup_open: bool) -> InputAction {
+    /// Classify with the standard trigger set, Ctrl+Z interception on, and the
+    /// switcher enabled (the TUI's policy). Image paste is off (the local-attach
+    /// default), matching the historical calls.
+    fn classify(data: &[u8]) -> InputAction {
         classify_input(
             data,
-            popup_open,
+            true,
             &voice(),
+            &dictation(),
+            &review(),
+            &editor(),
+            true,
+            false,
+        )
+    }
+
+    /// As [`classify`], but with the switcher off — the bare `attach` CLI, which
+    /// has no session list to draw and so leaves Ctrl+Space to the pane.
+    fn classify_no_switcher(data: &[u8]) -> InputAction {
+        classify_input(
+            data,
+            false,
+            &voice(),
+            &dictation(),
             &review(),
             &editor(),
             true,
@@ -1104,21 +1595,18 @@ mod tests {
 
     #[test]
     fn classify_plain_text_forwards_verbatim() {
-        assert_eq!(
-            classify(b"hello", false),
-            InputAction::Forward(b"hello".to_vec())
-        );
+        assert_eq!(classify(b"hello"), InputAction::Forward(b"hello".to_vec()));
     }
 
     #[test]
     fn classify_ctrl_q_detaches() {
         assert_eq!(
-            classify(b"\x11", false),
+            classify(b"\x11"),
             InputAction::Break(AttachResult::Detached)
         );
         // Anywhere in the burst, mixed with other bytes.
         assert_eq!(
-            classify(b"ab\x11cd", false),
+            classify(b"ab\x11cd"),
             InputAction::Break(AttachResult::Detached)
         );
     }
@@ -1126,7 +1614,7 @@ mod tests {
     #[test]
     fn classify_ctrl_backslash_switches_to_shell() {
         assert_eq!(
-            classify(b"\x1c", false),
+            classify(b"\x1c"),
             InputAction::Break(AttachResult::SwitchToShell)
         );
     }
@@ -1135,36 +1623,132 @@ mod tests {
     fn classify_ctrl_q_precedes_ctrl_backslash() {
         // Ctrl+Q is checked first, so a burst containing both detaches.
         assert_eq!(
-            classify(b"\x11\x1c", false),
+            classify(b"\x11\x1c"),
             InputAction::Break(AttachResult::Detached)
         );
     }
 
     #[test]
     fn classify_ctrl_space_opens_switcher_and_strips_nul() {
-        assert_eq!(classify(b"\x00", false), InputAction::OpenSwitcher(vec![]));
+        assert_eq!(classify(b"\x00"), InputAction::OpenSwitcher(vec![]));
         // Surrounding bytes survive; only the 0x00 is stripped.
         assert_eq!(
-            classify(b"a\x00b", false),
+            classify(b"a\x00b"),
             InputAction::OpenSwitcher(b"ab".to_vec())
+        );
+    }
+
+    #[test]
+    fn classify_ctrl_space_reaches_the_pane_when_the_switcher_is_off() {
+        // A frontend with no switcher to draw must forward the NUL *verbatim*,
+        // which is what `AttachConfig::switcher_enabled`'s docs have always
+        // promised. Gating at the effect site instead — as this did before —
+        // strips the byte and forwards only the remainder, silently eating the
+        // keystroke on every CLI and remote attach.
+        assert_eq!(
+            classify_no_switcher(b"\x00"),
+            InputAction::Forward(b"\x00".to_vec())
+        );
+        assert_eq!(
+            classify_no_switcher(b"a\x00b"),
+            InputAction::Forward(b"a\x00b".to_vec())
         );
     }
 
     #[test]
     fn classify_voice_trigger_toggles_and_strips() {
         // Lone Alt-V burst toggles voice and forwards nothing.
-        assert_eq!(classify(b"\x1bv", false), InputAction::ToggleVoice(vec![]));
+        assert_eq!(
+            classify(b"\x1bv"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Conversation,
+                rest: vec![]
+            }
+        );
         // Trigger embedded in a burst: stripped, the rest forwarded.
         assert_eq!(
-            classify(b"x\x1bvy", false),
-            InputAction::ToggleVoice(b"xy".to_vec())
+            classify(b"x\x1bvy"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Conversation,
+                rest: b"xy".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_dictation_trigger_toggles_dictation_and_strips() {
+        // Alt-t is the other voice hotkey: same interception shape, different
+        // destination for whatever is transcribed.
+        assert_eq!(
+            classify(b"\x1bt"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Dictation,
+                rest: vec![]
+            }
+        );
+        assert_eq!(
+            classify(b"x\x1bty"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Dictation,
+                rest: b"xy".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_voice_precedes_dictation_when_both_match() {
+        // Ordering: dictation is checked immediately *after* voice, so a burst
+        // holding both starts a conversation recording. Arbitrary but fixed — a
+        // burst containing two hotkeys is a paste, not a keystroke.
+        assert_eq!(
+            classify(b"\x1bv\x1bt"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Conversation,
+                rest: b"\x1bt".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_dictation_precedes_review() {
+        // …and before review, so Alt-t never breaks the attach out to the diff.
+        assert_eq!(
+            classify(b"\x1bt\x1br"),
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Dictation,
+                rest: b"\x1br".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_dictation_fires_with_ctrl_z_interception_off() {
+        // A *shell* pane's policy: Ctrl+Z stays the user's (job control), and
+        // conversation voice may not even be configured there. Dictation must
+        // still be intercepted — typing into a shell is what it is for.
+        let action = classify_input(
+            b"\x1bt",
+            true,
+            &[],
+            &dictation(),
+            &review(),
+            &editor(),
+            false,
+            false,
+        );
+        assert_eq!(
+            action,
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Dictation,
+                rest: vec![]
+            }
         );
     }
 
     #[test]
     fn classify_review_trigger_breaks() {
         assert_eq!(
-            classify(b"\x1br", false),
+            classify(b"\x1br"),
             InputAction::Break(AttachResult::SwitchToReview)
         );
     }
@@ -1172,29 +1756,16 @@ mod tests {
     #[test]
     fn classify_editor_trigger_breaks() {
         assert_eq!(
-            classify(b"\x05", false),
+            classify(b"\x05"),
             InputAction::Break(AttachResult::OpenEditor)
         );
     }
 
     #[test]
-    fn classify_popup_open_forwards_everything_verbatim() {
-        // With the popup open, even hotkeys are passed through untouched and
-        // Ctrl+Z is NOT stripped.
-        assert_eq!(
-            classify(b"\x11\x1c\x00\x1a", true),
-            InputAction::Forward(b"\x11\x1c\x00\x1a".to_vec())
-        );
-    }
-
-    #[test]
     fn classify_strips_ctrl_z_on_plain_forward_when_enabled() {
-        assert_eq!(
-            classify(b"a\x1ab", false),
-            InputAction::Forward(b"ab".to_vec())
-        );
+        assert_eq!(classify(b"a\x1ab"), InputAction::Forward(b"ab".to_vec()));
         // A lone Ctrl+Z becomes an empty forward (swallowed).
-        assert_eq!(classify(b"\x1a", false), InputAction::Forward(vec![]));
+        assert_eq!(classify(b"\x1a"), InputAction::Forward(vec![]));
     }
 
     #[test]
@@ -1203,6 +1774,7 @@ mod tests {
             b"a\x1ab",
             false,
             &voice(),
+            &dictation(),
             &review(),
             &editor(),
             false,
@@ -1215,9 +1787,27 @@ mod tests {
     fn classify_empty_triggers_disable_review_and_editor() {
         // With no review/editor triggers configured, those bytes are forwarded
         // as ordinary input rather than intercepted.
-        let action = classify_input(b"\x1br", false, &voice(), &[], &[], true, false);
+        let action = classify_input(
+            b"\x1br",
+            false,
+            &voice(),
+            &dictation(),
+            &[],
+            &[],
+            true,
+            false,
+        );
         assert_eq!(action, InputAction::Forward(b"\x1br".to_vec()));
-        let action = classify_input(b"\x05", false, &voice(), &[], &[], true, false);
+        let action = classify_input(
+            b"\x05",
+            false,
+            &voice(),
+            &dictation(),
+            &[],
+            &[],
+            true,
+            false,
+        );
         assert_eq!(action, InputAction::Forward(b"\x05".to_vec()));
     }
 
@@ -1229,23 +1819,48 @@ mod tests {
             b"\x1bv\x1br",
             false,
             &voice(),
+            &dictation(),
             &review(),
             &editor(),
             true,
             false,
         );
-        assert_eq!(action, InputAction::ToggleVoice(b"\x1br".to_vec()));
+        assert_eq!(
+            action,
+            InputAction::ToggleVoice {
+                mode: VoiceMode::Conversation,
+                rest: b"\x1br".to_vec()
+            }
+        );
     }
 
     #[test]
     fn classify_ctrl_v_pastes_image_when_enabled() {
         // With image paste enabled (remote attach), Ctrl+V (0x16) is intercepted
         // and the original burst carried through for the effectful handler.
-        let action = classify_input(b"\x16", false, &voice(), &review(), &editor(), true, true);
+        let action = classify_input(
+            b"\x16",
+            false,
+            &voice(),
+            &dictation(),
+            &review(),
+            &editor(),
+            true,
+            true,
+        );
         assert_eq!(action, InputAction::PasteImage(b"\x16".to_vec()));
         // Mixed with other bytes, the whole burst rides along (0x16 not stripped
         // here — the handler decides).
-        let action = classify_input(b"a\x16b", false, &voice(), &review(), &editor(), true, true);
+        let action = classify_input(
+            b"a\x16b",
+            false,
+            &voice(),
+            &dictation(),
+            &review(),
+            &editor(),
+            true,
+            true,
+        );
         assert_eq!(action, InputAction::PasteImage(b"a\x16b".to_vec()));
     }
 
@@ -1253,7 +1868,16 @@ mod tests {
     fn classify_ctrl_v_forwards_when_disabled() {
         // Local attach (image paste off): Ctrl+V is forwarded verbatim so the
         // co-located agent reads the clipboard itself — unchanged behaviour.
-        let action = classify_input(b"\x16", false, &voice(), &review(), &editor(), true, false);
+        let action = classify_input(
+            b"\x16",
+            false,
+            &voice(),
+            &dictation(),
+            &review(),
+            &editor(),
+            true,
+            false,
+        );
         assert_eq!(action, InputAction::Forward(b"\x16".to_vec()));
     }
 
@@ -1265,6 +1889,7 @@ mod tests {
             b"\x16\x11",
             false,
             &voice(),
+            &dictation(),
             &review(),
             &editor(),
             true,
@@ -1274,11 +1899,23 @@ mod tests {
     }
 
     #[test]
-    fn classify_ctrl_v_forwarded_verbatim_when_popup_open() {
-        // With the switcher popup open, every byte (including 0x16) is forwarded
-        // untouched — image paste must not fire while the picker owns input.
-        let action = classify_input(b"\x16", true, &voice(), &review(), &editor(), true, true);
-        assert_eq!(action, InputAction::Forward(b"\x16".to_vec()));
+    fn classify_ctrl_v_is_unaffected_by_the_switcher_policy() {
+        // The switcher no longer has an "open" state the classifier can see —
+        // while it is up the stdin pump is parked and classifies nothing — so
+        // Ctrl+V behaves the same either way.
+        for switcher_enabled in [true, false] {
+            let action = classify_input(
+                b"\x16",
+                switcher_enabled,
+                &voice(),
+                &dictation(),
+                &review(),
+                &editor(),
+                true,
+                true,
+            );
+            assert_eq!(action, InputAction::PasteImage(b"\x16".to_vec()));
+        }
     }
 
     // -- paste_decision: the strip/forward contract for a Ctrl+V burst --
@@ -1327,10 +1964,37 @@ mod tests {
     fn paste_decision_forwards_verbatim_when_over_size_cap() {
         // An over-limit image is not uploaded (the doomed transfer is skipped);
         // Ctrl+V is forwarded verbatim.
-        let too_big = vec![0u8; crate::paste_image::MAX_IMAGE_BYTES + 1];
+        let too_big = vec![0u8; claude_commander_protocol::paste::MAX_IMAGE_BYTES + 1];
         assert_eq!(
             paste_decision(Ok(Some(too_big)), b"\x16"),
             PasteDecision::Forward(b"\x16".to_vec())
         );
+    }
+
+    #[test]
+    fn display_message_args_hold_waits_for_a_key() {
+        // Held notices (recording, transcribing) pass `-d 0`; momentary ones
+        // leave the delay to tmux's `display-time`.
+        assert_eq!(
+            display_message_args("cc-1", "● Dictating…", true),
+            ["display-message", "-t", "cc-1", "-d", "0", "● Dictating…"]
+        );
+        assert_eq!(
+            display_message_args("cc-1", "Typed", false),
+            ["display-message", "-t", "cc-1", "Typed"]
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_notice_does_not_reach_the_pane() {
+        // A notice is for the status line, never for the pane's stdin — text
+        // meant for the operator must not be typed at the agent.
+        let injector = PaneInjector::default();
+        let mut cfg = pump_cfg();
+        cfg.injector = Some(injector.clone());
+        let mut h = start_pumps_with(cfg);
+        assert!(injector.notice("Dictating…", true));
+        assert!(injector.send(b"after"));
+        assert_eq!(read_term(&mut h.transport_out, 500).await, b"after");
     }
 }

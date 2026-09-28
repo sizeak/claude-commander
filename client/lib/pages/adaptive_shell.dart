@@ -1,229 +1,278 @@
 import 'package:flutter/material.dart';
 
-import '../server_config.dart';
+import '../chrome/chrome.dart';
+import '../chrome/chrome_forms.dart';
+import '../chrome/chrome_wide.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
+import '../state/fleet_store.dart';
+import '../theme/agent_glyphs.dart';
+import '../theme/theme_controller.dart';
+import '../theme/tokens.dart';
+import '../util/session_filter.dart';
+import '../util/viewport.dart';
+import '../widgets/brand_mark.dart';
+import '../widgets/session_chips.dart';
+import '../widgets/workspace_menu.dart';
+import 'activity_page.dart';
+import 'phone_shell.dart';
 import 'review_page.dart';
 import 'session_detail_page.dart';
 import 'session_list_page.dart';
 import 'terminal_page.dart';
 
 /// Logical width at or above which the app switches from the stacked phone
-/// layout to the desktop/tablet master-detail layout.
+/// layout to the desktop/tablet rail + detail layout — provided the viewport
+/// is also tall enough. See [useWideLayout].
 const double kWideBreakpoint = 900;
 
-/// The responsive home. Below [kWideBreakpoint] it is the phone
-/// [SessionListPage] (a stacked `Navigator.push` flow: list → detail →
-/// terminal/review). At or above it, a master-detail desktop layout: a server
-/// sidebar + session list on the left, and a persistent detail pane on the right
-/// whose detail / terminal / review views are switched in place.
+/// Whether [constraints] should get the rail + detail layout rather than the
+/// stacked [PhoneShell].
+///
+/// Width alone is not the question, and taking it as such put a phone on the
+/// wrong shell: a Pixel 8a is 914 × 411dp held sideways, clearing
+/// [kWideBreakpoint] by 14dp with barely 400dp of height. Measured on that
+/// device, the wide layout spends 71dp on the detail pane header and 40 on the
+/// tab strip before the pane gets a row; it resizes for the soft keyboard
+/// instead of panning, so the pane disappears entirely when the keyboard opens
+/// (and the fleet column overflowed its box by 126px); and it suppresses the
+/// on-screen modifier bar on the reasoning that a wide layout implies a
+/// physical keyboard, leaving a phone with no Esc, Ctrl or arrows. The stacked
+/// shell has none of those problems and gives the pane the full 914dp width.
+///
+/// The height comes from [isShortViewport] — `MediaQuery.sizeOf` — rather than
+/// from [constraints], for two reasons, and *not* the tempting third one. It is
+/// the same predicate the two chromes compact themselves on, so the shell and
+/// the chrome inside it cannot disagree about whether the viewport is short. And
+/// it is keyboard-invariant at any position in the tree, whereas [constraints]
+/// are only keyboard-invariant *here*: nothing above this `LayoutBuilder`
+/// consumes `viewInsets` today (`MaterialApp.builder` wraps the navigator in
+/// [WindowFrame], a plain `Column`, and every `Scaffold` is built by a chrome
+/// below the shells), so `constraints.maxHeight` measures 900 at a 900dp window
+/// with a 600dp keyboard up — verified. Reading it would therefore work now and
+/// silently start swapping the whole shell mid-keystroke the day an ancestor
+/// that rewrites the height appears.
+///
+/// Crossing this threshold does swap shells, which tears down the routes and
+/// the live attach beneath them — the same cost the 900dp width crossing has
+/// always had. It is reachable by rotating a tablet or dragging a desktop
+/// window's height past 500; the attach re-opens on the other side.
+bool useWideLayout(BuildContext context, BoxConstraints constraints) =>
+    constraints.maxWidth >= kWideBreakpoint && !isShortViewport(context);
+
+/// Which surface the shell's FLEET/ACTIVITY toggle is driving the detail pane to:
+/// the selected session's [_DetailPane] (fleet), or the cross-server
+/// [ActivityBody] feed (activity). The fleet list stays visible in both.
+enum _RailMode { fleet, activity }
+
+/// The responsive home. Where [useWideLayout] says no — a narrow viewport, or a
+/// wide but short one such as a phone held sideways — it is the [PhoneShell] (a
+/// bottom-nav Fleet + Activity shell over a stacked `Navigator.push` flow).
+/// Otherwise [ChromeWide]: the fleet list, a **detail pane** whose Overview /
+/// Agent / Shell / Changes tabs switch in place, and the shell's navigation —
+/// the FLEET/ACTIVITY toggle, the needs-input count, new-session and settings.
+///
+/// How many columns those become, and where the navigation sits, is the active
+/// theme's business, not this page's: Mission Control renders two panes with the
+/// nav in the rail's footer, while LCARS renders three above
+/// [kLcarsThreeColumnWidth] with an elbow nav rail of its own. This page only
+/// supplies the bodies and the live data.
 ///
 /// The same page *bodies* ([SessionListBody], [SessionDetailBody], [TerminalBody],
-/// [ReviewBody]) serve both layouts; only the surrounding shell differs.
+/// [ReviewBody], [ActivityBody]) serve both layouts; only the surrounding shell
+/// differs.
 class AdaptiveShell extends StatefulWidget {
-  /// The config store, threaded through so the settings route can re-open the
-  /// connection page with the same (possibly in-memory) store.
-  final ServerConfigStore configStore;
-
-  /// Handed to the settings connection page so a reconnect goes through the app
-  /// (which reconnects the shared store rather than minting a new handle).
-  final Future<void> Function(ServerConfig config) onConnected;
-
-  const AdaptiveShell({
-    super.key,
-    required this.configStore,
-    required this.onConnected,
-  });
+  const AdaptiveShell({super.key});
 
   @override
   State<AdaptiveShell> createState() => _AdaptiveShellState();
 }
 
 class _AdaptiveShellState extends State<AdaptiveShell> {
+  /// The server that owns [_selected]. Held alongside the session so the
+  /// detail pane can be scoped to (and driven by) the right server.
+  CommanderStore? _selectedStore;
+
   /// The session shown in the wide layout's detail pane, or null when nothing is
-  /// selected. Re-resolved from the store on every build so it tracks live
-  /// updates and survives a session vanishing (the detail body then shows its
+  /// selected. Re-resolved from its owning store on every build so it tracks
+  /// live updates and survives a session vanishing (the detail pane then shows its
   /// gone-state until dismissed).
   SessionInfo? _selected;
+
+  /// Whether the detail pane shows the selected session (fleet) or the Activity
+  /// feed. Selecting a session from the rail always snaps back to fleet.
+  _RailMode _mode = _RailMode.fleet;
+
+  /// The workspace that was active when [_selected] was picked. A switch away
+  /// from it clears the selection.
+  String? _selectedWorkspace;
+
+  void _select(CommanderStore store, SessionInfo session) => setState(() {
+    _selectedStore = store;
+    _selected = session;
+    _selectedWorkspace = FleetScope.of(context)?.activeWorkspace;
+    _mode = _RailMode.fleet;
+  });
+
+  void _clear() => setState(() {
+    _selectedStore = null;
+    _selected = null;
+  });
+
+  void _setMode(_RailMode mode) => setState(() => _mode = mode);
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
-      builder: (context, constraints) {
-        if (constraints.maxWidth < kWideBreakpoint) {
-          return SessionListPage(
-            configStore: widget.configStore,
-            onConnected: widget.onConnected,
-          );
-        }
-        return _wide(context);
-      },
+      builder: (context, constraints) => useWideLayout(context, constraints)
+          ? _wide(context)
+          : const PhoneShell(),
     );
   }
 
   Widget _wide(BuildContext context) {
-    final store = CommanderStoreScope.of(context)!;
+    final fleet = FleetScope.of(context)!;
     return ListenableBuilder(
-      listenable: store,
+      listenable: fleet,
       builder: (context, _) {
+        final workspace = fleet.activeWorkspace;
+        // Drop a selection whose server was removed — or that belongs to the
+        // workspace the user just switched away from: a switch lands on a
+        // fresh list, with nothing selected, rather than keeping a session the
+        // list no longer shows.
+        var store = _selectedStore;
+        if (store != null &&
+            (!fleet.servers.contains(store) ||
+                _selectedWorkspace != workspace)) {
+          store = null;
+          _selectedStore = null;
+          _selected = null;
+        }
         // Re-resolve the selection against the latest snapshot: pick up fresh
         // info, and fall back to the last-known info if the session vanished so
         // the detail pane can show its gone-state rather than blanking.
         final sel = _selected;
-        final resolved = sel == null
+        final resolved = (store == null || sel == null)
             ? null
             : (store.sessionById(sel.id) ?? sel);
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Claude Commander'),
-            actions: [
-              IconButton(
-                onPressed: store.refresh,
-                icon: const Icon(Icons.refresh),
-                tooltip: 'Refresh',
+
+        // A single cross-server pass powers the shell's counts: the fleet
+        // header's totals and the nav's needs-input badge.
+        var active = 0, total = 0, needsInput = 0;
+        for (final s in fleet.servers) {
+          for (final x in s.sessionsIn(workspace)) {
+            total++;
+            if (x.status.isActive) active++;
+            // The same union the list rows' attention glyph uses — an agent
+            // waiting for an answer, or a cascade paused mid-stack.
+            if (sessionDescriptor(x, s.agentStateFor(x.id)).wantsAttention) {
+              needsInput++;
+            }
+          }
+        }
+
+        return ChromeWide(
+          ChromeWideSpec(
+            fleetList: SessionListBody(
+              selectedId: resolved?.id,
+              onSelect: _select,
+            ),
+            detail: _detail(context, fleet, store, resolved),
+            modes: [
+              ChromeNavItem(
+                label: 'FLEET',
+                glyph: '▤',
+                selected: _mode == _RailMode.fleet,
+                onTap: () => _setMode(_RailMode.fleet),
               ),
-              SettingsMenu(
-                store: store,
-                configStore: widget.configStore,
-                onConnected: widget.onConnected,
-              ),
-            ],
-          ),
-          floatingActionButton: store.handle == null
-              ? null
-              : FloatingActionButton(
-                  onPressed: () => openCreateSession(context, store),
-                  tooltip: 'New session',
-                  child: const Icon(Icons.add),
-                ),
-          body: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(
-                width: 340,
-                child: _MasterColumn(
-                  store: store,
-                  selectedId: resolved?.id,
-                  onSelect: (s) => setState(() => _selected = s),
-                ),
-              ),
-              const VerticalDivider(width: 1),
-              Expanded(
-                child: resolved == null
-                    ? const _EmptyDetail()
-                    : _DetailPane(
-                        // Rekey per session so switching selection rebuilds the
-                        // pane (resets the tab + tears down any live terminal).
-                        key: ValueKey(resolved.id),
-                        session: resolved,
-                        api: store.api,
-                        handle: store.handle,
-                        onDismiss: () => setState(() => _selected = null),
-                      ),
+              ChromeNavItem(
+                label: 'ACTIVITY',
+                glyph: '≋',
+                selected: _mode == _RailMode.activity,
+                onTap: () => _setMode(_RailMode.activity),
               ),
             ],
+            // The LCARS frame's accent follows the active view, amber on Fleet
+            // and lilac on Activity — the same split the phone frames make
+            // through `ChromeViewRailSpec.style`.
+            style: _mode == _RailMode.fleet
+                ? ChromeViewRailStyle.branded
+                : ChromeViewRailStyle.plain,
+            needsInputCount: needsInput,
+            activeCount: active,
+            totalCount: total,
+            serverCount: fleet.servers.length,
+            titleMenu: workspaceTitleMenu(fleet, theme: ThemeScope.of(context)),
+            newSession: ChromeButtonAction(
+              icon: Icons.add,
+              label: 'New session',
+              kind: ChromeActionKind.primary,
+              onPressed: () => openCreateSession(context, fleet),
+            ),
+            settings: ChromeButtonAction(
+              icon: Icons.settings,
+              label: 'Settings',
+              onPressed: () => openSettings(context),
+            ),
           ),
         );
       },
     );
   }
-}
 
-/// The wide layout's left column: a server sidebar slot on top (single server for
-/// now) and the grouped session list below.
-class _MasterColumn extends StatelessWidget {
-  final CommanderStore store;
-  final String? selectedId;
-  final ValueChanged<SessionInfo> onSelect;
-
-  const _MasterColumn({
-    required this.store,
-    required this.selectedId,
-    required this.onSelect,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _ServerSidebar(store: store),
-        const Divider(height: 1),
-        Expanded(
-          child: SessionListBody(selectedId: selectedId, onSelect: onSelect),
-        ),
-      ],
-    );
-  }
-}
-
-/// The reserved server-sidebar slot: the single connected server's name plus a
-/// live connection indicator. Shaped as one row so a future multi-server list
-/// drops a column of these in unchanged.
-class _ServerSidebar extends StatelessWidget {
-  final CommanderStore store;
-  const _ServerSidebar({required this.store});
-
-  @override
-  Widget build(BuildContext context) {
-    final (color, label) = _indicator(context, store.connection);
-    return ListTile(
-      dense: true,
-      leading: Icon(Icons.dns_outlined, color: color),
-      title: Text(
-        store.config.baseUrl,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: Theme.of(context).textTheme.bodyMedium,
-      ),
-      subtitle: Row(
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 6),
-          Text(label, style: Theme.of(context).textTheme.labelSmall),
-        ],
+  /// The right pane: the Activity feed when the rail is toggled to activity,
+  /// otherwise the selected session's detail (or the empty-state).
+  Widget _detail(
+    BuildContext context,
+    FleetStore fleet,
+    CommanderStore? store,
+    SessionInfo? resolved,
+  ) {
+    if (_mode == _RailMode.activity) {
+      return const ActivityBody(showHeader: true);
+    }
+    if (resolved == null || store == null) return const _EmptyDetail();
+    return CommanderStoreScope(
+      store: store,
+      // Rekey per (server, session) so switching selection rebuilds the pane
+      // (back to the Agent tab + tears down the outgoing session's attach).
+      child: _DetailPane(
+        key: ValueKey('${store.config.id}:${resolved.id}'),
+        session: resolved,
+        api: store.api,
+        handle: store.handle,
+        onRefresh: fleet.refreshAll,
+        onDismiss: _clear,
       ),
     );
   }
-
-  (Color, String) _indicator(BuildContext context, ConnectionStateDto conn) {
-    final scheme = Theme.of(context).colorScheme;
-    return switch (conn.kind) {
-      ConnectionStateKind.connected => (Colors.green, 'Connected'),
-      ConnectionStateKind.connecting => (scheme.tertiary, 'Connecting…'),
-      ConnectionStateKind.degraded => (
-        scheme.error,
-        conn.reason.isEmpty ? 'Degraded' : 'Degraded: ${conn.reason}',
-      ),
-    };
-  }
 }
 
-/// Placeholder shown in the wide detail pane when no session is selected.
+/// Placeholder shown in the detail pane when no session is selected.
 class _EmptyDetail extends StatelessWidget {
   const _EmptyDetail();
 
   @override
   Widget build(BuildContext context) {
-    return Center(
+    final t = CommanderTokens.of(context);
+    return Container(
+      color: t.canvas,
+      alignment: Alignment.center,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.touch_app_outlined,
-            size: 48,
-            color: Theme.of(context).colorScheme.outline,
-          ),
-          const SizedBox(height: 12),
+          const BrandMark(size: 44),
+          const SizedBox(height: 16),
           Text(
             'Select a session',
             style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Pick a session from the fleet to open it.',
+            style: t.meta(size: 11, color: t.textFaint),
           ),
         ],
       ),
@@ -231,11 +280,24 @@ class _EmptyDetail extends StatelessWidget {
   }
 }
 
-enum _DetailTab { detail, terminal, shell, review }
+/// The detail tabs. Display labels are Overview / Agent / Shell / Changes;
+/// the enum spellings are kept from the previous segmented control so the wiring
+/// (detail→Overview, terminal→Agent, shell→Shell, review→Changes) is unchanged.
+enum _DetailTab {
+  detail('Overview'),
+  terminal('Agent'),
+  shell('Shell'),
+  review('Changes');
 
-/// The wide layout's right pane: a header with the session title and a
-/// segmented control switching between the detail, terminal, and review bodies
-/// in place (no route push).
+  const _DetailTab(this.label);
+  final String label;
+}
+
+/// The wide layout's detail pane: a header (state glyph + title + PR badge + meta
+/// + refresh), the tab strip, and the active tab's body switched in place (no
+/// route push). [ChromeWideDetail] frames all three — the tab strip is a
+/// horizontal underline row in Mission Control and a column of elbow blocks in
+/// LCARS — so this only says what the tabs are and what each one shows.
 class _DetailPane extends StatefulWidget {
   final SessionInfo session;
   final CommanderApi api;
@@ -243,6 +305,9 @@ class _DetailPane extends StatefulWidget {
   /// Null only transiently mid-reconnect; the terminal/review tabs need it, so
   /// they show a hint until a handle is available.
   final String? handle;
+
+  /// Refreshes every server (the detail pane header's refresh button).
+  final Future<void> Function() onRefresh;
 
   /// Clear the selection (used by the detail body's delete/dismiss).
   final VoidCallback onDismiss;
@@ -252,6 +317,7 @@ class _DetailPane extends StatefulWidget {
     required this.session,
     required this.api,
     required this.handle,
+    required this.onRefresh,
     required this.onDismiss,
   });
 
@@ -260,64 +326,49 @@ class _DetailPane extends StatefulWidget {
 }
 
 class _DetailPaneState extends State<_DetailPane> {
-  _DetailTab _tab = _DetailTab.detail;
+  /// Selecting a session lands on the live agent pane — the thing you almost
+  /// always came to look at. Overview is one tab away for the metadata.
+  _DetailTab _tab = _DetailTab.terminal;
 
   void _go(_DetailTab tab) => setState(() => _tab = tab);
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _header(context),
-        const Divider(height: 1),
-        Expanded(child: _content(context)),
-      ],
+    final session = widget.session;
+    final store = CommanderStoreScope.of(context);
+    final descriptor = sessionDescriptor(
+      session,
+      store?.agentStateFor(session.id) ?? AgentState.unknown,
     );
-  }
-
-  Widget _header(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              widget.session.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleMedium,
+    final serverName = store?.config.name;
+    return ChromeWideDetail(
+      ChromeWideDetailSpec(
+        glyph: SessionGlyph(descriptor, size: 12),
+        title: session.title,
+        meta: [
+          session.projectName,
+          session.branch,
+          session.program,
+          ?serverName,
+        ].join(' · '),
+        badge: session.prNumber == null
+            ? null
+            : prChip(context, session.prNumber!, session.prState),
+        refresh: ChromeButtonAction(
+          icon: Icons.refresh,
+          label: 'Refresh',
+          onPressed: () => widget.onRefresh(),
+        ),
+        tabs: [
+          for (final tab in _DetailTab.values)
+            ChromeWideTab(
+              tabKey: ValueKey('detail-tab-${tab.name}'),
+              label: tab.label,
             ),
-          ),
-          const SizedBox(width: 8),
-          SegmentedButton<_DetailTab>(
-            showSelectedIcon: false,
-            segments: const [
-              ButtonSegment(
-                value: _DetailTab.detail,
-                icon: Icon(Icons.info_outline),
-                label: Text('Detail'),
-              ),
-              ButtonSegment(
-                value: _DetailTab.terminal,
-                icon: Icon(Icons.terminal),
-                label: Text('Terminal'),
-              ),
-              ButtonSegment(
-                value: _DetailTab.shell,
-                icon: Icon(Icons.code),
-                label: Text('Shell'),
-              ),
-              ButtonSegment(
-                value: _DetailTab.review,
-                icon: Icon(Icons.rate_review),
-                label: Text('Review'),
-              ),
-            ],
-            selected: {_tab},
-            onSelectionChanged: (s) => _go(s.first),
-          ),
         ],
+        selected: _tab.index,
+        onSelect: (i) => _go(_DetailTab.values[i]),
+        content: _content(context),
       ),
     );
   }
@@ -334,6 +385,9 @@ class _DetailPaneState extends State<_DetailPane> {
           onOpenReview: () => _go(_DetailTab.review),
           onDeleted: widget.onDismiss,
           onDismiss: widget.onDismiss,
+          // The wide landscape layout has room for the terminal snapshot
+          // alongside everything else, so keep it.
+          showPanePreview: true,
         );
       case _DetailTab.terminal:
         if (handle == null) return const _Reconnecting();

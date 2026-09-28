@@ -3,7 +3,7 @@
 //! Thin wrappers over `CommanderService`: `list_sessions`,
 //! `find_session`/`find_session_exact`, `get_session_detail`,
 //! `get_pane_content`, `create_session`, `kill_session`, `restart_session`,
-//! `delete_session`.
+//! `restart_session_fresh`, `delete_session`.
 
 use axum::{
     Json,
@@ -13,9 +13,9 @@ use axum::{
 };
 use claude_commander_core::api::{
     ChangeProgram, CreateSessionOpts, PreviewData, PreviewTarget, RenameSession, SessionInfo,
-    SetSection,
+    SetSection, SetSessionBase, SetSessionBaseOutcome,
 };
-use claude_commander_core::cli::SessionLookup;
+use claude_commander_core::session::SessionLookup;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -139,6 +139,20 @@ pub async fn restart(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /sessions/{id}/restart-fresh` → `restart_session_fresh` → 204.
+///
+/// Distinct from `/restart`: this one never passes the agent's resume flag, so
+/// the relaunched pane starts a *fresh* conversation regardless of the server's
+/// `resume_session` config or whether the session was hibernated.
+pub async fn restart_fresh(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let id = parse_session_id(&id)?;
+    run_local(move || async move { state.service.restart_session_fresh(&id).await }).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `DELETE /sessions/{id}` → `delete_session` → 204.
 pub async fn delete(
     State(state): State<AppState>,
@@ -229,6 +243,26 @@ pub async fn keep_alive(
     Ok(Json(state.service.toggle_keep_alive(&id).await?))
 }
 
+/// `POST /sessions/{id}/base` → retarget the session's stack base, returning
+/// what happened (including whether the PR edit landed).
+///
+/// A POST sub-resource rather than a `PatchSession` variant because it answers
+/// with a body: `PATCH /sessions/{id}` is uniformly 204, and the caller cannot
+/// compute the PR outcome for itself.
+pub async fn set_base(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SetSessionBase>,
+) -> Result<Json<SetSessionBaseOutcome>, ApiError> {
+    let id = parse_session_id(&id)?;
+    Ok(Json(
+        state
+            .service
+            .set_session_base(&id, body.parent_session_id)
+            .await?,
+    ))
+}
+
 /// Body for the batch mark-unread route: the session ids to flag.
 #[derive(Debug, Deserialize)]
 pub struct UnreadBody {
@@ -272,6 +306,7 @@ mod tests {
             .route("/sessions/{q}/pane", get(super::pane))
             .route("/sessions/{id}/kill", post(super::kill))
             .route("/sessions/{id}/restart", post(super::restart))
+            .route("/sessions/{id}/restart-fresh", post(super::restart_fresh))
             .route(
                 "/sessions/{id}",
                 axum::routing::delete(super::delete).patch(super::patch),
@@ -295,6 +330,10 @@ mod tests {
 
         let mut config = Config::default();
         config.telemetry.enabled = false;
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it under `dir`, matching the shared
+        // `handlers/test_support.rs` fixture.
+        config.projects_dir = Some(dir.path().join("projects"));
         let mut core = CoreState::default();
         let mut project = Project::new("p", std::path::PathBuf::from("/tmp/p"), "main");
         let pid = project.id;
@@ -427,6 +466,29 @@ mod tests {
         assert_eq!(status, 400);
     }
 
+    /// The no-resume restart is its own route, reachable and validated like the
+    /// resuming one: a malformed id is a 400 and an unknown-but-valid id a 404
+    /// (which also proves `/restart-fresh` is wired and not shadowed by
+    /// `/restart`).
+    #[tokio::test]
+    async fn restart_fresh_validates_id_and_is_wired() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+
+        let req = Request::post("/sessions/not-a-uuid/restart-fresh")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 400);
+
+        let req = Request::post(format!("/sessions/{}/restart-fresh", uuid::Uuid::new_v4()))
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 404);
+    }
+
     /// Preview for an unknown session id is a 404.
     #[tokio::test]
     async fn preview_unknown_is_404() {
@@ -482,6 +544,22 @@ mod tests {
             .unwrap();
         let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
         assert_eq!(status, 400);
+    }
+
+    /// A base retarget on an unknown session is a 404, not the rejection enum's
+    /// 400/409 — the service maps `SessionNotFound` back to `NotFound` precisely
+    /// so this convention holds across every session route.
+    #[tokio::test]
+    async fn post_base_unknown_session_is_404() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        let req = Request::post(format!("/sessions/{}/base", uuid::Uuid::new_v4()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"parent_session_id":null}"#))
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 404);
     }
 
     /// A `set_section` PATCH on an unknown session id is a 404 (existence check).

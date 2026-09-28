@@ -6,12 +6,13 @@
 
 use std::fmt;
 
-use ratatui::style::Color;
+use diffgrid::style::Appearance;
+use ratatui_core::style::Color;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // ---------------------------------------------------------------------------
-// ColorValue — a serde-friendly wrapper around ratatui::style::Color
+// ColorValue — a serde-friendly wrapper around ratatui_core::style::Color
 // ---------------------------------------------------------------------------
 
 /// A user-facing color value that deserializes from:
@@ -233,6 +234,68 @@ impl<'de> Visitor<'de> for AgentWorkingStyleVisitor {
 }
 
 // ---------------------------------------------------------------------------
+// AppearanceValue — light/dark terminal background, declared by the user
+// ---------------------------------------------------------------------------
+
+/// Whether the terminal this runs in draws light text on a dark background or
+/// the other way round.
+///
+/// Nothing detects this: the terminal only reports its background via `OSC 11`,
+/// which is deliberately out of scope, so it is a claim the user makes about
+/// their own terminal. It matters because a derived *fill* (the review diff
+/// view's line bands) has to be blended toward the surface it sits on —
+/// blending toward black on a light terminal gives a near-black band under dark
+/// text.
+///
+/// Spelled out rather than reusing [`diffgrid::style::Appearance`] directly so
+/// the TOML spelling is ours and core needn't turn on diffgrid's `serde`
+/// feature for one enum — the same reason [`ColorValue`] wraps
+/// `ratatui::style::Color`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppearanceValue {
+    /// Light text on a dark background — the assumption every preset ships with.
+    #[default]
+    Dark,
+    /// Dark text on a light background.
+    Light,
+}
+
+impl AppearanceValue {
+    /// The config spelling, as written in `config.toml` and shown in settings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    /// Parse a config spelling, case-insensitively. `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
+
+impl From<AppearanceValue> for Appearance {
+    fn from(v: AppearanceValue) -> Self {
+        match v {
+            AppearanceValue::Dark => Appearance::Dark,
+            AppearanceValue::Light => Appearance::Light,
+        }
+    }
+}
+
+impl fmt::Display for AppearanceValue {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ThemeOverrides — optional per-field overrides loaded from [theme]
 // ---------------------------------------------------------------------------
 
@@ -242,12 +305,20 @@ impl<'de> Visitor<'de> for AgentWorkingStyleVisitor {
 /// The `project_colors: Vec<(Color, Color)>` field from `Theme` is
 /// intentionally omitted — paired-tuple arrays are awkward in TOML and
 /// the feature has minimal user demand.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeOverrides {
     /// Force a base palette: "basic", "indexed", or "truecolor".
     /// When set, the named palette is used instead of auto-detection.
     pub preset: Option<String>,
+
+    /// Declare the terminal background as `"dark"` or `"light"`.
+    ///
+    /// Unset means "whatever the preset says", which today is dark for every
+    /// one of them — so the default behaviour is unchanged. Set it to
+    /// `"light"` on a light terminal and derived fills (the review diff view's
+    /// add/remove bands) blend toward white instead of black.
+    pub appearance: Option<AppearanceValue>,
 
     // Pane borders
     pub border_focused: Option<ColorValue>,
@@ -294,6 +365,8 @@ pub struct ThemeOverrides {
     pub diff_hunk_header: Option<ColorValue>,
     pub diff_file_header: Option<ColorValue>,
     pub diff_context: Option<ColorValue>,
+    pub diff_expand_bg: Option<ColorValue>,
+    pub diff_hunk_header_bg: Option<ColorValue>,
 
     // Modal borders
     pub modal_info: Option<ColorValue>,
@@ -307,6 +380,10 @@ pub struct ThemeOverrides {
     // Status bar
     pub status_bar_bg: Option<ColorValue>,
     pub status_bar_fg: Option<ColorValue>,
+    /// Accent for the hotkey letter in `[n]ew session` and the board's top-bar
+    /// title. Distinct from `text_accent` because both are painted *on the status
+    /// bar*, so they must contrast with `status_bar_bg` rather than the canvas.
+    pub status_bar_accent: Option<ColorValue>,
 }
 
 #[cfg(test)]
@@ -316,7 +393,7 @@ mod tests {
     // ---- ColorValue deserialization -----------------------------------------
 
     /// Helper wrapper so we can test ColorValue via TOML key = value pairs
-    #[derive(Deserialize)]
+    #[derive(Deserialize, Serialize)]
     struct Wrap {
         c: ColorValue,
     }
@@ -349,6 +426,49 @@ mod tests {
     #[test]
     fn test_color_value_reset() {
         assert_eq!(parse_color("\"reset\"").0, Color::Reset);
+    }
+
+    /// Every form a `[theme]` value may take, pinned in one place with its
+    /// serialized spelling.
+    ///
+    /// `config.toml` is never rewritten, so each of these four forms is
+    /// permanently load-bearing: a user's file written years ago must still
+    /// parse. `ColorValue`'s `Serialize`/`Deserialize` are hand-written over a
+    /// `Color` owned by an external crate, which makes them exactly the kind of
+    /// thing a dependency swap can silently change — this asserts round-trip
+    /// stability so such a change fails loudly instead.
+    ///
+    /// The parse side is covered per-form above; what this adds is the
+    /// *serialize* direction (notably `Reset`, which no other round-trip test
+    /// reaches) and proof that parse and serialize agree.
+    #[test]
+    fn test_color_value_all_config_forms_roundtrip() {
+        // (TOML literal as it may appear in config.toml, parsed Color)
+        let cases = [
+            ("\"reset\"", Color::Reset),
+            ("\"dark_gray\"", Color::DarkGray),
+            ("117", Color::Indexed(117)),
+            ("\"#89b4fa\"", Color::Rgb(137, 180, 250)),
+        ];
+        for (literal, expected) in cases {
+            let parsed = parse_color(literal);
+            assert_eq!(parsed.0, expected, "parsing {literal}");
+
+            // Serializing must reproduce the same TOML literal, so a rewritten
+            // value re-parses identically.
+            let emitted = toml::to_string(&Wrap { c: parsed }).expect("serialize");
+            let emitted_value = emitted
+                .trim()
+                .strip_prefix("c = ")
+                .unwrap_or_else(|| panic!("unexpected TOML shape: {emitted:?}"))
+                .to_string();
+            assert_eq!(emitted_value, literal, "serializing {expected:?}");
+            assert_eq!(
+                parse_color(&emitted_value).0,
+                expected,
+                "re-parsing {emitted_value}"
+            );
+        }
     }
 
     // ---- AgentWorkingStyle deserialization ----------------------------------
@@ -452,6 +572,35 @@ mod tests {
         // Unset fields remain None
         assert!(overrides.border_unfocused.is_none());
         assert!(overrides.diff_added.is_none());
+    }
+
+    #[test]
+    fn test_theme_appearance_parses_from_toml() {
+        let overrides: ThemeOverrides = toml::from_str(r#"appearance = "light""#).unwrap();
+        assert_eq!(overrides.appearance, Some(AppearanceValue::Light));
+        assert_eq!(
+            Appearance::from(overrides.appearance.unwrap()),
+            Appearance::Light
+        );
+
+        // Unset is the common case and must not imply a surface of its own —
+        // the preset's declaration wins.
+        let none: ThemeOverrides = toml::from_str("").unwrap();
+        assert!(none.appearance.is_none());
+    }
+
+    #[test]
+    fn test_appearance_value_parse_is_case_insensitive_and_strict() {
+        assert_eq!(
+            AppearanceValue::parse("Light"),
+            Some(AppearanceValue::Light)
+        );
+        assert_eq!(
+            AppearanceValue::parse(" dark "),
+            Some(AppearanceValue::Dark)
+        );
+        assert_eq!(AppearanceValue::parse("solarized"), None);
+        assert_eq!(AppearanceValue::Light.as_str(), "light");
     }
 
     // ---- TOML round-trip ----------------------------------------------------

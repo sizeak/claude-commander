@@ -4,8 +4,12 @@
 //! partial `update`, `reload_config`, and `check_tmux` (the `/health/tmux`
 //! 200/503 probe).
 //!
-//! Note: the server's own bind/token config is deliberately NOT exposed here —
-//! it lives only in the server crate, so this endpoint can't leak or clobber it.
+//! Note: the server's own `[server]` settings ARE part of core's `Config` (so
+//! that `ConfigStore` stops deleting them on every write), which means this
+//! endpoint has to keep them safe explicitly rather than by their absence:
+//! `read` redacts `server.token` via [`Config::with_secrets_redacted`], and
+//! `ConfigPatch` is `deny_unknown_fields` with no `server` field, so a body that
+//! so much as mentions it is rejected. Both are pinned by tests below.
 //!
 //! `update` is a **partial** update over an explicit allow-list (see
 //! [`ConfigPatch`]). A full-replace `PUT` would let a remote client rewrite
@@ -31,6 +35,9 @@ use axum::{
 use claude_commander_core::Config;
 use claude_commander_core::api::SetProgramsRequest;
 use claude_commander_core::error::SessionError;
+use claude_commander_protocol::workspace::{
+    DeleteWorkspaceRequest, RenameWorkspaceRequest, SetWorkspacesRequest,
+};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -40,8 +47,15 @@ use crate::state::AppState;
 /// `GET /config` → `read_config`, with credential fields cleared: the caller
 /// proved it holds THIS server's token — not the remote-server tokens, STT
 /// API key, or telemetry credential the shared config file may also contain.
+///
+/// `[workspace_themes]` is left out too. It is not a secret, but it is this
+/// host's own cosmetics, which the workspace design keeps off the wire (every
+/// client themes its workspaces for itself), and no client reads it; like
+/// `[theme]` it cannot be set here either (`ConfigPatch` has no such field).
 pub async fn read(State(state): State<AppState>) -> Json<Config> {
-    Json(state.service.read_config().with_secrets_redacted())
+    let mut config = state.service.read_config().with_secrets_redacted();
+    config.workspace_themes.clear();
+    Json(config)
 }
 
 /// Partial config update: every field is optional, and only the fields below —
@@ -75,8 +89,6 @@ pub struct ConfigPatch {
     pub agent_state_poll_interval_ms: Option<u64>,
     pub invert_pr_label_color: Option<bool>,
     pub show_session_program: Option<bool>,
-    pub dim_unfocused_preview: Option<bool>,
-    pub dim_unfocused_opacity: Option<f32>,
     pub session_number_debounce_ms: Option<u64>,
     pub ai_summary_enabled: Option<bool>,
     pub rounded_borders: Option<bool>,
@@ -109,8 +121,6 @@ impl ConfigPatch {
         set!(agent_state_poll_interval_ms);
         set!(invert_pr_label_color);
         set!(show_session_program);
-        set!(dim_unfocused_preview);
-        set!(dim_unfocused_opacity);
         set!(session_number_debounce_ms);
         set!(ai_summary_enabled);
         set!(rounded_borders);
@@ -120,8 +130,8 @@ impl ConfigPatch {
 }
 
 /// Validate a merged config before persisting. Catches values that would break
-/// the running app (a zero refresh rate, an out-of-range opacity, a zero tmux
-/// concurrency). Returns a 400 `ApiError` on failure.
+/// the running app (a zero refresh rate, a zero tmux concurrency). Returns a
+/// 400 `ApiError` on failure.
 fn validate(cfg: &Config) -> Result<(), ApiError> {
     let invalid = |key: &str, reason: &str| {
         ApiError(
@@ -137,12 +147,6 @@ fn validate(cfg: &Config) -> Result<(), ApiError> {
     }
     if cfg.max_concurrent_tmux == 0 {
         return Err(invalid("max_concurrent_tmux", "must be greater than zero"));
-    }
-    if !(0.0..=1.0).contains(&cfg.dim_unfocused_opacity) {
-        return Err(invalid(
-            "dim_unfocused_opacity",
-            "must be between 0.0 and 1.0",
-        ));
     }
     Ok(())
 }
@@ -177,6 +181,41 @@ pub async fn put_programs(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PUT /config/workspaces` → replace the workspace definitions (plus, when
+/// given, Main's label and the startup choice) → 204. Never re-tags a project;
+/// a refused name or duplicate is a 400. Like `programs`, workspaces have
+/// their own route rather than a `ConfigPatch` field.
+pub async fn put_workspaces(
+    State(state): State<AppState>,
+    Json(req): Json<SetWorkspacesRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.service.set_workspace_defs(req)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /config/workspaces/rename` `{from, to}` → rename a workspace and
+/// rewrite its projects' tags → 204. Idempotent: an unknown `from` is a no-op
+/// 204, so a rename sent to every server is safe on the ones without it.
+pub async fn rename_workspace(
+    State(state): State<AppState>,
+    Json(req): Json<RenameWorkspaceRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.service.rename_workspace(&req.from, &req.to).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /config/workspaces/delete` `{name}` → drop a workspace, moving its
+/// projects to Main → 204 (a no-op 204 when unknown). A POST with a body, not
+/// `DELETE /config/workspaces/{name}`: every string is a valid name, including
+/// the static segments beside that capture.
+pub async fn delete_workspace(
+    State(state): State<AppState>,
+    Json(req): Json<DeleteWorkspaceRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.service.delete_workspace(&req.name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /config/reload` → `reload_config` → `{ "reloaded": bool }`
 /// (true when the on-disk config differed and was re-read).
 pub async fn reload(State(state): State<AppState>) -> Result<Response, ApiError> {
@@ -202,7 +241,7 @@ mod tests {
     use axum::http::Request;
     use axum::{
         Router,
-        routing::{get, put},
+        routing::{get, post, put},
     };
     use claude_commander_core::Config;
     use tempfile::TempDir;
@@ -214,6 +253,9 @@ mod tests {
         Router::new()
             .route("/config", get(super::read).patch(super::update))
             .route("/config/programs", put(super::put_programs))
+            .route("/config/workspaces", put(super::put_workspaces))
+            .route("/config/workspaces/rename", post(super::rename_workspace))
+            .route("/config/workspaces/delete", post(super::delete_workspace))
             .with_state(state)
     }
 
@@ -275,6 +317,38 @@ mod tests {
         assert!(text.contains("http://other:7878"));
     }
 
+    /// Workspace themes are the host's own cosmetics and never go on the wire
+    /// (docs/configuration.md): `GET /config` leaves `[workspace_themes]` out,
+    /// just as `ConfigPatch` refuses to set it.
+    #[tokio::test]
+    async fn read_config_leaves_out_workspace_themes() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        state
+            .service
+            .update_config({
+                let mut c = state.service.read_config();
+                c.workspace_themes.insert(
+                    "Work".into(),
+                    claude_commander_core::config::ThemeOverrides {
+                        preset: Some("basic".into()),
+                        ..Default::default()
+                    },
+                );
+                c
+            })
+            .unwrap();
+
+        let (status, body) = do_get(router(state.clone()), "/config").await;
+        assert_eq!(status, 200);
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("workspace_themes"), "{text}");
+        assert!(
+            !state.service.read_config().workspace_themes.is_empty(),
+            "only the response omits them"
+        );
+    }
+
     /// An allow-listed field updates and persists; nothing else changes.
     #[tokio::test]
     async fn patch_updates_allowed_field() {
@@ -290,6 +364,71 @@ mod tests {
         assert_eq!(after.ui_refresh_fps, 45);
         // An untouched field keeps its prior value.
         assert_eq!(after.worktrees_dir, before.worktrees_dir);
+    }
+
+    /// The `[server]` table is part of core's `Config` now, so `GET /config`
+    /// would serialise this server's own bearer token to every client holding it
+    /// unless redaction covers it.
+    #[tokio::test]
+    async fn get_config_redacts_the_servers_own_token() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        state
+            .service
+            .update_config({
+                let mut c = state.service.read_config();
+                c.server.port = 9999;
+                c.server.token = Some("own-secret".into());
+                c
+            })
+            .unwrap();
+
+        let (status, body) = do_get(router(state), "/config").await;
+        assert_eq!(status, 200);
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("own-secret"), "token leaked: {text}");
+        // The non-secret part of the table still comes through.
+        assert!(text.contains("9999"), "{text}");
+    }
+
+    /// A remote client must not be able to move this server's own bind address,
+    /// port or token. `ConfigPatch` has no `server` field and is
+    /// `deny_unknown_fields`, so naming it is a 4xx rather than a silent drop.
+    #[tokio::test]
+    async fn patch_rejects_the_server_table() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let before = state.service.read_config();
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({ "server": { "bind": "0.0.0.0" } }),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "patching [server] must be a 4xx, got {status}"
+        );
+        assert_eq!(state.service.read_config().server, before.server);
+    }
+
+    /// Per-workspace themes are local TUI config, never remotely writable:
+    /// `ConfigPatch` has no `workspace_themes` field, so naming it is a 4xx.
+    #[tokio::test]
+    async fn patch_rejects_workspace_themes() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({ "workspace_themes": { "Work": { "preset": "basic" } } }),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "patching [workspace_themes] must be a 4xx, got {status}"
+        );
+        assert!(state.service.read_config().workspace_themes.is_empty());
     }
 
     /// A sensitive path field cannot be changed: `deny_unknown_fields` rejects a
@@ -379,6 +518,120 @@ mod tests {
         let status = put_programs(state.clone(), serde_json::json!({ "programs": [] })).await;
         assert_eq!(status, 204);
         assert!(state.service.read_config().programs.is_empty());
+    }
+
+    async fn send_json(
+        state: AppState,
+        method: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::http::StatusCode {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        send(router(state), req).await.0
+    }
+
+    /// `PUT /config/workspaces` replaces the definitions; the snapshot serves
+    /// them back.
+    #[tokio::test]
+    async fn put_workspaces_updates_config_and_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let status = send_json(
+            state.clone(),
+            "PUT",
+            "/config/workspaces",
+            serde_json::json!({
+                "workspaces": [{"name": "Work"}, {"name": "Play"}],
+                "main": {"name": "Home"},
+                "startup_workspace": "Work"
+            }),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let snap = state.service.snapshot().await.unwrap();
+        let names: Vec<_> = snap.workspaces.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Work", "Play"]);
+        assert_eq!(snap.main_workspace.unwrap().name, "Home");
+    }
+
+    /// A refused list (reserved name) is a 400 and writes nothing.
+    #[tokio::test]
+    async fn put_workspaces_rejects_a_reserved_name() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let status = send_json(
+            state.clone(),
+            "PUT",
+            "/config/workspaces",
+            serde_json::json!({ "workspaces": [{"name": "last"}] }),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(state.service.read_config().workspaces.is_empty());
+    }
+
+    /// Rename and delete are idempotent 204s, and rewrite what they name.
+    #[tokio::test]
+    async fn rename_and_delete_workspace_routes() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        send_json(
+            state.clone(),
+            "PUT",
+            "/config/workspaces",
+            serde_json::json!({ "workspaces": [{"name": "Work"}] }),
+        )
+        .await;
+        let renamed = send_json(
+            state.clone(),
+            "POST",
+            "/config/workspaces/rename",
+            serde_json::json!({ "from": "Work", "to": "Job" }),
+        )
+        .await;
+        assert_eq!(renamed, 204);
+        assert_eq!(state.service.read_config().workspaces[0].name, "Job");
+        let unknown = send_json(
+            state.clone(),
+            "POST",
+            "/config/workspaces/rename",
+            serde_json::json!({ "from": "Nope", "to": "Other" }),
+        )
+        .await;
+        assert_eq!(unknown, 204, "renaming an unknown workspace is a no-op");
+
+        // A workspace may be *named* "delete" — the body carries the name.
+        for name in ["Job", "delete"] {
+            let status = send_json(
+                state.clone(),
+                "POST",
+                "/config/workspaces/delete",
+                serde_json::json!({ "name": name }),
+            )
+            .await;
+            assert_eq!(status, 204);
+        }
+        assert!(state.service.read_config().workspaces.is_empty());
+    }
+
+    /// Workspaces stay off the general PATCH surface, like `programs`.
+    #[tokio::test]
+    async fn patch_rejects_workspace_fields() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        for body in [
+            serde_json::json!({ "workspaces": [{"name": "Work"}] }),
+            serde_json::json!({ "startup_workspace": "main" }),
+            serde_json::json!({ "main_workspace": {"name": "Home"} }),
+        ] {
+            let status = patch(state.clone(), body).await;
+            assert!(status.is_client_error(), "got {status}");
+        }
     }
 
     /// `programs` remains off-limits on the general PATCH surface: the dedicated

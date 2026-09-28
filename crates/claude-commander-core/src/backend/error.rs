@@ -13,7 +13,7 @@
 
 use thiserror::Error;
 
-use crate::error::{Error as CoreError, SessionError, TmuxError};
+use crate::error::{Error as CoreError, GitError, SessionError, TmuxError};
 
 use super::run_local::RunLocalError;
 
@@ -78,11 +78,19 @@ impl From<CoreError> for BackendError {
                 SessionError::InvalidName { .. } | SessionError::InvalidProgram(_),
             ) => BackendError::InvalidRequest(err.to_string()),
 
-            CoreError::Tmux(TmuxError::NotInstalled | TmuxError::ServerNotRunning) => {
-                BackendError::Unavailable {
-                    reason: err.to_string(),
-                }
+            // A refused clone source/destination name: nothing failed, the
+            // *request* is unusable. Its message is redacted at construction
+            // (`clone_source_rejected`), so surfacing it cannot echo a credential.
+            CoreError::Git(GitError::CloneSourceRejected(_)) => {
+                BackendError::InvalidRequest(err.to_string())
             }
+
+            // A missing backing tool, joining tmux: `gh` is installable, which is
+            // why core carved this out of `OperationFailed`.
+            CoreError::Tmux(TmuxError::NotInstalled | TmuxError::ServerNotRunning)
+            | CoreError::Git(GitError::GhUnavailable) => BackendError::Unavailable {
+                reason: err.to_string(),
+            },
 
             _ => BackendError::Local(err),
         }
@@ -159,6 +167,54 @@ mod tests {
     fn other_errors_stay_local() {
         let e = CoreError::Git(GitError::OperationFailed("boom".into()));
         assert!(matches!(BackendError::from(e), BackendError::Local(_)));
+    }
+
+    /// A refused clone source is the *caller's* mistake, and the server already
+    /// answers it with a 400 — which a remote backend turns into
+    /// `InvalidRequest`. The local backend has to reach the same category from
+    /// the same core error, or one frontend message can't cover both transports.
+    /// Asserted next to `OperationFailed` because the pair is the point: same
+    /// shape, and only the variant separates a bad request from a broken backend.
+    #[test]
+    fn a_refused_clone_source_maps_to_invalid_request() {
+        let e = CoreError::Git(GitError::CloneSourceRejected("nope".into()));
+        // The exact string a remote backend would carry: the server's 400 body is
+        // `CoreError::to_string()` too (`server/src/error.rs`'s `IntoResponse`),
+        // so both transports hand a frontend the same message.
+        assert!(matches!(
+            BackendError::from(e),
+            BackendError::InvalidRequest(m) if m == "Git error: nope"
+        ));
+        assert!(matches!(
+            BackendError::from(CoreError::Git(GitError::OperationFailed("nope".into()))),
+            BackendError::Local(_)
+        ));
+    }
+
+    /// A missing `gh` joins missing tmux in `Unavailable`: it is a backing tool
+    /// the user can install, which is why core carved it out of
+    /// `OperationFailed`, and the server maps it to a 503 the remote backend
+    /// already turns into `Unavailable`.
+    #[test]
+    fn missing_gh_maps_to_unavailable() {
+        assert!(matches!(
+            BackendError::from(CoreError::Git(GitError::GhUnavailable)),
+            BackendError::Unavailable { .. }
+        ));
+    }
+
+    /// A repo listing that overran must **not** join it there. `Unavailable` is
+    /// what frontends word as "install gh", so a timeout landing in that bucket
+    /// would tell a user to install a `gh` they demonstrably have. It falls to
+    /// `Local`, carrying its own message, exactly as `CloneTimedOut` does.
+    #[test]
+    fn a_timed_out_repo_listing_is_not_unavailable() {
+        let err = BackendError::from(CoreError::Git(GitError::RepoListTimedOut { secs: 90 }));
+        assert!(
+            matches!(err, BackendError::Local(_)),
+            "a timeout is a failure with a reason, not a missing tool: {err:?}"
+        );
+        assert!(err.to_string().contains("timed out"), "{err}");
     }
 
     #[test]

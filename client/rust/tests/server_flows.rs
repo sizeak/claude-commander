@@ -6,7 +6,7 @@
 //!
 //! ## Why a plain `#[test]` holding a `Runtime` (not `#[tokio::test]`)
 //!
-//! The cdylib's route fns now resolve a [`RemoteClient`] from the server handle
+//! The cdylib's route fns now resolve a `RemoteClient` from the server handle
 //! and `block_on` its async call on the cdylib's *own* shared runtime. A nested
 //! `block_on` (calling one from inside another runtime's `block_on`) panics, so
 //! each test owns a multi-thread `Runtime` used **only** for async setup/teardown
@@ -27,13 +27,20 @@
 //! e2e.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use claude_commander_core::api::CreateSessionOpts;
 use claude_commander_core::session::SessionId;
 use claude_commander_protocol::api::{OperationKind, ProgramInfo};
-use claude_commander_test_support::{create_test_repo, spawn_server, test_state, tmux_available};
-use rust_lib_claude_commander_client::api::mirrors::OperationOutcomeKind;
-use rust_lib_claude_commander_client::api::{registry, review, simple};
+use claude_commander_protocol::github::CloneJobId;
+use claude_commander_test_support::{
+    create_test_repo, run_git, spawn_server, test_state, tmux_available,
+};
+use rust_lib_claude_commander_client::api::mirrors::{
+    CloneJobDto, CloneRequestDto, CloneSourceDto, CloneSourceKind, CloneStatusKind,
+    OperationOutcomeKind,
+};
+use rust_lib_claude_commander_client::api::{diff, registry, review, simple};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -74,7 +81,7 @@ impl Fixture {
         let state = test_state(&data, &worktrees);
         let service = state.service.clone();
         let addr = rt.block_on(spawn_server(state));
-        rt.block_on(service.add_project(repo_path.clone()))
+        rt.block_on(service.add_project(repo_path.clone(), None))
             .expect("register project");
         let base = format!("http://{addr}");
         // Connect through the cdylib registry — validates the URL and spawns the
@@ -177,8 +184,7 @@ fn list_create_detail_kill_round_trip() {
         "created session {id} should appear in list_sessions"
     );
 
-    let detail =
-        simple::get_session_detail(fx.handle.clone(), id.clone(), Some(50)).unwrap();
+    let detail = simple::get_session_detail(fx.handle.clone(), id.clone(), Some(50)).unwrap();
     assert!(detail.is_some(), "detail should resolve the full id");
     assert_eq!(detail.unwrap().info.id, id);
 
@@ -213,8 +219,7 @@ fn join_existing_by_prefix() {
     // `SessionId`'s Display is the 8-char prefix a client sees in the UI.
     let prefix = sid.to_string();
 
-    let detail =
-        simple::get_session_detail(fx.handle.clone(), prefix.clone(), Some(20)).unwrap();
+    let detail = simple::get_session_detail(fx.handle.clone(), prefix.clone(), Some(20)).unwrap();
     let detail = detail.expect("an 8-char prefix should resolve the existing session");
     assert!(
         detail.info.id.starts_with(&prefix),
@@ -225,14 +230,14 @@ fn join_existing_by_prefix() {
     fx.kill(&sid);
 }
 
-/// The workspace snapshot carries the registered project and any live sessions.
+/// The snapshot carries the registered project and any live sessions.
 #[test]
-fn workspace_snapshot_lists_projects_and_sessions() {
+fn snapshot_lists_projects_and_sessions() {
     let Some(fx) = Fixture::start() else { return };
     let sid = fx.create_session("cdylib-snapshot");
     let id = full_id(&sid);
 
-    let snap = simple::workspace_snapshot(fx.handle.clone()).expect("workspace_snapshot");
+    let snap = simple::snapshot(fx.handle.clone()).expect("snapshot");
     assert!(
         snap.projects
             .iter()
@@ -261,7 +266,9 @@ fn agent_states_snapshot_round_trips() {
     // (0xc03adecc…) is filtered out by the DTO conversion.
     let sentinel = Uuid::from_u128(0xc0_3a_de_cc_00_00_00_00_00_00_00_00_00_00_00_00);
     assert!(
-        snap.states.iter().all(|e| *e.session_id.as_uuid() != sentinel),
+        snap.states
+            .iter()
+            .all(|e| *e.session_id.as_uuid() != sentinel),
         "the commander sentinel must never appear in the flattened states"
     );
 
@@ -310,7 +317,7 @@ fn rename_and_set_section_round_trip() {
 
     simple::rename_session(fx.handle.clone(), id.clone(), "renamed-title".to_string())
         .expect("rename_session");
-    let snap = simple::workspace_snapshot(fx.handle.clone()).unwrap();
+    let snap = simple::snapshot(fx.handle.clone()).unwrap();
     assert_eq!(
         snap.sessions
             .iter()
@@ -337,7 +344,7 @@ fn mark_unread_then_read_round_trip() {
     let id = full_id(&sid);
 
     let unread = |fx: &Fixture| -> bool {
-        simple::workspace_snapshot(fx.handle.clone())
+        simple::snapshot(fx.handle.clone())
             .unwrap()
             .sessions
             .iter()
@@ -380,6 +387,7 @@ fn projects_add_list_branches_and_scan() {
     let new_id = simple::add_project(
         fx.handle.clone(),
         second_path.to_string_lossy().into_owned(),
+        None,
     )
     .expect("add_project");
     assert!(
@@ -387,7 +395,7 @@ fn projects_add_list_branches_and_scan() {
         "add_project must return a valid project id"
     );
 
-    let snap = simple::workspace_snapshot(fx.handle.clone()).unwrap();
+    let snap = simple::snapshot(fx.handle.clone()).unwrap();
     assert!(
         snap.projects.len() >= 2,
         "both the fixture repo and the added repo should be registered (got {})",
@@ -400,12 +408,9 @@ fn projects_add_list_branches_and_scan() {
         .iter()
         .find(|p| p.repo_path == fx.repo_path.to_string_lossy())
         .expect("original project present");
-    let branches = simple::list_branches(
-        fx.handle.clone(),
-        original.id.as_uuid().to_string(),
-        false,
-    )
-    .expect("list_branches");
+    let branches =
+        simple::list_branches(fx.handle.clone(), original.id.as_uuid().to_string(), false)
+            .expect("list_branches");
     assert!(
         !branches.is_empty(),
         "a committed repo must have at least one branch"
@@ -418,13 +423,257 @@ fn projects_add_list_branches_and_scan() {
         .expect("repo has a parent dir")
         .to_string_lossy()
         .into_owned();
-    let scan = simple::scan_directory(fx.handle.clone(), parent).expect("scan_directory");
+    let scan = simple::scan_directory(fx.handle.clone(), parent, None).expect("scan_directory");
     assert!(
         scan.added + scan.skipped >= 1,
         "scanning the parent dir should see the repo (added or skipped)"
     );
 
     drop(second_repo);
+}
+
+/// Seed a bare repo with one commit on `main` inside `dir` and return its
+/// **plain local path** — the string a user pastes into the clone box, and what
+/// `validate_clone_url` admits absolute local paths for.
+///
+/// Network-free by construction: the "remote" is a directory in a `TempDir`, so
+/// this flow never reaches GitHub (and needs no `gh`, no credentials and no
+/// connectivity in CI). A third copy of a fixture core also has in `git::clone`
+/// and `api.rs` — both of those live in `#[cfg(test)]` modules, so neither is
+/// reachable from an integration test in another crate.
+async fn seed_bare_repo(dir: &TempDir) -> PathBuf {
+    let remote = dir.path().join("remote.git");
+    let seed = dir.path().join("seed");
+    tokio::fs::create_dir_all(&seed).await.unwrap();
+    run_git(dir.path(), &["init", "--bare", "-b", "main", "remote.git"]).await;
+    run_git(&seed, &["init", "-b", "main"]).await;
+    run_git(&seed, &["config", "user.email", "t@t.t"]).await;
+    run_git(&seed, &["config", "user.name", "t"]).await;
+    tokio::fs::write(seed.join("README"), "v1\n").await.unwrap();
+    run_git(&seed, &["add", "."]).await;
+    run_git(&seed, &["commit", "-m", "initial"]).await;
+    run_git(
+        &seed,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    run_git(&seed, &["push", "origin", "main"]).await;
+    remote
+}
+
+/// Poll a clone job through the cdylib's `clone_job` route until it leaves
+/// `Running`, bounded so a wedged clone fails the test rather than hanging it
+/// (~20s of real time).
+///
+/// A plain fn using `std::thread::sleep`, not an `async` one: `simple::clone_job`
+/// `block_on`s the cdylib's own runtime, so like every other route call here it
+/// must run on the test thread rather than inside the fixture runtime (see the
+/// module docs).
+///
+/// The polling lives here, not in the bridge: `clone_job` is a single request by
+/// design, and every frontend drives its own cadence.
+fn await_clone(handle: &str, id: CloneJobId) -> CloneJobDto {
+    for _ in 0..1_000 {
+        let job = simple::clone_job(handle.to_string(), id)
+            .expect("clone_job must not error")
+            .expect("an in-flight job must not read as absent");
+        if !matches!(job.status.kind, CloneStatusKind::Running) {
+            return job;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("clone job {id} never reached a terminal status");
+}
+
+/// The clone route group end to end **through the frb bridge**: start a clone
+/// from a local bare repo, poll it to `Succeeded`, and confirm the checkout was
+/// registered as a project the client can see.
+///
+/// Driving `simple::` rather than `RemoteClient` is the point — it is the exact
+/// surface Dart calls, so it also pins the DTO flattening (`CloneJobDto.dest`
+/// stringified, `CloneStatusDto.project_id` populated for `Succeeded`) that the
+/// clone page reads.
+///
+/// Also pins the two answers a poller depends on: an unknown job id is
+/// `Ok(None)` (not an error — Task 6's registry prunes terminal jobs, so a client
+/// polling a pruned job must not see a hard failure), and `GET /github/repos`
+/// resolves as a *route* even where `gh` is absent.
+#[test]
+fn clone_from_a_local_bare_repo_registers_a_project() {
+    let Some(fx) = Fixture::start() else { return };
+
+    let remote_dir = TempDir::new().unwrap();
+    let remote = fx.rt.block_on(seed_bare_repo(&remote_dir));
+
+    // -- 202 Accepted carries the whole job, so the first status arrives with the
+    // id rather than needing a second round trip.
+    let started = simple::start_clone(
+        fx.handle.clone(),
+        CloneRequestDto {
+            source: CloneSourceDto {
+                kind: CloneSourceKind::Url,
+                value: remote.to_string_lossy().into_owned(),
+            },
+            dest_name: Some("cloned-by-client".to_string()),
+            // The app's active workspace rides along and tags the result.
+            workspace: Some("Cloned".to_string()),
+        },
+    )
+    .expect("start_clone");
+    assert!(
+        started.dest.ends_with("cloned-by-client"),
+        "the job must report the destination it is writing to, got {:?}",
+        started.dest
+    );
+
+    // -- poll to a terminal status --
+    let done = await_clone(&fx.handle, started.id);
+    assert!(
+        matches!(done.status.kind, CloneStatusKind::Succeeded),
+        "clone did not succeed: message {:?}",
+        done.status.message
+    );
+    let project_id = done
+        .status
+        .project_id
+        .expect("a Succeeded status must carry the registered project id");
+    assert_eq!(
+        std::fs::read_to_string(PathBuf::from(&done.dest).join("README")).unwrap(),
+        "v1\n",
+        "the checkout must contain the seeded commit's content"
+    );
+
+    // -- the clone is a registered project the client can see --
+    //
+    // Read through the workspace snapshot rather than a `GET /projects` call:
+    // `RemoteClient` has no method for that route (projects reach a client in the
+    // workspace snapshot), and adding one is outside this task's surface.
+    let snap = simple::snapshot(fx.handle.clone()).expect("snapshot");
+    // `ProjectInfoDto` is not `Debug` (it is an frb mirror), so report the paths.
+    let paths: Vec<&str> = snap.projects.iter().map(|p| p.repo_path.as_str()).collect();
+    let cloned = snap
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .unwrap_or_else(|| {
+            panic!("the cloned repo must be registered as a project, got {paths:?}")
+        });
+
+    // The badge's input, end to end: the origin the clone recorded survives the
+    // DTO flattening into the shape Dart reads. Asserted on the *content* rather
+    // than through `canonical_repo_slug` because this source is a local path, for
+    // which canonicalisation is `None` by design — comparing two `None`s would
+    // pass even with the field dropped.
+    assert_eq!(
+        cloned.workspace.as_deref(),
+        Some("Cloned"),
+        "a clone started in a workspace must land in it"
+    );
+
+    let origin = cloned
+        .origin_url
+        .as_deref()
+        .expect("a cloned project must carry the origin it was cloned from");
+    assert!(
+        origin.ends_with("remote.git"),
+        "the origin must name the source repo, got {origin}"
+    );
+
+    // -- an unknown (or pruned) job id is a normal `None`, not an error --
+    let unknown = simple::clone_job(fx.handle.clone(), CloneJobId::new())
+        .expect("an unknown job id must not be an error");
+    assert!(unknown.is_none(), "an unknown job id must read as absent");
+
+    // -- `GET /github/repos` resolves. Its *contents* need an authenticated `gh`,
+    // which a CI box need not have, so assert only that the route exists: a 404
+    // would mean the client and the server disagree on the path, which is exactly
+    // the drift this file catches.
+    //
+    // Matched on the message rather than the variant because the bridge flattens
+    // `ClientError` to an `anyhow::Error` (`registry::map_client_err`);
+    // `ClientError::NotFound`'s `Display` is exactly "not found"
+    // (`crates/claude-commander-client/src/error.rs:39`).
+    if let Err(err) = simple::github_repos(fx.handle.clone()) {
+        assert_ne!(
+            err.to_string(),
+            "not found",
+            "GET /github/repos must resolve to the repos route"
+        );
+    }
+}
+
+/// The workspace route group, through the exact functions Dart calls: define
+/// workspaces, register a project into one, move a project, rename (which
+/// rewrites tags) and delete (which moves projects back to Main). Every step is
+/// read back through `snapshot`, which also pins the DTO flattening of the new
+/// snapshot fields.
+#[test]
+fn workspaces_define_tag_move_rename_and_delete() {
+    use rust_lib_claude_commander_client::api::mirrors::{SetWorkspacesRequestDto, WorkspaceDef};
+    let Some(fx) = Fixture::start() else { return };
+
+    simple::set_workspaces(
+        fx.handle.clone(),
+        SetWorkspacesRequestDto {
+            workspaces: vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Personal")],
+            main: Some(WorkspaceDef::named("Home")),
+            startup_workspace: Some("Work".into()),
+        },
+    )
+    .expect("set_workspaces");
+    let snap = simple::snapshot(fx.handle.clone()).unwrap();
+    let names: Vec<&str> = snap.workspaces.iter().map(|w| w.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Work", "Personal"],
+        "definition order is display order"
+    );
+    assert_eq!(
+        snap.main_workspace.as_ref().map(|m| m.name.as_str()),
+        Some("Home")
+    );
+    assert_eq!(snap.startup_workspace, "Work");
+
+    // A project registered with a workspace lands in it.
+    let (_second_repo, second_path) = fx.rt.block_on(create_test_repo());
+    let pid = simple::add_project(
+        fx.handle.clone(),
+        second_path.to_string_lossy().into_owned(),
+        Some("Work".into()),
+    )
+    .expect("add_project");
+    let workspace_of = |id: &str| {
+        simple::snapshot(fx.handle.clone())
+            .unwrap()
+            .projects
+            .into_iter()
+            .find(|p| p.id.as_uuid().to_string() == id)
+            .expect("project present")
+            .workspace
+    };
+    assert_eq!(workspace_of(&pid).as_deref(), Some("Work"));
+
+    // Moving it re-tags it; moving to None puts it back in Main.
+    simple::set_project_workspace(fx.handle.clone(), pid.clone(), Some("Personal".into()))
+        .expect("set_project_workspace");
+    assert_eq!(workspace_of(&pid).as_deref(), Some("Personal"));
+
+    // Rename rewrites the tag along with the definition.
+    simple::rename_workspace(fx.handle.clone(), "Personal".into(), "Side".into())
+        .expect("rename_workspace");
+    assert_eq!(workspace_of(&pid).as_deref(), Some("Side"));
+
+    // Delete moves the project to Main.
+    simple::delete_workspace(fx.handle.clone(), "Side".into()).expect("delete_workspace");
+    assert_eq!(workspace_of(&pid), None);
+    let snap = simple::snapshot(fx.handle.clone()).unwrap();
+    assert!(snap.workspaces.iter().all(|w| w.name != "Side"));
+
+    // A refused name surfaces as an error the app can show, not a silent drop.
+    assert!(
+        simple::set_project_workspace(fx.handle.clone(), pid, Some("main".into())).is_err(),
+        "a reserved name must be refused"
+    );
 }
 
 /// The cascade / push-stack operation-status route group: push-stack records an
@@ -515,12 +764,9 @@ fn review_round_trip() {
     );
 
     // -- toggle the file's reviewed mark on --
-    let reviewed = review::toggle_file_reviewed(
-        fx.handle.clone(),
-        id.clone(),
-        "newfile.txt".to_string(),
-    )
-    .expect("toggle_file_reviewed");
+    let reviewed =
+        review::toggle_file_reviewed(fx.handle.clone(), id.clone(), "newfile.txt".to_string())
+            .expect("toggle_file_reviewed");
     assert!(
         reviewed,
         "toggling an un-reviewed file should mark it reviewed"
@@ -547,6 +793,40 @@ fn review_round_trip() {
         "a single fresh comment should apply or defer, not block/no-op"
     );
     assert_eq!(result.count, 1, "exactly one comment should be composed");
+
+    // -- the raw composition reaches the client, and lays out --
+    //
+    // The whole point of shipping `raw`: the client can run the layout engine
+    // itself rather than re-deriving rows from the lossier wire model. Proving
+    // it against a live server is the only place the protocol field, the HTTP
+    // decode and `diff_rows` are exercised together.
+    let snap = review::open_review(fx.handle.clone(), id.clone()).expect("re-open");
+    let raw = snap.raw.clone().expect("the server must ship the raw diff");
+    assert!(
+        raw.contains("+++ b/newfile.txt"),
+        "unexpected raw diff: {raw}"
+    );
+    let file = snap
+        .files
+        .into_iter()
+        .find(|f| f.display_path == "newfile.txt")
+        .expect("newfile.txt is in the diff");
+    let layout = diff::diff_rows(
+        Some(raw),
+        file,
+        diff::DiffLayoutMode::Inline,
+        None,
+        Vec::new(),
+        4,
+    )
+    .expect("diff_rows");
+    let added: Vec<String> = layout
+        .rows
+        .iter()
+        .filter(|r| matches!(r.left.origin, Some(review::ReviewLineOrigin::Addition)))
+        .map(|r| r.left.spans.iter().map(|s| s.text.as_str()).collect())
+        .collect();
+    assert_eq!(added, vec!["hello from test".to_string()]);
 
     // -- an unchanged refresh short-circuits (204 → None) --
     let latest = review::open_review(fx.handle.clone(), id.clone()).unwrap();

@@ -4,8 +4,6 @@
 //! `ensure_project`, `list_projects`, `remove_project`, `list_branches`, and
 //! project `preview`.
 
-use std::path::PathBuf;
-
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -14,51 +12,67 @@ use axum::{
 };
 use claude_commander_core::api::{BranchInfo, PreviewData, PreviewTarget, ProjectInfo};
 use claude_commander_core::session::ProjectId;
+use claude_commander_protocol::api::AddProjectRequest;
+use claude_commander_protocol::workspace::SetProjectWorkspace;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::handlers::run_local;
+use crate::handlers::{parse_id, run_local};
 use crate::state::AppState;
 
 /// Parse a `{id}` path param into a [`ProjectId`], mapping a malformed UUID to a
-/// 400 rather than a 404 (the client sent a syntactically bad id).
+/// 400 rather than a 404 (the client sent a syntactically bad id). See
+/// [`parse_id`].
 fn parse_project_id(raw: &str) -> Result<ProjectId, ApiError> {
-    Uuid::parse_str(raw).map(ProjectId::from_uuid).map_err(|e| {
-        ApiError(
-            claude_commander_core::error::SessionError::InvalidName {
-                name: raw.to_string(),
-                reason: format!("not a valid project id: {e}"),
-            }
-            .into(),
-        )
-    })
+    parse_id(raw, "project", ProjectId::from_uuid)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ProjectPathBody {
-    pub path: PathBuf,
-}
-
-/// `POST /projects` → `add_project` → 201 `{ "id": ... }`.
+/// `POST /projects` (`{ path, workspace? }`) → `add_project` → 201
+/// `{ "id": ... }`. `workspace` tags the new project (absent = Main).
 pub async fn add(
     State(state): State<AppState>,
-    Json(body): Json<ProjectPathBody>,
+    Json(body): Json<AddProjectRequest>,
 ) -> Result<Response, ApiError> {
     // `add_project` builds a `gix::Repository` (non-`Send`) across an await.
-    let id = run_local(move || async move { state.service.add_project(body.path).await }).await?;
+    let id =
+        run_local(
+            move || async move { state.service.add_project(body.path, body.workspace).await },
+        )
+        .await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))).into_response())
 }
 
-/// `POST /projects/ensure` → `ensure_project` → 201 `{ "id": ... }`.
+/// `POST /projects/ensure` (`{ path, workspace? }`) → `ensure_project` → 201
+/// `{ "id": ... }`. `workspace` tags the project only if this call registers it.
 pub async fn ensure(
     State(state): State<AppState>,
-    Json(body): Json<ProjectPathBody>,
+    Json(body): Json<AddProjectRequest>,
 ) -> Result<Response, ApiError> {
-    let id =
-        run_local(move || async move { state.service.ensure_project(body.path).await }).await?;
+    let id = run_local(move || async move {
+        state
+            .service
+            .ensure_project(body.path, body.workspace)
+            .await
+    })
+    .await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))).into_response())
+}
+
+/// `PUT /projects/{id}/workspace` (`{ workspace }`, `null` = Main) → 204.
+/// An unknown workspace name is defined on this server on the way (self-heal);
+/// a reserved or malformed one is a 400, an unknown project a 404.
+pub async fn set_workspace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SetProjectWorkspace>,
+) -> Result<StatusCode, ApiError> {
+    let id = parse_project_id(&id)?;
+    state
+        .service
+        .set_project_workspace(&id, body.workspace)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Response for `POST /projects/scan`. Mirrors core's `ScanResult`, which is not
@@ -69,16 +83,22 @@ pub struct ScanResponse {
     pub skipped: usize,
 }
 
-/// `POST /projects/scan` (body `{ path }`) → `scan_directory`. A POST, not a
-/// GET, because scanning *mutates* state: it adds every discovered repo as a
-/// project.
+/// `POST /projects/scan` (body `{ path, workspace? }`) → `scan_directory`. A
+/// POST, not a GET, because scanning *mutates* state: it adds every discovered
+/// repo as a project, tagged with `workspace` (absent = Main) like `POST
+/// /projects`.
 pub async fn scan(
     State(state): State<AppState>,
-    Json(body): Json<ProjectPathBody>,
+    Json(body): Json<AddProjectRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
     // `scan_directory` adds discovered repos via `add_project` (non-`Send` gix).
-    let result =
-        run_local(move || async move { state.service.scan_directory(&body.path).await }).await?;
+    let result = run_local(move || async move {
+        state
+            .service
+            .scan_directory(&body.path, body.workspace)
+            .await
+    })
+    .await?;
     Ok(Json(ScanResponse {
         added: result.added,
         skipped: result.skipped,
@@ -168,6 +188,40 @@ mod tests {
         assert_eq!(resp.skipped, 0);
     }
 
+    /// The scan body carries the caller's workspace like `POST /projects`: it
+    /// is read (a reserved name is a 400 before anything is scanned) and a
+    /// valid one is defined on this server.
+    #[tokio::test]
+    async fn scan_reads_the_workspace() {
+        let dir = TempDir::new().unwrap();
+        let scan_target = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let router = Router::new()
+            .route("/projects/scan", post(super::scan))
+            .with_state(state.clone());
+        let scan = |workspace: &str| {
+            Request::post("/projects/scan")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "path": scan_target.path(), "workspace": workspace })
+                        .to_string(),
+                ))
+                .unwrap()
+        };
+        let (status, _) = send(router.clone(), scan("main")).await;
+        assert_eq!(status, 400);
+        let (status, _) = send(router, scan("Work")).await;
+        assert_eq!(status, 200);
+        let names: Vec<String> = state
+            .service
+            .read_config()
+            .workspaces
+            .into_iter()
+            .map(|w| w.name)
+            .collect();
+        assert_eq!(names, ["Work"]);
+    }
+
     /// `GET /projects` over empty state is a 200 empty array.
     #[tokio::test]
     async fn list_empty_is_200_empty_array() {
@@ -207,6 +261,63 @@ mod tests {
             .unwrap();
         let (status, _) = send(router, req).await;
         assert_eq!(status, 400);
+    }
+
+    /// `PUT /projects/{id}/workspace` moves the project and self-heals the
+    /// definition; `null` moves it back to Main.
+    #[tokio::test]
+    async fn set_workspace_moves_the_project() {
+        use claude_commander_core::session::Project;
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let project = Project::new("repo", std::path::PathBuf::from("/repo"), "main");
+        let pid = project.id;
+        state
+            .service
+            .store()
+            .mutate(move |s| s.add_project(project))
+            .await
+            .unwrap();
+        let router = Router::new()
+            .route(
+                "/projects/{id}/workspace",
+                axum::routing::put(super::set_workspace),
+            )
+            .with_state(state.clone());
+        let put = |body: serde_json::Value| {
+            Request::put(format!("/projects/{}/workspace", pid.as_uuid()))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        let (status, _) = send(
+            router.clone(),
+            put(serde_json::json!({"workspace": "Work"})),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let snap = state.service.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(snap.workspaces[0].name, "Work");
+
+        let (status, _) = send(router.clone(), put(serde_json::json!({"workspace": null}))).await;
+        assert_eq!(status, 204);
+        let snap = state.service.snapshot().await.unwrap();
+        assert_eq!(snap.projects[0].workspace, None);
+
+        let (status, _) = send(
+            router.clone(),
+            put(serde_json::json!({"workspace": "main"})),
+        )
+        .await;
+        assert_eq!(status, 400, "a reserved name is refused");
+
+        let unknown = Request::put(format!("/projects/{}/workspace", uuid::Uuid::new_v4()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"workspace":"Work"}"#))
+            .unwrap();
+        assert_eq!(send(router, unknown).await.0, 404);
     }
 
     /// Branch listing for an unknown project id is a 404.

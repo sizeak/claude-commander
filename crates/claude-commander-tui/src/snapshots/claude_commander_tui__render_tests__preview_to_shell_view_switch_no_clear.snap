@@ -1,0 +1,15 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+assertion_line: 1294
+expression: terminal.backend()
+---
+"╭ Preview · Info · Shell ──────────────────────────────────╮"
+"│$ ls -la                                                  │"
+"│total 42                                                  │"
+"│drwxr-xr-x 5 user user 4096                               │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"╰──────────────────────────────────────────────────────────╯"

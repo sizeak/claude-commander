@@ -376,12 +376,18 @@ class ReviewSnapshotDto {
   /// Display paths of files still marked reviewed.
   final List<String> reviewed;
 
+  /// The raw unified diff the snapshot was parsed from, to be handed straight
+  /// back to [`diff_rows`] for layout. `None` against a server predating the
+  /// field, in which case `diff_rows` falls back to `files`.
+  final String? raw;
+
   const ReviewSnapshotDto({
     required this.base,
     required this.contentHash,
     required this.files,
     required this.comments,
     required this.reviewed,
+    this.raw,
   });
 
   @override
@@ -390,7 +396,8 @@ class ReviewSnapshotDto {
       contentHash.hashCode ^
       files.hashCode ^
       comments.hashCode ^
-      reviewed.hashCode;
+      reviewed.hashCode ^
+      raw.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -401,5 +408,6 @@ class ReviewSnapshotDto {
           contentHash == other.contentHash &&
           files == other.files &&
           comments == other.comments &&
-          reviewed == other.reviewed;
+          reviewed == other.reviewed &&
+          raw == other.raw;
 }

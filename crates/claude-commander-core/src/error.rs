@@ -26,9 +26,6 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("TUI error: {0}")]
-    Tui(#[from] TuiError),
-
     #[error("TTS error: {0}")]
     Tts(#[from] TtsError),
 }
@@ -93,6 +90,39 @@ pub enum SessionError {
 
     #[error("Invalid pasted image: {0}")]
     InvalidImage(String),
+
+    /// A refused stack-base retarget. Transparent so the typed reason
+    /// ([`crate::session::SetBaseRejection`]) is what the user reads.
+    #[error(transparent)]
+    InvalidBase(#[from] crate::session::SetBaseRejection),
+}
+
+/// A pasted-image rejection from the shared wire contract
+/// ([`claude_commander_protocol::paste::validate`]) is an invalid-image error.
+/// The contract owns the *rules* (accept allow-list, size cap) and their user-
+/// facing wording; core owns how that surfaces in its own hierarchy — and the
+/// server maps [`SessionError::InvalidImage`] to a 400, so the message reaches
+/// the client verbatim.
+impl From<claude_commander_protocol::paste::ImageRejection> for SessionError {
+    fn from(e: claude_commander_protocol::paste::ImageRejection) -> Self {
+        SessionError::InvalidImage(e.to_string())
+    }
+}
+
+impl From<claude_commander_protocol::paste::ImageRejection> for Error {
+    fn from(e: claude_commander_protocol::paste::ImageRejection) -> Self {
+        Error::Session(SessionError::InvalidImage(e.to_string()))
+    }
+}
+
+/// `Error::Session(#[from] SessionError)` does not chain through a second
+/// `#[from]`, so — exactly as [`claude_commander_protocol::paste::ImageRejection`]
+/// above — a rejection needs its own hop to the top-level error to keep call
+/// sites on a plain `?`.
+impl From<crate::session::SetBaseRejection> for Error {
+    fn from(e: crate::session::SetBaseRejection) -> Self {
+        Error::Session(SessionError::InvalidBase(e))
+    }
 }
 
 /// Tmux integration errors
@@ -172,6 +202,54 @@ pub enum GitError {
 
     #[error("Invalid reference: {0}")]
     InvalidRef(String),
+
+    /// The `gh` CLI is not installed or not runnable.
+    ///
+    /// Distinct from `OperationFailed` on purpose: the repo picker renders this
+    /// as its own state ("install the GitHub CLI to browse your repos") rather
+    /// than as a generic failure, and it is the one gh outcome a user can fix
+    /// without seeing gh's own stderr.
+    #[error("GitHub CLI (gh) is not installed or not runnable")]
+    GhUnavailable,
+
+    /// A clone ran past its time budget and was killed.
+    ///
+    /// Distinct from `OperationFailed` for the same reason as `GhUnavailable`:
+    /// it is actionable (a huge repo on a slow link wants a larger
+    /// `clone_timeout_secs`), and the process was killed, so there is no
+    /// subprocess stderr worth surfacing.
+    #[error("clone timed out after {secs}s")]
+    CloneTimedOut { secs: u64 },
+
+    /// A GitHub repo listing ran past its time budget and was killed.
+    ///
+    /// **Deliberately not folded into `GhUnavailable`.** That variant means "gh
+    /// is missing or unauthenticated", and the picker answers it with "install /
+    /// log in to the GitHub CLI" — advice that is actively wrong for a user whose
+    /// working `gh` merely took too long over a large account. Nor is it
+    /// `OperationFailed`: the process was killed, so there is no subprocess
+    /// stderr to pass on, and the actionable answer is a larger
+    /// `repo_list_timeout_secs`. Same reasoning as [`Self::CloneTimedOut`],
+    /// separate variant because the two carry different budgets and different
+    /// remedies.
+    #[error("listing GitHub repos timed out after {secs}s")]
+    RepoListTimedOut { secs: u64 },
+
+    /// A clone source or destination name was refused by the
+    /// [`claude_commander_protocol::github`] validators.
+    ///
+    /// Distinct from `OperationFailed` for the same reason as `GhUnavailable` and
+    /// `CloneTimedOut`, plus one more that only applies here: nothing failed. The
+    /// *request* is malformed, so a caller mapping errors onto a transport needs
+    /// to answer "you sent something unusable" rather than "the server broke" —
+    /// the server maps this to a 400 and every other `GitError` to a 500. A
+    /// rejection folded into `OperationFailed` is indistinguishable from a real
+    /// git failure, and the caller has no way to tell them apart.
+    ///
+    /// Built only by `clone_source_rejected`, which redacts the message, so a
+    /// credentialed source cannot be quoted back through this variant.
+    #[error("{0}")]
+    CloneSourceRejected(String),
 }
 
 /// Configuration errors
@@ -217,22 +295,6 @@ impl From<reqwest::Error> for TtsError {
     fn from(e: reqwest::Error) -> Self {
         TtsError::Request(e.to_string())
     }
-}
-
-/// TUI-related errors
-#[derive(Error, Debug)]
-pub enum TuiError {
-    #[error("Failed to initialize terminal: {0}")]
-    InitFailed(String),
-
-    #[error("Failed to restore terminal: {0}")]
-    RestoreFailed(String),
-
-    #[error("Render error: {0}")]
-    RenderError(String),
-
-    #[error("Event handling error: {0}")]
-    EventError(String),
 }
 
 /// Result type alias using our error type
@@ -343,13 +405,6 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "test");
         let top_err: Error = io_err.into();
         assert!(matches!(top_err, Error::Io(_)));
-    }
-
-    #[test]
-    fn test_tui_error_conversion() {
-        let tui_err = TuiError::InitFailed("test".to_string());
-        let top_err: Error = tui_err.into();
-        assert!(matches!(top_err, Error::Tui(_)));
     }
 
     #[test]

@@ -1,24 +1,43 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
+import '../theme/tokens.dart';
+import '../util/error_text.dart';
+import 'clone_repo_page.dart';
 
 /// Manages the server's registered projects (git repos). Lists each project's
 /// name + repo path; adds one by its server-side path (`addProject`), removes one
 /// (`removeProject`), scans a server-side directory for repos (`scanDirectory`),
-/// and browses a project's branches on demand (`listBranches`).
+/// clones one from GitHub ([CloneRepoPage]), and browses a project's branches on
+/// demand (`listBranches`).
 ///
 /// Project paths are typed, not picked — the paths live on the server, not the
-/// device, mirroring the TUI. The list is rendered reactively from the
-/// [CommanderStore] (the change feed refreshes it after a mutation).
+/// device, mirroring the TUI. The one exception is cloning, which is how a
+/// project arrives on a server that doesn't have it yet: the repo list and the
+/// checkout are both the server's, so a phone can add a project it has no copy
+/// of. The list is rendered reactively from the [CommanderStore] (the change feed
+/// refreshes it after a mutation).
+///
+/// A project added, scanned or cloned here lands in [workspace] — the app's
+/// active one — so it appears in the list the user came from. Every project is
+/// listed regardless of workspace, each tagged with the one it is in; moving
+/// them between workspaces is the Workspaces page's job.
 class ProjectsPage extends StatefulWidget {
   final CommanderStore store;
 
-  const ProjectsPage({super.key, required this.store});
+  /// Where new projects go (null = Main).
+  final String? workspace;
+
+  const ProjectsPage({super.key, required this.store, this.workspace});
 
   @override
   State<ProjectsPage> createState() => _ProjectsPageState();
 }
+
+/// The three ways to add a project, as offered by the **+** sheet.
+enum _AddSource { clone, path, scan }
 
 class _ProjectsPageState extends State<ProjectsPage> {
   bool _busy = false;
@@ -26,13 +45,86 @@ class _ProjectsPageState extends State<ProjectsPage> {
   CommanderStore get _store => widget.store;
 
   /// Prompt for a server-side path; returns the trimmed value or null on cancel.
-  Future<String?> _promptPath({
-    required String title,
-    required String label,
-  }) => showDialog<String>(
-    context: context,
-    builder: (_) => _PathPromptDialog(title: title, label: label),
-  );
+  Future<String?> _promptPath({required String title, required String label}) =>
+      showDialog<String>(
+        context: context,
+        builder: (_) => _PathPromptDialog(title: title, label: label),
+      );
+
+  /// The **+** sheet: the three ways a project can arrive. Cloning is listed
+  /// first because it is the only one that doesn't require the repo to already
+  /// be on the server's disk — the case a phone can't otherwise satisfy.
+  Future<void> _addSheet() async {
+    final t = CommanderTokens.of(context);
+    final choice = await showModalBottomSheet<_AddSource>(
+      context: context,
+      backgroundColor: t.canvasRaised,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _sheetTile(
+              sheetContext,
+              Icons.cloud_download_outlined,
+              'Clone from GitHub',
+              'Pick a repo, or paste a clone URL',
+              _AddSource.clone,
+            ),
+            _sheetTile(
+              sheetContext,
+              Icons.folder_open,
+              'Add existing path',
+              'A repo already on the server',
+              _AddSource.path,
+            ),
+            _sheetTile(
+              sheetContext,
+              Icons.travel_explore,
+              'Scan directory',
+              'Register every repo it finds',
+              _AddSource.scan,
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    switch (choice) {
+      case _AddSource.clone:
+        await _clone();
+      case _AddSource.path:
+        await _addProject();
+      case _AddSource.scan:
+        await _scan();
+    }
+  }
+
+  Widget _sheetTile(
+    BuildContext sheetContext,
+    IconData icon,
+    String label,
+    String subtitle,
+    _AddSource value,
+  ) {
+    final t = CommanderTokens.of(context);
+    return ListTile(
+      leading: Icon(icon, color: t.primary),
+      title: Text(label),
+      subtitle: Text(subtitle, style: t.meta(size: 11, color: t.textMuted)),
+      onTap: () => Navigator.of(sheetContext).pop(value),
+    );
+  }
+
+  /// Push the repo picker. It refreshes the store itself before popping, so the
+  /// list here already holds a newly cloned project when we come back.
+  Future<void> _clone() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<bool>(
+        builder: (_) =>
+            CloneRepoPage(store: _store, workspace: widget.workspace),
+      ),
+    );
+  }
 
   Future<void> _addProject() async {
     final path = await _promptPath(
@@ -41,7 +133,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
     );
     if (path == null || path.isEmpty) return;
     await _run(() async {
-      await _store.addProject(path);
+      await _store.addProject(path, workspace: widget.workspace);
       await _store.refresh();
       _snack('Project added');
     });
@@ -54,13 +146,17 @@ class _ProjectsPageState extends State<ProjectsPage> {
     );
     if (path == null || path.isEmpty) return;
     await _run(() async {
-      final result = await _store.scanDirectory(path);
+      final result = await _store.scanDirectory(
+        path,
+        workspace: widget.workspace,
+      );
       await _store.refresh();
       _snack('Added ${result.added}, skipped ${result.skipped}');
     });
   }
 
   Future<void> _remove(ProjectInfoDto project) async {
+    final t = CommanderTokens.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -75,7 +171,10 @@ class _ProjectsPageState extends State<ProjectsPage> {
             child: const Text('Cancel'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(
+              backgroundColor: t.danger,
+              foregroundColor: t.canvas,
+            ),
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Remove'),
           ),
@@ -97,7 +196,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
     try {
       await action();
     } catch (e) {
-      _snack('Failed: $e');
+      _snack('Failed: ${errorText(e, capitalize: false)}');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -116,21 +215,13 @@ class _ProjectsPageState extends State<ProjectsPage> {
       listenable: _store,
       builder: (context, _) {
         final projects = _store.projects;
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Projects'),
-            actions: [
-              IconButton(
-                onPressed: _busy ? null : _scan,
-                icon: const Icon(Icons.travel_explore),
-                tooltip: 'Scan directory',
-              ),
-            ],
-          ),
-          floatingActionButton: FloatingActionButton(
-            onPressed: _busy ? null : _addProject,
-            tooltip: 'Add project',
-            child: const Icon(Icons.add),
+        return ChromePage(
+          title: 'Projects',
+          code: '47-P',
+          primaryAction: ChromeButtonAction(
+            icon: Icons.add,
+            label: 'Add project',
+            onPressed: _busy ? null : _addSheet,
           ),
           body: projects.isEmpty
               ? _emptyState()
@@ -208,6 +299,7 @@ class _ProjectTileState extends State<_ProjectTile> {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: ExpansionTile(
@@ -217,10 +309,10 @@ class _ProjectTileState extends State<_ProjectTile> {
           overflow: TextOverflow.ellipsis,
         ),
         subtitle: Text(
-          widget.project.repoPath,
+          [widget.project.repoPath, ?widget.project.workspace].join(' · '),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: Theme.of(context).textTheme.bodySmall,
+          style: t.meta(size: 11, color: t.textMuted),
         ),
         trailing: IconButton(
           onPressed: widget.onRemove,
@@ -245,7 +337,12 @@ class _ProjectTileState extends State<_ProjectTile> {
     if (_error != null) {
       return Padding(
         padding: const EdgeInsets.all(16),
-        child: Text('Failed to load branches: $_error'),
+        child: Text(
+          'Failed to load branches: '
+          '${errorText(_error!, capitalize: false)}',
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
+        ),
       );
     }
     final branches = _branches;
@@ -256,6 +353,7 @@ class _ProjectTileState extends State<_ProjectTile> {
         child: Text('No branches'),
       );
     }
+    final t = CommanderTokens.of(context);
     return Column(
       children: [
         for (final b in branches)
@@ -264,8 +362,9 @@ class _ProjectTileState extends State<_ProjectTile> {
             leading: Icon(
               b.isRemote ? Icons.cloud_outlined : Icons.call_split,
               size: 18,
+              color: b.isRemote ? t.textFaint : t.working,
             ),
-            title: Text(b.name),
+            title: Text(b.name, style: t.meta(size: 12, color: t.textBright)),
           ),
       ],
     );

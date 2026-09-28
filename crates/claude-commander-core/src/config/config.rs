@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
@@ -16,6 +16,16 @@ use crate::config::keybindings::KeyBindings;
 use crate::config::migrations;
 use crate::config::theme::ThemeOverrides;
 use crate::error::{ConfigError, Error, Result};
+
+/// The `[workspace_themes]` key that holds the built-in Main workspace's theme.
+///
+/// Main has no name (it is the untagged workspace, and its display label is
+/// renameable), so its theme needs a fixed key that no user workspace can
+/// take. `"main"` is one of the protocol's
+/// [`RESERVED_WORKSPACE_NAMES`](claude_commander_protocol::workspace::RESERVED_WORKSPACE_NAMES),
+/// which `validate_workspace_name` refuses case-insensitively, and it is the
+/// spelling `startup_workspace = "main"` already uses for Main.
+pub const MAIN_WORKSPACE_THEME_KEY: &str = "main";
 
 /// A selectable agent harness in the new-session program picker: a display
 /// `label` paired with the `command` to launch (program plus any flags).
@@ -122,6 +132,31 @@ pub struct Config {
     /// Path to worktrees directory
     pub worktrees_dir: Option<PathBuf>,
 
+    /// Directory that cloned repositories land in. `None` (the default) means
+    /// `~/Projects` under the user's *home* directory — deliberately not under
+    /// the app's data dir, since these are ordinary checkouts the user works in
+    /// directly. Resolved by [`Config::projects_dir`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projects_dir: Option<PathBuf>,
+
+    /// Timeout in seconds for a single repository clone before it is abandoned.
+    /// Default 1800 (30 min), generous enough for a large repo on a slow link
+    /// while still bounding a hung clone.
+    #[serde(default = "default_clone_timeout_secs")]
+    pub clone_timeout_secs: u64,
+
+    /// Timeout in seconds for listing GitHub repos in the clone picker
+    /// (`gh api --paginate`) before the process group is killed. Default 90 —
+    /// see [`DEFAULT_REPO_LIST_TIMEOUT_SECS`] for why it is generous rather than
+    /// snappy, and note that raising it past
+    /// [`REPO_LIST_HTTP_TIMEOUT_SECS`] hands the race back to a remote client's
+    /// own request timeout.
+    ///
+    /// [`DEFAULT_REPO_LIST_TIMEOUT_SECS`]: claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+    /// [`REPO_LIST_HTTP_TIMEOUT_SECS`]: claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS
+    #[serde(default = "default_repo_list_timeout_secs")]
+    pub repo_list_timeout_secs: u64,
+
     /// Socket directory to isolate every tmux command commander spawns onto.
     ///
     /// For hermetic tests and the e2e harness only — leave unset (`None`) for
@@ -132,13 +167,19 @@ pub struct Config {
     /// `TMUX_TMPDIR`). `None` touches the environment not at all.
     pub tmux_tmpdir: Option<PathBuf>,
 
-    /// Base directory for pasted-image temp files (remote image paste). `None`
+    /// Base directory for the temp files commander hands to the agent by path:
+    /// pasted images (remote image paste) and comment-apply briefs. `None`
     /// (normal use) means the OS temp dir, which is space-free on every platform
-    /// and readable by the agent. Set only by hermetic tests to redirect writes
-    /// (and the store's prune) into a `TempDir` instead of the real `/tmp`, per
-    /// the repo's test-isolation rule.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paste_images_dir: Option<PathBuf>,
+    /// and readable by the agent without a permission prompt. Set only by
+    /// hermetic tests to redirect those writes (and the paste store's prune)
+    /// into a `TempDir` instead of the real `/tmp`, per the repo's
+    /// test-isolation rule.
+    #[serde(
+        default,
+        alias = "paste_images_dir",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_temp_dir: Option<PathBuf>,
 
     /// Organize worktrees into per-repository subdirectories
     pub per_repo_worktree_dirs: bool,
@@ -232,20 +273,25 @@ pub struct Config {
     /// so an omitted field resolves to `Config::default()`'s `false`.)
     pub show_session_program: bool,
 
-    /// Whether to hide empty section headers in the session list.
+    /// Whether to hide empty section columns on the board.
     ///
-    /// Enabled by default. When true, sections with no sessions (including
-    /// "In Progress") are not rendered. This is a UI-only change; backend
-    /// section assignment is unaffected.
+    /// Enabled by default. When true, a section with no cards (including the
+    /// implicit "In Progress" catch-all) is dropped from the board's columns;
+    /// the sidebar and backend section assignment are unaffected.
     #[serde(default = "default_true")]
     pub hide_empty_sections: bool,
 
-    /// Dim the right pane (preview/diff/shell) when the session list is focused
+    /// Dim the list views' right-hand pane (preview / shell). The pane is a
+    /// passive live capture — keys always drive the session list — so it renders
+    /// dimmed by default to keep the list visually dominant. Default true.
+    #[serde(default = "default_true")]
     pub dim_unfocused_preview: bool,
 
-    /// How much to dim unfocused pane colors (0.0 = fully dimmed/black, 1.0 = no dimming).
-    /// Uses a foreground color override instead of terminal DIM modifier for cross-terminal
-    /// compatibility. Only takes effect when `dim_unfocused_preview` is true.
+    /// How much to dim the right pane's colours (0.0 = fully dimmed/black,
+    /// 1.0 = no dimming). Uses a foreground colour override rather than the
+    /// terminal DIM modifier, for cross-terminal consistency. Only takes effect
+    /// when `dim_unfocused_preview` is true.
+    #[serde(default = "default_dim_opacity")]
     pub dim_unfocused_opacity: f32,
 
     /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
@@ -254,7 +300,7 @@ pub struct Config {
     /// Debounce delay in ms when typing multi-digit session numbers
     pub session_number_debounce_ms: u64,
 
-    /// Enable AI-generated branch summaries in the Info pane
+    /// Enable AI-generated branch summaries in the Info modal
     pub ai_summary_enabled: bool,
 
     /// Claude model to use for AI summaries (Haiku recommended for cost efficiency)
@@ -285,11 +331,44 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub precompute_review_caches: bool,
 
-    /// Section definitions for grouping sessions in the TUI list.
-    /// First-match-wins in declared order; unmatched sessions fall into a
-    /// built-in "Other" catch-all.
+    /// Raw configured section definitions for grouping sessions on the board.
+    /// First-match-wins in declared order; unmatched sessions fall into the
+    /// implicit "In Progress" catch-all. This is the *raw* list the settings
+    /// editor and serde operate on — an empty list means "no sections
+    /// configured". Consumers that drive the board/assignment should call
+    /// [`Config::effective_sections`] instead, which substitutes the baked-in
+    /// defaults when this is empty.
     #[serde(default)]
     pub sections: Vec<crate::session::SectionConfig>,
+
+    /// User-defined workspaces (`[[workspaces]]`: `name`), in display order. A workspace is a label on a project; the
+    /// built-in Main workspace (untagged projects) is never listed here. Edited
+    /// through `CommanderService::set_workspace_defs` / `rename_workspace` /
+    /// `delete_workspace` — the latter two also rewrite project tags, which a
+    /// plain config write cannot.
+    #[serde(default)]
+    pub workspaces: Vec<claude_commander_protocol::workspace::WorkspaceDef>,
+
+    /// Display label for the built-in Main workspace (`[main_workspace]`).
+    /// Unset shows "Main".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_workspace: Option<claude_commander_protocol::workspace::WorkspaceDef>,
+
+    /// Which workspace a frontend opens on: `"last"` (default — whichever that
+    /// client last had active), `"main"`, or a workspace name. A pinned name
+    /// that no longer exists falls back to Main.
+    #[serde(default)]
+    pub startup_workspace: claude_commander_protocol::workspace::StartupWorkspace,
+
+    /// Per-workspace TUI themes (`[workspace_themes."<name>"]`), keyed by
+    /// workspace name, with Main under [`MAIN_WORKSPACE_THEME_KEY`]. Each entry
+    /// is a `ThemeOverrides` read against `[theme]`: an entry without `preset`
+    /// layers its overrides over the usual theme; one with `preset` starts from
+    /// that preset. Local only: not on the wire and not in the server's config
+    /// patch. `CommanderService::rename_workspace` / `delete_workspace` move or
+    /// drop the entry.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub workspace_themes: std::collections::BTreeMap<String, ThemeOverrides>,
 
     /// Advisory WIP limit for the implicit "In Progress" catch-all section.
     /// When set, the section header shows `count/n`, rendering in the warning
@@ -342,6 +421,16 @@ pub struct Config {
     /// default. Validated on load (see [`Config::validate_remote_servers`]).
     #[serde(default)]
     pub remote_servers: Vec<RemoteServerConfig>,
+
+    /// How *this* machine exposes its own sessions over HTTP: the `[server]`
+    /// table read by the standalone `claude-commander-server` binary and by the
+    /// TUI's embedded server. See [`ServerConfig`].
+    ///
+    /// It lives on core's `Config` (rather than in the server crate) because
+    /// `ConfigStore` persists by re-serialising this struct, so a table core did
+    /// not model was deleted by the next settings edit.
+    #[serde(default)]
+    pub server: super::ServerConfig,
 }
 
 /// Conversation-mode (text-to-speech) settings.
@@ -446,17 +535,28 @@ pub struct SttConfig {
     /// Microphone to capture from, as cpal's stable device id (the PipeWire
     /// `node.name`, e.g. `alsa_input.pci-0000_c1_00.6.analog-stereo`). `None`
     /// uses the system default input device. Set it via the picker in
-    /// Settings ▸ Conversation rather than by hand. Ids — not friendly names —
+    /// Settings ▸ Voice rather than by hand. Ids — not friendly names —
     /// are stored because a mic and its speaker's loopback share a name; if the
     /// device is absent at record time, capture falls back to the default (with
     /// a warning) rather than failing.
     pub input_device: Option<String>,
+
+    /// Whether dictation (Alt-T) presses Enter after typing a transcript into
+    /// the attached pane. `"never"` types the text and stops, `"agent"` also
+    /// submits on an agent pane but leaves a shell pane alone, `"always"`
+    /// submits on any pane.
+    ///
+    /// Insert-only is the default because transcription mishears, and the pane
+    /// is a terminal: the user reads what was typed and presses Enter
+    /// themselves, which costs one keystroke and cannot run a command nobody
+    /// said. See [`DictationSubmit`](crate::conversation::DictationSubmit).
+    pub dictation_submit: crate::conversation::DictationSubmit,
 }
 
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
-            // Off by default — enable it in Settings ▸ Conversation.
+            // Off by default — enable it in Settings ▸ Voice.
             enabled: false,
             // Localhost placeholder, like the TTS default; override in config to
             // point at your transcription server.
@@ -467,6 +567,8 @@ impl Default for SttConfig {
             api_key: None,
             pause_media: true,
             input_device: None,
+            // Insert-only: the user reviews the transcript and presses Enter.
+            dictation_submit: crate::conversation::DictationSubmit::Never,
         }
     }
 }
@@ -514,8 +616,11 @@ impl Default for Config {
             diff_cache_ttl_ms: 500,
             ui_refresh_fps: 30,
             worktrees_dir: None,
+            projects_dir: None,
+            clone_timeout_secs: default_clone_timeout_secs(),
+            repo_list_timeout_secs: default_repo_list_timeout_secs(),
             tmux_tmpdir: None,
-            paste_images_dir: None,
+            agent_temp_dir: None,
             per_repo_worktree_dirs: false,
             editor: None,
             editor_gui: None,
@@ -537,7 +642,7 @@ impl Default for Config {
             show_session_program: false,
             hide_empty_sections: true,
             dim_unfocused_preview: true,
-            dim_unfocused_opacity: 0.4,
+            dim_unfocused_opacity: default_dim_opacity(),
             leader_key: " ".to_string(),
             session_number_debounce_ms: 250,
             ai_summary_enabled: true,
@@ -549,6 +654,10 @@ impl Default for Config {
             rounded_borders: false,
             precompute_review_caches: true,
             sections: Vec::new(),
+            workspaces: Vec::new(),
+            main_workspace: None,
+            workspace_themes: std::collections::BTreeMap::new(),
+            startup_workspace: Default::default(),
             in_progress_limit: None,
             recent_sessions_limit: default_recent_sessions_limit(),
             commander_enabled: false,
@@ -558,6 +667,7 @@ impl Default for Config {
             stt: SttConfig::default(),
             telemetry: TelemetryConfig::default(),
             remote_servers: Vec::new(),
+            server: super::ServerConfig::default(),
         }
     }
 }
@@ -566,8 +676,24 @@ fn default_true() -> bool {
     true
 }
 
+fn default_dim_opacity() -> f32 {
+    0.4
+}
+
 fn default_recent_sessions_limit() -> u32 {
     5
+}
+
+fn default_clone_timeout_secs() -> u64 {
+    1800
+}
+
+/// The default repo-list budget, taken from the protocol crate rather than
+/// spelled out here: its counterpart is the client's HTTP budget, and the two
+/// only mean anything relative to each other (see
+/// `claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS`).
+fn default_repo_list_timeout_secs() -> u64 {
+    claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
 }
 
 fn default_hibernate_idle_timeout_secs() -> u64 {
@@ -598,6 +724,11 @@ impl Config {
         }
         self.stt.api_key = None;
         self.telemetry.token = None;
+        // This server's OWN bearer token. `GET /config` is authenticated with
+        // that very token, but the response also reaches clients that merely
+        // hold it for one server and must not learn the others' — and it is
+        // written to logs and support dumps by the same call sites.
+        self.server.token = None;
         self
     }
 
@@ -754,6 +885,27 @@ impl Config {
         }
     }
 
+    /// Directory that cloned repositories land in (config override or the
+    /// default `~/Projects`).
+    ///
+    /// Deliberately resolved from the user's **home** directory via
+    /// [`directories::BaseDirs`], not from [`Self::project_dirs`] — the latter
+    /// yields the app's config/data dirs, so clones would end up buried in
+    /// `<data dir>/Projects` rather than somewhere the user works. Pinned by
+    /// `projects_dir_defaults_under_home_not_data_dir`.
+    pub fn projects_dir(&self) -> Result<PathBuf> {
+        if let Some(ref dir) = self.projects_dir {
+            Ok(dir.clone())
+        } else {
+            let home = BaseDirs::new().ok_or_else(|| {
+                Error::Config(ConfigError::LoadFailed(
+                    "Could not determine home directory".to_string(),
+                ))
+            })?;
+            Ok(home.home_dir().join("Projects"))
+        }
+    }
+
     /// Working directory for the commander session (config override or the
     /// default `<data dir>/commander`).
     pub fn commander_dir(&self) -> Result<PathBuf> {
@@ -762,6 +914,15 @@ impl Config {
         } else {
             Ok(Self::data_dir()?.join("commander"))
         }
+    }
+
+    /// The sections that actually drive board columns and section assignment:
+    /// the configured [`sections`](Self::sections) when non-empty, otherwise the
+    /// baked-in defaults. The convenience chokepoint over the free
+    /// [`crate::session::effective_sections`] so callers can't accidentally
+    /// bypass the defaults by reading the raw field.
+    pub fn effective_sections(&self) -> std::borrow::Cow<'_, [crate::session::SectionConfig]> {
+        crate::session::effective_sections(&self.sections)
     }
 
     /// Program (with flags) to launch for the commander session, falling back
@@ -980,6 +1141,7 @@ fn parse_key_code(s: &str) -> KeyCode {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::ServerConfig;
     #[test]
     fn with_secrets_redacted_clears_every_credential_field() {
         let c = Config {
@@ -996,6 +1158,11 @@ mod tests {
                 token: Some("telemetry-secret".into()),
                 ..Default::default()
             },
+            server: ServerConfig {
+                port: 9999,
+                token: Some("own-secret".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1003,15 +1170,72 @@ mod tests {
         assert!(redacted.remote_servers[0].token.is_none());
         assert!(redacted.stt.api_key.is_none());
         assert!(redacted.telemetry.token.is_none());
+        assert!(redacted.server.token.is_none());
         // Non-secret fields survive.
         assert_eq!(redacted.remote_servers[0].url, "http://b:7878");
+        assert_eq!(redacted.server.port, 9999);
         let json = serde_json::to_string(&redacted).unwrap();
-        for secret in ["server-secret", "stt-secret", "telemetry-secret"] {
+        for secret in [
+            "server-secret",
+            "stt-secret",
+            "telemetry-secret",
+            "own-secret",
+        ] {
             assert!(!json.contains(secret), "{secret} survived redaction");
         }
     }
 
     use super::*;
+
+    /// The `[server]` table round-trips through core's loader with the key
+    /// names the server crate has always used, so an existing `config.toml`
+    /// keeps working unchanged. Replaces the server crate's
+    /// `server_table_overrides_defaults`, which owned this contract while
+    /// `ServerConfig` lived there.
+    #[test]
+    fn server_table_round_trips_with_its_original_key_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[programs]]
+label = "Claude"
+command = "claude"
+
+[server]
+auto_start = true
+bind = "0.0.0.0"
+port = 9999
+token = "sekret"
+cors_allowed_origins = ["http://localhost:3000"]
+"#,
+        )
+        .unwrap();
+
+        let c = Config::load_from_path(&path).unwrap();
+        assert!(c.server.auto_start);
+        assert_eq!(c.server.bind.to_string(), "0.0.0.0");
+        assert_eq!(c.server.port, 9999);
+        assert_eq!(c.server.token.as_deref(), Some("sekret"));
+        assert_eq!(c.server.cors_allowed_origins, ["http://localhost:3000"]);
+        // Core's own keys still parse from the same file.
+        assert_eq!(c.default_session_program(), "claude");
+    }
+
+    /// A `config.toml` with no `[server]` table loads with the table's defaults,
+    /// which must leave the server switched off.
+    #[test]
+    fn missing_server_table_defaults_to_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "branch_prefix = \"wt/\"\n").unwrap();
+
+        let c = Config::load_from_path(&path).unwrap();
+        assert!(!c.server.auto_start);
+        assert_eq!(c.server.port, 7878);
+        assert!(c.server.token.is_none());
+    }
 
     #[test]
     fn test_max_sessions_and_in_progress_limit_round_trip() {
@@ -1100,6 +1324,11 @@ has_label = ["blocked", "waiting-on-author"]
         assert_eq!(c.prompt, None);
         assert_eq!(c.api_key, None);
         assert_eq!(c.input_device, None);
+        // Insert-only: a dictated transcript waits for the user's own Enter.
+        assert_eq!(
+            c.dictation_submit,
+            crate::conversation::DictationSubmit::Never
+        );
     }
 
     #[test]
@@ -1107,6 +1336,25 @@ has_label = ["blocked", "waiting-on-author"]
         let config: Config = toml::from_str("").expect("empty toml");
         assert!(!config.stt.enabled);
         assert_eq!(config.stt.base_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(
+            config.stt.dictation_submit,
+            crate::conversation::DictationSubmit::Never
+        );
+    }
+
+    #[test]
+    fn test_stt_dictation_submit_toml_roundtrip() {
+        let toml_src = r#"
+[stt]
+dictation_submit = "agent"
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert_eq!(
+            config.stt.dictation_submit,
+            crate::conversation::DictationSubmit::Agent
+        );
+        // Unspecified fields keep their defaults.
+        assert!(!config.stt.enabled);
     }
 
     #[test]
@@ -1396,6 +1644,27 @@ command = "codex"
     }
 
     #[test]
+    fn test_dim_unfocused_options_deserialise() {
+        // Absent → the defaults that make the right pane recede behind the list.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.dim_unfocused_preview);
+        assert_eq!(cfg.dim_unfocused_opacity, 0.4);
+
+        // `config.toml` is never rewritten, so any spelling these keys ever
+        // accepted is permanently load-bearing: a user who set them before the
+        // board redesign dropped the pane must still have them honoured.
+        let cfg: Config = toml::from_str(
+            r#"
+dim_unfocused_preview = false
+dim_unfocused_opacity = 0.75
+"#,
+        )
+        .unwrap();
+        assert!(!cfg.dim_unfocused_preview);
+        assert_eq!(cfg.dim_unfocused_opacity, 0.75);
+    }
+
+    #[test]
     fn test_session_list_flags_deserialise() {
         // Missing → default false.
         let cfg: Config = toml::from_str("").unwrap();
@@ -1468,6 +1737,81 @@ show_session_program = false
         };
         let result = config.resolve_worktrees_dir("genio").unwrap();
         assert_eq!(result, PathBuf::from("/tmp/worktrees/genio"));
+    }
+
+    /// The projects directory is where repositories are *cloned*, so it must
+    /// resolve under the user's home (`~/Projects`) — not under the app's data
+    /// dir. `Config::project_dirs()` returns the app's config/data dirs, so
+    /// resolving through it would silently bury clones in
+    /// `<data dir>/Projects`. This pins the distinction.
+    #[test]
+    fn projects_dir_defaults_under_home_not_data_dir() {
+        let config = Config::default();
+        let dir = config.projects_dir().unwrap();
+        assert!(dir.ends_with("Projects"), "unexpected default: {dir:?}");
+        assert!(
+            !dir.starts_with(Config::data_dir().unwrap()),
+            "projects_dir must not resolve under the app data dir: {dir:?}"
+        );
+    }
+
+    #[test]
+    fn projects_dir_honours_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            projects_dir: Some(tmp.path().join("repos")),
+            ..Config::default()
+        };
+        assert_eq!(config.projects_dir().unwrap(), tmp.path().join("repos"));
+    }
+
+    #[test]
+    fn clone_timeout_defaults_to_half_an_hour() {
+        assert_eq!(Config::default().clone_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn repo_list_timeout_defaults_to_the_protocol_budget() {
+        assert_eq!(
+            Config::default().repo_list_timeout_secs,
+            claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+        );
+    }
+
+    /// `clone_timeout_secs` and `repo_list_timeout_secs` are new fields, so every
+    /// existing `config.toml` — which is never rewritten — omits them.
+    /// Deserialising must fall back to the defaults rather than failing the whole
+    /// load.
+    #[test]
+    fn clone_fields_absent_from_toml_fall_back_to_defaults() {
+        let config: Config = toml::from_str("branch_prefix = \"cc/\"\n").unwrap();
+        assert_eq!(config.clone_timeout_secs, 1800);
+        assert_eq!(
+            config.repo_list_timeout_secs,
+            claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+        );
+        assert!(config.projects_dir.is_none());
+    }
+
+    /// `agent_temp_dir` was once `paste_images_dir` (it now also holds the
+    /// comment-apply briefs). `config.toml` is never rewritten, so the old
+    /// spelling is permanently load-bearing and must keep resolving to the same
+    /// field.
+    #[test]
+    fn agent_temp_dir_accepts_its_former_name() {
+        let renamed: Config = toml::from_str("agent_temp_dir = \"/tmp/cc\"\n").unwrap();
+        let legacy: Config = toml::from_str("paste_images_dir = \"/tmp/cc\"\n").unwrap();
+        assert_eq!(renamed.agent_temp_dir, Some(PathBuf::from("/tmp/cc")));
+        assert_eq!(legacy.agent_temp_dir, renamed.agent_temp_dir);
+    }
+
+    /// A user who sets the knob gets their value, not the default — the whole
+    /// point of the knob being the escape hatch for an account the default
+    /// cannot list.
+    #[test]
+    fn repo_list_timeout_is_read_from_toml() {
+        let config: Config = toml::from_str("repo_list_timeout_secs = 600\n").unwrap();
+        assert_eq!(config.repo_list_timeout_secs, 600);
     }
 
     #[test]

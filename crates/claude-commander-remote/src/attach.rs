@@ -13,7 +13,7 @@ use claude_commander_client::{
     AttachStreams as ClientAttachStreams, AttachTerminator as ClientTerminator,
 };
 use claude_commander_core::backend::{
-    AttachConnection, AttachEnd, AttachResizer, AttachStreams, AttachTerminator,
+    AttachConnection, AttachEnd, AttachRefresher, AttachResizer, AttachStreams, AttachTerminator,
 };
 
 /// Wraps a client [`ClientAttach`] as a core [`AttachConnection`].
@@ -25,13 +25,25 @@ impl AttachConnection for RemoteAttachConnection {
             reader,
             writer,
             resizer,
+            refresher,
             terminator,
         } = self.0.split();
         AttachStreams {
             reader: Box::new(reader),
             writer: Box::new(writer),
             resizer: AttachResizer::new(move |cols, rows| resizer.resize(cols, rows)),
+            // Sending the frame is itself synchronous (it only queues on the
+            // pump's control channel), so there is nothing to await here; the
+            // server does the actual `refresh-client`.
+            refresher: AttachRefresher::new(move || {
+                refresher.refresh();
+                std::future::ready(())
+            }),
             terminator: Box::new(RemoteTerminator(terminator)),
+            // The tmux client for a remote attach lives on the server, so there
+            // is no local client for the in-session switcher to `switch-client`;
+            // picking a local session from a remote attach re-attaches instead.
+            local_client_tty: None,
         }
     }
 }

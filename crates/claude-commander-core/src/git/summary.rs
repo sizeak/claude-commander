@@ -3,6 +3,7 @@
 //! Pipes the diff text into `claude --print` via stdin to generate a brief
 //! summary of changes. Uses Haiku by default for token efficiency.
 
+use crate::git::git_command;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -35,7 +36,7 @@ pub enum AiSummary {
 pub async fn compute_branch_diff(worktree_path: &Path, main_branch: &str) -> String {
     let (committed, uncommitted) = tokio::join!(
         // Committed changes vs main branch
-        Command::new("git")
+        git_command()
             .current_dir(worktree_path)
             .args(["diff", &format!("origin/{main_branch}...HEAD")])
             .stdin(Stdio::null())
@@ -43,7 +44,7 @@ pub async fn compute_branch_diff(worktree_path: &Path, main_branch: &str) -> Str
             .stderr(Stdio::piped())
             .output(),
         // Uncommitted working changes
-        Command::new("git")
+        git_command()
             .current_dir(worktree_path)
             .args(["diff", "HEAD"])
             .stdin(Stdio::null())

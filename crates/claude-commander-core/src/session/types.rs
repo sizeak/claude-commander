@@ -39,6 +39,30 @@ pub struct Project {
     /// Shell tmux session name (for project-level shell)
     #[serde(default)]
     pub shell_tmux_session_name: Option<String>,
+    /// URL of the repository's `origin` remote, as git resolves it (after any
+    /// `url.<base>.insteadOf` rewrite). `None` when the repo has no `origin` —
+    /// a valid resting state, not a pending fetch.
+    ///
+    /// Persisted rather than derived: the only consumer, the project projection
+    /// [`build_project_info_list`](crate::api), is a pure synchronous fold over
+    /// `AppState` on the workspace-poll path, so deriving it would mean opening
+    /// a `gix` repo per project per poll. Kept true to the repo by
+    /// `SessionManager::sync_worktrees`, which already holds an open repo: it
+    /// fills the field for projects added before it existed *and* corrects it
+    /// when a repo is renamed, transferred, or has its remote re-pointed.
+    #[serde(default)]
+    pub origin_url: Option<String>,
+    /// Name of the workspace this project is tagged with; `None` is the
+    /// built-in Main workspace. A label only — every workspace shares this
+    /// state file. An older binary's write drops it (the project falls back to
+    /// Main); that risk was accepted, and [`Self::extra`] closes it from here on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Every field this binary does not model, kept verbatim so a newer
+    /// binary's additions survive this one's writes. Must stay the last field
+    /// and must stay `flatten`: serde routes only *unclaimed* keys here.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Project {
@@ -56,6 +80,9 @@ impl Project {
             created_at: Utc::now(),
             worktrees: Vec::new(),
             shell_tmux_session_name: None,
+            origin_url: None,
+            workspace: None,
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -168,7 +195,7 @@ pub struct WorktreeSession {
     #[serde(default = "chrono::Utc::now")]
     pub entered_section_at: DateTime<Utc>,
     /// Most recent time the user attached to this session. Drives the
-    /// Alt+Tab-style MRU ordering in the in-tmux session picker.
+    /// Alt+Tab-style MRU ordering in the in-session switcher.
     /// `None` for sessions never attached since adopting the field.
     #[serde(default)]
     pub last_attached_at: Option<DateTime<Utc>>,
@@ -177,11 +204,20 @@ pub struct WorktreeSession {
     /// has been idle. Toggled per-session from the TUI/CLI.
     #[serde(default)]
     pub keep_alive: bool,
-    /// Set when this session was stopped by the auto-hibernation policy (as
-    /// opposed to a manual kill). Drives the wake path to resume the prior
-    /// agent conversation *even when* the global `resume_session` config is
-    /// off — hibernation is only non-destructive with `--resume`. Cleared when
-    /// the session is next recreated.
+    /// When this session adopted its *current* branch name, if that happened
+    /// after creation (a rename picked up by `reconcile_session_branches`).
+    /// `None` means the session has held [`Self::branch`] since it was created.
+    /// Feeds [`Self::branch_owned_since`], which bounds how far back a PR
+    /// matched by branch *name* may be — see
+    /// [`crate::git::check_pr_for_branch`].
+    #[serde(default)]
+    pub branch_adopted_at: Option<DateTime<Utc>>,
+    /// Set when this session was stopped non-destructively — by the
+    /// auto-hibernation policy or a manual kill that kept the worktree.
+    /// Drives the wake path to resume the prior agent conversation *even
+    /// when* the global `resume_session` config is off — stopping is only
+    /// non-destructive with `--resume`. Cleared when the session is next
+    /// recreated.
     #[serde(default)]
     pub hibernated: bool,
 }
@@ -232,6 +268,7 @@ impl WorktreeSession {
             entered_section_at: now,
             last_attached_at: None,
             keep_alive: false,
+            branch_adopted_at: None,
             hibernated: false,
         }
     }
@@ -281,6 +318,7 @@ impl WorktreeSession {
             entered_section_at: now,
             last_attached_at: None,
             keep_alive: false,
+            branch_adopted_at: None,
             hibernated: false,
         }
     }
@@ -318,14 +356,20 @@ impl WorktreeSession {
     /// Best fuzzy score across title, branch, and program — or `None` if
     /// no field matches. Used by the palette to rank results.
     pub fn fuzzy_score(&self, query: &str) -> Option<i64> {
-        [
-            self.title.as_str(),
-            self.branch.as_str(),
-            self.program.as_str(),
-        ]
-        .iter()
-        .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
-        .max()
+        claude_commander_viewmodel::session_score(&self.title, &self.branch, &self.program, query)
+    }
+
+    /// The instant from which this session has held its current branch name:
+    /// [`Self::branch_adopted_at`] when a rename was adopted, else
+    /// [`Self::created_at`]. Never earlier than creation, so a stale adoption
+    /// stamp can't widen the window.
+    ///
+    /// A PR is matched to a session by branch *name*, so anything that already
+    /// settled before this instant belongs to some earlier occupant of the name
+    /// — see [`crate::git::check_pr_for_branch`].
+    pub fn branch_owned_since(&self) -> DateTime<Utc> {
+        self.branch_adopted_at
+            .map_or(self.created_at, |adopted| adopted.max(self.created_at))
     }
 
     /// True when the session's PR is merged on GitHub. Honours the legacy
@@ -468,6 +512,79 @@ pub fn stack_top<S: SessionNode>(session_id: SessionId, project_sessions: &[&S])
     current
 }
 
+/// Why a request to retarget a session's stack base was refused.
+///
+/// Self-contained (no `#[from]` back into core's hierarchy), so the reason
+/// reaches a frontend typed rather than as a formatted string — the server maps
+/// the malformed variants to 400 and the state-conflict variants to 409.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SetBaseRejection {
+    #[error("the session no longer exists")]
+    SessionNotFound,
+
+    #[error("the chosen base session no longer exists")]
+    ParentNotFound,
+
+    #[error("a session can only be based on another session in the same project")]
+    DifferentProject,
+
+    #[error("a session cannot be based on itself")]
+    SelfParent,
+
+    #[error(
+        "'{parent_title}' is stacked on this session — basing this session on it would create a cycle"
+    )]
+    WouldCycle { parent_title: String },
+
+    #[error("'{branch}' is already the base of this session")]
+    AlreadyBased { branch: String },
+
+    #[error(
+        "this session's pull request is {state} — restacking it would be undone by the next PR sync"
+    )]
+    PrNotOpen { state: &'static str },
+
+    #[error(
+        "a paused cascade is in progress for this project — resume or abandon it before restacking"
+    )]
+    CascadeInProgress,
+}
+
+/// Whether `candidate` sits anywhere *below* `ancestor` in the stack — i.e.
+/// walking `candidate`'s parents eventually reaches `ancestor`.
+///
+/// This is the cycle guard for retargeting a session's base: making `ancestor`
+/// stack onto one of its own descendants would close a loop. That is not
+/// cosmetic — [`crate::session::board::build_session_order`] has no iteration
+/// bound and treats a cycle as having no root, so every member of the cycle is
+/// dropped from the board and session list entirely.
+///
+/// Bounded by `project_sessions.len()` the same way [`stack_root`] is, so an
+/// already-corrupted cycle terminates instead of spinning. Returns `false` when
+/// `candidate == ancestor` — identity is checked separately by the caller so
+/// the two rejections can be reported distinctly.
+pub fn is_descendant_of<S: SessionNode>(
+    candidate: SessionId,
+    ancestor: SessionId,
+    project_sessions: &[&S],
+) -> bool {
+    let mut current = candidate;
+    for _ in 0..project_sessions.len() {
+        let Some(parent) = project_sessions
+            .iter()
+            .find(|s| s.node_id() == current)
+            .and_then(|s| resolve_stack_parent(*s, project_sessions))
+        else {
+            return false;
+        };
+        if parent == ancestor {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
 /// Walk up the stack chain starting from `session_id` to find the session at
 /// the bottom of its stack.
 ///
@@ -522,22 +639,27 @@ pub fn stack_chain_from_base<S: SessionNode>(
     chain
 }
 
-/// Represents an item in the hierarchical session list
-/// Used for UI display and navigation
+/// A row in the session list, or a card on the board.
+///
+/// The board draws only `Worktree` rows (grouped under its own columns and
+/// sidebar); the list views additionally render the header, spacer and recents
+/// variants. Everything downstream — widgets, hit-testing, action gating —
+/// pattern-matches on these variants, so a row's kind is what decides both how
+/// it draws and whether it is selectable (see
+/// [`is_selectable`](Self::is_selectable)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionListItem {
-    /// A project header
+    /// A project header (list views). When `nested`, it renders indented one
+    /// level as a project sub-header under a section header.
     Project {
         id: ProjectId,
         name: String,
         repo_path: PathBuf,
         main_branch: String,
         worktree_count: usize,
-        /// When `true`, render indented one level deeper — used for project
-        /// sub-headers nested under a section header.
         nested: bool,
     },
-    /// A worktree session (indented under project)
+    /// A worktree session (a card row under its project)
     Worktree {
         id: SessionId,
         project_id: ProjectId,
@@ -570,32 +692,25 @@ pub enum SessionListItem {
         /// set to `false`.
         stacked_child: bool,
     },
-    /// A per-backend header grouping one server's projects and sessions.
-    /// Emitted only when more than one backend is configured — a lone local
-    /// backend is suppressed, so single-server trees render exactly as before.
-    /// Carries the connection health so the header can render live status.
+    /// A per-backend header grouping one server's projects and sessions (list
+    /// views). Emitted only when more than one backend is configured — a lone
+    /// local backend is suppressed. Carries connection health + an optional
+    /// version-mismatch warning for live status rendering.
     ServerHeader {
         backend: crate::backend::BackendId,
         name: String,
         connection: crate::backend::ConnectionState,
-        /// Set when this backend's server build is older than the client (see
-        /// [`server_version_mismatch`](crate::backend::server_version_mismatch)).
-        /// Rendered as a non-blocking `⚠` annotation; independent of
-        /// `connection` so a mismatched-but-healthy server still shows its
-        /// subtree.
         version_warning: Option<crate::backend::VersionMismatch>,
     },
-    /// A section header (used only when config.sections is non-empty).
+    /// A section header (list section views; used when sections are active).
     SectionHeader {
         name: String,
         count: usize,
         collapsed: bool,
-        /// Advisory WIP limit resolved from config. `None` means no limit
-        /// configured for this section.
+        /// Advisory WIP limit resolved from config. `None` = no limit.
         max_sessions: Option<u32>,
     },
-    /// A blank spacer row for visual separation between sections.
-    /// Not selectable.
+    /// A blank spacer row for visual separation between sections. Not selectable.
     Spacer,
     /// Label row heading the "Recent" block at the very top of the list.
     /// A view over recently-attached sessions, independent of any backend.
@@ -614,11 +729,24 @@ pub enum SessionListItem {
         status: SessionStatus,
         agent_state: Option<AgentState>,
         unread: bool,
+        /// The following fields mirror the real [`Worktree`](Self::Worktree) row
+        /// this shortcut points at, so the recents row renders identically. See
+        /// the `Worktree` variant for the individual field meanings.
+        branch: String,
+        program: String,
+        keep_alive: bool,
+        lfs_pulling: bool,
+        pr_number: Option<u32>,
+        pr_url: Option<String>,
+        pr_merged: bool,
+        pr_state: Option<crate::git::PrState>,
+        pr_draft: bool,
+        pr_labels: Vec<String>,
     },
 }
 
 impl SessionListItem {
-    /// Get a unique key for this item (for selection tracking)
+    /// A unique key for this item (for selection tracking across rebuilds).
     pub fn key(&self) -> String {
         match self {
             Self::Project { id, .. } => format!("project:{}", id),
@@ -631,23 +759,24 @@ impl SessionListItem {
         }
     }
 
-    /// Check if this is a project item
+    /// Whether this is a project header.
     pub fn is_project(&self) -> bool {
         matches!(self, Self::Project { .. })
     }
 
-    /// Check if this is a worktree item
+    /// Whether this is a worktree session row.
     pub fn is_worktree(&self) -> bool {
         matches!(self, Self::Worktree { .. })
     }
 
-    /// Whether navigation/selection should land on this row.
+    /// Whether navigation/selection should land on this row (everything but a
+    /// spacer).
     pub fn is_selectable(&self) -> bool {
         !matches!(self, Self::Spacer | Self::RecentsHeader)
     }
 
     /// Whether this row begins a group — a project, section, or server header.
-    /// Group-jump navigation moves between these rows.
+    /// Group-jump navigation (`NextGroup`/`PreviousGroup`) moves between these.
     pub fn is_group_header(&self) -> bool {
         matches!(
             self,
@@ -655,7 +784,7 @@ impl SessionListItem {
         )
     }
 
-    /// Whether this row is a server header (a per-backend grouping row).
+    /// Whether this row is a per-backend server header.
     pub fn is_server_header(&self) -> bool {
         matches!(self, Self::ServerHeader { .. })
     }
@@ -664,6 +793,44 @@ impl SessionListItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `state.json` project written before workspaces existed is in Main.
+    #[test]
+    fn a_project_without_a_workspace_field_is_in_main() {
+        let json = r#"{
+            "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+            "name": "repo", "repo_path": "/repo", "main_branch": "main",
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.workspace, None);
+        assert!(project.extra.is_empty());
+    }
+
+    /// Fields this binary doesn't know (written by a *newer* one) survive a
+    /// load/save round trip instead of being dropped by our next write. That is
+    /// what `Project::extra` is for — `workspace` itself was lost this way by
+    /// every binary that predates it.
+    #[test]
+    fn unknown_project_fields_survive_a_round_trip() {
+        let json = r#"{
+            "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+            "name": "repo", "repo_path": "/repo", "main_branch": "main",
+            "created_at": "2026-01-01T00:00:00Z",
+            "workspace": "Work",
+            "future_flag": true,
+            "future_table": {"nested": [1, 2, 3]}
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.workspace.as_deref(), Some("Work"));
+        let out: serde_json::Value = serde_json::to_value(&project).unwrap();
+        assert_eq!(out["workspace"], "Work");
+        assert_eq!(out["future_flag"], true);
+        assert_eq!(out["future_table"]["nested"][2], 3);
+        // Known fields are not duplicated into the catch-all.
+        assert!(!project.extra.contains_key("workspace"));
+        assert!(!project.extra.contains_key("name"));
+    }
 
     #[test]
     fn test_session_id_display() {
@@ -702,6 +869,23 @@ mod tests {
     }
 
     #[test]
+    fn project_deserialises_without_origin_url() {
+        // A `state.json` written by a binary that predates `origin_url` (or by
+        // an older binary still running alongside this one) has no such key.
+        // It must load with the field absent, not fail and wipe the project.
+        let json = r#"{
+            "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+            "name": "r",
+            "repo_path": "/repos/r",
+            "main_branch": "main",
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.name, "r");
+        assert_eq!(project.origin_url, None);
+    }
+
+    #[test]
     fn test_worktree_session_creation() {
         let project_id = ProjectId::new();
         let session = WorktreeSession::new(
@@ -718,6 +902,50 @@ mod tests {
         assert_eq!(session.program, "claude");
         assert!(session.tmux_session_name.starts_with("cc-"));
         assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn test_branch_owned_since_defaults_to_creation() {
+        let session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        assert!(session.branch_adopted_at.is_none());
+        assert_eq!(session.branch_owned_since(), session.created_at);
+    }
+
+    #[test]
+    fn test_branch_owned_since_uses_adoption_when_later() {
+        // A rename adopted mid-life moves the window forward: PRs that settled
+        // on the new name before the adoption belong to its previous occupant.
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        let adopted = session.created_at + chrono::Duration::days(7);
+        session.branch_adopted_at = Some(adopted);
+        assert_eq!(session.branch_owned_since(), adopted);
+    }
+
+    #[test]
+    fn test_branch_owned_since_never_predates_creation() {
+        // A nonsensical stamp (clock step, hand-edited state.json) must not widen
+        // the window back past creation.
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        session.branch_adopted_at = Some(session.created_at - chrono::Duration::days(30));
+        assert_eq!(session.branch_owned_since(), session.created_at);
     }
 
     #[test]
@@ -799,51 +1027,9 @@ mod tests {
             PathBuf::from("/tmp"),
             "claude",
         );
-        let title_only = crate::fuzzy::fuzzy_score("payments", "payments").unwrap();
+        let title_only = claude_commander_viewmodel::fuzzy_score("payments", "payments").unwrap();
         let combined = session.fuzzy_score("payments").unwrap();
         assert_eq!(combined, title_only);
-    }
-
-    #[test]
-    fn test_session_list_item_key() {
-        let project_id = ProjectId::new();
-        let session_id = SessionId::new();
-
-        let project_item = SessionListItem::Project {
-            id: project_id,
-            name: "test".to_string(),
-            repo_path: PathBuf::from("/tmp"),
-            main_branch: "main".to_string(),
-            worktree_count: 0,
-            nested: false,
-        };
-
-        let worktree_item = SessionListItem::Worktree {
-            id: session_id,
-            project_id,
-            title: "test".to_string(),
-            branch: "test".to_string(),
-            status: SessionStatus::Running,
-            program: "claude".to_string(),
-            pr_number: None,
-            pr_url: None,
-            pr_merged: false,
-            pr_state: None,
-            pr_draft: false,
-            pr_labels: Vec::new(),
-            worktree_path: PathBuf::from("/tmp/wt"),
-            created_at: chrono::Utc::now(),
-            agent_state: None,
-            unread: false,
-            keep_alive: false,
-            lfs_pulling: false,
-            stacked_child: false,
-        };
-
-        assert!(project_item.key().starts_with("project:"));
-        assert!(worktree_item.key().starts_with("worktree:"));
-        assert!(project_item.is_project());
-        assert!(worktree_item.is_worktree());
     }
 
     #[test]
@@ -979,42 +1165,6 @@ mod tests {
 
         project.remove_worktree(&SessionId::new());
         assert_eq!(project.worktrees.len(), 1);
-    }
-
-    #[test]
-    fn test_session_list_item_predicates_negative() {
-        let project_item = SessionListItem::Project {
-            id: ProjectId::new(),
-            name: "test".to_string(),
-            repo_path: PathBuf::from("/tmp"),
-            main_branch: "main".to_string(),
-            worktree_count: 0,
-            nested: false,
-        };
-        let worktree_item = SessionListItem::Worktree {
-            id: SessionId::new(),
-            project_id: ProjectId::new(),
-            title: "test".to_string(),
-            branch: "test".to_string(),
-            status: SessionStatus::Running,
-            program: "claude".to_string(),
-            pr_number: None,
-            pr_url: None,
-            pr_merged: false,
-            pr_state: None,
-            pr_draft: false,
-            pr_labels: Vec::new(),
-            worktree_path: PathBuf::from("/tmp/wt"),
-            created_at: chrono::Utc::now(),
-            agent_state: None,
-            unread: false,
-            keep_alive: false,
-            lfs_pulling: false,
-            stacked_child: false,
-        };
-
-        assert!(!project_item.is_worktree());
-        assert!(!worktree_item.is_project());
     }
 
     #[test]
@@ -1319,45 +1469,44 @@ mod tests {
     }
 
     #[test]
-    fn session_list_item_spacer_is_not_selectable() {
-        // Kills the mutant that makes is_selectable always return true:
-        // Spacer rows are never selectable.
-        assert!(!SessionListItem::Spacer.is_selectable());
+    fn is_descendant_of_walks_the_whole_chain() {
+        let a = session_with("a", None, None);
+        let b = session_with("b", None, Some(a.id));
+        let c = session_with("c", None, Some(b.id));
+        let sessions = [&a, &b, &c];
 
-        // And the positive cases still hold, so the assertion above is the
-        // discriminating one.
-        let project = SessionListItem::Project {
-            id: ProjectId::new(),
-            name: "p".to_string(),
-            repo_path: PathBuf::from("/tmp"),
-            main_branch: "main".to_string(),
-            worktree_count: 0,
-            nested: false,
-        };
-        assert!(project.is_selectable());
+        assert!(is_descendant_of(c.id, a.id, &sessions), "grandchild of A");
+        assert!(is_descendant_of(b.id, a.id, &sessions));
+        // Not symmetric, and identity is not descent.
+        assert!(!is_descendant_of(a.id, c.id, &sessions));
+        assert!(!is_descendant_of(a.id, a.id, &sessions));
     }
 
     #[test]
-    fn session_list_item_group_headers() {
-        let project = SessionListItem::Project {
-            id: ProjectId::new(),
-            name: "p".to_string(),
-            repo_path: PathBuf::from("/tmp"),
-            main_branch: "main".to_string(),
-            worktree_count: 0,
-            nested: false,
-        };
-        assert!(project.is_group_header());
+    fn is_descendant_of_is_false_for_an_unrelated_session() {
+        let a = session_with("a", None, None);
+        let b = session_with("b", None, Some(a.id));
+        let solo = session_with("solo", None, None);
+        let sessions = [&a, &b, &solo];
 
-        let section = SessionListItem::SectionHeader {
-            name: "Open PRs".to_string(),
-            count: 2,
-            collapsed: false,
-            max_sessions: None,
-        };
-        assert!(section.is_group_header());
+        assert!(!is_descendant_of(b.id, solo.id, &sessions));
+        assert!(!is_descendant_of(solo.id, a.id, &sessions));
+    }
 
-        assert!(!SessionListItem::Spacer.is_group_header());
+    /// An already-corrupted cycle must terminate rather than spin — the walk is
+    /// bounded by the session count, exactly like `stack_root`.
+    #[test]
+    fn is_descendant_of_terminates_on_a_corrupted_cycle() {
+        let mut a = session_with("a", None, None);
+        let mut b = session_with("b", None, None);
+        a.stack_parent_session_id = Some(b.id);
+        b.stack_parent_session_id = Some(a.id);
+        let solo = session_with("solo", None, None);
+        let sessions = [&a, &b, &solo];
+
+        // Reachable within the cycle, and the unreachable query still returns.
+        assert!(is_descendant_of(a.id, b.id, &sessions));
+        assert!(!is_descendant_of(a.id, solo.id, &sessions));
     }
 }
 

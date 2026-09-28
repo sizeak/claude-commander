@@ -1,38 +1,88 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'pages/adaptive_shell.dart';
 import 'pages/connection_page.dart';
 import 'server_config.dart';
 import 'services/commander_api.dart';
 import 'src/rust/frb_generated.dart';
-import 'state/commander_store.dart';
+import 'services/pref_store.dart';
+import 'services/window_service.dart';
 import 'state/commander_store_scope.dart';
+import 'state/fleet_store.dart';
+import 'theme/theme_controller.dart';
+import 'theme/theme_data.dart';
+import 'theme/theme_prefs.dart';
+import 'theme/tokens.dart';
+import 'window/window_controller.dart';
+import 'window/window_frame.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Edge-to-edge explicitly, not by platform default: OS enforcement only
+  // arrives at targetSdk 35 / Android 15, and below that the window may not be
+  // edge-to-edge at all — `MediaQuery.padding` would be ~0 and the LCARS bleed
+  // would silently no-op. A no-op on desktop.
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  // A missing token extension falls back to Mission Control so widget tests can
+  // pump bare widgets; in the real app that silence would hide a mis-themed
+  // subtree, so opt into the assert here.
+  debugAssertTokensPresent = true;
   // Initialise the Rust bridge before any `api` call.
   await RustLib.init();
-  const store = SecureServerConfigStore();
-  const api = RustCommanderApi();
-  final config = await store.load();
-  runApp(CommanderApp(api: api, store: store, initialConfig: config));
+  final api = RustCommanderApi();
+  final fleet = FleetStore(
+    api: api,
+    listStore: SecureServerListStore(),
+    // The active workspace is per device, so it lives with the other device
+    // preferences rather than on any server.
+    prefs: const SharedPrefStore(),
+  );
+  // Restore the saved theme *before* the first frame. The connect screen is the
+  // first thing a cold start with no servers shows, and it has to arrive already
+  // themed rather than flashing the default for a frame.
+  final theme = ThemeController(store: const SharedPrefStore());
+  await theme.load();
+  // Same rule, for the same reason: the runner shows the window on its first
+  // Flutter frame, so a frame or geometry restored late is a visible jump from
+  // the default 1280x720 to wherever the user left the window. Null on Android,
+  // where there is no window to manage.
+  final windowService = createWindowService();
+  final window = windowService == null
+      ? null
+      : WindowController(
+          store: const SharedPrefStore(),
+          service: windowService,
+        );
+  await window?.load();
+  // Fire-and-forget per server: each surfaces its own connect progress as state.
+  await fleet.loadAndConnectAll();
+  runApp(CommanderApp(api: api, fleet: fleet, theme: theme, window: window));
 }
 
-/// Owns the app's single [CommanderStore]. There is no store until a server is
-/// configured: first run shows the [ConnectionPage] and only *then* builds the
-/// store (via [_handleConnected]). A settings change reconnects the *same* store
-/// rather than minting a fresh handle — the handle lifecycle lives in the store,
-/// so it can never be abandoned.
+/// Owns the app's [FleetStore] — the multi-server aggregator. Every saved
+/// server is connected at once; the session list groups their sessions by
+/// server. With no servers configured (first run) the home is the add-server
+/// screen; adding the first server flips the home to the [AdaptiveShell].
 class CommanderApp extends StatefulWidget {
   final CommanderApi api;
-  final ServerConfigStore store;
-  final ServerConfig? initialConfig;
+  final FleetStore fleet;
+
+  /// The selected theme. Already loaded by `main()`, so the first frame is
+  /// painted in the user's chosen theme rather than the default.
+  final ThemeController theme;
+
+  /// The desktop window, or **null** where there is no window to manage. Null is
+  /// what leaves Android with no window bar and no F11 handler — the absence is
+  /// structural rather than a platform check inside the UI.
+  final WindowController? window;
 
   const CommanderApp({
     super.key,
     required this.api,
-    required this.store,
-    this.initialConfig,
+    required this.fleet,
+    required this.theme,
+    this.window,
   });
 
   @override
@@ -40,66 +90,79 @@ class CommanderApp extends StatefulWidget {
 }
 
 class _CommanderAppState extends State<CommanderApp> {
-  CommanderStore? _store;
-
   @override
   void initState() {
     super.initState();
-    final config = widget.initialConfig;
-    if (config != null) {
-      final store = CommanderStore(api: widget.api, config: config);
-      _store = store;
-      // Fire-and-forget: the store surfaces connect progress/errors as state,
-      // so the session list can render its connecting/error view immediately.
-      store.connect();
-    }
+    widget.fleet.addListener(_syncWorkspaceTheme);
+    _syncWorkspaceTheme();
+  }
+
+  /// Keeps the theme on the active workspace's. With only Main there is no
+  /// scope selector to edit a workspace theme from, so the usual theme applies
+  /// — a theme left on Main from when there were more must not stick.
+  ///
+  /// Cheap on every fleet notification: [ThemeController.setActiveWorkspace]
+  /// only notifies (and so only rebuilds the app) when the resolved theme
+  /// actually changes.
+  void _syncWorkspaceTheme() {
+    final fleet = widget.fleet;
+    widget.theme.setActiveWorkspace(
+      fleet.workspacesVisible ? workspaceThemeKey(fleet.activeWorkspace) : null,
+    );
   }
 
   @override
   void dispose() {
-    _store?.dispose();
+    widget.fleet.removeListener(_syncWorkspaceTheme);
+    widget.fleet.dispose();
+    widget.window?.dispose();
     super.dispose();
-  }
-
-  /// Called by the connection page on a successful save. First run creates and
-  /// connects the store (flipping the home to the session list); a settings
-  /// change reconnects the existing store (releasing the old handle first).
-  Future<void> _handleConnected(ServerConfig config) async {
-    final existing = _store;
-    if (existing == null) {
-      final store = CommanderStore(api: widget.api, config: config);
-      setState(() => _store = store);
-      await store.connect();
-    } else {
-      await existing.reconnect(config);
-    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final store = _store;
-    return CommanderStoreScope(
-      store: store,
-      child: MaterialApp(
-        title: 'Claude Commander',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.deepPurple,
-            brightness: Brightness.dark,
-          ),
-          useMaterial3: true,
-        ),
-        home: store == null
-            ? ConnectionPage(
-                api: widget.api,
-                store: widget.store,
-                onConnected: _handleConnected,
-              )
-            : AdaptiveShell(
-                configStore: widget.store,
-                onConnected: _handleConnected,
+    return FleetScope(
+      fleet: widget.fleet,
+      child: WindowScope(
+        controller: widget.window,
+        child: ThemeScope(
+          controller: widget.theme,
+          // Rebuilds the whole app on a theme change, which is the whole
+          // switching mechanism: MaterialApp wraps an AnimatedTheme, so colours
+          // crossfade rather than snap. A workspace switch goes through the same
+          // path ([_syncWorkspaceTheme]): between two themes on the same chrome
+          // only colours move and every State below survives; only a chrome
+          // change pays the cost described next (`workspace_theme_app_test`).
+          //
+          // Structure does *not* crossfade. `tokens.chrome` swaps at the lerp
+          // midpoint, and the two chromes build different widget types, so the
+          // shells re-inflate and page State beneath them is rebuilt: a live
+          // terminal attach in the wide shell reopens, and fleet search text
+          // resets. That is the same cost as switching detail tabs, which
+          // already re-creates attaches — but it is not "nothing is disposed",
+          // and the server-side session is untouched either way.
+          child: ListenableBuilder(
+            listenable: widget.theme,
+            builder: (context, _) => MaterialApp(
+              title: 'Claude Commander',
+              debugShowCheckedModeBanner: false,
+              theme: themeDataFor(widget.theme.tokens),
+              // Inside the app's Theme (so the bar resolves tokens) and above the
+              // Navigator (so no pushed route can cover it).
+              builder: (context, child) => WindowFrame(child: child!),
+              home: ListenableBuilder(
+                listenable: widget.fleet,
+                builder: (context, _) => widget.fleet.isEmpty
+                    // First run: no servers yet. Adding one flips the home below.
+                    ? ConnectionPage(
+                        api: widget.api,
+                        onSubmit: widget.fleet.addServer,
+                      )
+                    : const AdaptiveShell(),
               ),
+            ),
+          ),
+        ),
       ),
     );
   }

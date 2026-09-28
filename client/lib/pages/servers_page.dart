@@ -1,0 +1,125 @@
+import 'package:flutter/material.dart';
+
+import '../chrome/chrome.dart';
+import '../src/rust/api/mirrors.dart';
+import '../state/commander_store.dart';
+import '../state/fleet_store.dart';
+import '../theme/tokens.dart';
+import 'connection_page.dart';
+
+/// Manage the configured servers: add, edit, or remove. Each row shows a live
+/// connection dot. Adding/editing pushes the [ConnectionPage] form, whose
+/// `onSubmit` persists + (re)connects through the [FleetStore].
+class ServersPage extends StatelessWidget {
+  final FleetStore fleet;
+  const ServersPage({super.key, required this.fleet});
+
+  Future<void> _add(BuildContext context) => Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (_) => ConnectionPage(api: fleet.api, onSubmit: fleet.addServer),
+    ),
+  );
+
+  Future<void> _edit(BuildContext context, CommanderStore store) =>
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ConnectionPage(
+            api: store.api,
+            existing: store.config,
+            onSubmit: fleet.updateServer,
+          ),
+        ),
+      );
+
+  Future<void> _confirmRemove(
+    BuildContext context,
+    CommanderStore store,
+  ) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Remove ${store.config.name}?'),
+        content: const Text(
+          'Disconnects and forgets this server on this device. The server '
+          'itself and its sessions are untouched.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (ok ?? false) await fleet.removeServer(store.config.id);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
+    return ChromePage(
+      title: 'Servers',
+      code: '47-S',
+      primaryAction: ChromeButtonAction(
+        icon: Icons.add,
+        label: 'Add server',
+        onPressed: () => _add(context),
+      ),
+      body: ListenableBuilder(
+        listenable: fleet,
+        builder: (context, _) {
+          final servers = fleet.servers;
+          return ListView(
+            children: [
+              for (final store in servers)
+                ListenableBuilder(
+                  listenable: store,
+                  builder: (context, _) => ListTile(
+                    leading: _dot(context, store.connection),
+                    title: Text(store.config.name),
+                    subtitle: Text(
+                      store.config.baseUrl,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: t.meta(size: 11, color: t.textMuted),
+                    ),
+                    onTap: () => _edit(context, store),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      tooltip: 'Remove',
+                      onPressed: () => _confirmRemove(context, store),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _dot(BuildContext context, ConnectionStateDto conn) {
+    final t = CommanderTokens.of(context);
+    final color = switch (conn.kind) {
+      ConnectionStateKind.connected => t.working,
+      ConnectionStateKind.connecting => t.attention,
+      ConnectionStateKind.degraded => t.danger,
+    };
+    return Container(
+      width: 12,
+      height: 12,
+      margin: const EdgeInsets.only(top: 4),
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        boxShadow: conn.kind == ConnectionStateKind.connected
+            ? [BoxShadow(color: color.withValues(alpha: 0.6), blurRadius: 8)]
+            : null,
+      ),
+    );
+  }
+}

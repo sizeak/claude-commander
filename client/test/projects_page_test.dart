@@ -1,3 +1,4 @@
+import 'package:claude_commander_client/pages/clone_repo_page.dart';
 import 'package:claude_commander_client/pages/projects_page.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/src/rust/api/simple.dart'
@@ -22,7 +23,7 @@ void main() {
 
   Widget wrap() => MaterialApp(home: ProjectsPage(store: store));
 
-  /// Connect the store (so the page has a live handle + workspace), then pump.
+  /// Connect the store (so the page has a live handle + snapshot), then pump.
   Future<void> pump(WidgetTester tester) async {
     await store.connect();
     await tester.pumpWidget(wrap());
@@ -37,6 +38,14 @@ void main() {
         matching: find.widgetWithText(FilledButton, 'OK'),
       ),
     );
+    await tester.pumpAndSettle();
+  }
+
+  /// Open the **+** sheet and pick one of its three ways to add a project.
+  Future<void> chooseAddSource(WidgetTester tester, String label) async {
+    await tester.tap(find.byType(FloatingActionButton));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(label));
     await tester.pumpAndSettle();
   }
 
@@ -56,20 +65,32 @@ void main() {
     expect(find.textContaining('No projects'), findsOneWidget);
   });
 
+  testWidgets('the + sheet offers all three ways to add a project', (
+    tester,
+  ) async {
+    await pump(tester);
+
+    await tester.tap(find.byType(FloatingActionButton));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Clone from GitHub'), findsOneWidget);
+    expect(find.text('Add existing path'), findsOneWidget);
+    expect(find.text('Scan directory'), findsOneWidget);
+  });
+
   testWidgets('adding a project calls addProject then refreshes', (
     tester,
   ) async {
     await pump(tester);
-    final refreshesBefore = api.countOf('workspaceSnapshot');
+    final refreshesBefore = api.countOf('snapshot');
 
-    await tester.tap(find.byType(FloatingActionButton));
-    await tester.pumpAndSettle();
+    await chooseAddSource(tester, 'Add existing path');
     await enterPathAndConfirm(tester, '/srv/repos/new');
 
     expect(api.countOf('addProject'), 1);
     expect(api.lastCall('addProject')!.args['path'], '/srv/repos/new');
     // A refresh follows the add so the new project shows without a manual pull.
-    expect(api.countOf('workspaceSnapshot'), greaterThan(refreshesBefore));
+    expect(api.countOf('snapshot'), greaterThan(refreshesBefore));
   });
 
   testWidgets('scanning a directory calls scanDirectory and reports counts', (
@@ -78,13 +99,37 @@ void main() {
     api.scanDirectoryResponse = const ScanResultDto(added: 2, skipped: 1);
     await pump(tester);
 
-    await tester.tap(find.byTooltip('Scan directory'));
-    await tester.pumpAndSettle();
+    await chooseAddSource(tester, 'Scan directory');
     await enterPathAndConfirm(tester, '/srv/repos');
 
     expect(api.countOf('scanDirectory'), 1);
     expect(api.lastCall('scanDirectory')!.args['path'], '/srv/repos');
     expect(find.textContaining('Added 2, skipped 1'), findsOneWidget);
+  });
+
+  testWidgets('a scan lands its repos in the active workspace', (tester) async {
+    await store.connect();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ProjectsPage(store: store, workspace: 'Work'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await chooseAddSource(tester, 'Scan directory');
+    await enterPathAndConfirm(tester, '/srv/repos');
+
+    expect(api.lastCall('scanDirectory')!.args['workspace'], 'Work');
+  });
+
+  testWidgets('Clone from GitHub pushes the repo picker', (tester) async {
+    api.githubReposResponse = [githubRepo(owner: 'acme', name: 'widget')];
+    await pump(tester);
+
+    await chooseAddSource(tester, 'Clone from GitHub');
+
+    expect(find.byType(CloneRepoPage), findsOneWidget);
+    expect(api.countOf('githubRepos'), 1);
   });
 
   testWidgets('removing a project confirms then calls removeProject', (

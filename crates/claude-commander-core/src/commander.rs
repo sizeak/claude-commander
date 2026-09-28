@@ -5,10 +5,18 @@
 //! `claude-commander` CLI. This module owns the commander's scratch directory
 //! and the priming files Claude reads there.
 //!
-//! Layering: the pure helpers (`claude_md_content`, `generate_cli_reference`,
-//! `seed_notes_md`, `write_claude_md`, `plan_session_action`) carry the logic
-//! and are unit-tested here. `ensure_session`/`is_running` are thin IO wrappers
-//! over tmux and are exercised by tmux-gated integration tests.
+//! Layering: the pure helpers (`claude_md_content`, `seed_notes_md`,
+//! `write_claude_md`, `plan_session_action`) carry the logic and are unit-tested
+//! here. `ensure_session`/`is_running` are thin IO wrappers over tmux and are
+//! exercised by tmux-gated integration tests.
+//!
+//! The CLI reference embedded in `CLAUDE.md` arrives as rendered markdown from
+//! the binary that owns the CLI (`claude-commander`'s `cli_args::cli_reference`).
+//! Only binaries define a CLI, so only binaries depend on clap — a third-party
+//! embedder of this library shouldn't have to. Note this applies to the
+//! *generated* half only: the handwritten preamble (`commander_prime.md`) does
+//! name the `claude-commander` CLI, deliberately, since driving it is the whole
+//! point of the commander session.
 
 use std::path::Path;
 
@@ -46,44 +54,21 @@ const NOTES_SEED: &str = "# Commander notes\n\n\
     Claude Commander never touches this file.\n\n\
     ## Active workflows\n";
 
-/// Build the full `CLAUDE.md` body: the handwritten preamble followed by a
-/// CLI reference generated from the live clap command tree.
-pub fn claude_md_content(cmd: &clap::Command) -> String {
-    format!(
-        "{}\n{}",
-        COMMANDER_PRIME.trim_end(),
-        generate_cli_reference(cmd)
-    )
-}
-
-/// Render a markdown CLI reference by walking the clap command tree and
-/// emitting each visible subcommand's long help verbatim. Hidden subcommands
-/// (e.g. internal popup helpers) are skipped. Shared with the conversation
-/// session so it documents the same CLI.
-pub fn generate_cli_reference(cmd: &clap::Command) -> String {
-    let bin = cmd.get_name().to_string();
-    let mut out = String::new();
-    for sub in cmd.get_subcommands() {
-        if sub.is_hide_set() {
-            continue;
-        }
-        out.push_str(&format!("### `{bin} {}`\n\n", sub.get_name()));
-        let help = sub.clone().render_long_help();
-        out.push_str("```\n");
-        out.push_str(help.to_string().trim_end());
-        out.push_str("\n```\n\n");
-    }
-    out
+/// Build the full `CLAUDE.md` body: the handwritten preamble followed by
+/// `cli_reference` — markdown documenting the CLI, rendered by the binary that
+/// defines it (see the module docs).
+pub fn claude_md_content(cli_reference: &str) -> String {
+    format!("{}\n{}", COMMANDER_PRIME.trim_end(), cli_reference)
 }
 
 /// Write `CLAUDE.md` into the commander directory, overwriting any existing
 /// copy (the file is owned by Claude Commander, not the commander session).
 ///
 /// Async because it runs on the TUI/CLI runtime; uses `tokio::fs` so the disk
-/// write never blocks the executor. The CLI reference is composed synchronously
-/// (pure CPU) before the `await`.
-pub async fn write_claude_md(dir: &Path, cmd: &clap::Command) -> Result<()> {
-    tokio::fs::write(dir.join("CLAUDE.md"), claude_md_content(cmd)).await?;
+/// write never blocks the executor. The body is composed synchronously (pure
+/// CPU) before the `await`.
+pub async fn write_claude_md(dir: &Path, cli_reference: &str) -> Result<()> {
+    tokio::fs::write(dir.join("CLAUDE.md"), claude_md_content(cli_reference)).await?;
     Ok(())
 }
 
@@ -134,7 +119,7 @@ fn plan_session_action(exists: bool, pane_dead: bool) -> SessionAction {
 pub async fn ensure_session(
     config: &Config,
     tmux: &TmuxExecutor,
-    cmd: &clap::Command,
+    cli_reference: &str,
 ) -> Result<String> {
     if !config.commander_enabled {
         return Err(SessionError::CommanderDisabled.into());
@@ -145,7 +130,7 @@ pub async fn ensure_session(
 
     let dir = config.commander_dir()?;
     tokio::fs::create_dir_all(&dir).await?;
-    write_claude_md(&dir, cmd).await?;
+    write_claude_md(&dir, cli_reference).await?;
     seed_notes_md(&dir).await?;
 
     let exists = tmux.session_exists(COMMANDER_TMUX_NAME).await?;
@@ -182,48 +167,23 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// A miniature clap command tree mirroring the shape of the real CLI:
-    /// a couple of visible subcommands (one with args) plus a hidden one.
-    fn sample_cli() -> clap::Command {
-        clap::Command::new("claude-commander")
-            .subcommand(clap::Command::new("list").about("List all sessions"))
-            .subcommand(
-                clap::Command::new("new")
-                    .about("Create a new session")
-                    .arg(clap::Arg::new("name").help("Session name")),
-            )
-            .subcommand(clap::Command::new("pick-session").hide(true))
-    }
-
-    #[test]
-    fn cli_reference_includes_visible_subcommands() {
-        let reference = generate_cli_reference(&sample_cli());
-        assert!(reference.contains("claude-commander list"));
-        assert!(reference.contains("List all sessions"));
-        assert!(reference.contains("claude-commander new"));
-        assert!(reference.contains("Create a new session"));
-    }
-
-    #[test]
-    fn cli_reference_skips_hidden_subcommands() {
-        let reference = generate_cli_reference(&sample_cli());
-        assert!(
-            !reference.contains("pick-session"),
-            "hidden subcommands must not leak into the CLI reference"
-        );
-    }
+    /// Stands in for the markdown the owning binary renders from its clap tree.
+    /// Core never parses it — it only has to reach the file intact — so a
+    /// representative snippet is enough.
+    const SAMPLE_REFERENCE: &str = "### `claude-commander list`\n\n```\nList all sessions\n```\n";
 
     #[test]
     fn claude_md_starts_with_prime_and_appends_reference() {
-        let content = claude_md_content(&sample_cli());
+        let content = claude_md_content(SAMPLE_REFERENCE);
         assert!(
             content.starts_with("# Commander Claude"),
             "generated CLAUDE.md must lead with the handwritten preamble"
         );
         // The safety boundary from the preamble survives.
         assert!(content.contains("cannot do"));
-        // The live CLI reference is appended.
-        assert!(content.contains("claude-commander list"));
+        // The caller's reference is appended verbatim — core neither generates
+        // nor rewrites it (it can't; only the binary knows its own CLI).
+        assert!(content.contains(SAMPLE_REFERENCE));
     }
 
     #[tokio::test]
@@ -232,11 +192,12 @@ mod tests {
         let path = dir.path().join("CLAUDE.md");
         std::fs::write(&path, "stale content the commander scribbled").unwrap();
 
-        write_claude_md(dir.path(), &sample_cli()).await.unwrap();
+        write_claude_md(dir.path(), SAMPLE_REFERENCE).await.unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("stale content"));
         assert!(written.starts_with("# Commander Claude"));
+        assert!(written.contains("claude-commander list"));
     }
 
     #[tokio::test]
@@ -282,7 +243,7 @@ mod tests {
         let config = Config::default();
         assert!(!config.commander_enabled);
         let tmux = TmuxExecutor::new();
-        let err = ensure_session(&config, &tmux, &sample_cli())
+        let err = ensure_session(&config, &tmux, SAMPLE_REFERENCE)
             .await
             .unwrap_err();
         assert!(

@@ -20,7 +20,7 @@ impl SessionManager {
     pub async fn ensure_attachable(&self, session_id: &SessionId) -> Result<String> {
         info!("ensure_attachable called for session: {}", session_id);
 
-        let (tmux_name, worktree_path, title, program, hibernated, status_bar) = {
+        let (tmux_name, worktree_path, title, program, status, hibernated, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -41,6 +41,7 @@ impl SessionManager {
                 session.worktree_path.clone(),
                 session.title.clone(),
                 session.program.clone(),
+                session.status,
                 session.hibernated,
                 self.status_bar_info(session, &state),
             )
@@ -87,9 +88,18 @@ impl SessionManager {
             self.tmux
                 .configure_status_bar(&tmux_name, &status_bar)
                 .await;
+        }
 
-            // Mark Running and clear the hibernation marker — the pane is live
-            // and resumed, so a future wake shouldn't force resume again.
+        // The pane is live now — recreated above, or alive all along. Reflect
+        // that in the stored status and clear the hibernation marker: the pane
+        // holds the conversation, so a future wake shouldn't force resume again.
+        //
+        // The already-alive case matters as much as the recreate one: a session
+        // can legitimately reach here `Stopped` with a live pane (a reconcile
+        // pass that read tmux as absent — see `api::reconciled_status`), and
+        // leaving it Stopped keeps agent-state detection suppressed, so the row
+        // renders `○` while the user sits in a working agent pane.
+        if needs_recreate || status != SessionStatus::Running {
             let sid = *session_id;
             let _ = self
                 .store

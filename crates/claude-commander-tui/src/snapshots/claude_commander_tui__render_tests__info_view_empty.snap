@@ -1,0 +1,14 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+expression: terminal.backend()
+---
+"                                                            "
+"         ╭ Info — demo ───────────────────────────╮         "
+"         │Select a session to see info            │         "
+"         │                                        │         "
+"         │                                        │         "
+"         │                                        │         "
+"         │                                        │         "
+"         │                                        │         "
+"         ╰────────────────────────────────────────╯         "
+"                                                            "

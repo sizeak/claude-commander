@@ -37,7 +37,7 @@ rust-embed = "8"
 mime_guess = "2"
 
 # Upstream HTTP + WebSocket clients for the reverse proxy
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "rustls-native-certs", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 
 # Shared http types (axum + reqwest both build on the `http` crate)

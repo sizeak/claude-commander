@@ -1,0 +1,22 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+expression: terminal.backend()
+---
+"                                                            "
+"                                                            "
+"         ╭ Info — demo ───────────────────────────╮         "
+"         │ Session: my-session                    │         "
+"         │ Branch:  feature-x                     │         "
+"         │ Created: 2026-04-10 09:00 UTC          │         "
+"         │ Status:  ● running                     │         "
+"         │ Program: claude                        │         "
+"         │ Path:    /tmp/wt                       │         "
+"         │ Changes: No changes                    │         "
+"         │                                        │         "
+"         │ ─────────────────────────────────      │         "
+"         │                                        │         "
+"         │ PR: None                               │         "
+"         │                                        │         "
+"         ╰────────────────────────────────────────╯         "
+"                                                            "
+"                                                            "

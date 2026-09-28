@@ -23,20 +23,58 @@ path = "src/lib.rs"
 # Shared wire types (DTOs + WS protocol) — also consumed by the server and the
 # mobile/desktop clients, so the serde shape has a single source of truth.
 claude-commander-protocol = { path = "../claude-commander-protocol" }
+# Session matching/ranking. Lives in `claude-commander-viewmodel` rather than here
+# so the Flutter client's cdylib can share it — core is host-bound and the cdylib
+# cannot depend on it, which is how the Dart scorer came to diverge.
+claude-commander-viewmodel = { path = "../claude-commander-viewmodel" }
 
 # Async runtime
 tokio = { workspace = true }
 futures = "0.3"
 
-# CLI (derive macros - idiomatic Rust)
-clap = { version = "4.6", features = ["derive"] }
+# No clap: defining a CLI is a binary's job, so the clap tree and the CLI
+# reference generated from it live in `claude-commander` (and the server's own
+# `main.rs`). Embedders of this library don't inherit an argument parser.
 
-# TUI
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-ansi-to-tui = "8"
-# Text-input buffer (cursor/editing) for the review comment box.
-tui-input = "0.15"
+# `Color` for the `[theme]` config values and the tmux `status-style` string.
+# ratatui 0.30 is the modularised release and re-exports `ratatui_core::style`
+# verbatim (`pub use ratatui_core::{style, symbols, text};`), so this is the
+# SAME `Color` type the TUI renders with — not a mirror — and the hand-written
+# `ColorValue` serde impl in `config/theme.rs` is unaffected by using it here.
+# Depending on ratatui-core rather than full ratatui is what lets the headless
+# server and the mobile cdylib skip the whole terminal-UI dependency tree.
+#
+# `features = ["std"]` is REQUIRED, not decorative: ratatui-core's default
+# feature set is empty (`default = []`), and it is full ratatui that normally
+# turns `std` on. A consumer that takes core without the TUI crate (the server,
+# claude-commander-remote, client/rust) would otherwise get a no_std build.
+#
+# Keep this version in lockstep with the TUI crate's `ratatui`: if a future
+# ratatui bumps to ratatui-core 0.2 while this stays 0.1, `Color` becomes two
+# distinct types and `config/theme.rs` stops type-checking against the TUI.
+# That is a loud compile error, not silent breakage, but bump both together.
+ratatui-core = { version = "0.1", features = ["std"] }
+
+# Key events. NOT a rendering dependency: `config/keybindings.rs` persists
+# crossterm `KeyCode`/`KeyModifiers` in the keybinding map, and `tmux/attach.rs`
+# toggles raw mode, so these stay here after the frontend moved out. Crossterm is
+# pure Rust with no native libraries. The `event-stream` feature is enabled
+# nowhere in the workspace: the TUI reads the terminal with the synchronous
+# `poll`/`read` pair on a thread it owns (`claude-commander-tui/src/event.rs`).
+crossterm = "0.29"
+
+# Diff view-model and layout engine: unified-diff parsing, logical rows,
+# gap expansion, role-tagged spans, soft wrapping and hit-testing. The review
+# view and `git::review_diff`'s parser both delegate to it.
+#
+# Pinned to an exact revision rather than a branch so a build is reproducible
+# and an upstream push can't silently change what this compiles against. Bump
+# the `rev` deliberately when picking up diffgrid changes — and bump it in
+# `claude-commander-tui` and `client/rust` in the same commit. `Config.theme`
+# embeds a `diffgrid::style::Appearance`, so a rev that differs between core and
+# a frontend makes that two distinct types and the frontend stops compiling
+# against core (see #270, which fixed exactly that for the cdylib).
+diffgrid = { git = "https://github.com/sizeak/diffgrid", rev = "83698a53458868c7c691d89dbb21e89fbc905afa" }
 
 # Git (pure Rust)
 gix = { version = "0.85", default-features = false, features = [
@@ -57,25 +95,14 @@ serde_json = { workspace = true }
 toml = "1.1"
 toml_edit = "0.25"
 
-# Error handling
+# Error handling. No color-eyre: installing a panic/error reporter is a binary's
+# job, and `claude-commander` already owns that dependency.
 thiserror = { workspace = true }
 anyhow = "1.0"
-color-eyre = "0.6"
 
-# Observability
+# Observability. Emitting spans/events is the library's job; *subscribing* to
+# them is the binary's, so tracing-subscriber is not a dependency here.
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Syntax highlighting for the review diff view (fancy-regex backend — pure
-# Rust, no C/oniguruma dependency). `two-face` supplies an extended syntax set
-# (the bat language set, incl. TypeScript/TSX/TOML/…) that syntect's bundled
-# defaults lack.
-syntect = { version = "5.3", default-features = false, features = [
-    "default-fancy",
-] }
-two-face = { version = "0.5", default-features = false, features = [
-    "syntect-fancy",
-] }
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
@@ -87,6 +114,9 @@ directories = "6.0"
 url = "2.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 regex = "1.12"
+# No unicode-width / unicode-segmentation: the width and grapheme arithmetic they
+# serve is the review view's, so they live with `claude-commander-tui`. Core's own
+# diff work delegates to `diffgrid`.
 
 # Async utilities
 async-trait = "0.1"
@@ -94,21 +124,14 @@ async-trait = "0.1"
 # PTY for terminal attachment
 pty-process = { version = "0.5", features = ["async"] }
 
-# Unix system calls (safe wrappers)
-nix = { version = "0.31", features = ["term", "poll", "fs", "user"] }
+# Unix system calls (safe wrappers). `signal` is what lets `git::clone` kill a
+# timed-out clone's whole process group rather than just the process it spawned.
+nix = { version = "0.31", features = ["term", "poll", "fs", "user", "signal"] }
 
-# Throbber/spinner widget
-throbber-widgets-tui = "0.11"
 
-# Fuzzy matching for the quick-select palette
-fuzzy-matcher = "0.3"
-rayon = "1.12.0"
-# default features include `chafa-dyn`, which needs the chafa C lib via
-# pkg-config; we only need the built-in protocols + crossterm integration.
-ratatui-image = { version = "11.0.6", default-features = false, features = [
-    "crossterm",
-    "image-defaults",
-] }
+# RGBA→PNG encoding for pasted screenshots (`paste_image.rs`). The *rendering*
+# of those images is the frontend's job and lives with ratatui-image there;
+# encoding and the pruned temp-file store are core's.
 image = "0.25"
 
 # Conversation mode (TTS + STT): HTTP client for the OpenAI-compatible TTS/STT
@@ -133,9 +156,16 @@ reqwest = { version = "0.13", default-features = false, features = [
 # rodio master moved to cpal 0.18 and forwards `pipewire = ["cpal/pipewire"]`, so
 # both playback (rodio) and capture (our direct cpal) unify onto a single
 # PipeWire-backed cpal 0.18. Bump this rev when a rodio release ships cpal 0.18.
+# The `tracing` feature is essential, not cosmetic: without it rodio's internal
+# messages (the cpal stream-error callback that fires when the default output
+# device changes, and the device-sink drop notice) fall back to `eprintln!`
+# straight to stderr. In the TUI those land on the terminal and corrupt the
+# display — the `tracing` feature reroutes them through the subscriber, which the
+# TUI sends to the log file. Don't drop it.
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "ee3c21f2f3d926110706a2780658d098831c1ed9", default-features = false, features = [
     "playback",
     "pipewire",
+    "tracing",
     "wav",
     "mp3",
 ], optional = true }
@@ -156,8 +186,20 @@ arboard = { version = "3.6", optional = true }
 default = ["audio", "clipboard"]
 audio = ["dep:rodio", "dep:cpal", "dep:hound"]
 clipboard = ["dep:arboard"]
+# Exposes test scaffolding (`backend::mock::MockBackend`,
+# `api::snapshot_from_state`) to OTHER crates' tests. A `#[cfg(test)]`
+# item is invisible across a crate boundary, and `claude-commander-tui`'s tests
+# need both — so they are gated on `any(test, feature = "test-support")` instead.
+# Enable it only from a `[dev-dependencies]` entry: it is off by default, so
+# `cargo build` never compiles the double into a release binary, the headless
+# server, or the mobile cdylib.
+test-support = []
 
 [dev-dependencies]
+# Itself, with `test-support`: `tests/` is a separate crate, so `cfg(test)` does
+# not reach core from there, and its fixtures need `git::fixture` (git that never
+# signs, whatever the developer's global config says).
+claude-commander-core = { path = ".", default-features = false, features = ["test-support"] }
 # Property-based testing
 proptest = "1.11"
 # Async test utilities
@@ -166,7 +208,5 @@ tokio-test = "0.4"
 tempfile = "3.27"
 # Test assertions
 pretty_assertions = "1.4"
-# Snapshot testing
-insta = "1.48"
 # Set file mtimes deterministically (paste-image prune test)
 filetime = "0.2"

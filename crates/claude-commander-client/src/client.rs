@@ -13,12 +13,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use claude_commander_protocol::api::{
-    AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
-    OperationStatus, PreviewData, ProgramInfo, ReviewSnapshot, SessionDetail, SetProgramsRequest,
-    ToggleReviewed, WorkspaceSnapshot,
+    AddProjectRequest, AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide,
+    NewComment, OperationStatus, PreviewData, ProgramInfo, ReviewSnapshot, SessionDetail,
+    SetProgramsRequest, SetSessionBase, SetSessionBaseOutcome, Snapshot, ToggleReviewed,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::session::{ProjectId, SessionId};
+use claude_commander_protocol::workspace::{
+    DeleteWorkspaceRequest, RenameWorkspaceRequest, SetProjectWorkspace, SetWorkspacesRequest,
+};
 use claude_commander_protocol::ws::AttachKind;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
 use serde::Serialize;
@@ -31,21 +35,60 @@ use crate::error::{self, ClientError, ClientResult};
 use crate::spec::{RemoteServerSpec, SecretString};
 
 /// How long to wait for a TCP connection before treating the server as
-/// unreachable. Kept short so the poller's backoff engages promptly.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// unreachable.
+///
+/// This was 5s, chosen so the poller's backoff engaged promptly — too tight for
+/// the client's actual home, a phone. A handset reaching a LAN or VPN server
+/// routinely needs longer than one SYN retransmit: the radio may be leaving
+/// doze, Wi-Fi may still be associating, or a VPN tunnel may be re-establishing,
+/// and none of that is the server being down. Giving up at 5s rendered a healthy
+/// server as unreachable and dropped the poller into backoff, so the *next*
+/// attempt was a second or more away as well.
+///
+/// 15s spans the first four SYN attempts rather than the first three, which is
+/// the practical difference between "the network was waking up" and "nothing is
+/// listening". Receipt for the schedule: RFC 6298 §2.1 fixes the initial RTO at
+/// 1s and §5.5 doubles it per retransmit, and Linux retries a SYN
+/// `net.ipv4.tcp_syn_retries` times (default 6, `tcp(7)`) — so the SYNs go out
+/// at t≈0s, 1s, 3s, 7s, 15s. A *refused* connection still fails instantly; this
+/// budget only bounds the no-answer case.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Overall per-request ceiling (a slow branch-diff still fits comfortably).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Tighter per-request bound for interactive review reads/writes (list/create/
 /// delete comment, toggle-reviewed): these are quick store/file operations, so
 /// a user who fires one and waits shouldn't sit through the 30s
-/// [`REQUEST_TIMEOUT`] when a server has wedged — a few seconds surfaces the
-/// failure while still tolerating a slow link.
-const REVIEW_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// [`REQUEST_TIMEOUT`] when a server has wedged.
+///
+/// It cannot go below [`CONNECT_TIMEOUT`] — reqwest counts the connect inside
+/// the total request timeout, so a bound under the connect budget would fail a
+/// cold-but-healthy link before it ever got a chance to answer (asserted by
+/// `review_timeouts_are_bounded_between_write_and_request_ceiling`). It tracks
+/// the connect budget at exactly that floor: still half the ceiling, and once
+/// the pool has a live connection the request itself is the only thing spending
+/// the budget.
+const REVIEW_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Per-request bound for `apply_comments`. Longer than [`REVIEW_WRITE_TIMEOUT`]
 /// because the server does more work here — it recomposes a fresh review diff,
 /// re-anchors every comment, then detects the agent's state and sends keys into
 /// tmux — but still well under [`REQUEST_TIMEOUT`].
-const APPLY_COMMENTS_TIMEOUT: Duration = Duration::from_secs(15);
+const APPLY_COMMENTS_TIMEOUT: Duration = Duration::from_secs(20);
+/// Per-request bound for `GET /github/repos`, the one route that runs *longer*
+/// than [`REQUEST_TIMEOUT`] rather than shorter.
+///
+/// The value is
+/// [`REPO_LIST_HTTP_TIMEOUT_SECS`](claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS),
+/// which the protocol crate defines alongside the server's own `gh` budget so the
+/// ordering between them is stated and tested in one place — see
+/// [`RemoteClient::github_repos`] for why the ordering matters.
+///
+/// A per-request bound may exceed the client-wide one: reqwest 0.13's
+/// `RequestBuilder::timeout` "affects only this request and overrides the timeout
+/// configured using `ClientBuilder::timeout()`" — it replaces it rather than
+/// tightening it. Pinned by `a_repo_list_request_outlasts_the_client_ceiling`,
+/// which would otherwise fail at 30s.
+const REPO_LIST_TIMEOUT: Duration =
+    Duration::from_secs(claude_commander_protocol::github::REPO_LIST_HTTP_TIMEOUT_SECS);
 
 /// The transport client for one remote `claude-commander-server`: the HTTP
 /// client, the resolved base URL, and the (redacted) bearer token. Cloneable via
@@ -136,6 +179,16 @@ impl RemoteClient {
         segments.push(&sid);
         segments.extend_from_slice(tail);
         self.endpoint(&segments)
+    }
+
+    /// `/api/projects/clone/{job}` — the poll URL for one clone job.
+    ///
+    /// Goes through `as_uuid()` rather than `CloneJobId`'s `Display` for the same
+    /// reason [`Self::session_url`] and [`Self::project_url`] do: the *full* UUID
+    /// is the path segment the server routes on, and the neighbouring id types'
+    /// `Display` truncates to an 8-char prefix.
+    fn clone_job_url(&self, id: CloneJobId) -> Url {
+        self.endpoint(&["projects", "clone", &id.as_uuid().to_string()])
     }
 
     fn project_url(&self, id: ProjectId, tail: &[&str]) -> Url {
@@ -388,7 +441,7 @@ impl RemoteClient {
         self.post_empty_ok(self.endpoint(&["pr-refresh"])).await
     }
 
-    pub async fn workspace_snapshot(&self) -> ClientResult<WorkspaceSnapshot> {
+    pub async fn snapshot(&self) -> ClientResult<Snapshot> {
         self.get_json(self.endpoint(&["workspace"])).await
     }
 
@@ -478,6 +531,14 @@ impl RemoteClient {
         self.post_empty_ok(self.session_url(id, &["restart"])).await
     }
 
+    /// Restart a session with a *fresh* agent conversation — the server relaunches
+    /// the pane without the agent's resume flag, whatever its own
+    /// `resume_session` config says.
+    pub async fn restart_session_fresh(&self, id: SessionId) -> ClientResult<()> {
+        self.post_empty_ok(self.session_url(id, &["restart-fresh"]))
+            .await
+    }
+
     pub async fn delete_session(&self, id: SessionId) -> ClientResult<()> {
         self.delete_ok(self.session_url(id, &[])).await
     }
@@ -492,16 +553,50 @@ impl RemoteClient {
         self.patch_json_ok(self.session_url(id, &[]), &body).await
     }
 
+    /// Retarget a session's stack base (`POST /sessions/{id}/base`).
+    ///
+    /// A POST with a body rather than a PATCH op, because the response carries
+    /// the outcome — notably whether the `gh pr edit` landed, which the caller
+    /// cannot determine for itself.
+    pub async fn set_session_base(
+        &self,
+        id: SessionId,
+        parent: Option<SessionId>,
+    ) -> ClientResult<SetSessionBaseOutcome> {
+        let body = SetSessionBase {
+            parent_session_id: parent,
+        };
+        self.post_json(self.session_url(id, &["base"]), &body).await
+    }
+
     /// Change a session's launch program (PATCH `change_program` op).
     pub async fn change_program(&self, id: SessionId, program: String) -> ClientResult<()> {
         let body = serde_json::json!({ "op": "change_program", "program": program });
         self.patch_json_ok(self.session_url(id, &[]), &body).await
     }
 
-    /// Upload a pasted image (PNG bytes) to a session (`POST /paste-image`).
-    pub async fn paste_image(&self, id: SessionId, png: Vec<u8>) -> ClientResult<()> {
-        self.post_bytes_ok(self.session_url(id, &["paste-image"]), png, "image/png")
-            .await
+    /// Upload a pasted image to a session (`POST /paste-image`).
+    ///
+    /// The bytes are checked against the shared wire contract
+    /// ([`claude_commander_protocol::paste::validate`]) *before* the request, so
+    /// junk or over-cap content fails immediately as
+    /// [`ClientError::InvalidRequest`] rather than after a round trip — which
+    /// matters most on the slow mobile links that would otherwise spend the
+    /// upload only to be refused. Every remote caller (the TUI's Ctrl+V, the
+    /// CLI, the Flutter client) inherits the check by going through here.
+    ///
+    /// The sniffed type also sets `Content-Type`. That is advisory only: the
+    /// server re-sniffs the body and never trusts the header, so a wrong one
+    /// cannot widen what it accepts.
+    pub async fn paste_image(&self, id: SessionId, bytes: Vec<u8>) -> ClientResult<()> {
+        let format = claude_commander_protocol::paste::validate(&bytes)
+            .map_err(|e| ClientError::InvalidRequest(e.to_string()))?;
+        self.post_bytes_ok(
+            self.session_url(id, &["paste-image"]),
+            bytes,
+            format.content_type(),
+        )
+        .await
     }
 
     pub async fn mark_read(&self, id: SessionId) -> ClientResult<()> {
@@ -525,10 +620,40 @@ impl RemoteClient {
 
     // -- Projects --
 
-    pub async fn add_project(&self, path: PathBuf) -> ClientResult<ProjectId> {
-        let body = serde_json::json!({ "path": path });
+    /// `POST /projects` — register `path`, tagged with `workspace` (`None` =
+    /// Main). An absent workspace is omitted from the body, so an older server
+    /// sees exactly the request it always did.
+    pub async fn add_project(
+        &self,
+        path: PathBuf,
+        workspace: Option<String>,
+    ) -> ClientResult<ProjectId> {
+        let body = AddProjectRequest { path, workspace };
         let env: IdEnvelope<ProjectId> =
             self.post_json(self.endpoint(&["projects"]), &body).await?;
+        Ok(env.id)
+    }
+
+    /// `POST /projects/ensure` — register `path`, or answer with the id of the
+    /// project already registered for it.
+    ///
+    /// The idempotent counterpart to [`Self::add_project`], which registers
+    /// unconditionally. Callers offering "register this existing checkout" want
+    /// this one: the path they were handed is frequently already a project, and a
+    /// second `add_project` would leave two entries for one repository. The
+    /// dedupe rule (and the path resolution behind it) is the server's, so no
+    /// client re-states it.
+    ///
+    /// `workspace` tags the project only if the server registers it here.
+    pub async fn ensure_project(
+        &self,
+        path: PathBuf,
+        workspace: Option<String>,
+    ) -> ClientResult<ProjectId> {
+        let body = AddProjectRequest { path, workspace };
+        let env: IdEnvelope<ProjectId> = self
+            .post_json(self.endpoint(&["projects", "ensure"]), &body)
+            .await?;
         Ok(env.id)
     }
 
@@ -536,9 +661,125 @@ impl RemoteClient {
         self.delete_ok(self.project_url(id, &[])).await
     }
 
-    pub async fn scan_directory(&self, dir: PathBuf) -> ClientResult<ScanResponse> {
+    // -- Workspaces --
+
+    /// `PUT /config/workspaces` — replace the server's workspace definitions.
+    pub async fn set_workspaces(&self, req: SetWorkspacesRequest) -> ClientResult<()> {
+        self.put_json_ok(self.endpoint(&["config", "workspaces"]), &req)
+            .await
+    }
+
+    /// `POST /config/workspaces/rename` — rename a workspace server-side,
+    /// rewriting its projects' tags. A no-op success where it is unknown.
+    pub async fn rename_workspace(&self, from: String, to: String) -> ClientResult<()> {
+        self.post_json_ok(
+            self.endpoint(&["config", "workspaces", "rename"]),
+            &RenameWorkspaceRequest { from, to },
+        )
+        .await
+    }
+
+    /// `POST /config/workspaces/delete` — delete a workspace server-side,
+    /// moving its projects to Main. A no-op success where it is unknown.
+    pub async fn delete_workspace(&self, name: String) -> ClientResult<()> {
+        self.post_json_ok(
+            self.endpoint(&["config", "workspaces", "delete"]),
+            &DeleteWorkspaceRequest { name },
+        )
+        .await
+    }
+
+    /// `PUT /projects/{id}/workspace` — move a project (`None` = Main).
+    pub async fn set_project_workspace(
+        &self,
+        id: ProjectId,
+        workspace: Option<String>,
+    ) -> ClientResult<()> {
+        self.put_json_ok(
+            self.project_url(id, &["workspace"]),
+            &SetProjectWorkspace { workspace },
+        )
+        .await
+    }
+
+    /// `POST /projects/scan` — register every repo under `dir`, each new one
+    /// tagged with `workspace` (`None` = Main; omitted from the body, so an
+    /// older server sees the body it always did).
+    pub async fn scan_directory(
+        &self,
+        dir: PathBuf,
+        workspace: Option<String>,
+    ) -> ClientResult<ScanResponse> {
         let url = self.endpoint(&["projects", "scan"]);
-        self.post_json(url, &ScanRequest { path: dir }).await
+        let body = AddProjectRequest {
+            path: dir,
+            workspace,
+        };
+        self.post_json(url, &body).await
+    }
+
+    // -- GitHub repos / repository clone --
+
+    /// `GET /github/repos` — every repo the server-side `gh` user can clone, for
+    /// the repo picker.
+    ///
+    /// The list is the server's to produce: `gh` runs where the repositories will
+    /// be checked out, so a phone with no `gh` and no GitHub credentials still gets
+    /// a picker. An absent `gh` surfaces as [`ClientError::Unavailable`] (the
+    /// server's 503 for a missing backing tool, as with tmux), which a frontend can
+    /// word as "install gh on the server" rather than as a generic failure.
+    ///
+    /// **The only route that outlasts [`REQUEST_TIMEOUT`], and it has to.** The
+    /// server runs `gh api --paginate` under its own budget
+    /// ([`DEFAULT_REPO_LIST_TIMEOUT_SECS`], 90s by default) — more than the 30s
+    /// ceiling every other request gets. Under that ceiling a large account's
+    /// listing surfaced as a transport timeout, i.e. "the server is down", when
+    /// the server was merely still paginating; and giving up here does nothing
+    /// about the `gh` on the far side, so each retry stacked another one. So this
+    /// request is given [`REPO_LIST_TIMEOUT`], which outlasts the server's budget
+    /// and lets the server win the race and answer with its real reason.
+    ///
+    /// [`DEFAULT_REPO_LIST_TIMEOUT_SECS`]: claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
+    pub async fn github_repos(&self) -> ClientResult<Vec<GithubRepo>> {
+        self.get_json_within(self.endpoint(&["github", "repos"]), REPO_LIST_TIMEOUT)
+            .await
+    }
+
+    /// `POST /projects/clone` — start a clone, returning the created job.
+    ///
+    /// The route answers **202 Accepted carrying the whole [`CloneJob`]**, not just
+    /// its id, so the caller gets the id, the destination and the initial status in
+    /// one round trip and can start polling [`Self::clone_job`] without a second
+    /// request to learn where it stands.
+    ///
+    /// **The status in the returned job is not a terminal status.** Every
+    /// outcome — success, failure, and an already-occupied destination — is
+    /// reported through the job, so this reads `Running` essentially always. A
+    /// caller that treats it as final will miss every result.
+    ///
+    /// `Err` means the *request* was refused (an unusable source or destination
+    /// name is a 400 → [`ClientError::InvalidRequest`], carrying the server's
+    /// already-redacted reason). Nothing here builds a message out of
+    /// `req.source`: a hand-pasted URL can carry `user:token@` userinfo, and the
+    /// rejection strings are redacted where they are constructed in
+    /// `claude-commander-protocol` precisely so no hop has to remember to.
+    pub async fn start_clone(&self, req: CloneRequest) -> ClientResult<CloneJob> {
+        self.post_json(self.endpoint(&["projects", "clone"]), &req)
+            .await
+    }
+
+    /// `GET /projects/clone/{job}` — one poll of a clone job.
+    ///
+    /// **A `404` is `Ok(None)`, not an error.** An unknown job is a normal answer
+    /// for a poller: the server's job registry prunes jobs a while after they
+    /// finish, so a client that keeps polling (or resumes polling an id it stored
+    /// across a restart) must see "gone" rather than a hard failure it would
+    /// surface as a broken connection.
+    ///
+    /// One request per call by design — the cadence, and when to stop, belong to
+    /// the caller.
+    pub async fn clone_job(&self, id: CloneJobId) -> ClientResult<Option<CloneJob>> {
+        self.get_json_opt(self.clone_job_url(id)).await
     }
 
     // -- Cascade / push-stack --
@@ -691,12 +932,6 @@ pub struct ScanResponse {
     pub skipped: usize,
 }
 
-/// Request body for `POST /projects/scan`: the directory to scan.
-#[derive(serde::Serialize)]
-struct ScanRequest {
-    path: PathBuf,
-}
-
 fn diff_side_param(side: DiffSide) -> &'static str {
     match side {
         DiffSide::Old => "old",
@@ -707,6 +942,26 @@ fn diff_side_param(side: DiffSide) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The connect budget must outlast a link that is merely *waking* — the
+    /// phone client's normal case. On the RFC 6298 / Linux schedule cited on
+    /// [`CONNECT_TIMEOUT`] the SYNs go out at t≈0s, 1s, 3s, 7s, 15s; the old 5s
+    /// budget gave up after the one at 3s, so a server that answered a moment
+    /// later was rendered unreachable and the poller went into backoff on top.
+    /// Asserted at the constant level (no clock, no socket) so it stays
+    /// deterministic.
+    #[test]
+    fn the_connect_budget_outlasts_a_waking_link() {
+        assert!(
+            CONNECT_TIMEOUT >= Duration::from_secs(15),
+            "the connect budget must reach the SYN at ~7s with room to answer, \
+             got {CONNECT_TIMEOUT:?}"
+        );
+        assert!(
+            CONNECT_TIMEOUT < REQUEST_TIMEOUT,
+            "connecting must never be allowed to consume the whole request budget"
+        );
+    }
 
     /// Interactive review reads/writes must be bounded tighter than the 30s
     /// [`REQUEST_TIMEOUT`] so a wedged server surfaces promptly, and the heavier
@@ -732,6 +987,77 @@ mod tests {
             REVIEW_WRITE_TIMEOUT >= CONNECT_TIMEOUT,
             "review-write budget must at least cover the connect budget"
         );
+    }
+
+    /// The repo listing is the one request allowed to run *past* the ceiling, and
+    /// it must outlast the server's own `gh` budget or the client reports its own
+    /// transport timeout ("the server is down") while a `gh` keeps paginating on
+    /// the far side.
+    #[test]
+    fn the_repo_list_budget_outlasts_both_the_ceiling_and_the_server() {
+        assert!(
+            REPO_LIST_TIMEOUT > REQUEST_TIMEOUT,
+            "the repo listing needs more than the {REQUEST_TIMEOUT:?} ceiling"
+        );
+        assert!(
+            REPO_LIST_TIMEOUT.as_secs()
+                > claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS,
+            "the client must not give up before the server kills gh"
+        );
+    }
+
+    /// Pins the reqwest semantic the line above rests on: a per-request timeout
+    /// **replaces** the client-wide one, so it may be *longer*. Were it clamped to
+    /// the minimum of the two, `github_repos` would still die at
+    /// [`REQUEST_TIMEOUT`] and the fix would be silently inert.
+    ///
+    /// Deliberately scaled down (50ms ceiling, 5s override, ~300ms server) so it
+    /// proves the ordering in a third of a second rather than in half a minute.
+    /// Loopback only, no external network.
+    #[tokio::test]
+    async fn a_per_request_timeout_may_exceed_the_client_ceiling() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Answer two requests, each after a delay that outlasts the client-wide
+        // ceiling but fits inside the per-request override.
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n[]")
+                    .await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let url = format!("http://{addr}/github/repos");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+
+        // Without an override the client-wide ceiling bites: this is the shape of
+        // the bug being fixed.
+        assert!(
+            client.get(&url).send().await.is_err(),
+            "the client-wide ceiling should have expired at 50ms"
+        );
+        // With one, the request outlives that ceiling.
+        let response = client
+            .get(&url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("a per-request timeout must be able to exceed the client-wide one");
+        assert!(response.status().is_success());
     }
 
     #[test]
@@ -780,9 +1106,98 @@ mod tests {
         );
     }
 
+    /// A clone-job poll URL must carry the **full** job UUID.
+    ///
+    /// `CloneJobId`'s `Display` is the full UUID today, but the neighbouring
+    /// `SessionId`/`ProjectId` truncate theirs to an 8-char prefix for the session
+    /// tree — so this pins that [`RemoteClient::clone_job`] goes through
+    /// `as_uuid()`, as [`RemoteClient::session_url`]/[`RemoteClient::project_url`]
+    /// do, rather than leaning on a `Display` whose contract differs from its
+    /// siblings'. A truncated segment would 404 every poll.
+    #[test]
+    fn clone_job_url_carries_the_full_uuid() {
+        let client = RemoteClient::new(RemoteServerSpec {
+            name: "box".to_string(),
+            base_url: "http://host:8080".to_string(),
+            token: None,
+        })
+        .unwrap();
+        let id =
+            CloneJobId::from_uuid(Uuid::parse_str("2f3ab1c0-0000-4000-8000-00000000abcd").unwrap());
+        assert_eq!(
+            client.clone_job_url(id).as_str(),
+            "http://host:8080/api/projects/clone/2f3ab1c0-0000-4000-8000-00000000abcd"
+        );
+    }
+
     #[test]
     fn diff_side_param_wire_forms() {
         assert_eq!(diff_side_param(DiffSide::Old), "old");
         assert_eq!(diff_side_param(DiffSide::New), "new");
+    }
+
+    /// A client pointed at a port nothing listens on. Any request that actually
+    /// reaches the network fails as [`ClientError::Unavailable`], so an
+    /// `InvalidRequest` from these tests proves the rejection happened locally.
+    fn unreachable_client() -> RemoteClient {
+        RemoteClient::new(RemoteServerSpec {
+            name: "box".to_string(),
+            // Port 0 is never connectable.
+            base_url: "http://127.0.0.1:0".to_string(),
+            token: None,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn paste_image_rejects_non_image_without_a_request() {
+        let err = unreachable_client()
+            .paste_image(SessionId::new(), b"not an image".to_vec())
+            .await
+            .expect_err("a non-image must be refused");
+        match err {
+            ClientError::InvalidRequest(m) => assert!(
+                m.contains("not a recognised image"),
+                "expected the contract's wording, got {m}"
+            ),
+            other => panic!("expected a local InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn paste_image_rejects_oversized_without_a_request() {
+        let too_big = vec![0u8; claude_commander_protocol::paste::MAX_IMAGE_BYTES + 1];
+        let err = unreachable_client()
+            .paste_image(SessionId::new(), too_big)
+            .await
+            .expect_err("an oversized body must be refused");
+        match err {
+            ClientError::InvalidRequest(m) => assert!(
+                m.contains("over the"),
+                "expected the size-cap wording, got {m}"
+            ),
+            other => panic!("expected a local InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// An accepted image still goes to the wire — proving the local check gates
+    /// on content, not on every call.
+    #[tokio::test]
+    async fn paste_image_sends_valid_image_to_the_wire() {
+        // Only the signature + start of IHDR: the allow-list sniffs a prefix, so
+        // this is the shortest body `validate` accepts. Deliberately not a
+        // decodable PNG — nothing on this path decodes it.
+        const PNG_MAGIC_PREFIX: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52,
+        ];
+        let err = unreachable_client()
+            .paste_image(SessionId::new(), PNG_MAGIC_PREFIX.to_vec())
+            .await
+            .expect_err("nothing is listening, so the request must fail");
+        assert!(
+            matches!(err, ClientError::Unavailable { .. }),
+            "a valid image must reach the transport, got {err:?}"
+        );
     }
 }

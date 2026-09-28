@@ -72,6 +72,11 @@ trap cleanup EXIT
 git init -q "$REPO"
 git -C "$REPO" config user.email "e2e@test.local"
 git -C "$REPO" config user.name "E2E"
+# Repo-local, not `-c`: the server under test also runs git in this repo and its
+# worktrees, and a developer's global commit.gpgsign (say via a locked 1Password
+# op-ssh-sign) must reach neither that nor the fixture commit below.
+git -C "$REPO" config commit.gpgsign false
+git -C "$REPO" config tag.gpgsign false
 echo "# e2e" > "$REPO/README.md"
 git -C "$REPO" add README.md
 git -C "$REPO" commit -q -m "Initial commit"
@@ -98,6 +103,22 @@ done
 curl -fsS "$BASE_URL/health" >/dev/null || { echo "e2e: server never became healthy" >&2; exit 1; }
 echo "e2e: server healthy."
 
+# -- register the repo as a project ---------------------------------------------
+# The create-session page picks a project from a dropdown of projects registered
+# on the server; it no longer accepts a typed repo path. A fresh hermetic server
+# has none, so without this the app correctly shows "No projects registered on the
+# server" and there is no form to drive. Registered here rather than through the UI
+# on purpose: the add-project journey (+ → prompt → addProject → refresh) is
+# already covered by client/test/projects_page_test.dart, and driving it here would
+# make the session journey depend on dialog internals and on chrome-specific
+# navigation that varies by theme.
+echo "e2e: registering $REPO as a project…"
+curl -fsS -X POST "$BASE_URL/api/projects" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"path\": \"$REPO\"}" >/dev/null ||
+  { echo "e2e: failed to register the project" >&2; exit 1; }
+
 # -- build the cdylib into rust/target/debug so flutter_rust_bridge's loader
 #    finds a CURRENT library. frb's generated ioDirectory is rust/target/release/
 #    (symlinked to debug); `cargo test` only refreshes target/debug/deps, not the
@@ -113,8 +134,13 @@ if [ ! -e "$CLIENT_DIR/rust/target/release" ] || [ -L "$CLIENT_DIR/rust/target/r
 fi
 
 # -- drive the app end-to-end on the Linux desktop target --
+#
+# The e2e journey is named explicitly rather than running the whole
+# integration_test/ directory: it also holds screenshots_test.dart, which renders
+# the README images from a *different* fixture and is driven by
+# docs/tool/capture-client.sh.
 cd "$CLIENT_DIR"
-flutter test integration_test -d linux \
+flutter test integration_test/app_flows_test.dart -d linux \
   --dart-define=CC_E2E_BASE_URL="$BASE_URL" \
   --dart-define=CC_E2E_TOKEN="$TOKEN" \
   --dart-define=CC_E2E_REPO="$REPO"

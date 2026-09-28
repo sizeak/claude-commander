@@ -16,7 +16,7 @@ use tracing::warn;
 
 use crate::auth::require_bearer;
 use crate::handlers::{
-    blobs, cascade, config, health, paste, projects, review, sessions, workspace,
+    blobs, cascade, config, github, health, paste, projects, review, sessions, snapshot,
 };
 use crate::state::AppState;
 use crate::ws;
@@ -59,10 +59,10 @@ pub fn build_router(state: AppState) -> Router {
 
     let api = Router::new()
         // -- workspace surface --
-        .route("/workspace", get(workspace::snapshot))
-        .route("/agent-states", get(workspace::agent_states))
-        .route("/pr-refresh", post(workspace::pr_refresh))
-        .route("/create-options", get(workspace::create_options))
+        .route("/workspace", get(snapshot::snapshot))
+        .route("/agent-states", get(snapshot::agent_states))
+        .route("/pr-refresh", post(snapshot::pr_refresh))
+        .route("/create-options", get(snapshot::create_options))
         .route("/comments/pending", get(review::pending))
         // -- cascade / push-stack --
         .route("/cascade/resume", post(cascade::resume))
@@ -76,6 +76,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/{id}/kill", post(sessions::kill))
         .route("/sessions/{id}/restart", post(sessions::restart))
         .route(
+            "/sessions/{id}/restart-fresh",
+            post(sessions::restart_fresh),
+        )
+        .route(
             "/sessions/{id}",
             delete(sessions::delete).patch(sessions::patch),
         )
@@ -83,6 +87,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/{id}/branch-diff", get(sessions::branch_diff))
         .route("/sessions/{id}/read", post(sessions::read))
         .route("/sessions/{id}/keep-alive", post(sessions::keep_alive))
+        .route("/sessions/{id}/base", post(sessions::set_base))
         .route("/sessions/{id}/cascade", post(cascade::cascade))
         .route("/sessions/{id}/push-stack", post(cascade::push_stack))
         // -- review + comments --
@@ -110,7 +115,7 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/sessions/{id}/paste-image",
             post(paste::paste_image).route_layer(DefaultBodyLimit::max(
-                claude_commander_core::paste_image::MAX_IMAGE_BYTES,
+                claude_commander_protocol::paste::MAX_IMAGE_BYTES,
             )),
         )
         // -- projects --
@@ -118,11 +123,29 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/scan", post(projects::scan))
         .route("/projects/ensure", post(projects::ensure))
         .route("/projects/{id}", delete(projects::delete))
+        .route("/projects/{id}/workspace", put(projects::set_workspace))
         .route("/projects/{id}/branches", get(projects::branches))
         .route("/projects/{id}/preview", get(projects::preview))
+        // -- repo picker + clone --
+        // `/projects/clone` sits alongside `/projects/{id}`, and it **does** rely
+        // on the router preferring a static segment over a capture: without that,
+        // "clone" binds to `{id}` and a POST here reaches a path that only
+        // registers DELETE, i.e. a 405 rather than this handler. The differing
+        // methods do not save it — they are what the failure would look like.
+        // `routes_reach_the_clone_handlers` is the receipt: it drives the real
+        // router and identifies the handler by a message only it produces, so a
+        // capture match shows up as a wrong status/body rather than passing
+        // quietly.
+        .route("/github/repos", get(github::repos))
+        .route("/projects/clone", post(github::clone))
+        .route("/projects/clone/{job}", get(github::clone_status))
         // -- config + health --
         .route("/config", get(config::read).patch(config::update))
         .route("/config/programs", put(config::put_programs))
+        // -- workspaces (definitions; project tags go via /projects/{id}/workspace) --
+        .route("/config/workspaces", put(config::put_workspaces))
+        .route("/config/workspaces/rename", post(config::rename_workspace))
+        .route("/config/workspaces/delete", post(config::delete_workspace))
         .route("/config/reload", post(config::reload))
         .route("/health/tmux", get(config::health_tmux))
         // Bearer auth guards the whole `/api` surface; the CORS layer sits
@@ -150,6 +173,7 @@ pub fn build_router(state: AppState) -> Router {
 mod tests {
     use axum::body::Body;
     use axum::http::{Request, header};
+    use http_body_util::BodyExt;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -198,6 +222,51 @@ mod tests {
         );
     }
 
+    /// The clone routes resolve to *their own* handlers through the real router.
+    ///
+    /// `/projects/clone` sits next to `/projects/{id}`, so the literal "clone"
+    /// could be captured as a project id and `/projects/clone/{job}` could be read
+    /// as some `/projects/{id}/…` sub-route. Both assertions below identify the
+    /// handler by a message only it produces, so a mis-resolution shows up as a
+    /// wrong body rather than passing on a coincidentally equal status.
+    #[tokio::test]
+    async fn routes_reach_the_clone_handlers() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+
+        // A malformed job id → 400 from `parse_clone_job_id`. Routed to
+        // `/projects/{id}/…` instead this would be a 404 or a project-id message.
+        let req = Request::get("/api/projects/clone/not-a-uuid")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 400);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("not a valid clone job id"),
+            "not the clone-status handler: {body}"
+        );
+
+        // A rejected source → 400 from the clone handler. A routing miss would be
+        // a 404 (no such path) or 405 (wrong method on `/projects/{id}`).
+        let req = Request::post("/api/projects/clone")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "source": { "kind": "github", "full_name": "nope" } })
+                    .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 400);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("owner/name repository slug"),
+            "not the clone handler: {body}"
+        );
+    }
+
     /// With an empty allowlist (default), even a syntactically valid origin is
     /// denied — same-origin only.
     #[tokio::test]
@@ -216,6 +285,84 @@ mod tests {
                 .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .is_none(),
             "empty allowlist must not emit a CORS allow header"
+        );
+    }
+
+    /// The snapshot is served at `/api/workspace` with a fixed top-level key
+    /// set. The Rust type is named `Snapshot`, but the URL and the JSON shape
+    /// are the wire contract every client (TUI remote, Flutter) builds against,
+    /// so a rename must not move either.
+    #[tokio::test]
+    async fn snapshot_is_served_at_api_workspace_with_a_stable_shape() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+
+        let req = Request::get("/api/workspace").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("snapshot is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "cascade_paused",
+                "main_workspace",
+                "operations",
+                "pending_comment_sessions",
+                "project_pull",
+                "projects",
+                "server",
+                "sessions",
+                "startup_workspace",
+                "workspaces",
+            ]
+        );
+    }
+
+    /// The workspace routes are reachable through the real router (and so
+    /// behind auth, with the static `rename`/`delete` segments not shadowed).
+    #[tokio::test]
+    async fn workspace_routes_are_mounted() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+        for (method, uri, body) in [
+            (
+                "PUT",
+                "/api/config/workspaces",
+                r#"{"workspaces":[{"name":"Work"}]}"#,
+            ),
+            (
+                "POST",
+                "/api/config/workspaces/rename",
+                r#"{"from":"Work","to":"Job"}"#,
+            ),
+            ("POST", "/api/config/workspaces/delete", r#"{"name":"Job"}"#),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), 204, "{method} {uri}");
+        }
+        let req = Request::put(format!("/api/projects/{}/workspace", uuid::Uuid::new_v4()))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"workspace":"Work"}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            404,
+            "an unknown project, not an unmounted route"
         );
     }
 }

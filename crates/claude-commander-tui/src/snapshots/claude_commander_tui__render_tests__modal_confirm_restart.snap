@@ -1,0 +1,28 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+expression: terminal.backend()
+---
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                              ╭ Restart Session ─────────────────────────────────────────╮                              "
+"                              │This will kill the current tmux session and start a fresh │                              "
+"                              │one.                                                      │                              "
+"                              │Claude will pick up where it left off via /resume.        │                              "
+"                              │                                                          │                              "
+"                              │[Enter] Confirm  [Esc] Cancel                             │                              "
+"                              ╰──────────────────────────────────────────────────────────╯                              "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "

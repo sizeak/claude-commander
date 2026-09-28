@@ -13,3 +13,10 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+      # Formats the staged files in place, so (like cargo fmt above) a commit
+      # that needed reformatting fails and the changes have to be restaged.
+      - id: dart-format
+        name: dart format
+        entry: client/tool/dart-format.sh
+        language: system
+        types: [dart]

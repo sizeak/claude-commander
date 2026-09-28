@@ -57,21 +57,45 @@ claude-commander config --init
 claude-commander --config /path/to/config.toml
 ```
 
-## Session List
+## Views and the Board
 
-The left pane shows projects and their worktree sessions in a tree view. Projects are sorted alphabetically. Sessions within a project are sorted newest first (by creation time).
+The session list has four views, cycled with `v`: three **list** views (grouped by project, by section, or by section with PR stacks) and the full-screen kanban **board** (see [Views](../README.md#views)). The project list is the default; `v` rotates project → sections → stacks → board → project, skipping the section views when no `[[sections]]` are configured, and the chosen view is remembered across restarts.
 
-Each session row shows the title and, in `[brackets]`, the branch name — but only when the branch differs from what the title would sanitize to. A session titled "Feature Auth" with branch `feature-auth` (or `prefix/feature-auth` when `branch_prefix` is set) renders as just `Feature Auth`; the bracket reappears only when the branch carries new information, e.g. you renamed it to `feature-auth-v2` outside the app.
+The three list views pair the list with a **right-hand pane**, cycled with `Tab` (or `Shift-Tab` to go back) through three tabs: **Preview** (a live tail of the agent's pane), **Info** (the selected session's metadata, diffstat, PR details and stack chain — the same content the `i` modal shows, including `g` to generate an AI summary), and **Shell** (a live tail of its shell). `<` / `>` move the divider, and the width is remembered across restarts. A project row has no agent pane, so it cycles Shell ↔ Info and its Info tab describes the project — path, main branch, and any reason its background pull is blocked.
+
+The pane is passive — keys always drive the list — so the two live captures render dimmed by default (`dim_unfocused_preview`); Info is left at full brightness, being static text rather than a tail. The mouse wheel over the pane scrolls its content rather than moving the selection. On a capture tab, scrolling away from the bottom stops the auto-follow and wheeling back to the bottom resumes it; Info stays anchored where you leave it.
+
+The board is a full-screen takeover with no side pane, so `Tab` and `<`/`>` do nothing there — `i` is the only way to reach a session's Info there. In every view, `i` opens the Info modal, `Enter`/`s` a session's shell, and `r` its review diff.
+
+The board is described below. Each column is a section, and every session is its own card bordered in its project's colour. The leftmost column is a project sidebar listing every project (sorted alphabetically) with its session count.
+
+Within a column, cards are ordered by how likely each session is to need you: a **needs-you** band on top (waiting for input, a paused cascade, or unread output), an **active** band in the middle (working, idle, or a transient create/merge/push), and **stopped** sessions at the bottom. Within a band, newer sessions float above older ones, so recent work is easy to find. The banding is coarse on purpose — a session cycling between working and idle stays in the active band rather than jumping around. A PR stack stays contiguous and sorts by its most-attention-needing member. Empty columns are hidden by default (`hide_empty_sections` in [Configuration](configuration.md)); set it to false to always show every section column.
+
+A card's border title is the session's number and title — the project name is never rendered on the card (project identity lives in the border colour and the sidebar legend). The card's single interior line carries the status glyph and a word describing it (`working…`, `waiting`, `idle`, …), any row markers (`*` pending comments, `⚓` keep-alive, `⇣ LFS`), the PR pill or, in `[brackets]`, the branch name, and — right aligned — three clickable action buttons: `[>_]` opens the session shell, `[±]` opens the review diff, and `[i]` opens the info panel. A single click on a button selects that card and fires the action; clicking elsewhere on a card selects it and double-clicking attaches.
+
+**Selecting** a project in the sidebar (`Enter`, or double-click) **filters** the board to only that project's cards; the sidebar keeps listing every project, and the top bar names the active filter. Selecting the same project again — or **`Esc`** — clears the filter; selecting a different project refilters; moving into the columns keeps the active filter so you can browse and act on that project's cards. Merely moving the cursor over the sidebar does not filter. Jumping to a session through the quick-switch palette clears the filter when needed, so a jump to a session in another project always lands.
+
+The branch name in `[brackets]` appears only when the branch differs from what the title would sanitize to. A session titled "Feature Auth" with branch `feature-auth` (or `prefix/feature-auth` when `branch_prefix` is set) shows no bracket; it reappears only when the branch carries new information, e.g. you renamed it to `feature-auth-v2` outside the app.
 
 ### PR Stacks
 
-When a session's PR targets another session's branch (rather than `main`), the two form a stack. Stacked children render one indent deeper and sit directly beneath the session they're stacked on, in bottom-to-top stack order. The stack base keeps its normal position in the root session list sorted by creation time.
+When a session's PR targets another session's branch (rather than `main`), the two form a stack. Each stack member is its own card, rendered contiguously in stack order: the base card first, with stacked children drawn as their own cards nested (indented) one level deeper beneath it in bottom-to-top stack order.
 
 Press `t` on any session in a stack to create a new session on top of that stack — regardless of which member you have selected, the new branch is forked from the topmost session. When you launch Claude in the new session it is told to use `gh pr create --base <parent-branch>` so the PR targets the right place automatically.
 
 Stacks are detected from the PR's `baseRefName` returned by the `gh` CLI, so they stay accurate across GitHub's auto-retargeting when a stack member is merged.
 
-Stack grouping is only active in the default project-grouped view. When [Session List Sections](configuration.md#session-list-sections) is configured, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state.
+How a stack renders depends on the view (cycle with `v`). In the **project-grouped** and **Section Stacks** list views (the latter is the default when [Session List Sections](configuration.md#session-list-sections) is configured), children are nested under their base and the whole stack stays together under the section chosen by its base (the stack root), so a draft or early-stage session stacked on top never drags the whole stack out of the base's section. In the plain **Sections** list view, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state. On the **board** a stack occupies exactly one column and moves between columns as a unit; the column is chosen by the stack's newest leaf (its section assignment, including any manual `m` move), so a base and its children never split across columns.
+
+#### Fixing a stack: Set session base
+
+When a stack is wired up wrongly — a session stacked on the wrong parent, or stacked when it should sit on `main` — **Set session base** from the command palette re-points it. Pick another session in the same project to stack onto, or the project's main branch to unstack entirely. Sessions stacked on *this* one come along automatically: they are stacked on its branch, which does not move.
+
+The command updates the stack link and, when the session has an open PR, retargets that PR with `gh pr edit --base`. If the `gh` edit fails you are told so explicitly, because the base on GitHub is the source of truth — the next PR sync would otherwise quietly restore the old base.
+
+**It does not rewrite git history.** The branch still contains its old base's commits, so until you rebase or merge onto the new base yourself, both the PR and the review diff will show them. Retargeting onto a *sibling* rather than an ancestor is the case to watch: the merge base falls back towards `main` and the diff grows to include the old parent's work as well as your own.
+
+A retarget is refused when it would create a cycle (basing a session on one of its own descendants), when the session's PR is already merged or closed (PR status is polled with `--state all`, so a settled PR keeps re-asserting its own base and the change would be undone at the next sync), and while a cascade is paused for that project (resume or abandon it first — `Cascade resume` re-derives the stack from the current topology).
 
 #### Cascade merge main through a stack
 
@@ -89,9 +113,9 @@ Pre-flight is the same as cascade merge: no live agent may be `Working` or `Wait
 
 ## AI Summary
 
-The Info pane can display an AI-generated summary of branch changes, powered
-by the Claude CLI. Press `g` (configurable) while viewing the Info pane to
-generate a summary. Summaries are cached per-session — once generated, they
+The Info modal (`i`) can display an AI-generated summary of branch changes,
+powered by the Claude CLI. Press `g` (configurable) while the Info modal is
+open to generate a summary. Summaries are cached per-session — once generated, they
 display instantly when you revisit the session. Press `g` again to regenerate
 after making changes.
 
@@ -113,8 +137,8 @@ working tree.
 
 While attached to a Claude session you can jump straight to its review diff
 with **`Alt-r`**, and **`Alt-r`** again from inside the diff switches back to
-the session — the same direct toggle the shell pane has with `Ctrl-\`, without
-detaching to the session list. `Alt-r` is used rather than `Ctrl-r` so a
+the session — the same direct toggle the shell session has with `Ctrl-\`, without
+detaching to the board. `Alt-r` is used rather than `Ctrl-r` so a
 shell's `Ctrl-r` reverse-history-search is never shadowed; the toggle is wired
 up for Claude sessions only.
 
@@ -151,6 +175,13 @@ foreground-only colouring on 256- and 16-colour terminals.
   between inline and side-by-side layouts. In the inline layout, lines longer
   than the pane soft-wrap onto continuation rows (GitHub-style) so nothing runs
   off-screen; side-by-side truncates to keep its columns aligned.
+- **Expand context**: like GitHub, you can reveal more of the surrounding file
+  around a hunk. Each collapsed gap (before, between, and after hunks) shows a
+  clickable control — click `⌄`/`⌃` to reveal a chunk above/below, or `↕ all`
+  to reveal the whole gap. From the keyboard, `{` expands context above the
+  hunk under the cursor and `}` below it. Revealed lines are shown for context
+  only — they aren't selectable or commentable. Expansion resets when the diff
+  is refreshed.
 - **Mark reviewed**: press `m` to toggle a ✓ reviewed mark on the current
   file. Marking dims the file in the tree and auto-advances to the next
   unreviewed file (wrapping); unmarking stays put. Marks persist per session
@@ -171,7 +202,7 @@ foreground-only colouring on 256- and 16-colour terminals.
   Comments are *staged* — they persist across restarts until applied, and
   show as `*` in the gutter and a coloured `*N` count on the file (and its
   parent directories) in the tree. A session with pending comments is also
-  flagged with a `*` in the main session list. Each comment also renders as
+  flagged with a `*` on the board. Each comment also renders as
   an inline box beneath its line; press `z` (or click the box) to fold it
   down to a single-line header or expand it again.
 - **Apply**: press `a` to hand all staged comments to the session's agent.
@@ -184,10 +215,31 @@ foreground-only colouring on 256- and 16-colour terminals.
   i.e. finishes a turn — folding its changes in while keeping your place (same
   file, clamped cursor/scroll). Press `r` to re-compose on demand at any time;
   it reports "Review refreshed" or "Review already up to date".
+- **Switch session**: press `Ctrl-Space` (or the leader key, `Space` by
+  default) to open the session switcher over the diff — the same palette as
+  everywhere else, filtered to sessions, since every command in it would have
+  to close the review to run. Picking a session attaches to it, exactly as
+  picking one from the board does; `Esc` closes the switcher and puts the diff
+  back where you left it. The leader key opens the switcher only where the
+  review has no meaning of its own for that key, so rebinding it to (say) `r`
+  leaves `r` refreshing the diff. That is per-mode: a leader on a key the
+  review binds in one place only — `v`, which selects in the diff body — still
+  opens the switcher from the file list, where `v` does nothing. `Ctrl-Space`
+  works anywhere in the view except the comment box, where every key is text.
+- **Open in editor**: press `.` (the same open-in-editor binding as the session
+  list) to open the session's worktree in your configured editor without leaving
+  the review — a GUI editor launches alongside the TUI, a terminal editor takes
+  over until you exit. Unavailable for remote sessions, whose worktrees live on
+  the server.
 - **Drift**: if the code under a comment changes before you apply, the view
   re-anchors it by its captured snippet. If it can't be located unambiguously
   the comment is marked `⚠` (drifted) and blocks apply until you review or
   delete it (`d` removes the comment under the cursor).
+- **Reverted files**: if a file leaves the diff altogether — the change you
+  commented on was reverted, so there is nothing left to review — its pending
+  comments are dropped rather than left blocking apply from a file the view can
+  no longer show you. The status bar reports what was dropped. Comments you have
+  already applied are kept regardless.
 
 Comments are stored per session under the data directory (alongside
 `state.json`); the brief handed to the agent is written to a temp file outside

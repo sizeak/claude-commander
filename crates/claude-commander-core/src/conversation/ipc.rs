@@ -26,7 +26,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
-use crate::conversation::{ListenAction, ListenerHandle, apply_listen_action};
+use crate::conversation::{ListenAction, ListenerHandle, VoiceMode, apply_listen_action};
 
 /// Default per-user socket path. Prefers `$XDG_RUNTIME_DIR` (per-user on Linux),
 /// falling back to the OS temp dir (`$TMPDIR`, per-user on macOS). Both the TUI
@@ -129,7 +129,10 @@ async fn handle_conn(stream: UnixStream, listener: ListenerHandle, recording: Ar
     }
     let reply = match parse_action(&line) {
         Some(action) => {
-            if apply_listen_action(&listener, &recording, action) {
+            // The socket is the desktop global-shortcut route into the *conversation*
+            // agent; dictation needs an attached pane to type into, which an external
+            // trigger has no way to name.
+            if apply_listen_action(&listener, &recording, action, VoiceMode::Conversation) {
                 "recording\n"
             } else {
                 "stopped\n"
@@ -187,7 +190,10 @@ mod tests {
             .expect("send");
         assert_eq!(reply, "recording");
         assert!(recording.load(Ordering::Acquire));
-        assert!(matches!(rx.try_recv(), Ok(ListenerCommand::Start)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ListenerCommand::Start(VoiceMode::Conversation))
+        ));
 
         let reply = send_command(&path, ListenAction::Toggle)
             .await

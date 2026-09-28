@@ -1,0 +1,19 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+expression: terminal.backend()
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                ╭ Quick Switch ────────────────────────────────╮                "
+"                │❯ auth_                                       │                "
+"                │ ● Add auth [feature-auth] (my-app)           │                "
+"                │ ○ Fix login (my-app)                         │                "
+"                │ ○ Old task [old-branch] (other)              │                "
+"                ╰──────────────────────────────────────────────╯                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "

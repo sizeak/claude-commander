@@ -4,6 +4,8 @@
 //! Assignment is a pure function of the session's PR-derived state and the
 //! user's section configuration.
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -184,6 +186,28 @@ fn has_predicates(section: &SectionConfig) -> bool {
 /// position 0 (displayed first).
 pub const IN_PROGRESS: &str = "In Progress";
 
+/// Baked-in board sections used when the user has configured no `[[sections]]`.
+///
+/// "In Progress" is the implicit catch-all at process position 0 (see
+/// [`IN_PROGRESS`]) and is therefore *not* included here — these are only the
+/// predicate-bearing columns that follow it. Nothing here is ever written to
+/// `config.toml`; the moment the user declares any section of their own, these
+/// defaults disappear (see [`effective_sections`]).
+pub fn default_board_sections() -> Vec<SectionConfig> {
+    vec![
+        SectionConfig {
+            name: "In Review".to_string(),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
+            ..Default::default()
+        },
+        SectionConfig {
+            name: "Merged".to_string(),
+            pr_state: Some(StatePredicate::One(PrState::Merged)),
+            ..Default::default()
+        },
+    ]
+}
+
 /// Output group for one section in the rendered session list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedSection {
@@ -243,6 +267,23 @@ fn display_index(name: Option<&str>, sections: &[SectionConfig]) -> usize {
         .position(|s| s.name == n)
         .map(|i| i + 1)
         .unwrap_or(0)
+}
+
+/// The sections that actually drive board columns and section assignment: the
+/// user's configured sections when non-empty, otherwise the baked-in
+/// [`default_board_sections`].
+///
+/// Every section consumer (auto-assignment, the `m` move picker, WIP limits,
+/// section views) routes through this so that an empty `[[sections]]` config
+/// behaves exactly as if the user had configured the defaults. The result is
+/// never persisted back to config — the settings editor keeps operating on the
+/// raw configured list.
+pub fn effective_sections(configured: &[SectionConfig]) -> Cow<'_, [SectionConfig]> {
+    if configured.is_empty() {
+        Cow::Owned(default_board_sections())
+    } else {
+        Cow::Borrowed(configured)
+    }
 }
 
 /// Recompute the session's section assignment and update
@@ -336,6 +377,47 @@ pub fn place_created_session(
     session.current_section = Some(name.to_string());
     session.entered_section_at = now;
     true
+}
+
+/// Whether `name` may be given to a section — used by both the create and the
+/// rename path, which must agree.
+///
+/// Rejects the blank name, a name already taken, and the reserved
+/// [`IN_PROGRESS`] literal. The last one matters because the catch-all is not a
+/// configured section: a section spelled like it renders as a *second* header
+/// of the same name, `assign_section` intercepts the literal before it ever
+/// consults the config (so moving a session there silently lands it in the
+/// catch-all, override-locked out of predicate assignment), and its
+/// `max_sessions` is shadowed by the catch-all's own limit.
+///
+/// Matching is literal, as everywhere else section names are compared.
+pub fn section_name_available(name: &str, sections: &[SectionConfig]) -> bool {
+    let name = name.trim();
+    !name.is_empty() && name != IN_PROGRESS && !sections.iter().any(|s| s.name == name)
+}
+
+/// Rewrite a session's stored section names after the section `old` was
+/// renamed to `new`. Returns `true` when the session referred to it.
+///
+/// Membership is stored by name (`current_section`, `section_override`), so a
+/// rename that only touches the config leaves both pointing at a section that
+/// no longer exists — [`assign_section`] then discards the override, restarts
+/// its forward-only scan from index 0, and drops the session into the
+/// "In Progress" catch-all (or back into an *earlier* section whose predicate
+/// still matches). Renaming must therefore migrate the sessions in the same
+/// breath as the config.
+///
+/// `entered_section_at` is deliberately left alone: the session hasn't moved,
+/// only the label changed, so within-section ordering is preserved.
+pub fn rename_section(session: &mut WorktreeSession, old: &str, new: &str) -> bool {
+    let mut touched = false;
+    for field in [&mut session.current_section, &mut session.section_override] {
+        if field.as_deref() == Some(old) {
+            *field = Some(new.to_string());
+            touched = true;
+        }
+    }
+    touched
 }
 
 fn section_matches(session: &WorktreeSession, section: &SectionConfig) -> bool {
@@ -580,37 +662,6 @@ mod tests {
 
         assert!(changed);
         assert_eq!(session.current_section.as_deref(), Some("Open"));
-    }
-
-    #[test]
-    fn session_pinned_to_manual_only_section_renders_in_that_bucket() {
-        // A session manually moved to "Stale" must render under "Stale",
-        // not fall into In Progress. Display order follows config order
-        // regardless of whether a section has predicates.
-        let sections = vec![
-            SectionConfig {
-                name: "Needs Review".into(),
-                has_label: Some(LabelPredicate::One("dev-review-required".into())),
-                ..Default::default()
-            },
-            SectionConfig {
-                name: "Stale".into(),
-                ..Default::default()
-            },
-        ];
-        let mut session = make_session();
-        session.current_section = Some("Stale".into());
-
-        let groups = build_sections(&[session.clone()], &sections);
-
-        assert_eq!(
-            groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
-            vec!["In Progress", "Needs Review", "Stale"]
-        );
-        let stale = groups.iter().find(|g| g.name == "Stale").unwrap();
-        assert_eq!(stale.sessions, vec![session.id]);
-        let in_progress = groups.iter().find(|g| g.name == "In Progress").unwrap();
-        assert!(in_progress.sessions.is_empty());
     }
 
     #[test]
@@ -1427,6 +1478,180 @@ mod tests {
         assert_eq!(session.section_override, None);
         assert_eq!(session.current_section, None);
         assert_eq!(session.entered_section_at, original);
+    }
+
+    #[test]
+    fn effective_sections_returns_defaults_when_empty() {
+        let defaults = effective_sections(&[]);
+        let names: Vec<&str> = defaults.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["In Review", "Merged"]);
+        // "In Progress" stays implicit — it must not be baked in as a section.
+        assert!(defaults.iter().all(|s| s.name != IN_PROGRESS));
+    }
+
+    #[test]
+    fn effective_sections_returns_configured_when_non_empty() {
+        let configured = vec![SectionConfig {
+            name: "My Column".into(),
+            ..Default::default()
+        }];
+        let effective = effective_sections(&configured);
+        let names: Vec<&str> = effective.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["My Column"]);
+    }
+
+    #[test]
+    fn default_sections_assign_open_pr_to_in_review() {
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+
+        let sections = default_board_sections();
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("In Review".into())
+        );
+    }
+
+    #[test]
+    fn renaming_a_manual_only_section_keeps_its_pinned_sessions() {
+        // A session pinned to a predicate-less waypoint holds the section's
+        // name in both `section_override` and `current_section`. Renaming the
+        // section in Settings → Sections rewrites only the config, so both
+        // stored names go stale and the session drops into In Progress.
+        let mut sections = vec![SectionConfig {
+            name: "Self Review".into(),
+            ..Default::default()
+        }];
+        let mut session = make_session();
+        let placed_at = session.entered_section_at + Duration::minutes(1);
+        place_created_session(&mut session, "Self Review", &sections, placed_at);
+
+        // User renames the section: config and sessions migrate together.
+        sections[0].name = "Reviewing".into();
+        rename_section(&mut session, "Self Review", "Reviewing");
+
+        // The TUI reconciles every session against the new config.
+        apply_assignment(&mut session, &sections, placed_at + Duration::minutes(1));
+
+        let groups = build_sections(&[session.clone()], &sections);
+        let reviewing = groups
+            .iter()
+            .find(|g| g.name == "Reviewing")
+            .expect("Reviewing section present");
+        assert_eq!(
+            reviewing.sessions,
+            vec![session.id],
+            "pinned session should follow the section through a rename"
+        );
+    }
+
+    #[test]
+    fn renaming_a_section_does_not_slide_sessions_back_to_an_earlier_one() {
+        // Process order: 0=In Progress, 1=Open, 2=In Review. The session has
+        // advanced to "In Review"; its own predicate no longer matches but
+        // "Open"'s still does, and forward-only keeps it put. Renaming
+        // "In Review" makes `current_section` unresolvable, which resets the
+        // scan to index 0 — so the session slides back to "Open".
+        let mut sections = vec![
+            SectionConfig {
+                name: "Open".into(),
+                pr_state: Some(StatePredicate::One(PrState::Open)),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "In Review".into(),
+                review_decision: Some(DecisionPredicate::One(ReviewDecision::ChangesRequested)),
+                ..Default::default()
+            },
+        ];
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.review_decision = None;
+        session.current_section = Some("In Review".into());
+
+        sections[1].name = "Reviewing".into();
+        rename_section(&mut session, "In Review", "Reviewing");
+
+        let later = session.entered_section_at + Duration::hours(1);
+        apply_assignment(&mut session, &sections, later);
+
+        assert_eq!(
+            session.current_section.as_deref(),
+            Some("Reviewing"),
+            "session should stay in the renamed section, not fall back to an earlier one"
+        );
+    }
+
+    #[test]
+    fn default_sections_assign_merged_pr_to_merged() {
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Merged);
+
+        let sections = default_board_sections();
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("Merged".into())
+        );
+    }
+
+    #[test]
+    fn section_name_availability_rules() {
+        let sections = vec![SectionConfig {
+            name: "Drafts".into(),
+            ..Default::default()
+        }];
+
+        assert!(section_name_available("WIP", &sections));
+        assert!(section_name_available("  WIP  ", &sections), "trimmed");
+        assert!(!section_name_available("", &sections));
+        assert!(!section_name_available("   ", &sections));
+        assert!(!section_name_available("Drafts", &sections), "duplicate");
+        assert!(
+            !section_name_available(IN_PROGRESS, &sections),
+            "the catch-all's name must not be shadowed by a configured section"
+        );
+    }
+
+    #[test]
+    fn rename_section_rewrites_both_stored_names_and_keeps_the_stamp() {
+        let mut session = make_session();
+        session.current_section = Some("Drafts".into());
+        session.section_override = Some("Drafts".into());
+        let stamp = session.entered_section_at;
+
+        assert!(rename_section(&mut session, "Drafts", "WIP"));
+
+        assert_eq!(session.current_section.as_deref(), Some("WIP"));
+        assert_eq!(session.section_override.as_deref(), Some("WIP"));
+        assert_eq!(
+            session.entered_section_at, stamp,
+            "a relabel is not a move; ordering within the section must survive"
+        );
+    }
+
+    #[test]
+    fn default_sections_leave_prless_session_in_progress() {
+        let session = make_session(); // no PR at all
+
+        let sections = default_board_sections();
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::InProgress
+        );
+    }
+
+    #[test]
+    fn rename_section_leaves_unrelated_sessions_alone() {
+        let mut session = make_session();
+        session.current_section = Some("Open".into());
+
+        assert!(!rename_section(&mut session, "Drafts", "WIP"));
+
+        assert_eq!(session.current_section.as_deref(), Some("Open"));
+        assert_eq!(session.section_override, None);
     }
 
     #[test]

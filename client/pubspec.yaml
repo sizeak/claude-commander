@@ -38,13 +38,35 @@ dependencies:
     path: rust_builder
   flutter_rust_bridge: 2.11.1
   flutter_secure_storage: ^10.3.1
+  # Non-secret device preferences (the selected theme). Deliberately not
+  # flutter_secure_storage: routing a UI preference through the Android Keystore
+  # / libsecret would gate the first frame's theme on the keyring being unlocked.
+  shared_preferences: ^2.3.2
   uuid: ^4.5.3
-  # Terminal emulator widget for the live PTY view (Phase 3 spike). Pinned to
-  # our fork at the v4.0.0 commit so we can carry local patches.
+  # Terminal emulator widget for the live PTY view. Pinned to our fork's
+  # `commander` branch, which carries local patches on top of upstream v4.0.0
+  # (see pubspec.lock resolved-ref for the exact commit).
   xterm:
     git:
       url: https://github.com/sizeak/xterm.dart.git
       ref: commander
+  # Image attach for the terminal view. `image_picker` is fully supported on
+  # Android (native photo picker + camera) and "limited" on Linux, where its
+  # endorsed `image_picker_linux` implementation delegates to `file_selector` —
+  # a GTK file dialog, no camera. That asymmetry is why the UI only offers a
+  # camera option on Android.
+  image_picker: ^1.2.3
+  # Clipboard image *reading*, which Flutter's own `Clipboard` cannot do (text
+  # only). Covers Linux and Android from one API, so a phone screenshot pastes
+  # just like a desktop one. Builds its own Rust via cargokit — already a
+  # requirement here for flutter_rust_bridge, so no new toolchain.
+  super_clipboard: ^0.9.1
+  # Desktop window control: fullscreen, hiding the native title bar, and reading
+  # back the window's geometry so it can be restored on the next launch. Declares
+  # only linux/macos/windows, so every call is behind the `WindowService` seam
+  # (`services/window_service.dart`) — on Android the plugin is simply absent and
+  # an ungated call would throw `MissingPluginException`.
+  window_manager: ^0.5.2
 
 dev_dependencies:
   flutter_test:
@@ -58,6 +80,37 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   integration_test:
     sdk: flutter
+  # Generates the platform launcher icons (all Android densities + adaptive
+  # icons) from the source art under tool/icon/. Regenerate with:
+  #   dart run flutter_launcher_icons
+  flutter_launcher_icons: ^0.14.4
+
+# App launcher icon generation. Source art lives in tool/icon/ (SVG masters
+# alongside the rendered PNGs). The adaptive background carries the dark navy
+# gradient; the green/yellow rank chevrons sit on the transparent foreground
+# layer.
+#
+# Each platform gets its own master rather than sharing icon_full.png, because
+# the three consume art differently and the mismatch is visible: iOS masks to
+# its own superellipse (so the art must be full-bleed and opaque), while macOS
+# masks nothing (so the art must carry Apple's 824/1024 inset itself). See the
+# header comments in icon_ios.svg / icon_macos.svg.
+flutter_launcher_icons:
+  android: true
+  image_path: "tool/icon/icon_full.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "tool/icon/icon_background.png"
+  adaptive_icon_foreground: "tool/icon/icon_foreground.png"
+  ios: true
+  image_path_ios: "tool/icon/icon_ios.png"
+  # icon_ios.svg is drawn without transparency, so this is a backstop, not the
+  # mechanism: an App Store submission is rejected outright for an alpha channel
+  # in the app icon, and that failure surfaces at upload time rather than build
+  # time. Cheap insurance against a future edit reintroducing one.
+  remove_alpha_ios: true
+  macos:
+    generate: true
+    image_path: "tool/icon/icon_macos.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -70,10 +123,21 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  # Bundled OFL fonts (see assets/fonts/*-OFL.txt for licences). Both are
+  # variable fonts declared once; Flutter maps TextStyle.fontWeight onto the
+  # wght axis, so all weights (400–700) resolve from the single file.
+  fonts:
+    - family: SpaceGrotesk
+      fonts:
+        - asset: assets/fonts/SpaceGrotesk-VF.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-VF.ttf
+    # The LCARS theme's display face — condensed, uppercase-led. Only ever used
+    # for chrome: terminal output stays JetBrainsMono in every theme.
+    - family: Antonio
+      fonts:
+        - asset: assets/fonts/Antonio-VF.ttf
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
