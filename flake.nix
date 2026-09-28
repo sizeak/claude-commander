@@ -639,6 +639,14 @@
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
           # Read by web/e2e/run.sh to verify the npm pin matches.
           CC_PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
+          # web/package.json also pins @biomejs/biome, so `npm run check` works
+          # outside this shell. Its npm binary is dynamically linked for an FHS
+          # layout, so inside the shell the npm wrapper is pointed at nixpkgs'
+          # build instead (the wrapper honours BIOME_BINARY, see
+          # node_modules/@biomejs/biome/bin/biome); verify.sh's web lane checks
+          # the two versions agree.
+          BIOME_BINARY = "${pkgs.biome}/bin/biome";
+          CC_BIOME_VERSION = pkgs.biome.version;
         };
 
         # Flutter + Rust + Android NDK toolchain for the in-repo `client/` app

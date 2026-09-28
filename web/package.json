@@ -17,6 +17,7 @@
     "@xterm/xterm": "5.5.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.9",
     "@playwright/test": "1.61.1",
     "@types/node": "^24.0.0",
     "esbuild": "0.28.2",

@@ -513,6 +513,43 @@ assert_eq "0" "$leak_rc" "a tree enabling core's test-support is a leak"
 assert_eq "cargo tree --offline --workspace -e normal,build,features -i claude-commander-core" \
   "$CC_CORE_FEATURE_TREE_CMD" "the guard inspects normal+build edges only, offline"
 
+echo "== cc_kill_process_groups =="
+# dev-run.sh web's cleanup. It runs from an EXIT trap under `set -u`, handed
+# pids that may be empty (a helper that never started) or already gone.
+group_rc=0
+(set -u && cc_kill_process_groups "" "" 2>/dev/null) || group_rc=$?
+assert_eq "0" "$group_rc" "empty pids are skipped under set -u"
+setsid sleep 300 &
+group_leader=$!
+# A leader with a child in its group: killing the group must take both.
+setsid bash -c 'sleep 300 & wait' &
+group_tree=$!
+sleep 0.2
+group_child="$(pgrep -g "$group_tree" -x sleep || true)"
+assert_eq "1" "$(printf '%s\n' "$group_child" | grep -c .)" "the fixture group has one child"
+group_rc=0
+cc_kill_process_groups "$group_leader" "" "$group_tree" 2>/dev/null || group_rc=$?
+assert_eq "0" "$group_rc" "killing live groups succeeds"
+# Poll rather than `wait`, which would hang on a group the helper missed.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  group_alive=""
+  for p in "$group_leader" "$group_tree" "$group_child"; do
+    # A reaped-but-unwaited child is a zombie, which kill -0 still sees.
+    [ "$(ps -o stat= -p "$p" 2>/dev/null | cut -c1)" = "" ] ||
+      [ "$(ps -o stat= -p "$p" 2>/dev/null | cut -c1)" = "Z" ] ||
+      group_alive="$group_alive $p"
+  done
+  [ -z "$group_alive" ] && break
+  sleep 0.2
+done
+assert_eq "" "$group_alive" "every process in each group is gone"
+# Whatever the helper left, don't leak it past the test.
+kill -KILL -- "-$group_leader" "-$group_tree" 2>/dev/null || true
+wait "$group_leader" "$group_tree" 2>/dev/null || true
+group_rc=0
+cc_kill_process_groups "$group_leader" 2>/dev/null || group_rc=$?
+assert_eq "0" "$group_rc" "a group that is already gone is not an error"
+
 echo
 printf '%s passed, %s failed\n' "$pass_count" "$fail_count"
 [ "$fail_count" -eq 0 ] || exit 1

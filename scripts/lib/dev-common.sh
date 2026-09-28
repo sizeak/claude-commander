@@ -178,7 +178,7 @@ cc_lane_description() {
     cdylib) printf 'cargo test --locked in client/rust\n' ;;
     e2e) printf 'client/tool/e2e.sh (hermetic server + Linux app)\n' ;;
     goldens) printf 'flutter test test/goldens (reference images only)\n' ;;
-    web) printf 'web/: npm ci, check, typecheck, test, build is fresh; protocol TS drift\n' ;;
+    web) printf 'web/: npm ci, check, typecheck, test, build is fresh; protocol TS drift + ts clippy\n' ;;
     web-e2e) printf 'web/e2e/run.sh (hermetic server + headless Playwright)\n' ;;
     nix-build) printf 'nix build\n' ;;
     nix-src-filter) printf 'scripts/check-nix-src-filter.sh (flake src filter guard)\n' ;;
@@ -292,6 +292,19 @@ cc_first_pid() {
     "" | *[!0-9]*) printf '\n' ;;
     *) printf '%s\n' "$raw" ;;
   esac
+}
+
+# cc_kill_process_groups PID... -- SIGTERM each process group led by PID (a
+# helper started under `setsid`, so killing the group reaches everything it
+# spawned). Empty arguments -- a helper that was never started -- are skipped,
+# and a group that has already exited is not an error, so this is safe to call
+# from an EXIT trap under `set -u` on any exit path, more than once.
+cc_kill_process_groups() {
+  local pid
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    kill -TERM -- "-$pid" 2>/dev/null || true
+  done
 }
 
 # cc_apk_path <debug|release> -- APK path relative to client/.

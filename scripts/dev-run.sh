@@ -159,10 +159,20 @@ target_server() {
 # `debug-embed` feature that would bake it in is a *dev*-dependency feature, which
 # cargo does not unify into `cargo run`), so a reload picks up the rebuilt files
 # without restarting the server.
-#
-# ASSUMPTION: the build script accepts `-- --watch` (esbuild's flag, passed
-# through npm). web/package.json is owned by the TypeScript port; if its watch
-# entry point ends up spelled differently, this is the line to change.
+
+# The web target's helper process groups. Globals, not locals of target_web:
+# the EXIT trap that reaps them runs after the function has returned, when its
+# locals no longer exist (and under `set -u` naming one aborts the trap).
+CC_WEB_WATCH_PID=""
+CC_WEB_READY_PID=""
+
+# shellcheck disable=SC2329  # invoked by the EXIT trap and target_web
+web_cleanup() {
+  cc_kill_process_groups "$CC_WEB_WATCH_PID" "$CC_WEB_READY_PID"
+  CC_WEB_WATCH_PID=""
+  CC_WEB_READY_PID=""
+}
+
 target_web() {
   local port=8787 token=""
   while [ "$#" -gt 0 ]; do
@@ -200,22 +210,15 @@ target_web() {
   # reached otherwise: a non-interactive shell starts background jobs with
   # SIGINT ignored, so Ctrl-C would stop the server and leave the watcher (and
   # the esbuild under npm under nix develop) running. Killing the group takes
-  # the whole tree.
-  local watch_pid="" ready_pid=""
-  # shellcheck disable=SC2329  # invoked by the EXIT trap
-  web_cleanup() {
-    local pid
-    for pid in "$watch_pid" "$ready_pid"; do
-      [ -n "$pid" ] && kill -TERM -- "-$pid" 2>/dev/null || true
-    done
-  }
+  # the whole tree. The trap covers a signal or an error; the normal return
+  # below reaps them itself.
   trap web_cleanup EXIT
   trap 'exit 130' INT TERM
 
-  cc_info "npm run build -- --watch (writes $CC_WEBUI_DIR)"
+  cc_info "npm run watch (writes $CC_WEBUI_DIR)"
   setsid bash -c "source $(cc_quote_args "$CC_REPO_ROOT/scripts/lib/dev-common.sh")
-    cc_run_in_shell $(cc_quote_args "$CC_WEB_SHELL") biome 'cd web && exec npm run build -- --watch'" &
-  watch_pid=$!
+    cc_run_in_shell $(cc_quote_args "$CC_WEB_SHELL") biome 'cd web && exec npm run watch'" &
+  CC_WEB_WATCH_PID=$!
 
   # The URL is printed again once the server answers, since by then the first
   # print has scrolled away under the cargo build.
@@ -228,7 +231,7 @@ target_web() {
         fi
         sleep 0.5
       done" &
-    ready_pid=$!
+    CC_WEB_READY_PID=$!
   fi
 
   cc_info "web UI will be at $url"
@@ -237,6 +240,10 @@ target_web() {
   # this one's. As a separate process each keeps its own cleanup.
   local status=0
   "${BASH_SOURCE[0]}" server --isolated --port "$port" --token "$token" || status=$?
+  # The server exited on its own (Ctrl-C lands in the trap instead): stop the
+  # helpers now, so the exit status is the server's and nothing outlives us.
+  web_cleanup
+  trap - EXIT INT TERM
   return "$status"
 }
 

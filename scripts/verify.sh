@@ -251,6 +251,19 @@ lane_web() {
   trap "rm -rf '$snapshot'" RETURN
   cp -a "$CC_WEBUI_DIR" "$snapshot/webui" || return $?
 
+  # web/package.json pins @biomejs/biome so `npm run check` works outside the
+  # shell; inside it the npm wrapper runs nixpkgs' biome (BIOME_BINARY, see
+  # devShells.web). The two must agree or the lane and a bare `npm run check`
+  # could format differently. CC_BIOME_VERSION is only set inside that shell.
+  # shellcheck disable=SC2016  # expanded by the inner shell, not this one
+  cc_run_in_shell "$CC_WEB_SHELL" "$WEB_PROBE" '
+    pinned="$(node -p "require(\"./web/package.json\").devDependencies[\"@biomejs/biome\"] ?? \"\"")"
+    if [ -n "${CC_BIOME_VERSION:-}" ] && [ "$pinned" != "$CC_BIOME_VERSION" ]; then
+      echo "error: @biomejs/biome is pinned to ${pinned:-nothing} but devShells.web has biome $CC_BIOME_VERSION -- bump them together" >&2
+      exit 1
+    fi
+  ' || return $?
+
   cc_run_in_shell "$CC_WEB_SHELL" "$WEB_PROBE" "
     set -e
     cd web
@@ -262,14 +275,25 @@ lane_web() {
   " || return $?
 
   if ! diff -r "$snapshot/webui" "$CC_WEBUI_DIR"; then
-    cc_error "$CC_WEBUI_DIR is stale: run 'cd web && npm run build' and commit the result"
+    # Put the stale tree back rather than leave the rebuild in place: otherwise
+    # a second run compares the rebuild against itself and passes, and the
+    # uncommitted fix is easy to lose track of.
+    rm -rf "$CC_WEBUI_DIR" && cp -a "$snapshot/webui" "$CC_WEBUI_DIR"
+    cc_error "$CC_WEBUI_DIR does not match what web/ builds to (diff above)."
+    cc_error "The lane's rebuild was reverted, so this keeps failing until you run"
+    cc_error "'cd web && npm run build' and commit $CC_WEBUI_DIR."
     return 1
   fi
 
   # web/src/generated/ is exported from protocol's types by ts-rs; this fails
   # when the committed bindings drift from the Rust (regenerate with
   # CC_TS_REGENERATE=1 -- see crates/claude-commander-protocol/src/ts_export.rs).
-  cc_run_in_shell "" cargo "cargo test -p claude-commander-protocol --features ts ts_export"
+  # The `ts` feature is off in every other lane, so its code is linted here too.
+  cc_run_in_shell "" cargo "
+    set -e
+    cargo test -p claude-commander-protocol --features ts ts_export
+    cargo clippy -p claude-commander-protocol --all-targets --features ts -- -D warnings
+  "
 }
 
 lane_web_e2e() {
