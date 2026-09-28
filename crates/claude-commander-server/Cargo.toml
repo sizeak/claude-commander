@@ -39,6 +39,10 @@ tower-http = { version = "0.7", features = ["trace", "cors", "catch-panic"] }
 # Optional TLS termination (behind the `tls` feature, off by default).
 axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 
+# The browser UI (`webui/`), baked into the binary; see src/webui.rs.
+rust-embed = "8"
+mime_guess = "2"
+
 # Configuration (layered: defaults -> [server] table -> CLI flags)
 figment = { version = "0.10", features = ["toml", "env"] }
 
@@ -69,6 +73,9 @@ tls = ["dep:axum-server"]
 # because it only closes through this crate's test targets, not its library.
 claude-commander-test-support = { path = "../claude-commander-test-support" }
 tempfile = "3.27"
+# Embed `webui/` in debug test builds too (by default a debug build reads it
+# from disk at request time), so the router tests assert what actually ships.
+rust-embed = { version = "8", features = ["debug-embed"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # Real HTTP + WebSocket clients for the tmux-gated integration tests.

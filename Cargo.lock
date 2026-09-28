@@ -884,7 +884,9 @@ dependencies = [
  "figment",
  "futures",
  "http-body-util",
+ "mime_guess",
  "reqwest",
+ "rust-embed",
  "serde",
  "serde_json",
  "tempfile",
@@ -951,31 +953,6 @@ dependencies = [
  "claude-commander-protocol",
  "fuzzy-matcher",
  "serde_json",
-]
-
-[[package]]
-name = "claude-commander-web"
-version = "0.37.0"
-dependencies = [
- "axum",
- "base64",
- "clap",
- "claude-commander-protocol",
- "futures",
- "http",
- "http-body-util",
- "mime_guess",
- "reqwest",
- "rust-embed",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "tower",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4968,7 +4945,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
- "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -6029,7 +6005,6 @@ dependencies = [
  "futures-util",
  "log",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
