@@ -9,17 +9,21 @@
 #                                             the terminal UI (--serve also runs
 #                                             the HTTP API in its process)
 #   dev-run.sh server [--port N] [--token T] [--isolated] [-- ARGS…]
+#   dev-run.sh web [--port N] [--token T]     the browser UI: rebuilt on save, served
+#                                             by an isolated server; prints the URL
 #   dev-run.sh linux [--log FILE]             the Flutter Linux desktop app
 #   dev-run.sh android [--device SERIAL] [--release] [--no-launch] [--window]
 #   dev-run.sh emulator start|stop|status     headless AVD lifecycle
 #
-# tui / server / linux run in the foreground and exit with the app's own status.
+# tui / server / web / linux run in the foreground and exit with the app's own
+# status (web: the server's; its build watcher is stopped on exit).
 # android reports where it failed: 40 emulator boot, 41 APK build, 42 install,
 # 43 launch. 2 means bad arguments, 3 a missing toolchain nix could not supply.
 #
 # Toolchains resolve themselves: a target uses the tool already on PATH, else it
 # re-enters the nix dev shell that provides it. Android needs `.#client` (SDK +
-# NDK + emulator); override with CC_ANDROID_SHELL, the AVD with CC_AVD.
+# NDK + emulator); override with CC_ANDROID_SHELL, the AVD with CC_AVD. web
+# re-enters `.#web` unless biome is on PATH; override with CC_WEB_SHELL.
 set -euo pipefail
 
 # SCRIPTDIR, not the invocation dir: dev-run.sh is run from anywhere.
@@ -143,6 +147,97 @@ target_server() {
 
   cc_info "cargo run -p claude-commander-server -- $args"
   cc_run_in_shell "" cargo "cargo run -p claude-commander-server -- $args"
+}
+
+# ---------------------------------------------------------------------------
+# web
+# ---------------------------------------------------------------------------
+
+# The web UI's edit loop: the page rebuilt on every save, served by an isolated
+# debug server. It works because rust-embed reads its folder from disk on each
+# request in a debug build (crates/claude-commander-server/src/webui.rs; the
+# `debug-embed` feature that would bake it in is a *dev*-dependency feature, which
+# cargo does not unify into `cargo run`), so a reload picks up the rebuilt files
+# without restarting the server.
+#
+# ASSUMPTION: the build script accepts `-- --watch` (esbuild's flag, passed
+# through npm). web/package.json is owned by the TypeScript port; if its watch
+# entry point ends up spelled differently, this is the line to change.
+target_web() {
+  local port=8787 token=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --port)
+        [ "$#" -ge 2 ] || cc_die "$CC_EXIT_USAGE" "web: --port needs a value"
+        port="$2"
+        shift 2
+        ;;
+      --token)
+        [ "$#" -ge 2 ] || cc_die "$CC_EXIT_USAGE" "web: --token needs a value"
+        token="$2"
+        shift 2
+        ;;
+      *) cc_die "$CC_EXIT_USAGE" "web: unexpected argument '$1'" ;;
+    esac
+  done
+  # The page reads its token from the URL fragment, so this target has to know
+  # it to print a clickable URL -- unlike `server`, which may let the server
+  # generate and log one.
+  [ -n "$token" ] || token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  local url="http://127.0.0.1:$port/#token=$token"
+
+  # Synchronously first, so a dependency failure stops here instead of
+  # scrolling past under the server's cargo output. Same staleness test as
+  # web/e2e/run.sh.
+  cc_run_in_shell "$CC_WEB_SHELL" biome "
+    cd web
+    if [ ! -f node_modules/.package-lock.json ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+      npm ci --no-audit --no-fund --loglevel=error
+    fi
+  " || return $?
+
+  # Each helper gets its own process group (setsid), because neither can be
+  # reached otherwise: a non-interactive shell starts background jobs with
+  # SIGINT ignored, so Ctrl-C would stop the server and leave the watcher (and
+  # the esbuild under npm under nix develop) running. Killing the group takes
+  # the whole tree.
+  local watch_pid="" ready_pid=""
+  # shellcheck disable=SC2329  # invoked by the EXIT trap
+  web_cleanup() {
+    local pid
+    for pid in "$watch_pid" "$ready_pid"; do
+      [ -n "$pid" ] && kill -TERM -- "-$pid" 2>/dev/null || true
+    done
+  }
+  trap web_cleanup EXIT
+  trap 'exit 130' INT TERM
+
+  cc_info "npm run build -- --watch (writes $CC_WEBUI_DIR)"
+  setsid bash -c "source $(cc_quote_args "$CC_REPO_ROOT/scripts/lib/dev-common.sh")
+    cc_run_in_shell $(cc_quote_args "$CC_WEB_SHELL") biome 'cd web && exec npm run build -- --watch'" &
+  watch_pid=$!
+
+  # The URL is printed again once the server answers, since by then the first
+  # print has scrolled away under the cargo build.
+  if command -v curl >/dev/null 2>&1; then
+    setsid bash -c "
+      for _ in \$(seq 1 1200); do
+        if curl -fs -o /dev/null http://127.0.0.1:$port/; then
+          printf '\n==> web UI ready: %s\n\n' $(cc_quote_args "$url")
+          exit 0
+        fi
+        sleep 0.5
+      done" &
+    ready_pid=$!
+  fi
+
+  cc_info "web UI will be at $url"
+  # A child dev-run.sh rather than a call to target_server: --isolated installs
+  # its own EXIT trap (tmux kill-server, then the temp tree), which would replace
+  # this one's. As a separate process each keeps its own cleanup.
+  local status=0
+  "${BASH_SOURCE[0]}" server --isolated --port "$port" --token "$token" || status=$?
+  return "$status"
 }
 
 # ---------------------------------------------------------------------------
@@ -514,6 +609,7 @@ case "$target" in
     ;;
   tui) target_tui "$@" ;;
   server) target_server "$@" ;;
+  web) target_web "$@" ;;
   linux) target_linux "$@" ;;
   android) target_android "$@" ;;
   emulator) target_emulator "$@" ;;
