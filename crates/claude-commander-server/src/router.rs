@@ -464,6 +464,73 @@ mod tests {
         assert!(body_string(css).await.contains(".xterm-viewport"));
     }
 
+    /// Every page response carries the hardening headers: no MIME sniffing, no
+    /// framing (clickjacking a page that holds a bearer token), no referrer,
+    /// and a CSP that allows only same-origin scripts and connections.
+    #[tokio::test]
+    async fn page_responses_carry_security_headers() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+        for path in ["/", "/app.js", "/style.css", "/some-client-route"] {
+            let resp = get_resp(app.clone(), path).await;
+            assert_eq!(resp.status(), 200, "{path}");
+            let h = resp.headers();
+            let get = |name: &str| {
+                h.get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_else(|| panic!("{path}: no {name}"))
+                    .to_owned()
+            };
+            assert_eq!(get("x-content-type-options"), "nosniff", "{path}");
+            assert_eq!(get("x-frame-options"), "DENY", "{path}");
+            assert_eq!(get("referrer-policy"), "no-referrer", "{path}");
+            let csp = get("content-security-policy");
+            for directive in [
+                "default-src 'self'",
+                "script-src 'self'",
+                "connect-src 'self' ws: wss:",
+                "frame-ancestors 'none'",
+            ] {
+                assert!(csp.contains(directive), "{path}: {csp} lacks {directive}");
+            }
+            assert!(!csp.contains("unsafe-eval"), "{path}: {csp}");
+        }
+    }
+
+    /// The page is read-only: anything but GET/HEAD is a 405, not the page.
+    #[tokio::test]
+    async fn non_get_page_requests_are_method_not_allowed() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+        for (method, path) in [("POST", "/"), ("PUT", "/app.js"), ("DELETE", "/x")] {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), 405, "{method} {path}");
+            assert_eq!(resp.headers().get(header::ALLOW).unwrap(), "GET, HEAD");
+        }
+        let head = Request::head("/").body(Body::empty()).unwrap();
+        assert_eq!(app.oneshot(head).await.unwrap().status(), 200);
+    }
+
+    /// A missing *file* (the last segment has an extension) is a 404, not
+    /// `index.html`: HTML served as a source map or a script is a confusing
+    /// failure, and a 200 hides the missing asset. Extension-less paths are
+    /// client-side routes and still get the page.
+    #[tokio::test]
+    async fn missing_asset_paths_are_404_not_the_page() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+        for path in ["/app.js.map", "/vendor/xterm.js", "/nope.css"] {
+            let resp = get_resp(app.clone(), path).await;
+            assert_eq!(resp.status(), 404, "{path}");
+            assert!(!content_type(&resp).starts_with("text/html"), "{path}");
+        }
+    }
+
     /// The favicon is the real SVG, not a Git LFS pointer (which is what a
     /// checkout without LFS smudging would embed).
     #[tokio::test]
