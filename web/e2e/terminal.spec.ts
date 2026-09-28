@@ -1,4 +1,5 @@
 import {
+  api,
   connect,
   ECHO_SESSION,
   expect,
@@ -83,5 +84,32 @@ test.describe("session tree and terminal", () => {
     await expect.poll(async () => (await paneSize())?.cols).toBeLessThan(before?.cols ?? 0);
     await expect.poll(rowsMismatch).toBe(0);
     expect((await paneSize())?.rows).toBeLessThan(before?.rows ?? 0);
+  });
+
+  // Last in the file: it restarts the echo session the tests above rely on.
+  test("an attach comes back after the session is restarted elsewhere", async ({
+    page,
+    request,
+  }) => {
+    const s = await sessionByTitle(request, ECHO_SESSION);
+    await openSession(page, ECHO_SESSION);
+    await expect(terminalText(page)).toContainText("echo agent ready");
+
+    // Through the API, not the page: the TUI, the CLI or another tab.
+    await api(request, "POST", `/sessions/${s.id}/restart`);
+    // The old pane's session ended, which the attach reports and stops on...
+    await expect(terminalText(page)).toContainText("session_ended");
+    // ...then, with the session running again, it re-attaches on its own
+    // (the terminal is reset for the new pane) without a click.
+    await expect(terminalText(page)).not.toContainText("session_ended", { timeout: 30_000 });
+    await expect(terminalText(page)).toContainText("echo agent ready");
+    await expect(page.locator("#conn-status")).toHaveText("connected");
+
+    // And it is live: typed input reaches the new pane.
+    const marker = `e2e-restarted-${Date.now()}`;
+    await page.locator("#terminal").click();
+    await page.keyboard.type(marker);
+    await page.keyboard.press("Enter");
+    await expect(terminalText(page)).toContainText(`got:${marker}`);
   });
 });

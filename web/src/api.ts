@@ -58,18 +58,30 @@ export class Auth {
    * user has already replaced (a poll in flight across a submit), and acting
    * on it would throw away the new one.
    */
-  reject(sent: string | null = this.token): { message: string | undefined } | null {
+  reject(sent: string | null = this.token): Rejection | null {
     if (sent !== this.token) return null;
-    const message = this.source === "submitted" ? "That token was rejected." : undefined;
+    const rejection: Rejection = {
+      message: this.source === "submitted" ? "That token was rejected." : undefined,
+      token: this.token,
+      source: this.source,
+    };
     this.token = null;
     this.source = "none";
     this.rejected = true;
-    return { message };
+    return rejection;
   }
 
   headers(): Record<string, string> {
     return this.token ? { Authorization: `Bearer ${this.token}` } : {};
   }
+}
+
+/** A token the server refused, and what to tell the user about it. */
+export interface Rejection {
+  /** The connect screen's message, if the rejection deserves one. */
+  message: string | undefined;
+  token: string | null;
+  source: TokenSource;
 }
 
 /** The server answered 401: the token is missing or wrong. */
@@ -80,7 +92,10 @@ export class Unauthorized extends Error {
   }
 }
 
-/** Any other non-2xx answer (or a network failure), with a user-facing message. */
+/**
+ * Any other non-2xx answer, with a user-facing message. `status` 0 means no
+ * answer at all: the request timed out.
+ */
 export class ApiError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -99,21 +114,38 @@ export function errorMessage(status: number, body: unknown): string {
 
 type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 
+/**
+ * How long a read may take before it counts as no answer. Without a bound, one
+ * fetch stuck on a half-open connection (a laptop waking from sleep) never
+ * settles, the poll awaiting it never finishes, and the poller -- which only
+ * schedules the next run after the current one -- stops for good.
+ */
+export const READ_TIMEOUT_MS = 10_000;
+/**
+ * Mutations get far longer: creating a session can fetch the remote and add a
+ * worktree first. The bound is only there so none can hang forever.
+ */
+export const WRITE_TIMEOUT_MS = 120_000;
+
 export interface ApiOptions {
-  /** Called on every 401, after the token has been forgotten. */
-  onUnauthorized: (message: string | undefined) => void;
+  /** Called on the first 401 for the current token, after it has been forgotten. */
+  onUnauthorized: (rejection: Rejection) => void;
   fetch?: typeof fetch;
+  /** Overrides READ_TIMEOUT_MS (tests). */
+  timeoutMs?: number;
 }
 
 export class Api {
   readonly auth: Auth;
-  private readonly onUnauthorized: (message: string | undefined) => void;
+  private readonly onUnauthorized: (rejection: Rejection) => void;
   private readonly fetchImpl: typeof fetch;
+  private readonly readTimeoutMs: number;
 
   constructor(auth: Auth, opts: ApiOptions) {
     this.auth = auth;
     this.onUnauthorized = opts.onUnauthorized;
     this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init));
+    this.readTimeoutMs = opts.timeoutMs ?? READ_TIMEOUT_MS;
   }
 
   /**
@@ -127,12 +159,13 @@ export class Api {
     // change nothing the user needs to see.
     const first = !this.auth.rejected;
     const outcome = this.auth.reject(sent);
-    if (outcome && first) this.onUnauthorized(outcome.message);
+    if (outcome && first) this.onUnauthorized(outcome);
   }
 
   /**
    * One request. Resolves to the parsed JSON body (`undefined` for an empty
-   * one, e.g. a 204); rejects with `Unauthorized` or `ApiError`.
+   * one, e.g. a 204); rejects with `Unauthorized` or `ApiError` -- including
+   * `ApiError(0, ...)` when no answer (headers and body) arrives in time.
    */
   async request<T>(method: Method, path: string, body?: unknown): Promise<T> {
     const sent = this.auth.token;
@@ -142,12 +175,17 @@ export class Api {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    const res = await this.fetchImpl(`/api${path}`, init);
+    const ms = method === "GET" ? this.readTimeoutMs : WRITE_TIMEOUT_MS;
+    const { res, text } = await withTimeout(ms, async (signal) => {
+      init.signal = signal;
+      const res = await this.fetchImpl(`/api${path}`, init);
+      // A 401's body is irrelevant; don't wait on it.
+      return { res, text: res.status === 401 ? "" : await res.text() };
+    });
     if (res.status === 401) {
       this.unauthorized(sent);
       throw new Unauthorized();
     }
-    const text = await res.text();
     let parsed: unknown;
     try {
       parsed = text ? JSON.parse(text) : undefined;
@@ -200,6 +238,27 @@ export class Api {
     this.request<ReviewedToggle>("POST", `/sessions/${id}/files/reviewed`, req);
   applyComments = (id: SessionId) =>
     this.request<ApplyOutcome>("POST", `/sessions/${id}/comments/apply`);
+}
+
+/**
+ * Run `work` with an abort signal, failing with `ApiError(0, ...)` after `ms`.
+ * The race (rather than trusting the signal alone) bounds a fetch or body that
+ * ignores its signal too; the signal still tears the real request down.
+ */
+async function withTimeout<T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const ctl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctl.abort();
+      reject(new ApiError(0, `request timed out after ${Math.round(ms / 1000)}s`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([work(ctl.signal), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

@@ -3,7 +3,8 @@
 // Three layers, highest first:
 //   flash  — a transient note ("copied"), until its timer ends it;
 //   sticky — a terminal state of the attach ("session ended", a rejected
-//            token), until the user acts (selects, toggles, reconnects);
+//            token), until the user acts (selects, toggles, reconnects) —
+//            except that an error base ("disconnected") shows through it;
 //   base   — the poll's own view ("connected" / "disconnected").
 // The poll writes only the base layer, every 1.5s. With a single slot, as
 // before, each poll overwrote whatever the terminal had said a moment earlier.
@@ -47,6 +48,10 @@ export class ConnStatus {
   }
 
   view(): ConnView {
-    return this.flashView?.view ?? this.sticky ?? this.base;
+    if (this.flashView) return this.flashView.view;
+    // Losing the server outranks a sticky state: that is about one pane, this
+    // about everything, and hiding it would claim a server we can't reach.
+    if (this.base.cls === "error") return this.base;
+    return this.sticky ?? this.base;
   }
 }

@@ -144,3 +144,69 @@ export class AttachLifecycle {
     return { kind: "reconnect", delayMs };
   }
 }
+
+/** Why the current attach stopped for good, if it did. */
+export type Halt = "auth" | "gone" | null;
+
+/**
+ * What clicking session `clicked` does, given the current selection and how
+ * its attach stands. Re-clicking the selected session is how a user retries an
+ * attach that ended ("session ended" after the TUI restarted it, a Ctrl-b d);
+ * while it is live, or waiting on the connect screen, it does nothing.
+ */
+export function selectAction(
+  selected: string | null,
+  clicked: string,
+  halt: Halt,
+): "attach" | "reattach" | "none" {
+  if (selected !== clicked) return "attach";
+  return halt === "gone" ? "reattach" : "none";
+}
+
+export const GONE_PROBE_BASE_MS = 3000;
+export const GONE_PROBE_MAX_MS = 60_000;
+
+/**
+ * Brings back an attach that ended "gone" once there is a pane to attach to
+ * again, fed the selected session's status from each poll.
+ *
+ * The session's pane can come back without this tab doing anything: the TUI,
+ * the CLI or another tab restarts it, or the pane was merely detached (Ctrl-b
+ * d) and never went. So:
+ * - seen not running and then running again (killed, then restarted):
+ *   re-attach at once;
+ * - running throughout (a restart faster than a poll, a detach): the snapshot
+ *   can't tell, so probe — re-attach after a delay that doubles, to a cap,
+ *   with each probe that ends "gone" again;
+ * - missing from the snapshot (deleted): never.
+ */
+export class GoneRecovery {
+  private readonly now: () => number;
+  private goneAt: number | null = null;
+  private sawDown = false;
+  private probes = 0;
+
+  constructor(now: () => number = () => Date.now()) {
+    this.now = now;
+  }
+
+  /** The attach just ended "gone" (including a probe that found nothing). */
+  onGone(): void {
+    this.goneAt = this.now();
+    this.sawDown = false;
+  }
+
+  /** A poll saw the selected session with `status`; true means re-attach now. */
+  onPoll(status: string | undefined): boolean {
+    if (this.goneAt === null || status === undefined) return false;
+    if (status !== "running") {
+      this.sawDown = true;
+      return false;
+    }
+    const wait = Math.min(GONE_PROBE_BASE_MS * 2 ** this.probes, GONE_PROBE_MAX_MS);
+    if (!this.sawDown && this.now() - this.goneAt < wait) return false;
+    if (!this.sawDown) this.probes++;
+    this.goneAt = null;
+    return true;
+  }
+}

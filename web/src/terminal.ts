@@ -14,6 +14,8 @@ import {
   AttachLifecycle,
   attachFrame,
   authFrame,
+  GoneRecovery,
+  type Halt,
   parseControl,
   resizeFrame,
   wsAttachUrl,
@@ -33,8 +35,10 @@ let term: Terminal | null = null;
 let fit: FitAddon | null = null;
 let ws: WebSocket | null = null;
 let lifecycle = new AttachLifecycle();
-/** The current attach ended for good (auth / no such session): don't reopen it. */
-let halted = false;
+/** Why the current attach ended for good, if it did: don't reopen it on our own. */
+let halt: Halt = null;
+/** Brings a "gone" attach back when the session's pane returns (ws.ts). */
+let recovery = new GoneRecovery();
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 let attachKind: AttachKind = "agent";
@@ -221,7 +225,25 @@ export function attach(id: string): void {
 /** Drop the attach entirely (the session is gone or deselected). */
 export function detach(): void {
   closeSocket();
-  halted = false;
+  halt = null;
+}
+
+/** How the current attach stands (for a re-click on the selected session). */
+export function haltState(): Halt {
+  return halt;
+}
+
+/**
+ * Fed the selected session's status from every poll: an attach that ended
+ * "gone" re-attaches once the session has a pane again (another tab or the TUI
+ * restarted it, or it was only detached).
+ */
+export function onSelectedStatus(status: string | undefined): void {
+  if (halt === "gone" && state.selectedId && recovery.onPoll(status)) {
+    closeSocket();
+    term?.reset();
+    startAttach(state.selectedId, false);
+  }
 }
 
 /**
@@ -229,7 +251,7 @@ export function detach(): void {
  * and the user has since reconnected). A no-op while an attach is live.
  */
 export function resume(): void {
-  if (halted && state.selectedId) {
+  if (halt && state.selectedId) {
     term?.reset();
     startAttach(state.selectedId);
   }
@@ -249,13 +271,18 @@ export function reattach(): void {
 
 /**
  * A fresh attach: new lifecycle (backoff, final errors), then its first socket.
- * Every path here is a user action (select, toggle, reconnect, restart), which
- * is what clears a sticky "session ended" from the header.
+ * A user action (select, toggle, reconnect, restart) clears a sticky "session
+ * ended" from the header and starts recovery over; an automatic re-attach
+ * (`onSelectedStatus`) keeps both, so a failed probe backs off and the header
+ * only changes once an attach is actually `ready`.
  */
-function startAttach(id: string): void {
+function startAttach(id: string, user = true): void {
   lifecycle = new AttachLifecycle();
-  halted = false;
-  clearStickyConn();
+  halt = null;
+  if (user) {
+    recovery = new GoneRecovery();
+    clearStickyConn();
+  }
   openSocket(id);
 }
 
@@ -306,6 +333,7 @@ function openSocket(id: string): void {
   sock.onmessage = (ev: MessageEvent<string | ArrayBuffer>) => {
     if (typeof ev.data === "string") {
       const msg = parseControl(ev.data);
+      if (msg?.type === "ready") clearStickyConn();
       const note = msg && life.onControl(msg);
       if (note) term?.write(note);
     } else {
@@ -330,14 +358,15 @@ function openSocket(id: string): void {
           startAttach(id);
           break;
         }
-        halted = true;
+        halt = "auth";
         stickConn("error", "disconnected");
         hooks.onAuthRejected(sentToken);
         break;
       case "gone":
         // The terminal already shows the error line; stop there, and keep
         // saying so in the header until the user attaches again.
-        halted = true;
+        halt = "gone";
+        recovery.onGone();
         stickConn("error", next.message);
         break;
     }
@@ -355,7 +384,7 @@ function scheduleReconnect(id: string, delayMs: number): void {
 }
 
 function onVisibilityChange(): void {
-  if (document.visibilityState !== "visible" || !state.selectedId || halted) return;
+  if (document.visibilityState !== "visible" || !state.selectedId || halt) return;
   if (!ws || ws.readyState > WebSocket.OPEN) {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);

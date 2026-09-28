@@ -21,6 +21,17 @@ describe("ConnStatus: what the header shows", () => {
     assert.deepEqual(s.view(), { cls: "ok", text: "connected" });
   });
 
+  test("losing the server outranks a sticky terminal state", () => {
+    // "session ended" is about one pane; "disconnected" is about everything,
+    // and hiding it behind the pane's state would claim a server we can't reach.
+    const s = new ConnStatus();
+    s.setSticky("error", "session ended");
+    s.setBase("error", "disconnected");
+    assert.deepEqual(s.view(), { cls: "error", text: "disconnected" });
+    s.setBase("ok", "connected");
+    assert.deepEqual(s.view(), { cls: "error", text: "session ended" });
+  });
+
   test("a flash wins while it lasts, then gives way to what is underneath", () => {
     const s = new ConnStatus();
     s.setBase("ok", "connected");

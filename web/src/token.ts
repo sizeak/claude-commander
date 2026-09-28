@@ -41,14 +41,17 @@ export interface HashToken {
 }
 
 /**
- * Take a `#token=…` fragment (a pairing link): store it, then strip it from
- * the address bar so it isn't left in history or a shared screenshot. Other
- * fragment params and the query string are kept. The fragment never reaches
- * the server in a request.
+ * Take a `#token=…` fragment (a pairing link) and strip it from the address
+ * bar so it isn't left in history or a shared screenshot. Other fragment params
+ * and the query string are kept. The fragment never reaches the server in a
+ * request.
  *
- * A link token always wins over a stored one: following a pairing link is the
- * user choosing that server's token (typically after it was rotated). It is not
- * silent, though: `replacedOther` tells the caller to say so on screen.
+ * A link token is tried ahead of a stored one: following a pairing link is the
+ * user choosing that server's token (typically after it was rotated). It is
+ * *not* stored here, though. The caller persists it once the server has
+ * accepted it, so a stale link cannot cost the user a saved token that still
+ * works (see `planRejection`). `replacedOther` tells the caller to say so on
+ * screen when it does replace one.
  */
 export function takeHashToken(
   loc: Pick<Location, "hash" | "pathname" | "search">,
@@ -62,6 +65,23 @@ export function takeHashToken(
   const rest = params.toString();
   hist.replaceState(null, "", loc.pathname + loc.search + (rest ? `#${rest}` : ""));
   const previous = store.get();
-  store.set(token);
   return { token, replacedOther: previous !== null && previous !== token };
+}
+
+/** What to do after the server refused a token. */
+export type RejectionPlan =
+  /** Carry on with the saved token (a stale link over a good saved one). */
+  | { kind: "fallback"; token: string }
+  /** Ask on the connect screen; forget the saved token if it was the one refused. */
+  | { kind: "connect"; clearStored: boolean };
+
+/** Decide what a refusal of `rejected` means, given the token saved in storage. */
+export function planRejection(
+  rejected: { token: string | null; source: string },
+  stored: string | null,
+): RejectionPlan {
+  if (rejected.source === "hash" && stored !== null && stored !== rejected.token) {
+    return { kind: "fallback", token: stored };
+  }
+  return { kind: "connect", clearStored: stored !== null && stored === rejected.token };
 }

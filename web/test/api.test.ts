@@ -32,7 +32,7 @@ function headersOf(call: Call | undefined): Record<string, string> {
 function apiWith(status: number, body = "", auth = new Auth()) {
   const { fetch, calls } = fakeFetch(status, body);
   const rejected: (string | undefined)[] = [];
-  const api = new Api(auth, { onUnauthorized: (m) => rejected.push(m), fetch });
+  const api = new Api(auth, { onUnauthorized: (r) => rejected.push(r.message), fetch });
   return { api, calls, rejected, auth };
 }
 
@@ -149,6 +149,55 @@ describe("Auth: what a rejection says", () => {
   });
 });
 
+describe("request timeout", () => {
+  // A fetch that never answers: a half-open TCP connection after a laptop
+  // sleeps. Without a bound, the poll awaiting it never finishes, so the
+  // poller never schedules another and the header says "connected" forever.
+  const hung = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+
+  test("a request that never answers fails after the timeout", async () => {
+    const api = new Api(new Auth(), {
+      onUnauthorized: () => assert.fail("no 401 here"),
+      fetch: hung,
+      timeoutMs: 20,
+    });
+    await assert.rejects(api.workspace(), (e) => {
+      assert.ok(e instanceof ApiError, String(e));
+      assert.equal(e.status, 0);
+      assert.match(e.message, /timed out/);
+      return true;
+    });
+  });
+
+  test("the fetch is handed an abort signal that fires at the timeout", async () => {
+    let signal: AbortSignal | null | undefined;
+    const f = ((_u: string, init: RequestInit) => {
+      signal = init.signal;
+      return new Promise<Response>(() => {});
+    }) as unknown as typeof fetch;
+    const api = new Api(new Auth(), {
+      onUnauthorized: () => assert.fail("no 401 here"),
+      fetch: f,
+      timeoutMs: 20,
+    });
+    await assert.rejects(api.workspace(), ApiError);
+    assert.equal(signal?.aborted, true, "the hung connection is torn down, not leaked");
+  });
+
+  test("a body that never finishes is bounded too", async () => {
+    const f = (async () =>
+      new Response(new ReadableStream({ start() {} }), {
+        status: 200,
+      })) as unknown as typeof fetch;
+    const api = new Api(new Auth(), {
+      onUnauthorized: () => assert.fail("no 401 here"),
+      fetch: f,
+      timeoutMs: 20,
+    });
+    await assert.rejects(api.workspace(), /timed out/);
+  });
+});
+
 describe("a 401 for a token that is no longer current", () => {
   test("is ignored: a new token set mid-request must not be forgotten", async () => {
     // A poll sent with the old token is still in flight when the user
@@ -161,7 +210,7 @@ describe("a 401 for a token that is no longer current", () => {
         answer = resolve;
       })) as unknown as typeof globalThis.fetch;
     const rejected: (string | undefined)[] = [];
-    const api = new Api(auth, { onUnauthorized: (m) => rejected.push(m), fetch });
+    const api = new Api(auth, { onUnauthorized: (r) => rejected.push(r.message), fetch });
 
     const inFlight = api.workspace();
     auth.set("new", "submitted");
@@ -178,7 +227,11 @@ describe("a 401 for a token that is no longer current", () => {
     auth.set("current", "submitted");
     assert.equal(auth.reject("stale"), null);
     assert.equal(auth.token, "current");
-    assert.deepEqual(auth.reject("current"), { message: "That token was rejected." });
+    assert.deepEqual(auth.reject("current"), {
+      message: "That token was rejected.",
+      token: "current",
+      source: "submitted",
+    });
     assert.equal(auth.token, null);
   });
 });

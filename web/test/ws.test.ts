@@ -5,8 +5,12 @@ import {
   ATTACH_STABLE_MS,
   AttachLifecycle,
   attachFrame,
+  GONE_PROBE_BASE_MS,
+  GONE_PROBE_MAX_MS,
+  GoneRecovery,
   parseControl,
   RECONNECT_MAX_MS,
+  selectAction,
   wsAttachUrl,
 } from "../src/ws.ts";
 
@@ -122,5 +126,75 @@ describe("AttachLifecycle: what a close means", () => {
     const l = new AttachLifecycle();
     l.onControl({ type: "detached", reason: "transport" });
     assert.equal(l.onClose().kind, "reconnect");
+  });
+});
+
+describe("selectAction: clicking a session row", () => {
+  test("a different session attaches", () => {
+    assert.equal(selectAction("a", "b", null), "attach");
+    assert.equal(selectAction(null, "b", null), "attach");
+  });
+
+  test("the selected session is a no-op while its attach is live", () => {
+    assert.equal(selectAction("a", "a", null), "none");
+  });
+
+  test("the selected session re-attaches once its attach ended for good", () => {
+    // e.g. the TUI restarted it, or Ctrl-b d detached the pane.
+    assert.equal(selectAction("a", "a", "gone"), "reattach");
+    // A rejected token waits on the connect screen, which resumes itself.
+    assert.equal(selectAction("a", "a", "auth"), "none");
+  });
+});
+
+describe("GoneRecovery: re-attaching after the session ended", () => {
+  test("a session seen down and then running again is re-attached at once", () => {
+    let now = 0;
+    const r = new GoneRecovery(() => now);
+    r.onGone();
+    assert.equal(r.onPoll("stopped"), false, "killed: nothing to attach to");
+    now += 100;
+    assert.equal(r.onPoll("running"), true, "restarted (another tab, the TUI)");
+  });
+
+  test("a session that never looked down is probed, backing off", () => {
+    // A restart faster than a poll, or a Ctrl-b d: the snapshot says running
+    // throughout, so only trying tells whether a pane is there.
+    let now = 0;
+    const r = new GoneRecovery(() => now);
+    r.onGone();
+    assert.equal(r.onPoll("running"), false, "not straight away");
+    now += GONE_PROBE_BASE_MS;
+    assert.equal(r.onPoll("running"), true);
+    // That probe ended "gone" again: the next waits longer.
+    r.onGone();
+    now += GONE_PROBE_BASE_MS;
+    assert.equal(r.onPoll("running"), false);
+    now += GONE_PROBE_BASE_MS;
+    assert.equal(r.onPoll("running"), true);
+  });
+
+  test("probing backs off to a cap, never stops", () => {
+    let now = 0;
+    const r = new GoneRecovery(() => now);
+    for (let i = 0; i < 20; i++) {
+      r.onGone();
+      now += GONE_PROBE_MAX_MS;
+      assert.equal(r.onPoll("running"), true, `probe ${i}`);
+    }
+  });
+
+  test("nothing happens until the attach has actually gone", () => {
+    const r = new GoneRecovery(() => 1e9);
+    assert.equal(r.onPoll("running"), false);
+    assert.equal(r.onPoll(undefined), false);
+  });
+
+  test("a session missing from the snapshot is not re-attached", () => {
+    let now = 0;
+    const r = new GoneRecovery(() => now);
+    r.onGone();
+    now += GONE_PROBE_MAX_MS;
+    assert.equal(r.onPoll(undefined), false);
   });
 });
