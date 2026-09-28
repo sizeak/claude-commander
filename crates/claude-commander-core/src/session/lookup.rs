@@ -15,6 +15,18 @@ use crate::session::WorktreeSession;
 /// hands clients the full 36-char UUID. Matching on either keeps both the
 /// CLI/TUI (which show the prefix) and API clients (which echo the full id)
 /// working through the same resolution path.
+/// A blank query (empty or whitespace-only) never identifies a session.
+///
+/// `""` is a prefix of every ID and equals an empty title, so without this
+/// guard it resolved to an arbitrary session — reachable remotely, since
+/// `/ws/attach` feeds the client's `session_id` straight into
+/// [`find_session`]. Non-blank short prefixes are deliberately still accepted:
+/// they are ordinary CLI/TUI input (the first match wins, as it always has),
+/// and destructive paths use [`find_session_exact`], which never prefix-matches.
+fn is_blank(query: &str) -> bool {
+    query.trim().is_empty()
+}
+
 fn id_matches(session: &WorktreeSession, query: &str) -> bool {
     // Full UUID is exact and unambiguous; the 8-char display is a prefix match.
     session.id.as_uuid().to_string() == query || session.id.to_string().starts_with(query)
@@ -26,8 +38,11 @@ fn id_matches(session: &WorktreeSession, query: &str) -> bool {
 /// (case-insensitive), it is returned even if another session's ID
 /// happens to start with the query string. The ID fallback accepts either the
 /// full UUID (as returned by the HTTP API) or the 8-char display prefix (as
-/// shown in the CLI/TUI).
+/// shown in the CLI/TUI). A blank query matches nothing.
 pub fn find_session<'a>(state: &'a AppState, query: &str) -> Option<&'a WorktreeSession> {
+    if is_blank(query) {
+        return None;
+    }
     let query_lower = query.to_lowercase();
 
     // Prefer exact title match (case-insensitive)
@@ -67,6 +82,9 @@ pub fn find_session_exact<'a>(
     state: &'a AppState,
     query: &str,
 ) -> SessionLookup<&'a WorktreeSession> {
+    if is_blank(query) {
+        return SessionLookup::NotFound;
+    }
     let query_lower = query.to_lowercase();
     let mut matches = state
         .sessions
@@ -219,6 +237,43 @@ mod tests {
     fn returns_none_on_empty_state() {
         let state = AppState::new();
         assert!(find_session(&state, "anything").is_none());
+    }
+
+    #[test]
+    fn empty_query_matches_nothing() {
+        // "" is a prefix of every ID. `/ws/attach` feeds a client-supplied
+        // `session_id` straight in, so `{"session_id": ""}` used to attach to
+        // an arbitrary session.
+        let state = make_state(vec![make_session("a"), make_session("b")]);
+        assert!(find_session(&state, "").is_none());
+    }
+
+    #[test]
+    fn whitespace_only_query_matches_nothing() {
+        let state = make_state(vec![make_session("a"), make_session("b")]);
+        for q in [" ", "   ", "\t", "\n"] {
+            assert!(find_session(&state, q).is_none(), "query {q:?} matched");
+        }
+    }
+
+    #[test]
+    fn empty_query_does_not_match_an_empty_title() {
+        // Title matching must not let "" resolve either.
+        let state = make_state(vec![make_session("")]);
+        assert!(find_session(&state, "").is_none());
+        assert!(matches!(
+            find_session_exact(&state, ""),
+            SessionLookup::NotFound
+        ));
+    }
+
+    #[test]
+    fn single_char_id_prefix_still_resolves() {
+        // Short prefixes are legitimate CLI/TUI input; only blank is rejected.
+        let s = make_session("my-session");
+        let id_prefix = &s.id.to_string()[..1];
+        let state = make_state(vec![s.clone()]);
+        assert_eq!(find_session(&state, id_prefix).unwrap().id, s.id);
     }
 
     // -- find_session_exact tests --

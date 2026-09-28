@@ -251,6 +251,74 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
     drop(worktrees_dir);
 }
 
+/// An empty `session_id` must be rejected with `WS_ERR_NO_SESSION`, not
+/// resolved. `""` prefixes every session ID, so before the lookup rejected
+/// blank queries this attached to an arbitrary live session.
+#[tokio::test]
+async fn ws_attach_with_empty_session_id_is_rejected() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let data_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let state = test_state(&data_dir, &worktrees_dir);
+    let service = state.service.clone();
+    let addr = spawn_server(state).await;
+
+    // A live session the empty query could otherwise have matched.
+    service.add_project(repo_path.clone(), None).await.unwrap();
+    let session_id = service
+        .create_session(claude_commander_core::api::CreateSessionOpts {
+            project_path: repo_path.clone(),
+            title: "ws-empty-id".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        })
+        .await
+        .unwrap();
+
+    let url = format!("ws://{addr}/ws/attach");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws.send(Message::Text(
+        r#"{"type":"auth","token":"unused"}"#.to_string().into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        r#"{"type":"attach","session_id":""}"#.to_string().into(),
+    ))
+    .await
+    .unwrap();
+
+    let frame = next_text_frame(&mut ws)
+        .await
+        .expect("should receive a control frame after attach");
+    let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    assert_eq!(
+        parsed["type"], "error",
+        "an empty session_id must not attach, got: {frame}"
+    );
+    assert_eq!(
+        parsed["message"],
+        claude_commander_protocol::ws::WS_ERR_NO_SESSION,
+        "an empty session_id must report no-such-session, got: {frame}"
+    );
+
+    service.kill_session(&session_id).await.unwrap();
+    drop(repo_temp_dir);
+    drop(data_dir);
+    drop(worktrees_dir);
+}
+
 /// WS agent-attach must revive a session whose tmux died server-side (parity
 /// with `LocalBackend::attach`, which routes through `ensure_attachable`). Kill
 /// the tmux session out from under the server, then WS-attach to the agent pane:
