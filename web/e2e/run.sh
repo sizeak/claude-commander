@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #
-# Browser e2e for the web UI: builds a hermetic commander world, serves the
-# page, and runs the Playwright suite (web/e2e/*.spec.ts) against it headless.
+# Browser e2e for the web UI: builds a hermetic commander world, starts the
+# server (which serves the page itself), and runs the Playwright suite
+# (web/e2e/*.spec.ts) against it headless.
 #
 # Usage: web/e2e/run.sh [--no-build] [playwright test args...]
 #   e.g. web/e2e/run.sh --grep review
 #
-#   --no-build   use the existing target/debug binaries instead of building
+#   --no-build   use the existing target/debug binary instead of building
 #
 # Exit status: Playwright's (0 all passed, 1 failures or bad Playwright args),
 # 3 missing toolchain / version mismatch, 4 fixture setup failed.
@@ -21,11 +22,15 @@
 # PLAYWRIGHT_BROWSERS_PATH, which only that shell sets). An ambient node is not
 # enough: the browsers must be nixpkgs' pinned build, since Playwright's own
 # download can't run on NixOS and would differ from what CI runs anyway.
-# CC_WEB_SHELL overrides the shell ref. Binaries are built with the ambient
+# CC_WEB_SHELL overrides the shell ref. The server is built with the ambient
 # cargo, else the default dev shell.
 #
+# The page under test is whatever crates/claude-commander-server/webui/ holds:
+# a debug build of the server reads it from disk, so rebuild it first
+# (`npm run build`) when testing a change to web/src.
+#
 # The suite itself only knows the page's origin and token (CC_WEB_BASE_URL,
-# CC_WEB_TOKEN); which binary serves the page is decided here, in serve_page.
+# CC_WEB_TOKEN); where the page comes from is decided here, in serve_page.
 set -euo pipefail
 
 WEB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,9 +50,9 @@ case "${1:-}" in
 esac
 
 if [ "$BUILD" = 1 ]; then
-  cc_info "building claude-commander-server + claude-commander-web…"
+  cc_info "building claude-commander-server…"
   cc_run_in_shell "" cargo \
-    "cd '$CC_REPO_ROOT' && cargo build -q -p claude-commander-server -p claude-commander-web"
+    "cd '$CC_REPO_ROOT' && cargo build -q -p claude-commander-server"
 fi
 
 if [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
@@ -76,11 +81,9 @@ free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",
 # fixture.sh reads CC_PORT when sourced.
 # shellcheck disable=SC2034
 CC_PORT="$(free_port)"
-WEB_PORT="$(free_port)"
 # shellcheck source=SCRIPTDIR/../../docs/tool/fixture.sh
 source "$CC_REPO_ROOT/docs/tool/fixture.sh"
 
-WEB_PID=""
 LOG_DIR="$WEB_DIR/test-results/fixture-logs"
 
 PHASE="setup"
@@ -91,10 +94,8 @@ cleanup() {
   if [ "$PHASE" = setup ] && [ "$status" -ne 0 ]; then
     cc_error "fixture setup failed (status $status)"
     [ -f "${CC_WORK:-}/server.log" ] && tail -n 40 "$CC_WORK/server.log" >&2
-    [ -f "${CC_WORK:-}/web.log" ] && tail -n 40 "$CC_WORK/web.log" >&2
     status=4
   fi
-  [ -n "$WEB_PID" ] && kill "$WEB_PID" 2>/dev/null || true
   if [ -n "${CC_WORK:-}" ]; then
     mkdir -p "$LOG_DIR"
     cp "$CC_WORK"/*.log "$LOG_DIR/" 2>/dev/null || true
@@ -128,29 +129,20 @@ seed() {
   export CC_WEB_FIXTURE_ADD_REPO CC_WEB_FIXTURE_SCAN_DIR
 }
 
-# Serve the page and export its origin. Today that is the standalone proxy in
-# pass-through mode (no --commander-token, so the browser carries the token
-# itself); once the server serves the page this becomes CC_BASE_URL.
+# Export the page's origin. claude-commander-server serves the page itself, so
+# that is the server's own URL. Probe the page rather than trusting /health:
+# a server that is up but serves no page fails setup (4), not every test.
 serve_page() {
-  "$CC_REPO_ROOT/target/debug/claude-commander-web" \
-    --bind 127.0.0.1 --port "$WEB_PORT" --commander-url "$CC_BASE_URL" \
-    >>"$CC_WORK/web.log" 2>&1 &
-  WEB_PID=$!
-  CC_WEB_BASE_URL="http://127.0.0.1:$WEB_PORT"
-  local _
-  for _ in $(seq 1 60); do
-    curl -fsS "$CC_WEB_BASE_URL/" >/dev/null 2>&1 && return 0
-    kill -0 "$WEB_PID" 2>/dev/null || break
-    sleep 0.5
-  done
-  cc_error "the page never came up at $CC_WEB_BASE_URL"
+  CC_WEB_BASE_URL="$CC_BASE_URL"
+  if curl -fsS "$CC_WEB_BASE_URL/" | grep -q "<title>Claude Commander</title>"; then
+    return 0
+  fi
+  cc_error "the page is not served at $CC_WEB_BASE_URL/"
   return 1
 }
 
-for bin in claude-commander-server claude-commander-web; do
-  [ -x "$CC_REPO_ROOT/target/debug/$bin" ] ||
-    cc_die "$CC_EXIT_TOOLCHAIN" "target/debug/$bin missing (drop --no-build)"
-done
+[ -x "$CC_REPO_ROOT/target/debug/claude-commander-server" ] ||
+  cc_die "$CC_EXIT_TOOLCHAIN" "target/debug/claude-commander-server missing (drop --no-build)"
 
 rm -rf "$LOG_DIR"
 cc_fixture_env
@@ -166,7 +158,7 @@ serve_page
 PHASE="test"
 
 export CC_WEB_BASE_URL CC_WEB_TOKEN="$CC_TOKEN"
-cc_info "page at $CC_WEB_BASE_URL (server $CC_BASE_URL)"
+cc_info "page at $CC_WEB_BASE_URL"
 
 status=0
 npx playwright test "$@" || status=$?
