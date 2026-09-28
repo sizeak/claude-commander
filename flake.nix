@@ -602,6 +602,38 @@
           ];
         };
 
+        # The web UI's JS toolchain and browser e2e (`web/`, see web/e2e/run.sh).
+        # Enter with `nix develop .#web`. Separate from the default shell so Rust
+        # contributors never pull Chromium; and `web/` is a top-level directory,
+        # so the `src` filter above prunes it whole — nothing here reaches the
+        # package build.
+        #
+        # Chromium comes from nixpkgs, not from `npx playwright install`: the
+        # downloaded browsers are dynamically linked against an FHS layout NixOS
+        # lacks. The catch is that a Playwright client only drives the browser
+        # revisions it was released with, so `@playwright/test` in
+        # web/package.json is pinned to exactly `playwright-driver.version` —
+        # a mismatch fails at launch with "Executable doesn't exist". Bump the
+        # two together (web/e2e/run.sh checks they agree before running).
+        devShells.web = pkgs.mkShell {
+          name = "claude-commander-web";
+          packages = with pkgs; [
+            nodejs
+            biome
+            # web/e2e/run.sh drives the hermetic docs/tool/fixture.sh, which
+            # needs these at runtime (server's tmux + git, health poll, seeding).
+            tmux
+            git
+            curl
+            python3
+          ];
+          PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
+          # Read by web/e2e/run.sh to verify the npm pin matches.
+          CC_PLAYWRIGHT_DRIVER_VERSION = pkgs.playwright-driver.version;
+        };
+
         # Flutter + Rust + Android NDK toolchain for the in-repo `client/` app
         # (Android-first, iOS + desktop to follow). Enter with
         # `nix develop .#client`. Separate from the default shell on purpose —

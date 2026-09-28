@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+#
+# Browser e2e for the web UI: builds a hermetic commander world, serves the
+# page, and runs the Playwright suite (web/e2e/*.spec.ts) against it headless.
+#
+# Usage: web/e2e/run.sh [--no-build] [playwright test args...]
+#   e.g. web/e2e/run.sh --grep review
+#
+#   --no-build   use the existing target/debug binaries instead of building
+#
+# Exit status: Playwright's (0 all passed, 1 failures or bad Playwright args),
+# 3 missing toolchain / version mismatch, 4 fixture setup failed.
+#
+# Hermetic by construction — it reuses docs/tool/fixture.sh, whose
+# cc_fixture_env puts config/state/worktrees under a temp tree, points
+# TMUX_TMPDIR there AND unsets $TMUX/$TMUX_PANE (without which tmux resolves the
+# developer's real server and the cleanup's kill-server would nuke it), stubs gh
+# and exports DO_NOT_TRACK=1. The trap tears the whole tree down on any exit.
+#
+# Toolchain: re-enters `nix develop .#web` unless already inside it (probed by
+# PLAYWRIGHT_BROWSERS_PATH, which only that shell sets). An ambient node is not
+# enough: the browsers must be nixpkgs' pinned build, since Playwright's own
+# download can't run on NixOS and would differ from what CI runs anyway.
+# CC_WEB_SHELL overrides the shell ref. Binaries are built with the ambient
+# cargo, else the default dev shell.
+#
+# The suite itself only knows the page's origin and token (CC_WEB_BASE_URL,
+# CC_WEB_TOKEN); which binary serves the page is decided here, in serve_page.
+set -euo pipefail
+
+WEB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/../../scripts/lib/dev-common.sh
+source "$WEB_DIR/../scripts/lib/dev-common.sh"
+
+BUILD=1
+if [ "${1:-}" = "--no-build" ]; then
+  BUILD=0
+  shift
+fi
+case "${1:-}" in
+-h | --help)
+  cc_usage_from_header "${BASH_SOURCE[0]}"
+  exit 0
+  ;;
+esac
+
+if [ "$BUILD" = 1 ]; then
+  cc_info "building claude-commander-server + claude-commander-web…"
+  cc_run_in_shell "" cargo \
+    "cd '$CC_REPO_ROOT' && cargo build -q -p claude-commander-server -p claude-commander-web"
+fi
+
+if [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+  command -v nix >/dev/null 2>&1 || cc_die "$CC_EXIT_TOOLCHAIN" \
+    "no PLAYWRIGHT_BROWSERS_PATH and no nix: enter 'nix develop .#web' first"
+  exec nix develop "${CC_WEB_SHELL:-$CC_REPO_ROOT#web}" -c "${BASH_SOURCE[0]}" --no-build "$@"
+fi
+
+cd "$WEB_DIR"
+
+# A Playwright client drives only the browser revisions it shipped with, so the
+# npm pin must equal the nixpkgs driver that built PLAYWRIGHT_BROWSERS_PATH.
+pinned="$(node -p 'require("./package.json").devDependencies["@playwright/test"]')"
+if [ -n "${CC_PLAYWRIGHT_DRIVER_VERSION:-}" ] && [ "$pinned" != "$CC_PLAYWRIGHT_DRIVER_VERSION" ]; then
+  cc_die "$CC_EXIT_TOOLCHAIN" "@playwright/test is pinned to $pinned but nixpkgs' playwright-driver is $CC_PLAYWRIGHT_DRIVER_VERSION — bump them together"
+fi
+
+if [ ! -f node_modules/.package-lock.json ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+  cc_info "npm ci…"
+  npm ci --no-audit --no-fund --loglevel=error
+fi
+
+# --- fixture -----------------------------------------------------------------
+
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
+# fixture.sh reads CC_PORT when sourced.
+# shellcheck disable=SC2034
+CC_PORT="$(free_port)"
+WEB_PORT="$(free_port)"
+# shellcheck source=SCRIPTDIR/../../docs/tool/fixture.sh
+source "$CC_REPO_ROOT/docs/tool/fixture.sh"
+
+WEB_PID=""
+LOG_DIR="$WEB_DIR/test-results/fixture-logs"
+
+PHASE="setup"
+
+# shellcheck disable=SC2329  # invoked by the EXIT trap
+cleanup() {
+  local status=$?
+  if [ "$PHASE" = setup ] && [ "$status" -ne 0 ]; then
+    cc_error "fixture setup failed (status $status)"
+    [ -f "${CC_WORK:-}/server.log" ] && tail -n 40 "$CC_WORK/server.log" >&2
+    [ -f "${CC_WORK:-}/web.log" ] && tail -n 40 "$CC_WORK/web.log" >&2
+    status=4
+  fi
+  [ -n "$WEB_PID" ] && kill "$WEB_PID" 2>/dev/null || true
+  if [ -n "${CC_WORK:-}" ]; then
+    mkdir -p "$LOG_DIR"
+    cp "$CC_WORK"/*.log "$LOG_DIR/" 2>/dev/null || true
+  fi
+  # cc_fixture_cleanup runs a bare `tmux kill-server`; refuse unless it provably
+  # targets the throwaway server.
+  if [ -z "${TMUX:-}" ] && [ -n "${CC_WORK:-}" ] && [ "${TMUX_TMPDIR:-}" = "$CC_WORK/tmux" ]; then
+    cc_fixture_cleanup
+  else
+    cc_warn "tmux isolation not provable; leaving ${CC_WORK:-?} and its tmux server alone"
+    [ -n "${CC_SERVER_PID:-}" ] && kill "$CC_SERVER_PID" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+
+# Seeded world (titles must match e2e/support.ts):
+#   project alpha: "Echo pane" (interactive stand-in), "Review me" (committed
+#   diff vs main), "Lifecycle" (for kill/restart)
+#   unregistered: repos/beta (added by path), repos/scan/{gamma,delta} (scanned)
+seed() {
+  local alpha id
+  alpha="$(cc_make_repo alpha)"
+  id="$(cc_new_session "Echo pane" "$alpha" echo "")"
+  id="$(cc_new_session "Review me" "$alpha" idle "review this")"
+  cc_dirty_worktree "$id" 3
+  cc_new_session "Lifecycle" "$alpha" idle "kill and restart me" >/dev/null
+  CC_WEB_FIXTURE_ADD_REPO="$(cc_make_repo beta)"
+  cc_make_repo scan/gamma >/dev/null
+  cc_make_repo scan/delta >/dev/null
+  CC_WEB_FIXTURE_SCAN_DIR="$CC_WORK/repos/scan"
+  export CC_WEB_FIXTURE_ADD_REPO CC_WEB_FIXTURE_SCAN_DIR
+}
+
+# Serve the page and export its origin. Today that is the standalone proxy in
+# pass-through mode (no --commander-token, so the browser carries the token
+# itself); once the server serves the page this becomes CC_BASE_URL.
+serve_page() {
+  "$CC_REPO_ROOT/target/debug/claude-commander-web" \
+    --bind 127.0.0.1 --port "$WEB_PORT" --commander-url "$CC_BASE_URL" \
+    >>"$CC_WORK/web.log" 2>&1 &
+  WEB_PID=$!
+  CC_WEB_BASE_URL="http://127.0.0.1:$WEB_PORT"
+  local _
+  for _ in $(seq 1 60); do
+    curl -fsS "$CC_WEB_BASE_URL/" >/dev/null 2>&1 && return 0
+    kill -0 "$WEB_PID" 2>/dev/null || break
+    sleep 0.5
+  done
+  cc_error "the page never came up at $CC_WEB_BASE_URL"
+  return 1
+}
+
+for bin in claude-commander-server claude-commander-web; do
+  [ -x "$CC_REPO_ROOT/target/debug/$bin" ] ||
+    cc_die "$CC_EXIT_TOOLCHAIN" "target/debug/$bin missing (drop --no-build)"
+done
+
+rm -rf "$LOG_DIR"
+cc_fixture_env
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+cc_write_config
+# Setup steps run bare (not `step || …`, which would disable errexit inside
+# them): any failure exits through the trap, which maps it to status 4.
+cc_start_server
+cc_info "seeding the fixture…"
+seed
+serve_page
+PHASE="test"
+
+export CC_WEB_BASE_URL CC_WEB_TOKEN="$CC_TOKEN"
+cc_info "page at $CC_WEB_BASE_URL (server $CC_BASE_URL)"
+
+status=0
+npx playwright test "$@" || status=$?
+exit "$status"

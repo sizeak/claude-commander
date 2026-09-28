@@ -25,6 +25,7 @@
 #   waiting  — permission prompt containing "Esc to cancel"
 #              (`claude_content_state`)
 #   idle     — ordinary transcript, no prompt markers
+#   echo     — interactive: echoes typed lines and reports resizes (web e2e only)
 #
 # Every line is kept under ~46 columns so the transcript doesn't soft-wrap in the
 # narrowest place it is shown: the client's phone-width terminal.
@@ -101,6 +102,33 @@ waiting)
   say "${y}╰────────────────────────────────────────────╯${r}"
   say "  ${d}Esc to cancel${r}"
   set_title "claude"
+  ;;
+echo)
+  # Interactive mode for the web e2e (web/e2e/), never used by the screenshots:
+  # keeps the tty's echo on and answers every line it reads with `got:<line>`,
+  # and prints `size:<rows> <cols>` whenever the PTY's size changes, so a test
+  # can observe typed input and a resize through the pane content alone.
+  #
+  # The size is polled rather than printed from a WINCH trap: bash defers a
+  # trap until a blocking `read` returns (observed with bash 5.3), so a trap
+  # would only report a resize after the next typed line. `read -t` bounds the
+  # wait; a timeout (status >128) loses nothing, since in canonical mode a
+  # partial line stays in the tty's buffer until Enter.
+  say " ${g}●${r} echo agent ready"
+  set_title "claude"
+  last_size=""
+  while :; do
+    size="$(stty size)"
+    if [ "$size" != "$last_size" ]; then
+      printf 'size:%s\n' "$size"
+      last_size="$size"
+    fi
+    if IFS= read -r -t 0.2 line; then
+      printf 'got:%s\n' "$line"
+    elif [ $? -le 128 ]; then
+      exit 0 # EOF: the pane is gone
+    fi
+  done
   ;;
 *)
   say " ${g}●${r} Done — ${d}3 files changed, tests pass.${r}"

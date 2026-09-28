@@ -1,0 +1,17 @@
+{
+  "name": "claude-commander-web-ui",
+  "private": true,
+  "description": "Claude Commander's browser UI and its Playwright e2e suite.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "e2e": "./e2e/run.sh",
+    "typecheck": "tsc -p e2e --noEmit",
+    "lint": "biome check ."
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
