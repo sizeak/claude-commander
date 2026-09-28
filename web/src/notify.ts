@@ -2,12 +2,14 @@
 // tab). `NotifyTracker` decides *what* changed between two polls — pure, so
 // `node --test` covers it; `showNotifications` is the browser side.
 
+import { COMMANDER_SENTINEL_ID } from "./generated/constants.ts";
 import type { AgentState, SessionId, SessionInfo } from "./generated/index.ts";
+import { agentStateFor } from "./state.ts";
 
 export type NotifyKind = "needs_input" | "finished";
 
 export interface NotifyEvent {
-  /** The key the transition was observed under (a session id). */
+  /** The session's id. */
   key: string;
   kind: NotifyKind;
 }
@@ -17,24 +19,48 @@ export interface Poll {
   agentStates: Partial<Record<SessionId, AgentState>>;
 }
 
+interface Seen {
+  unread: boolean;
+  agent: AgentState;
+}
+
 /**
  * Edge-triggered: each transition is reported once, on the poll that first
  * shows it. The first poll only records a baseline, so loading the page never
- * notifies for states that already held.
+ * notifies for states that already held — and likewise a session's first
+ * appearance only baselines it.
+ *
+ * - **finished** is `SessionInfo.unread` going false → true: the server's own
+ *   record that the agent finished and nobody has looked since. A polled
+ *   `working → idle` is not used — a 1.5 s sample of the pane detector can
+ *   both miss that edge and invent one from a flap.
+ * - **needs input** is the agent state entering `waiting_for_input`.
+ *
+ * Only real sessions are tracked: the commander's sentinel entry in
+ * `AgentStatesSnapshot.states` has no session and never notifies.
  */
 export class NotifyTracker {
-  private prev: Poll | null = null;
+  private prev: Map<string, Seen> | null = null;
 
   observe(poll: Poll): NotifyEvent[] {
+    const next = new Map<string, Seen>();
+    for (const s of poll.sessions) {
+      if (s.id === COMMANDER_SENTINEL_ID || s.session_id === COMMANDER_SENTINEL_ID) continue;
+      next.set(s.id, { unread: s.unread, agent: agentStateFor(poll.agentStates, s) });
+    }
     const prev = this.prev;
-    this.prev = { sessions: poll.sessions, agentStates: { ...poll.agentStates } };
+    this.prev = next;
     if (!prev) return [];
+
     const events: NotifyEvent[] = [];
-    for (const [key, st] of Object.entries(poll.agentStates)) {
-      const before = prev.agentStates[key];
-      if (st === before) continue;
-      if (st === "waiting_for_input") events.push({ key, kind: "needs_input" });
-      else if (st === "idle" && before === "working") events.push({ key, kind: "finished" });
+    for (const [key, now] of next) {
+      const before = prev.get(key);
+      if (!before) continue;
+      if (now.agent === "waiting_for_input" && before.agent !== "waiting_for_input") {
+        events.push({ key, kind: "needs_input" });
+      } else if (now.unread && !before.unread) {
+        events.push({ key, kind: "finished" });
+      }
     }
     return events;
   }
@@ -70,9 +96,8 @@ export function showNotifications(
   if (events.length === 0) return;
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   if (document.visibilityState !== "hidden") return;
-  for (const { key, kind } of events) {
-    const s = sessions.find((x) => x.id === key || x.session_id === key);
-    const id = s ? s.id : key;
+  for (const { key: id, kind } of events) {
+    const s = sessions.find((x) => x.id === id);
     const n = new Notification(`${s ? s.title : "Session"} — ${MESSAGES[kind]}`, {
       body: s ? `${s.project_name} · ${s.branch}` : "",
       tag: id, // replaces an earlier notification for the same session
