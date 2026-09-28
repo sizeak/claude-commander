@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Claude Commander">
+  <rect width="64" height="64" rx="14" fill="#0d1117"/>
+  <!-- Stylised Claude "sunburst": rays radiating from the centre. -->
+  <g transform="translate(32 32)" stroke="#d97757" stroke-width="4.2" stroke-linecap="round">
+    <line y1="-7" y2="-23" transform="rotate(0)"/>
+    <line y1="-7" y2="-20" transform="rotate(30)"/>
+    <line y1="-7" y2="-23" transform="rotate(60)"/>
+    <line y1="-7" y2="-20" transform="rotate(90)"/>
+    <line y1="-7" y2="-23" transform="rotate(120)"/>
+    <line y1="-7" y2="-20" transform="rotate(150)"/>
+    <line y1="-7" y2="-23" transform="rotate(180)"/>
+    <line y1="-7" y2="-20" transform="rotate(210)"/>
+    <line y1="-7" y2="-23" transform="rotate(240)"/>
+    <line y1="-7" y2="-20" transform="rotate(270)"/>
+    <line y1="-7" y2="-23" transform="rotate(300)"/>
+    <line y1="-7" y2="-20" transform="rotate(330)"/>
+  </g>
+  <circle cx="32" cy="32" r="4.5" fill="#d97757"/>
+</svg>

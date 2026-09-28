@@ -57,8 +57,15 @@
               # crates/, or README/docs/CLAUDE.md invalidate the build too.
               isCrateMarkdown =
                 pkgs.lib.hasPrefix "crates/" rel && pkgs.lib.hasSuffix ".md" rel;
+              # The server's web UI is rust-embed'ed into the binary from this
+              # directory, so its .html/.js/.css/.svg must survive — scoped to
+              # exactly this tree (the directory itself, then everything in it).
+              isServerWebui =
+                rel == "crates/claude-commander-server/webui"
+                || pkgs.lib.hasPrefix "crates/claude-commander-server/webui/" rel;
             in
-            !prunedTopDir && (isCrateMarkdown || craneLib.filterCargoSources path type);
+            !prunedTopDir
+            && (isCrateMarkdown || isServerWebui || craneLib.filterCargoSources path type);
           name = "source";
         };
 
