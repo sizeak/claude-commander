@@ -15,6 +15,7 @@ import {
   type Locator,
   type Page,
 } from "@playwright/test";
+import type { ProjectInfo, SessionInfo, Snapshot } from "../src/generated/index.ts";
 
 function required(name: string): string {
   const v = process.env[name];
@@ -44,18 +45,9 @@ export const fixture = {
 
 // ---- the commander API, through the page's own origin ----------------------
 
-export interface SessionInfo {
-  id: string;
-  title: string;
-  status: string;
-  project_id: string;
-}
-
-export interface ProjectInfo {
-  id: string;
-  name: string;
-  repo_path: string;
-}
+// The wire shapes are protocol's generated types, as in the page: a
+// hand-written copy here would keep passing after a rename it should catch.
+export type { ProjectInfo, SessionInfo };
 
 export async function api<T = unknown>(
   request: APIRequestContext,
@@ -74,7 +66,7 @@ export async function api<T = unknown>(
 }
 
 export async function workspace(request: APIRequestContext) {
-  return api<{ sessions: SessionInfo[]; projects: ProjectInfo[] }>(request, "GET", "/workspace");
+  return api<Snapshot>(request, "GET", "/workspace");
 }
 
 export async function sessionByTitle(request: APIRequestContext, title: string) {

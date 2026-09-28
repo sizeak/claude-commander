@@ -19,7 +19,9 @@ export default defineConfig({
   retries: 0,
   timeout: 60_000,
   expect: { timeout: 15_000 },
-  reporter: [["list"]],
+  // On CI, also an HTML report (web/playwright-report/), which the Web job
+  // uploads on failure alongside test-results/.
+  reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : [["list"]],
   use: {
     ...devices["Desktop Chrome"],
     baseURL,

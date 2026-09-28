@@ -107,6 +107,10 @@ cleanup() {
   # targets the throwaway server.
   if [ -z "${TMUX:-}" ] && [ -n "${CC_WORK:-}" ] && [ "${TMUX_TMPDIR:-}" = "$CC_WORK/tmux" ]; then
     cc_fixture_cleanup
+  elif [ -z "${CC_SERVER_PID:-}" ] && [ -n "${CC_WORK:-}" ]; then
+    # cc_fixture_env failed before isolating tmux, so no server was started and
+    # nothing can be using the tree: remove it without touching tmux at all.
+    rm -rf "$CC_WORK"
   else
     cc_warn "tmux isolation not provable; leaving ${CC_WORK:-?} and its tmux server alone"
     [ -n "${CC_SERVER_PID:-}" ] && kill "$CC_SERVER_PID" 2>/dev/null || true
@@ -137,7 +141,10 @@ seed() {
 # a server that is up but serves no page fails setup (4), not every test.
 serve_page() {
   CC_WEB_BASE_URL="$CC_BASE_URL"
-  if curl -fsS "$CC_WEB_BASE_URL/" | grep -q "<title>Claude Commander</title>"; then
+  # Captured first, not piped: `grep -q` exits at the match, and under
+  # pipefail a curl still writing the rest of the page then fails on SIGPIPE.
+  local page
+  if page="$(curl -fsS "$CC_WEB_BASE_URL/")" && grep -q "<title>Claude Commander</title>" <<<"$page"; then
     return 0
   fi
   cc_error "the page is not served at $CC_WEB_BASE_URL/"
@@ -148,9 +155,11 @@ serve_page() {
   cc_die "$CC_EXIT_TOOLCHAIN" "target/debug/claude-commander-server missing (drop --no-build)"
 
 rm -rf "$LOG_DIR"
-cc_fixture_env
+# The trap goes in before cc_fixture_env, which mktemps the tree first: a
+# failure anywhere after that must still reach cleanup, or the tree leaks.
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+cc_fixture_env
 cc_write_config
 # Setup steps run bare (not `step || …`, which would disable errexit inside
 # them): any failure exits through the trap, which maps it to status 4.

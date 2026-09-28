@@ -277,6 +277,9 @@ jobs:
   web:
     name: Web
     runs-on: ubuntu-latest
+    # The e2e lane bounds itself (CC_WEB_E2E_TIMEOUT), but a cold Nix store or
+    # cargo cache can hang elsewhere; don't hold a runner for GitHub's 6h default.
+    timeout-minutes: 45
     permissions:
       # cache purging
       actions: write
@@ -341,8 +344,9 @@ jobs:
 
       # Playwright keeps a trace per failed test (`trace: "retain-on-failure"`)
       # under web/test-results, beside the fixture's server and tmux logs that
-      # web/e2e/run.sh copies into test-results/fixture-logs; the whole lane
-      # logs are in target/verify-logs. All three die with the runner otherwise.
+      # web/e2e/run.sh copies into test-results/fixture-logs; under CI the
+      # config adds an HTML report in web/playwright-report; the whole lane
+      # logs are in target/verify-logs. All die with the runner otherwise.
       # Open a trace with `npx playwright show-trace <zip>`.
       - name: Upload Web Failure Artifacts
         if: failure()
