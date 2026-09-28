@@ -19,18 +19,28 @@ import {
   wsAttachUrl,
 } from "./ws.ts";
 
+export interface TerminalHooks {
+  /** The attach was refused for the token: take the user to the connect screen. */
+  onAuthRejected(): void;
+}
+
 let auth: Auth;
+let hooks: TerminalHooks;
 let term: Terminal | null = null;
 let fit: FitAddon | null = null;
 let ws: WebSocket | null = null;
+let lifecycle = new AttachLifecycle();
+/** The current attach ended for good (auth / no such session): don't reopen it. */
+let halted = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 let attachKind: AttachKind = "agent";
 let ctrlPending = false;
 let pendingCopy = false;
 
-export function initTerminal(a: Auth): void {
+export function initTerminal(a: Auth, h: TerminalHooks): void {
   auth = a;
+  hooks = h;
   els.shellBtn.addEventListener("click", toggleShell);
   els.kbdBtn.addEventListener("click", () => term?.focus());
   wireKeyBar();
@@ -202,12 +212,31 @@ export function attach(id: string): void {
   const t = ensureTerm();
   closeSocket();
   t.reset();
-  openSocket(id);
+  startAttach(id);
 }
 
 /** Drop the attach entirely (the session is gone or deselected). */
 export function detach(): void {
   closeSocket();
+  halted = false;
+}
+
+/**
+ * Re-attach after an attach that ended for good (e.g. the token was rejected
+ * and the user has since reconnected). A no-op while an attach is live.
+ */
+export function resume(): void {
+  if (halted && state.selectedId) {
+    term?.reset();
+    startAttach(state.selectedId);
+  }
+}
+
+/** A fresh attach: new lifecycle (backoff, final errors), then its first socket. */
+function startAttach(id: string): void {
+  lifecycle = new AttachLifecycle();
+  halted = false;
+  openSocket(id);
 }
 
 function closeSocket(): void {
@@ -230,13 +259,14 @@ function closeSocket(): void {
 
 // Open (or reopen) the attach socket for `id`. Reconnects on an unexpected drop
 // (backgrounded mobile tab, network blip, server restart) while it stays
-// selected; tmux replays the pane on re-attach, so it's seamless.
+// selected; tmux replays the pane on re-attach, so it's seamless. A rejected
+// token or a missing session ends the attach instead (see AttachLifecycle).
 function openSocket(id: string): void {
   closeSocket();
   const sock = new WebSocket(wsAttachUrl(location));
   sock.binaryType = "arraybuffer";
   ws = sock;
-  const lifecycle = new AttachLifecycle();
+  const life = lifecycle;
 
   sock.onopen = () => {
     setConn("ok", "connected");
@@ -253,7 +283,7 @@ function openSocket(id: string): void {
   sock.onmessage = (ev: MessageEvent<string | ArrayBuffer>) => {
     if (typeof ev.data === "string") {
       const msg = parseControl(ev.data);
-      const note = msg && lifecycle.onControl(msg);
+      const note = msg && life.onControl(msg);
       if (note) term?.write(note);
     } else {
       term?.write(new Uint8Array(ev.data));
@@ -263,9 +293,23 @@ function openSocket(id: string): void {
   sock.onclose = () => {
     if (state.selectedId !== id || ws !== sock) return;
     ws = null;
-    const next = lifecycle.onClose();
-    setConn("error", "reconnecting…");
-    scheduleReconnect(id, next.delayMs);
+    const next = life.onClose();
+    switch (next.kind) {
+      case "reconnect":
+        setConn("error", "reconnecting…");
+        scheduleReconnect(id, next.delayMs);
+        break;
+      case "auth":
+        halted = true;
+        setConn("error", "disconnected");
+        hooks.onAuthRejected();
+        break;
+      case "gone":
+        // The terminal already shows the error line; stop there.
+        halted = true;
+        setConn("error", next.message);
+        break;
+    }
   };
 
   sock.onerror = () => setConn("error", "stream error");
@@ -280,7 +324,7 @@ function scheduleReconnect(id: string, delayMs: number): void {
 }
 
 function onVisibilityChange(): void {
-  if (document.visibilityState !== "visible" || !state.selectedId) return;
+  if (document.visibilityState !== "visible" || !state.selectedId || halted) return;
   if (!ws || ws.readyState > WebSocket.OPEN) {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
@@ -304,7 +348,7 @@ export function toggleShell(): void {
   updateShellButton();
   term?.reset();
   closeSocket();
-  openSocket(state.selectedId);
+  startAttach(state.selectedId);
 }
 
 function updateShellButton(): void {

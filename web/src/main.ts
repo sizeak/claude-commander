@@ -28,7 +28,7 @@ import { NotifyTracker, requestPermissionOnFirstClick, showNotifications } from 
 import { initReview, openReview } from "./review.ts";
 import { initSettings } from "./settings.ts";
 import { agentStateFor, currentSession, humanize, state } from "./state.ts";
-import { attach, detach, fitNow, initTerminal, sendResize } from "./terminal.ts";
+import { attach, detach, fitNow, initTerminal, resume, sendResize } from "./terminal.ts";
 import { renderTree, type TreeHandlers, TreeView } from "./tree.ts";
 
 const POLL_MS = 1500;
@@ -89,6 +89,8 @@ els.connectForm.addEventListener("submit", async (e) => {
   closeModal(els.connectModal);
   els.connectToken.value = "";
   refreshAll();
+  // An attach the old token lost (WS_ERR_AUTH) picks up where it stopped.
+  resume();
 });
 
 // ---- polling -----------------------------------------------------------------
@@ -259,7 +261,7 @@ function wire(): void {
   wireModals();
   wireContextMenu();
   requestPermissionOnFirstClick();
-  initTerminal(auth);
+  initTerminal(auth, { onAuthRejected: () => api.unauthorized() });
   initReview(api);
   initSettings(api);
   initForms(api, { refresh: refreshAll, select: selectSession });

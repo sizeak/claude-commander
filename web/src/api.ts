@@ -94,6 +94,14 @@ export class Api {
   }
 
   /**
+   * The server refused the token — over HTTP (a 401) or on the attach socket
+   * (`WS_ERR_AUTH`): forget it and hand over to the connect screen.
+   */
+  unauthorized(): void {
+    this.onUnauthorized(this.auth.reject());
+  }
+
+  /**
    * One request. Resolves to the parsed JSON body (`undefined` for an empty
    * one, e.g. a 204); rejects with `Unauthorized` or `ApiError`.
    */
@@ -106,7 +114,7 @@ export class Api {
     }
     const res = await this.fetchImpl(`/api${path}`, init);
     if (res.status === 401) {
-      this.onUnauthorized(this.auth.reject());
+      this.unauthorized();
       throw new Unauthorized();
     }
     const text = await res.text();
