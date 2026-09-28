@@ -42,9 +42,30 @@ export function groupByProject(sessions: readonly SessionInfo[]): Map<string, Se
   return by;
 }
 
-/** Renders the tree when its model changes. */
+/**
+ * A cheap fingerprint of a model: equal data gives an equal key even though
+ * every poll parses fresh objects. The whole model is serialised (not a
+ * hand-picked subset of fields), so a field the tree starts rendering later
+ * can't be forgotten here.
+ */
+export function treeKey(model: TreeModel): string {
+  return JSON.stringify([
+    model.projects,
+    model.sessions,
+    model.agentStates,
+    model.selectedId,
+    [...model.collapsed].sort(),
+  ]);
+}
+
+/**
+ * Renders the tree only when its model changes. The page polls every 1.5 s,
+ * and rebuilding the tree each time would reset hover state, restart CSS
+ * transitions and churn the DOM for nothing.
+ */
 export class TreeView {
   private readonly render: (model: TreeModel) => void;
+  private lastKey: string | null = null;
 
   constructor(render: (model: TreeModel) => void) {
     this.render = render;
@@ -52,6 +73,9 @@ export class TreeView {
 
   /** Returns whether it re-rendered. */
   update(model: TreeModel): boolean {
+    const key = treeKey(model);
+    if (key === this.lastKey) return false;
+    this.lastKey = key;
     this.render(model);
     return true;
   }
