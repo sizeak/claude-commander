@@ -35,6 +35,11 @@ EXCLUDED_PROBES=(
     # the directory but dropping its files still changes the hash, because an
     # empty directory is part of the tree.
     "_filter_probe_dir/probe.rs"
+    # The web UI's *source*: only its committed build output (webui/, below) is
+    # a build input. Named explicitly rather than left to the new-directory probe
+    # above, because web/ is the one top-level directory that does feed the
+    # binary, which makes it the likeliest to be admitted by a widened filter.
+    "web/src/_filter_probe.ts"
     # A non-Rust asset *beside* the server's webui/: proves that admission is
     # scoped to webui/ itself rather than to the whole server crate.
     "crates/claude-commander-server/_filter_probe.svg"

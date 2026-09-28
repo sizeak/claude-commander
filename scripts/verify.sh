@@ -12,6 +12,7 @@
 #   verify.sh --e2e               rust lanes + the Flutter e2e (forced)
 #   verify.sh --goldens           just the client's golden images
 #   verify.sh --goldens --update  regenerate them, then read the image diff
+#   verify.sh --web               the browser UI: web/ checks + Playwright e2e
 #   verify.sh -p core <filter>    single crate: cargo test -p <crate> <filter>
 #   verify.sh --list              print the lane / exit-code table
 #
@@ -22,7 +23,8 @@
 #
 # Toolchains resolve themselves: a lane uses the tool already on PATH, else it
 # re-enters the nix dev shell that provides it (same rule as
-# client/tool/dart-format.sh). Override the client shell with CC_CLIENT_SHELL.
+# client/tool/dart-format.sh). Override the client shell with CC_CLIENT_SHELL,
+# the web one (node + nixpkgs' Playwright browsers) with CC_WEB_SHELL.
 set -euo pipefail
 
 # SCRIPTDIR, not the invocation dir: verify.sh is run from anywhere.
@@ -103,6 +105,7 @@ Tiers:
   --fast        $(cc_lanes_for_tier fast)
   --client      $(cc_lanes_for_tier rust) + $(cc_lanes_for_tier client)
   --goldens     $(cc_lanes_for_tier goldens)
+  --web         $(cc_lanes_for_tier web)
   --all         every lane above
 EOF
 }
@@ -211,6 +214,82 @@ lane_e2e() {
   return "$status"
 }
 
+# The PATH probe for the web lane is biome, not node: an ambient node (nvm and
+# the like) is common, and taking the shortcut on it alone would run
+# `npm run check` without the biome that `.#web` supplies. Anything with biome on
+# PATH is either inside that shell or has deliberately assembled the same kit.
+readonly WEB_PROBE=biome
+
+lane_web() {
+  # The npm scripts are web/package.json's contract with this lane. A missing
+  # one fails the lane rather than passing it: `npm run --if-present` would turn
+  # "the contract broke" into a silent green.
+  local present missing
+  present="$(cc_capture_in_shell "$CC_WEB_SHELL" "$WEB_PROBE" \
+    "node -p 'Object.keys(require(\"./web/package.json\").scripts ?? {}).join(\" \")'")" || return $?
+  # shellcheck disable=SC2086  # split on purpose: one word per script
+  missing="$(cc_missing_words "$present" $CC_WEB_NPM_SCRIPTS)"
+  if [ -n "$missing" ]; then
+    cc_error "web/package.json has no npm script(s): $missing"
+    return 1
+  fi
+
+  # Freshness. The built page is committed -- the nix package build has no
+  # node, so rust-embed bakes in whatever is checked in -- so it must equal what
+  # the source builds to. Compared against a snapshot of the tree as it stood
+  # before the build rather than against HEAD, so a local run with source edits
+  # and a matching rebuild, both still uncommitted, passes; on CI's clean
+  # checkout that is the same comparison as `git diff --exit-code`. `diff -r`
+  # also sees files the build adds or stops producing, which a tracked-file
+  # diff would not.
+  local snapshot
+  snapshot="$(mktemp -d)"
+  # shellcheck disable=SC2064  # expand now, while $snapshot is still in scope
+  trap "rm -rf '$snapshot'" RETURN
+  cp -a "$CC_WEBUI_DIR" "$snapshot/webui" || return $?
+
+  cc_run_in_shell "$CC_WEB_SHELL" "$WEB_PROBE" "
+    set -e
+    cd web
+    npm ci --no-audit --no-fund --loglevel=error
+    npm run check
+    npm run typecheck
+    npm test
+    npm run build
+  " || return $?
+
+  if ! diff -r "$snapshot/webui" "$CC_WEBUI_DIR"; then
+    cc_error "$CC_WEBUI_DIR is stale: run 'cd web && npm run build' and commit the result"
+    return 1
+  fi
+
+  # web/src/generated/ is exported from protocol's types by ts-rs; this fails
+  # when the committed bindings drift from the Rust (regenerate with
+  # CC_TS_REGENERATE=1 -- see crates/claude-commander-protocol/src/ts_export.rs).
+  cc_run_in_shell "" cargo "cargo test -p claude-commander-protocol --features ts ts_export"
+}
+
+lane_web_e2e() {
+  # run.sh re-enters CC_WEB_SHELL itself unless PLAYWRIGHT_BROWSERS_PATH says it
+  # is already inside it: nixpkgs' pinned Chromium is the only browser it will
+  # drive, since Playwright's own download cannot run on NixOS. Headless, so --
+  # unlike the Flutter e2e -- it needs no display, and CI runs it too.
+  if [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ] && ! command -v nix >/dev/null 2>&1; then
+    CC_SKIP_REASON="no PLAYWRIGHT_BROWSERS_PATH and no nix to enter $CC_WEB_SHELL"
+    return "$CC_LANE_SKIPPED"
+  fi
+  # Bounded for the e2e lane's reason: a hung browser or fixture server would
+  # otherwise wedge the sweep. TERM reaches run.sh's EXIT trap, which tears down
+  # the fixture's server, its tmux server and the temp tree.
+  local timeout_secs="${CC_WEB_E2E_TIMEOUT:-1200}"
+  local status=0
+  CC_WEB_SHELL="$CC_WEB_SHELL" timeout -k 30 "$timeout_secs" web/e2e/run.sh || status=$?
+  if [ "$status" -eq 124 ]; then
+    echo "web-e2e: TIMED OUT after ${timeout_secs}s (raise CC_WEB_E2E_TIMEOUT to allow longer)"
+  fi
+  return "$status"
+}
+
 lane_nix_build() {
   if ! command -v nix >/dev/null 2>&1; then
     CC_SKIP_REASON="nix is not installed"
@@ -269,7 +348,7 @@ lane_shellcheck() {
   # constant its callers use looks unused (SC2034).
   local -a targets=()
   local f
-  for f in scripts/*.sh scripts/tests/*.sh client/tool/*.sh docs/tool/*.sh; do
+  for f in scripts/*.sh scripts/tests/*.sh client/tool/*.sh docs/tool/*.sh web/e2e/*.sh; do
     [ -f "$f" ] && targets+=("$f")
   done
   if [ "${#targets[@]}" -eq 0 ]; then
@@ -307,6 +386,8 @@ run_lane() {
     cdylib) cc_lane cdylib lane_cdylib ;;
     goldens) cc_lane goldens lane_goldens ;;
     e2e) cc_lane e2e lane_e2e ;;
+    web) cc_lane web lane_web ;;
+    web-e2e) cc_lane web-e2e lane_web_e2e ;;
     nix-src-filter) cc_lane nix-src-filter lane_nix_src_filter ;;
     nix-build) cc_lane nix-build lane_nix_build ;;
     packaging) cc_lane packaging lane_packaging ;;
@@ -387,6 +468,13 @@ while [ "$#" -gt 0 ]; do
       # Not joined to the rust lanes: this is the focused image loop, and making
       # it wait on a full cargo build would defeat that.
       select_tier goldens
+      TIER_SET=1
+      shift
+      ;;
+    --web)
+      # Standalone like --goldens: the page's edit loop should not wait on a
+      # full workspace cargo test. web-e2e builds the one binary it serves from.
+      select_tier web
       TIER_SET=1
       shift
       ;;
