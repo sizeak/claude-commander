@@ -271,18 +271,26 @@ impl AgentKind {
     /// than treating it as a submit keystroke, so a back-to-back text+Enter
     /// leaves the prompt sitting unsent in the composer until a *separate* Enter
     /// arrives. Spacing the Enter out lets Codex drain the text first, so the
-    /// Enter lands as its own read and submits. Claude Code submits on the
-    /// carriage-return regardless of timing, so it needs no delay. (Verified
-    /// against codex-cli 0.144.3: a coalesced text+Enter write never submitted
-    /// across 5/5 trials; a ~200ms gap submitted 15/15.)
+    /// Enter lands as its own read and submits. (Verified against codex-cli
+    /// 0.144.3: a coalesced text+Enter write never submitted across 5/5 trials;
+    /// a ~200ms gap submitted 15/15.)
     ///
-    /// Oh My Pi needs no delay either, verified rather than assumed: a single
+    /// Claude Code does the same once the burst is long enough to look like a
+    /// paste: the Enter becomes a newline in the composer. Short text hides it,
+    /// which is why dictation auto-submit only *sometimes* failed. Verified
+    /// against Claude Code 2.1.284 by writing text+`\r` as one `write` to an
+    /// attached tmux client's PTY — the path the attach pump takes: 40 chars
+    /// submitted 3/3; 70, 300 and 1200 chars submitted 0/3 each; with a 100ms
+    /// or 250ms gap before the `\r`, 300 and 1200 chars submitted 3/3 each.
+    ///
+    /// Oh My Pi needs no delay, verified rather than assumed: a single
     /// `send-keys '<text>' Enter` — one write carrying both — submitted 3/3
     /// against omp 17.2.15, each time leaving an empty composer and dispatching
-    /// the turn.
+    /// the turn; and a 300-char text+`\r` single PTY write submitted against
+    /// omp 18.1.17.
     pub fn submit_key_delay(self) -> Option<Duration> {
         match self {
-            Self::Codex => Some(Duration::from_millis(250)),
+            Self::Codex | Self::Claude => Some(Duration::from_millis(250)),
             _ => None,
         }
     }
@@ -673,16 +681,21 @@ mod tests {
     }
 
     #[test]
-    fn submit_key_delay_only_for_codex() {
-        // Codex needs the submit Enter spaced out from the injected prompt text
-        // or it folds the newline into the paste and never submits; the other
-        // harnesses submit on the carriage-return regardless. Removing the delay
-        // reintroduces the "comments sit unsent in the composer" bug.
-        assert_eq!(
-            AgentKind::Codex.submit_key_delay(),
-            Some(Duration::from_millis(250))
-        );
-        assert_eq!(AgentKind::Claude.submit_key_delay(), None);
+    fn submit_key_delay_for_codex_and_claude() {
+        // Codex and Claude Code both need the submit Enter spaced out from the
+        // injected prompt text, or they read the whole burst as a paste and the
+        // Enter lands as a newline in the composer instead of a submit (Claude
+        // only once the text is past ~60 chars, which is why short prompts hid
+        // it). OpenCode and omp submit on the carriage-return regardless.
+        // Removing either delay reintroduces "the prompt sits unsent in the
+        // composer" — for dictation auto-submit and comment apply alike.
+        for kind in [AgentKind::Codex, AgentKind::Claude] {
+            assert_eq!(
+                kind.submit_key_delay(),
+                Some(Duration::from_millis(250)),
+                "{kind:?}"
+            );
+        }
         assert_eq!(AgentKind::OpenCode.submit_key_delay(), None);
         assert_eq!(AgentKind::Omp.submit_key_delay(), None);
         assert_eq!(AgentKind::Unknown.submit_key_delay(), None);
