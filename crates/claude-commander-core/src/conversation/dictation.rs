@@ -205,14 +205,22 @@ mod tests {
     }
 
     #[test]
-    fn plan_agent_no_delay_for_claude() {
+    fn plan_agent_delays_submit_for_claude() {
+        // Claude Code reads a long text+Enter burst as a paste and types the
+        // Enter as a newline, so a dictated sentence of any length must have its
+        // Enter spaced out to submit.
         let plan = plan_dictation(
-            "run the tests",
+            "please refactor the session manager so that the worktree cleanup runs after the tmux session is gone",
             DictationSubmit::Agent,
             pane(AttachKind::Agent, AgentKind::Claude),
         )
         .expect("non-empty text plans");
-        assert_eq!(plan.submit, SubmitPlan::Submit { delay: None });
+        assert_eq!(
+            plan.submit,
+            SubmitPlan::Submit {
+                delay: Some(Duration::from_millis(250))
+            }
+        );
     }
 
     #[test]
