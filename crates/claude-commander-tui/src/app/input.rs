@@ -156,11 +156,11 @@ fn list_row_at(
     (idx < item_count).then_some(idx)
 }
 
-/// Which filterable modal needs its filter recomputed after a paste.
+/// Which filterable modal needs its filter recomputed after text lands in it (a paste or a dictation).
 /// Used to defer the `&mut self` refilter call until after the
 /// `&mut self.ui_state.modal` borrow has been released.
 #[derive(Debug, PartialEq, Eq)]
-enum PasteRefilter {
+enum Refilter {
     CheckoutBranch,
     QuickSwitch,
 }
@@ -172,7 +172,7 @@ enum TextField<'a> {
     /// A single-line field with nothing to recompute afterwards.
     Line(&'a mut Input),
     /// A single-line query whose filtered list the caller recomputes.
-    Query(&'a mut Input, PasteRefilter),
+    Query(&'a mut Input, Refilter),
     /// The path field, which owns its completer and refilters inline.
     Path {
         value: &'a mut Input,
@@ -201,10 +201,8 @@ fn text_field(modal: &mut Modal) -> Option<TextField<'_>> {
             completer,
             scroll,
         },
-        Modal::CheckoutBranch { query, .. } => {
-            TextField::Query(query, PasteRefilter::CheckoutBranch)
-        }
-        Modal::QuickSwitch { query, .. } => TextField::Query(query, PasteRefilter::QuickSwitch),
+        Modal::CheckoutBranch { query, .. } => TextField::Query(query, Refilter::CheckoutBranch),
+        Modal::QuickSwitch { query, .. } => TextField::Query(query, Refilter::QuickSwitch),
         Modal::ReviewDiff(state) if state.comment.is_some() => TextField::Draft(state),
         // A paste over a colour picker is a hex colour, wherever the picker's
         // focus is.
@@ -233,7 +231,7 @@ impl TextField<'_> {
     /// the comment draft is multi-line capable and gets the raw text (newline
     /// handling lives in `paste_into_draft`). Returns the refilter the caller
     /// still owes, if any.
-    fn insert(self, text: &str) -> Option<PasteRefilter> {
+    fn insert(self, text: &str) -> Option<Refilter> {
         let clean = || text.replace(['\n', '\r'], "");
         match self {
             TextField::Line(value) => super::insert_into_input(value, &clean()),
@@ -260,10 +258,10 @@ impl TextField<'_> {
 }
 
 /// Append clipboard text to the open modal's text field (see [`TextField`]).
-/// Returns `Some(PasteRefilter::…)` when the caller still needs to recompute a
+/// Returns `Some(Refilter::…)` when the caller still needs to recompute a
 /// filtered list via an `&mut self` helper; `None` when handling is complete
 /// (or the modal has no text field).
-fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> {
+fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<Refilter> {
     text_field(modal)?.insert(text)
 }
 
@@ -811,10 +809,10 @@ impl App {
     }
 
     /// Run the refilter a [`TextField::insert`] left to the caller.
-    fn finish_text_insert(&mut self, refilter: Option<PasteRefilter>) {
+    fn finish_text_insert(&mut self, refilter: Option<Refilter>) {
         match refilter {
-            Some(PasteRefilter::CheckoutBranch) => self.refilter_checkout_branches(),
-            Some(PasteRefilter::QuickSwitch) => self.refilter_quick_switch(),
+            Some(Refilter::CheckoutBranch) => self.refilter_checkout_branches(),
+            Some(Refilter::QuickSwitch) => self.refilter_quick_switch(),
             None => {}
         }
     }
@@ -2374,7 +2372,7 @@ mod tests {
         // arm was missing from the InputEvent::Paste match.
         let mut modal = checkout_modal("");
         let refilter = apply_paste_to_modal(&mut modal, "feature-foo");
-        assert_eq!(refilter, Some(PasteRefilter::CheckoutBranch));
+        assert_eq!(refilter, Some(Refilter::CheckoutBranch));
         match modal {
             Modal::CheckoutBranch { query, .. } => assert_eq!(query.value(), "feature-foo"),
             _ => panic!("modal variant changed"),
@@ -2410,7 +2408,7 @@ mod tests {
     fn paste_into_quick_switch_appends_and_requests_refilter() {
         let mut modal = quick_switch_modal("");
         let refilter = apply_paste_to_modal(&mut modal, "hello");
-        assert_eq!(refilter, Some(PasteRefilter::QuickSwitch));
+        assert_eq!(refilter, Some(Refilter::QuickSwitch));
         match modal {
             Modal::QuickSwitch { query, .. } => assert_eq!(query.value(), "hello"),
             _ => panic!("modal variant changed"),
@@ -2487,9 +2485,10 @@ diff --git a/a.rs b/a.rs
     }
 
     #[test]
-    fn dictation_takes_every_text_field_but_secrets() {
-        // Dictation and paste share one list of text fields; dictation only
-        // narrows it by the masked (secret) field.
+    fn dictation_takes_every_text_field_but_secrets_and_colours() {
+        // Dictation and paste share one list of text fields; dictation narrows
+        // it by the masked (secret) field and the colour picker (covered in
+        // `app::tests`, which can build a Settings modal).
         assert!(dictation_field(&mut input_modal("")).is_some());
         assert!(dictation_field(&mut quick_switch_modal("")).is_some());
         assert!(dictation_field(&mut checkout_modal("")).is_some());

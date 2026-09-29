@@ -508,12 +508,11 @@ is open or not**, mirroring spoken replies.
 
 `stt.enabled` is a separate switch from `conversation.enabled` and is **off by default**. It is the
 master switch for *both* uses of the microphone: `Alt-v` (this section, which does need conversation
-mode, since that's where the transcript goes) and `Alt-t` ([dictation](#dictation-alt-t), which types
-the transcript into the attached pane or the open dialog's text field, and needs no conversation
-session at all). Microphone
-capture uses `cpal` (PipeWire/ALSA on Linux — see the build note above). If no microphone is available
-or the STT server is unreachable, voice input degrades gracefully (a status message) and never
-blocks the UI.
+mode, since that's where the transcript goes) and `Alt-t` ([dictation](#dictation-alt-t), which
+types the transcript into the attached pane or the open dialog's text field, and needs no
+conversation session at all). Microphone capture uses `cpal` (PipeWire/ALSA on Linux — see the
+build note above). If no microphone is available or the STT server is unreachable, voice input
+degrades gracefully (a status message) and never blocks the UI.
 
 ```toml
 [stt]
@@ -551,10 +550,11 @@ when you stop — so very long dictations wait until the end to transcribe.
 ### Dictation (Alt-t)
 
 `Alt-v` sends what you said to the *conversation agent*. **`Alt-t`** sends it to *where you're
-typing* — the attached pane, or an open dialog's text field (see below): it records the microphone, transcribes it through the same `[stt]` engine, and types
-the result into whatever the attached tmux client is showing — an agent's prompt, a shell command
-line, local session or remote. It's the same toggle shape as `Alt-v` (press to start, press to
-stop), and either key stops a recording the other started, because there is only one microphone.
+typing*: it records the microphone, transcribes it through the same `[stt]` engine, and types the
+result into the attached pane — an agent's prompt, a shell command line, local session or remote —
+or, outside a pane, into the open dialog's text field (see below). It's the same toggle shape as
+`Alt-v` (press to start, press to stop), and either key stops a recording the other started,
+because there is only one microphone.
 
 What is fixed **when recording starts** is the *destination kind*: a recording begun with `Alt-t`
 is typed into a pane even if `Alt-v` is the key that stops it, and vice versa. *Which* pane is
@@ -575,19 +575,20 @@ It also works **outside a pane**, into any open dialog's text field: a review co
 written, the new-session name, the conversation overlay's input, the quick-switch and branch
 search boxes, a path prompt. The text is inserted at the cursor exactly as a paste would be, and
 nothing is ever submitted there — `dictation_submit` applies to panes only, because a dialog's
-Enter commits it. The status bar (or, in the review view, its footer beside the comment's
-save/cancel) shows the same **● Dictating…** → **● Transcribing…** → **✓ Typed** progression.
-A masked field (a server's bearer token) is excluded: a secret is not something to read aloud to
-a transcription server.
+Enter commits it. The status bar shows the same **● Dictating…** → **● Transcribing…** → **✓ Typed**
+progression; the full-screen views that cover it show it themselves — the review view in its
+footer beside the comment's save/cancel, the conversation overlay in its input row and the rule
+beneath it. A masked field (a server's bearer token) is excluded: a secret is not something to read
+aloud to a transcription server.
 
 Pressed with neither — the bare session list — there is nowhere to type, so it says *"Open a text
-field or attach to a session to dictate"* and records nothing — as it does in the in-session
-switcher, whose search box sits over a live pane. A transcript is placed wherever is
-on screen *when it arrives*: stop a recording after the dialog has closed (or after you've
-detached) and it is dropped with the same message rather than typed into whatever comes next. A
-pane wins while one is attached — but a recording *started* in a dialog is never submitted, even
-if it ends up typed into a pane you attached to while it was transcribing: `dictation_submit`
-only applies to dictation you started in the pane.
+field or attach to a session to dictate"* and records nothing. It also refuses to start in the
+in-session switcher, whose search box sits over a live pane. A transcript is placed wherever is on
+screen *when it arrives*: stop a recording after the dialog has closed (or after you've detached)
+and it is dropped with the same message rather than typed into whatever comes next. A pane wins
+while one is attached — but a recording *started* in a dialog is never submitted, even if it ends
+up typed into a pane you attached to while it was transcribing: `dictation_submit` only applies to
+dictation you started in the pane.
 
 #### What gets typed
 

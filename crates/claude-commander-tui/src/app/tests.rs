@@ -1,4 +1,5 @@
 use super::actions::{CopyTokenReport, adjust_list_scroll, delete_confirm_message};
+use super::conversation::DictationOutcome;
 use super::modals::centered_rect;
 use super::render::{commander_chip_label, server_chip_label};
 use super::review::ReviewFocus;
@@ -5743,19 +5744,40 @@ fn review_footer_surfaces_a_status_message_while_a_comment_is_open() {
     state.begin_comment();
     app.ui_state.modal = Modal::ReviewDiff(state);
     app.ui_state.status_message = Some((
-        "● Dictating… (Alt-T to type)".to_string(),
+        "● Dictating… (Alt-t to type)".to_string(),
         Instant::now() + Duration::from_secs(60),
     ));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     terminal.draw(|f| app.render(f)).unwrap();
 
-    let text = buffer_text(&terminal);
-    assert!(text.contains("● Dictating…"), "toast missing:\n{text}");
-    assert!(
-        text.contains("save") && text.contains("cancel"),
-        "editor buttons gone:\n{text}"
-    );
+    let footer = last_row_text(&terminal);
+    assert!(footer.contains("● Dictating…"), "toast missing: {footer:?}");
+    assert_editor_buttons_clickable(&app);
+}
+
+/// The glyphs of the terminal's bottom row — the review view's footer.
+fn last_row_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+    let buffer = terminal.backend().buffer();
+    let width = buffer.area.width as usize;
+    let cells = buffer.content();
+    cells[cells.len() - width..]
+        .iter()
+        .map(|c| c.symbol())
+        .collect()
+}
+
+/// The comment editor's save (Enter) and cancel (Esc) are in the footer's
+/// recorded click targets, not merely drawn somewhere on screen.
+fn assert_editor_buttons_clickable(app: &App) {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    for code in [KeyCode::Enter, KeyCode::Esc] {
+        let key = KeyEvent::new(code, KeyModifiers::NONE);
+        assert!(
+            app.ui_state.review_buttons.iter().any(|b| b.key == key),
+            "footer lost its {code:?} button"
+        );
+    }
 }
 
 #[test]
@@ -5779,12 +5801,12 @@ fn review_footer_keeps_save_and_cancel_when_a_long_toast_overflows() {
     let mut terminal = Terminal::new(TestBackend::new(50, 20)).unwrap();
     terminal.draw(|f| app.render(f)).unwrap();
 
-    let text = buffer_text(&terminal);
-    assert!(text.contains("save") && text.contains("cancel"), "{text}");
+    let footer = last_row_text(&terminal);
     assert!(
-        text.contains("✗ Transcription") && text.contains('…'),
-        "{text}"
+        footer.contains("✗ Transcription") && footer.contains('…'),
+        "the toast is truncated in the footer: {footer:?}"
     );
+    assert_editor_buttons_clickable(&app);
 }
 
 /// The buffer cell where `needle` starts, searching row by row from the
@@ -10314,12 +10336,53 @@ fn app_with_fake_listener() -> (
     (app, rx)
 }
 
+/// Hand `outcome` over exactly as the transcript consumer does — through the
+/// mailbox — and let the UI loop's tick place it.
+fn deliver(app: &mut App, outcome: DictationOutcome) {
+    app.conversation
+        .dictations
+        .sender()
+        .send(outcome)
+        .expect("mailbox open");
+    app.drain_dictations();
+}
+
 fn toast(app: &App) -> String {
     app.ui_state
         .status_message
         .clone()
         .expect("expected a status toast")
         .0
+}
+
+/// A plain text prompt (the Add Project flow's), optionally masked.
+fn text_input_modal(value: &str, mask: bool) -> Modal {
+    Modal::Input {
+        title: String::new(),
+        prompt: String::new(),
+        value: Input::from(value),
+        on_submit: InputAction::AddProject,
+        existing_branches: None,
+        project_picker: None,
+        program_picker: None,
+        server_picker: None,
+        section_picker: None,
+        focus: crate::app::InputFocus::Name,
+        expanded: false,
+        mask,
+    }
+}
+
+/// An empty palette in `mode`, before any refilter has run.
+fn quick_switch_modal(mode: PaletteMode) -> Modal {
+    Modal::QuickSwitch {
+        mode,
+        query: Input::default(),
+        matches: Vec::new(),
+        selected_idx: 0,
+        scroll: 0,
+        review: None,
+    }
 }
 
 fn draft_text(app: &App) -> String {
@@ -10345,10 +10408,7 @@ fn review_with_open_comment(app: &mut App) {
 async fn dictated_text_types_into_an_open_review_comment() {
     let mut app = make_test_app();
     review_with_open_comment(&mut app);
-    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
-        "use a helper here".into(),
-    )))
-    .await;
+    deliver(&mut app, DictationOutcome::Text("use a helper here".into()));
     assert_eq!(draft_text(&app), "use a helper here");
     assert!(toast(&app).contains("Typed"));
 }
@@ -10356,24 +10416,8 @@ async fn dictated_text_types_into_an_open_review_comment() {
 #[tokio::test]
 async fn dictated_text_types_into_a_text_input_modal() {
     let mut app = make_test_app();
-    app.ui_state.modal = Modal::Input {
-        title: String::new(),
-        prompt: String::new(),
-        value: Input::from("fix "),
-        on_submit: InputAction::AddProject,
-        existing_branches: None,
-        project_picker: None,
-        program_picker: None,
-        server_picker: None,
-        section_picker: None,
-        focus: crate::app::InputFocus::Name,
-        expanded: false,
-        mask: false,
-    };
-    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
-        "the login bug".into(),
-    )))
-    .await;
+    app.ui_state.modal = text_input_modal("fix ", false);
+    deliver(&mut app, DictationOutcome::Text("the login bug".into()));
     match &app.ui_state.modal {
         Modal::Input { value, .. } => assert_eq!(value.value(), "fix the login bug"),
         _ => panic!("input modal closed"),
@@ -10387,10 +10431,7 @@ async fn dictated_text_types_into_the_conversation_input() {
         input: Input::default(),
         scroll: 0,
     };
-    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
-        "what's running".into(),
-    )))
-    .await;
+    deliver(&mut app, DictationOutcome::Text("what's running".into()));
     match &app.ui_state.modal {
         Modal::Conversation { input, .. } => assert_eq!(input.value(), "what's running"),
         _ => panic!("conversation overlay closed"),
@@ -10402,28 +10443,106 @@ async fn dictated_text_is_not_typed_into_a_masked_field() {
     // A masked field holds a secret; speaking one to a transcription server
     // is not something dictation should invite.
     let mut app = make_test_app();
-    app.ui_state.modal = Modal::Input {
-        title: String::new(),
-        prompt: String::new(),
-        value: Input::default(),
-        on_submit: InputAction::AddProject,
-        existing_branches: None,
-        project_picker: None,
-        program_picker: None,
-        server_picker: None,
-        section_picker: None,
-        focus: crate::app::InputFocus::Name,
-        expanded: false,
-        mask: true,
-    };
-    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
-        "hunter2".into(),
-    )))
-    .await;
+    app.ui_state.modal = text_input_modal("", true);
+    deliver(&mut app, DictationOutcome::Text("hunter2".into()));
     match &app.ui_state.modal {
         Modal::Input { value, .. } => assert_eq!(value.value(), ""),
         _ => panic!("input modal closed"),
     }
+}
+
+#[tokio::test]
+async fn dictated_text_refilters_the_palette_it_types_into() {
+    // A search box's list is recomputed after a dictation just as after a
+    // paste — the insert alone would leave the old matches showing.
+    use claude_commander_core::session::SectionConfig;
+    let mut app = make_test_app();
+    app.config.sections = vec![
+        SectionConfig {
+            name: "Review".to_string(),
+            ..Default::default()
+        },
+        SectionConfig {
+            name: "Done".to_string(),
+            ..Default::default()
+        },
+    ];
+    app.ui_state.modal = quick_switch_modal(PaletteMode::SectionPicker {
+        session_id: SessionId::new(),
+    });
+    app.ui_state.modal_list_last_click = Some((0, Instant::now()));
+
+    deliver(&mut app, DictationOutcome::Text("review".into()));
+
+    let Modal::QuickSwitch { query, matches, .. } = &app.ui_state.modal else {
+        panic!("palette closed");
+    };
+    assert_eq!(query.value(), "review");
+    assert!(
+        matches
+            .iter()
+            .any(|m| matches!(m, QuickSwitchItem::SectionMove { label, .. } if label == "Review")),
+        "the palette must be refiltered, got {matches:?}"
+    );
+    assert!(
+        app.ui_state.modal_list_last_click.is_none(),
+        "a pending first-click must not survive the list changing"
+    );
+}
+
+#[tokio::test]
+async fn dictated_text_types_into_the_path_prompt_and_refilters_it() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::PathInput {
+        title: String::new(),
+        prompt: String::new(),
+        value: Input::default(),
+        on_submit: InputAction::AddProject,
+        completer: crate::path_completer::PathCompleter::new(),
+        scroll: 4,
+    };
+    deliver(&mut app, DictationOutcome::Text("projects".into()));
+    match &app.ui_state.modal {
+        Modal::PathInput { value, scroll, .. } => {
+            assert_eq!(value.value(), "projects");
+            assert_eq!(*scroll, 0, "the completions list restarts at the top");
+        }
+        _ => panic!("path prompt closed"),
+    }
+}
+
+#[tokio::test]
+async fn dictated_text_is_not_typed_into_a_colour_picker() {
+    // The picker takes hex, which nobody speaks — though it still takes a
+    // paste (see `text_field`).
+    let mut app = make_test_app();
+    let mut settings = keybindings_settings_state(&app, None);
+    settings.editing = Some(SettingsEditing::Colour {
+        picker: Box::new(super::colour_picker::ColourPicker::open(
+            &crate::theme::Theme::truecolor(),
+            None,
+            "Inherit",
+        )),
+    });
+    app.ui_state.modal = Modal::Settings(settings);
+    assert!(!app.modal_accepts_dictation());
+    deliver(&mut app, DictationOutcome::Text("red".into()));
+    assert!(toast(&app).contains("Open a text field"));
+}
+
+#[tokio::test]
+async fn a_tick_places_a_waiting_dictation() {
+    // The mailbox is drained by the UI loop's tick, not by an event of its own
+    // — which is what keeps it clear of `restart_input`'s drain.
+    let mut app = make_test_app();
+    review_with_open_comment(&mut app);
+    app.conversation
+        .dictations
+        .sender()
+        .send(DictationOutcome::Text("nit".into()))
+        .unwrap();
+    app.process_event(AppEvent::Tick).await;
+    assert_eq!(draft_text(&app), "nit");
 }
 
 #[tokio::test]
@@ -10432,10 +10551,7 @@ async fn dictated_text_with_no_text_field_toasts() {
     // land as a toast rather than an error modal — a missed dictation is not
     // a failure the user must dismiss.
     let mut app = make_test_app();
-    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
-        "hello".into(),
-    )))
-    .await;
+    deliver(&mut app, DictationOutcome::Text("hello".into()));
     assert!(
         toast(&app).contains("Open a text field or attach to a session to dictate"),
         "unexpected toast: {}",
@@ -10452,10 +10568,7 @@ async fn dictated_text_with_the_review_open_but_no_comment_is_not_typed() {
     // The review view only has a text field while a comment draft is open.
     let mut app = make_test_app();
     app.ui_state.modal = Modal::ReviewDiff(review_state_for(SessionId::new()));
-    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
-        "hello".into(),
-    )))
-    .await;
+    deliver(&mut app, DictationOutcome::Text("hello".into()));
     match &app.ui_state.modal {
         Modal::ReviewDiff(state) => assert!(state.comment.is_none()),
         _ => panic!("review view closed"),
@@ -10466,13 +10579,9 @@ async fn dictated_text_with_the_review_open_but_no_comment_is_not_typed() {
 #[tokio::test]
 async fn dictation_failures_toast_in_the_ui() {
     let mut app = make_test_app();
-    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::NothingHeard))
-        .await;
+    deliver(&mut app, DictationOutcome::NothingHeard);
     assert!(toast(&app).contains("Nothing heard"));
-    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Failed(
-        "STT down".into(),
-    )))
-    .await;
+    deliver(&mut app, DictationOutcome::Failed("STT down".into()));
     assert!(toast(&app).contains("STT down"));
 }
 
@@ -10506,16 +10615,13 @@ async fn toggle_dictation_starts_recording_with_a_review_comment_open() {
     app.toggle_dictation().await;
 
     assert!(app.conversation.is_recording());
-    assert!(
-        app.conversation
-            .ui_dictation
-            .load(std::sync::atomic::Ordering::Acquire),
-        "a UI-started recording is marked insert-only"
-    );
+    assert!(app.conversation.ui_dictating);
+    // Started as a UI dictation, so its transcript can never be submitted —
+    // the mode rides with this recording through the listener.
     assert!(matches!(
         rx.try_recv(),
         Ok(ListenerCommand::Start(
-            claude_commander_core::conversation::VoiceMode::Dictation
+            claude_commander_core::conversation::VoiceMode::UiDictation
         ))
     ));
     assert!(toast(&app).contains("Dictating"));
@@ -10529,14 +10635,7 @@ async fn toggle_dictation_will_not_start_in_the_switcher_over_a_live_attach() {
     let (mut app, mut listener_rx) = app_with_fake_listener();
     let (pane_tx, _pane_rx) = tokio::sync::mpsc::unbounded_channel();
     app.conversation.injector.install(pane_tx);
-    app.ui_state.modal = Modal::QuickSwitch {
-        mode: PaletteMode::Unified,
-        query: Input::default(),
-        matches: Vec::new(),
-        selected_idx: 0,
-        scroll: 0,
-        review: None,
-    };
+    app.ui_state.modal = quick_switch_modal(PaletteMode::Unified);
 
     app.toggle_dictation().await;
 

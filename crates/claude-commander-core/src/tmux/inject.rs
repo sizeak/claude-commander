@@ -54,8 +54,11 @@ pub enum PaneInput {
 /// [`AttachSession::finish`](crate::tmux::AttachSession::finish) aborts and then
 /// awaits before it returns; so once an attach is over, the receiver is dropped
 /// and every later `send` is `false`. A failed `send` **is** the "there is no
-/// pane to type into" signal — there is deliberately no separate `is_attached`,
-/// which could only ever be a stale answer by the time the caller acted on it.
+/// pane to type into" signal, and the only one to route text by.
+/// [`is_attached`](Self::is_attached) exists for a different question — may a
+/// frontend *start* something whose result would go to a pane? — where a
+/// stale answer costs nothing worse than one refused or unneeded recording;
+/// the text itself is still delivered, or not, by `send`.
 ///
 /// [`set_pane`](Self::set_pane) carries the other half: *what* is on screen, for
 /// the submit policy that decides whether an Enter follows the typed text.
@@ -97,7 +100,8 @@ impl PaneInjector {
     /// Show a status-line notice in the attached client — the only place the
     /// operator can see feedback while a pane covers the TUI. `hold` keeps it up
     /// until the next keypress (see [`PaneInput::Notice`]). Same `false` contract
-    /// as [`send`](Self::send); a notice with nobody attached is simply dropped.
+    /// as [`send`](Self::send); a notice with nobody attached is dropped, and the
+    /// `false` tells the caller to report it some other way.
     pub fn notice(&self, text: impl Into<String>, hold: bool) -> bool {
         self.push(PaneInput::Notice {
             text: text.into(),

@@ -71,20 +71,6 @@ impl RestartKind {
     }
 }
 
-/// What a dictation produced, for the UI loop to deliver (see
-/// [`StateUpdate::Dictated`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DictationOutcome {
-    /// The transcript, already normalised to one line
-    /// ([`normalise_dictation`](claude_commander_core::conversation::normalise_dictation)),
-    /// so every text field can take it as-is.
-    Text(String),
-    /// The recording transcribed to nothing.
-    NothingHeard,
-    /// Transcription failed; carries the engine's error.
-    Failed(String),
-}
-
 /// State updates from background tasks
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
@@ -111,16 +97,6 @@ pub enum StateUpdate {
     SessionRemoved { session_id: SessionId },
     /// Error occurred
     Error { message: String },
-    /// A dictation finished with no attached pane to deliver it to, so it is
-    /// the UI loop's to place: typed into the open modal's text field, or
-    /// reported in the status bar.
-    ///
-    /// Raised off the UI loop, by the transcript consumer task: it holds the
-    /// [`PaneInjector`](claude_commander_core::tmux::PaneInjector) but no `&mut
-    /// App`, and a failed injection is the only way it can learn nothing is
-    /// attached. The handler answers with a toast rather than a modal, because
-    /// a missed dictation is not a failure the user has to dismiss.
-    Dictated(DictationOutcome),
     /// Session creation completed successfully
     SessionCreated {
         session_id: SessionId,

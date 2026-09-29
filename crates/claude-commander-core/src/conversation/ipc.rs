@@ -130,8 +130,8 @@ async fn handle_conn(stream: UnixStream, listener: ListenerHandle, recording: Ar
     let reply = match parse_action(&line) {
         Some(action) => {
             // The socket is the desktop global-shortcut route into the *conversation*
-            // agent; dictation needs an attached pane to type into, which an external
-            // trigger has no way to name.
+            // agent; dictation needs a destination — an attached pane or an open text
+            // field — which an external trigger has no way to name.
             if apply_listen_action(&listener, &recording, action, VoiceMode::Conversation) {
                 "recording\n"
             } else {

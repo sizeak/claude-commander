@@ -2185,7 +2185,7 @@ impl App {
 
         // Ordered footer items per sub-mode. `Plain` items are non-actionable
         // key legends; `Button`s replay the key they label on click.
-        let live_toast = self
+        let mut live_toast = self
             .ui_state
             .status_message
             .as_ref()
@@ -2198,7 +2198,7 @@ impl App {
             // where it applies. It goes *after* the editor's buttons: the row
             // truncates a toast that overflows and drops everything after it,
             // and a long error must not cost save/cancel.
-            let toast = live_toast.clone();
+            let toast = live_toast.take();
             if toast.is_none() {
                 items.push(FooterItem::Plain("type comment"));
                 items.push(FooterItem::Plain("←→/Home/End move"));

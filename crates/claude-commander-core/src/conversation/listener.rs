@@ -36,6 +36,22 @@ pub enum VoiceMode {
     /// The transcript is typed into the pane the attached tmux client is
     /// showing, as if the operator had typed it themselves.
     Dictation,
+    /// Dictation started from the frontend's own UI, for the text field open
+    /// there. Delivered exactly as [`Dictation`](Self::Dictation) is — to a
+    /// pane if one is attached by the time it arrives, else to the frontend —
+    /// except that it is never submitted: it was meant for a dialog, where
+    /// nothing submits. A mode rather than frontend-side state because it has
+    /// to stay paired with its own recording (see `PendingModes`), not with
+    /// whichever transcript happens to come back next.
+    UiDictation,
+}
+
+impl VoiceMode {
+    /// Whether the transcript is typed somewhere, rather than spoken to the
+    /// conversation agent.
+    pub fn is_dictation(self) -> bool {
+        matches!(self, Self::Dictation | Self::UiDictation)
+    }
 }
 
 /// Commands to the listener task.
@@ -77,12 +93,12 @@ fn transcript_for(mode: VoiceMode, outcome: &Result<String, TtsError>) -> Option
             error: None,
         }),
         (VoiceMode::Conversation, _) => None,
-        (VoiceMode::Dictation, Ok(_)) => Some(Transcript {
+        (VoiceMode::Dictation | VoiceMode::UiDictation, Ok(_)) => Some(Transcript {
             mode,
             text: String::new(),
             error: None,
         }),
-        (VoiceMode::Dictation, Err(e)) => Some(Transcript {
+        (VoiceMode::Dictation | VoiceMode::UiDictation, Err(e)) => Some(Transcript {
             mode,
             text: String::new(),
             error: Some(e.to_string()),
@@ -263,7 +279,7 @@ pub fn spawn_listener(
                     let wav_bytes = wav.len();
                     let t0 = Instant::now();
                     let outcome = client.transcribe(wav).await;
-                    if matches!(mode, VoiceMode::Dictation) {
+                    if mode.is_dictation() {
                         // Dictation never reaches the conversation session, so no
                         // `TurnComplete` will ever arrive to release the media gate
                         // — and the gate resumes only on Silence, on TurnComplete
@@ -580,6 +596,29 @@ mod tests {
                 .error
                 .as_deref()
                 .is_some_and(|e| e.contains("mic gone"))
+        );
+    }
+
+    #[test]
+    fn ui_dictation_is_dictation_and_hears_every_outcome() {
+        // Only the submit decision differs; everything else treats it as
+        // dictation — including the empty and failed outcomes, which the
+        // frontend reports where the user is looking.
+        assert!(VoiceMode::UiDictation.is_dictation());
+        assert!(VoiceMode::Dictation.is_dictation());
+        assert!(!VoiceMode::Conversation.is_dictation());
+        assert_eq!(
+            transcript_for(VoiceMode::UiDictation, &Ok(String::new())),
+            Some(Transcript {
+                mode: VoiceMode::UiDictation,
+                text: String::new(),
+                error: None
+            })
+        );
+        assert!(
+            transcript_for(VoiceMode::UiDictation, &Err(TtsError::Audio("x".into())))
+                .and_then(|t| t.error)
+                .is_some()
         );
     }
 }

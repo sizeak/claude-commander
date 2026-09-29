@@ -478,7 +478,6 @@ impl App {
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
             }
-            StateUpdate::Dictated(outcome) => self.apply_dictation(outcome),
             StateUpdate::ReviewPrepared { prepared } => {
                 // Only swap in the view if the loading spinner is still up. The
                 // user can't navigate while it's shown, but another background
