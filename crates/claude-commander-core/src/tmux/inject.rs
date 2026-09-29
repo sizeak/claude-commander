@@ -54,8 +54,11 @@ pub enum PaneInput {
 /// [`AttachSession::finish`](crate::tmux::AttachSession::finish) aborts and then
 /// awaits before it returns; so once an attach is over, the receiver is dropped
 /// and every later `send` is `false`. A failed `send` **is** the "there is no
-/// pane to type into" signal — there is deliberately no separate `is_attached`,
-/// which could only ever be a stale answer by the time the caller acted on it.
+/// pane to type into" signal, and the only one to route text by.
+/// [`is_attached`](Self::is_attached) exists for a different question — may a
+/// frontend *start* something whose result would go to a pane? — where a
+/// stale answer costs nothing worse than one refused or unneeded recording;
+/// the text itself is still delivered, or not, by `send`.
 ///
 /// [`set_pane`](Self::set_pane) carries the other half: *what* is on screen, for
 /// the submit policy that decides whether an Enter follows the typed text.
@@ -97,12 +100,22 @@ impl PaneInjector {
     /// Show a status-line notice in the attached client — the only place the
     /// operator can see feedback while a pane covers the TUI. `hold` keeps it up
     /// until the next keypress (see [`PaneInput::Notice`]). Same `false` contract
-    /// as [`send`](Self::send); a notice with nobody attached is simply dropped.
+    /// as [`send`](Self::send); a notice with nobody attached is dropped, and the
+    /// `false` tells the caller to report it some other way.
     pub fn notice(&self, text: impl Into<String>, hold: bool) -> bool {
         self.push(PaneInput::Notice {
             text: text.into(),
             hold,
         })
+    }
+
+    /// Whether an attach is live to receive input — what [`send`](Self::send)
+    /// would find, asked without sending anything. The frontend's UI can be on
+    /// screen *during* an attach (the in-session switcher runs over a parked
+    /// pump), so "the UI loop is running" does not by itself mean "nothing is
+    /// attached".
+    pub fn is_attached(&self) -> bool {
+        matches!(&self.0.lock().unwrap().tx, Some(tx) if !tx.is_closed())
     }
 
     fn push(&self, input: PaneInput) -> bool {
@@ -149,6 +162,17 @@ mod tests {
             !injector.send(b"hi"),
             "a dead receiver means the attach is over"
         );
+    }
+
+    #[test]
+    fn is_attached_tracks_the_receiver() {
+        let injector = PaneInjector::default();
+        assert!(!injector.is_attached(), "nothing installed yet");
+        let (tx, rx) = mpsc::unbounded_channel();
+        injector.install(tx);
+        assert!(injector.is_attached());
+        drop(rx);
+        assert!(!injector.is_attached(), "the attach ended");
     }
 
     #[tokio::test]

@@ -282,7 +282,7 @@ impl BindableAction {
             Self::OpenCommander => "Open commander session",
             Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
             Self::ToggleVoiceInput => "Voice input: record / send (STT)",
-            Self::ToggleDictation => "Dictate into session: record / type transcript (STT)",
+            Self::ToggleDictation => "Dictate: record / type transcript into pane or field (STT)",
             Self::OpenReviewDiff => "Review diff & comment",
             Self::ShowHelp => "Show help",
             Self::ShowSettings => "Settings",

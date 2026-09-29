@@ -1089,7 +1089,9 @@ where
                                 // there is no fallback font to rescue it.
                                 let msg = match (now_recording, mode) {
                                     (true, VoiceMode::Conversation) => "● Recording… (Alt-V to send)",
-                                    (true, VoiceMode::Dictation) => "● Dictating… (Alt-t to type)",
+                                    (true, VoiceMode::Dictation | VoiceMode::UiDictation) => {
+                                        "● Dictating… (Alt-t to type)"
+                                    }
                                     (false, _) => "● Transcribing…",
                                 };
                                 // Both are states the user is *in*, so the notice

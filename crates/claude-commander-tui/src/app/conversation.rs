@@ -23,6 +23,13 @@ use claude_commander_core::conversation::{
 };
 use claude_commander_core::tmux::{PaneInfo, PaneInjector};
 
+/// Where dictation works, for when it was asked for somewhere it doesn't.
+const NOWHERE_TO_DICTATE: &str = "Open a text field or attach to a session to dictate";
+
+/// The status shown while a dictation records. Spelt as the attach loop's
+/// pane notice spells it (core `tmux/attach.rs`), so both surfaces agree.
+const DICTATING: &str = "● Dictating… (Alt-t to type)";
+
 /// Canonical project spinner frames (advanced every 3 render ticks).
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -275,8 +282,59 @@ pub struct ConversationRuntime {
     /// spawned once and outlives every individual attach, so it cannot be handed
     /// a per-attach writer. Each attach installs its own channel into this one
     /// handle, and a [`send`](PaneInjector::send) that returns `false` *is* the
-    /// "nothing is attached" answer.
+    /// "nothing is attached" answer ([`is_attached`](PaneInjector::is_attached)
+    /// is only the advisory pre-check for starting a recording).
     pub injector: PaneInjector,
+    /// Where the transcript consumer leaves a dictation that no pane took,
+    /// for the UI loop to place (see [`DictationMailbox`]).
+    pub dictations: DictationMailbox,
+    /// Whether the recording in progress, if any, was started by the UI's own
+    /// Alt-T. Display only — it picks the conversation overlay's recording
+    /// indicator. What the *transcript* may do rides with the recording itself
+    /// ([`VoiceMode::UiDictation`]), never with this.
+    pub ui_dictating: bool,
+}
+
+/// What a dictation produced, for the UI loop to deliver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DictationOutcome {
+    /// The transcript, already normalised to one line
+    /// ([`normalise_dictation`](claude_commander_core::conversation::normalise_dictation)),
+    /// so every text field can take it as-is.
+    Text(String),
+    /// The recording transcribed to nothing.
+    NothingHeard,
+    /// Transcription failed; carries the engine's error.
+    Failed(String),
+}
+
+/// The hand-off from the transcript consumer task to the UI loop, for a
+/// dictation with no attached pane to go to.
+///
+/// Its own unbounded channel rather than a [`StateUpdate`] on the event loop's,
+/// for two reasons. That channel is bounded, and nothing drains it while the
+/// loop is parked in an attach or the editor (the render ticks fill it), so a
+/// hand-off there would stall the consumer — and every dictation queued behind
+/// it. And [`EventLoop::restart_input`] discards whatever it holds when an
+/// attach returns, which would lose the transcript without a word. The UI loop
+/// drains this on every tick instead ([`App::drain_dictations`]).
+pub struct DictationMailbox {
+    tx: tokio::sync::mpsc::UnboundedSender<DictationOutcome>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<DictationOutcome>,
+}
+
+impl Default for DictationMailbox {
+    fn default() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self { tx, rx }
+    }
+}
+
+impl DictationMailbox {
+    /// The consumer task's end.
+    pub fn sender(&self) -> tokio::sync::mpsc::UnboundedSender<DictationOutcome> {
+        self.tx.clone()
+    }
 }
 
 impl ConversationRuntime {
@@ -447,7 +505,10 @@ async fn spawn_session_runtime(
 }
 
 /// Type one dictated transcript into whatever pane is attached, then submit it
-/// if the policy says so.
+/// if the policy says so — never for a [`VoiceMode::UiDictation`], which was
+/// meant for a dialog. With nothing attached, the outcome goes to the UI loop
+/// instead (a [`DictationMailbox`]), which types it into the open modal's text
+/// field — so dictation reaches whatever is on screen, pane or dialog.
 ///
 /// Free of `&App` for the same reason [`submit_to_session`] is: it runs on the
 /// long-lived transcript consumer task, and while a session is attached the UI
@@ -456,15 +517,26 @@ async fn spawn_session_runtime(
 async fn dictate(
     injector: &PaneInjector,
     policy: DictationSubmit,
-    events: &tokio::sync::mpsc::Sender<AppEvent>,
+    to_ui: &tokio::sync::mpsc::UnboundedSender<DictationOutcome>,
     transcript: &Transcript,
 ) {
+    let hand_to_ui = |outcome| {
+        if to_ui.send(outcome).is_err() {
+            warn!(target: "conversation", "UI loop gone; dropped a dictation");
+        }
+    };
+    let policy = match transcript.mode {
+        VoiceMode::UiDictation => DictationSubmit::Never,
+        _ => policy,
+    };
     // The attach loop is holding a "● Transcribing…" notice in the pane's
     // status line (see `PaneInput::Notice`); every branch below replaces it, so
     // the operator is never left looking at a state that has already ended.
     if let Some(err) = &transcript.error {
         warn!(target: "conversation", "dictation transcription failed: {err}");
-        injector.notice(format!("✗ Transcription failed: {err}"), false);
+        if !injector.notice(format!("✗ Transcription failed: {err}"), false) {
+            hand_to_ui(DictationOutcome::Failed(err.clone()));
+        }
         return;
     }
     // With no pane ever recorded, fall back to the most restrictive descriptor
@@ -480,7 +552,9 @@ async fn dictate(
     });
     let Some(plan) = plan_dictation(&transcript.text, policy, pane) else {
         debug!(target: "conversation", "dictated transcript was empty; nothing to type");
-        injector.notice("✗ Nothing heard", false);
+        if !injector.notice("✗ Nothing heard", false) {
+            hand_to_ui(DictationOutcome::NothingHeard);
+        }
         return;
     };
     // The transcript is the user's speech, so its length is logged and its text
@@ -493,16 +567,12 @@ async fn dictate(
     );
     if !injector.send(plan.text.as_bytes()) {
         // `send` returning false *is* the "nothing is attached" signal (see
-        // `PaneInjector`), and this task can't toast on its own — the status
-        // message belongs to the UI loop, which owns `&mut App`.
-        debug!(target: "conversation", "no attached pane to dictate into; dropping transcript");
-        if events
-            .send(AppEvent::StateUpdate(StateUpdate::DictationUndeliverable))
-            .await
-            .is_err()
-        {
-            warn!(target: "conversation", "event loop gone; dropped the dictation notice");
-        }
+        // `PaneInjector`), so the UI loop — which owns `&mut App`, and with it
+        // the open modal — gets the text instead. The plan's text, not the
+        // raw transcript: it is already one line, and the submit half of the
+        // plan is deliberately dropped, because a dialog's Enter commits it.
+        debug!(target: "conversation", "no attached pane; handing the transcript to the UI loop");
+        hand_to_ui(DictationOutcome::Text(plan.text));
         return;
     }
     if let SubmitPlan::Submit { delay } = plan.submit {
@@ -600,6 +670,7 @@ impl App {
         // below could set the flag and Start the *old*, about-to-be-dropped
         // recorder. It self-heals on the next toggle, so we don't lock here.)
         self.conversation.recording.store(false, Ordering::Release);
+        self.conversation.ui_dictating = false;
         self.build_and_store_listener();
     }
 
@@ -634,12 +705,12 @@ impl App {
         // which rebuilds this task with the new value.
         let injector = self.conversation.injector.clone();
         let policy = self.config.stt.dictation_submit;
-        let events = self.event_loop.sender();
+        let to_ui = self.conversation.dictations.sender();
         tokio::spawn(async move {
             while let Some(transcript) = rx_text.recv().await {
                 match transcript.mode {
-                    VoiceMode::Dictation => {
-                        dictate(&injector, policy, &events, &transcript).await;
+                    VoiceMode::Dictation | VoiceMode::UiDictation => {
+                        dictate(&injector, policy, &to_ui, &transcript).await;
                     }
                     VoiceMode::Conversation => {
                         let text = transcript.text.trim().to_string();
@@ -746,23 +817,27 @@ impl App {
             .conversation
             .apply_listen(ListenAction::Toggle, VoiceMode::Conversation)
         {
-            Some(true) => self.set_status_message("● Listening… (Alt-V to send)", 60),
+            Some(true) => {
+                self.conversation.ui_dictating = false;
+                self.set_status_message("● Listening… (Alt-V to send)", 60);
+            }
             Some(false) => self.set_status_message("● Transcribing…", 4),
             None => self.set_status_message("Voice input unavailable — no microphone?", 4),
         }
     }
 
-    /// Alt-T: stop a dictation recording and type its transcript into the pane.
+    /// Alt-T with the TUI's own UI on screen: start or stop dictating into the
+    /// open modal's text field (a review comment, the new-session name, the
+    /// conversation overlay's input…).
     ///
-    /// The mirror of [`toggle_voice_input`](Self::toggle_voice_input), with one
-    /// asymmetry that is the whole design: dictation needs somewhere to type, so
-    /// it only ever *stops* a recording from here. Reaching this method at all
-    /// means the UI loop is running the session list — while a session is
-    /// attached the loop is parked inside `drive_attach`, and Alt-T is
-    /// recognised there by the attach loop's byte interceptor instead. So an
-    /// idle press here is by construction a press with nothing attached, and
-    /// starting the microphone would only collect a transcript with nowhere to
-    /// go.
+    /// The mirror of [`toggle_voice_input`](Self::toggle_voice_input), except
+    /// that dictation needs somewhere to type, so it only *starts* a recording
+    /// when the open modal has a text field for it. Reaching this method at all
+    /// means the UI loop is running — while a session is attached the loop is
+    /// parked inside `drive_attach`, and Alt-T is recognised there by the
+    /// attach loop's byte interceptor instead. A *stop* is always honoured,
+    /// whatever is open: the transcript is placed wherever is on screen when it
+    /// comes back (see [`apply_dictation`](Self::apply_dictation)).
     ///
     /// Only the listener is brought up, never the headless conversation session:
     /// dictation never speaks to the agent, so paying for one would be a
@@ -777,15 +852,57 @@ impl App {
         }
         self.ensure_listener_started().await;
         if !self.conversation.is_recording() {
-            self.set_status_message("Attach to a session to dictate into it", 4);
-            return;
+            // A live attach means the modal is the in-session switcher, drawn
+            // over a parked pane: its transcript would go to that pane (or be
+            // lost with the attach), not into the search box on screen.
+            if self.conversation.injector.is_attached() {
+                self.set_status_message("Close the switcher to dictate into the session", 4);
+                return;
+            }
+            if !self.modal_accepts_dictation() {
+                self.set_status_message(NOWHERE_TO_DICTATE, 4);
+                return;
+            }
         }
         match self
             .conversation
-            .apply_listen(ListenAction::Toggle, VoiceMode::Dictation)
+            .apply_listen(ListenAction::Toggle, VoiceMode::UiDictation)
         {
-            Some(_) => self.set_status_message("● Transcribing…", 4),
+            Some(true) => {
+                self.conversation.ui_dictating = true;
+                self.set_status_message(DICTATING, 60);
+            }
+            Some(false) => self.set_status_message("● Transcribing…", 4),
             None => self.set_status_message("Voice input unavailable — no microphone?", 4),
+        }
+    }
+
+    /// Place every dictation the transcript consumer has left in the mailbox.
+    /// Called on each render tick, so a hand-off waits at most one tick.
+    pub(super) fn drain_dictations(&mut self) {
+        while let Ok(outcome) = self.conversation.dictations.rx.try_recv() {
+            self.apply_dictation(outcome);
+        }
+    }
+
+    /// Deliver a dictation that had no attached pane to go to: type it into
+    /// the open modal's text field, or say why nothing happened.
+    pub(super) fn apply_dictation(&mut self, outcome: DictationOutcome) {
+        match outcome {
+            DictationOutcome::Text(text) => {
+                if self.dictate_into_modal(&text) {
+                    self.set_status_message("✓ Typed", 2);
+                } else {
+                    // The dialog closed (or the user detached) while they
+                    // spoke. Say where dictation does work rather than
+                    // reporting a failure they can't act on.
+                    self.set_status_message(NOWHERE_TO_DICTATE, 4);
+                }
+            }
+            DictationOutcome::NothingHeard => self.set_status_message("✗ Nothing heard", 4),
+            DictationOutcome::Failed(err) => {
+                self.set_status_message(format!("✗ Transcription failed: {err}"), 6);
+            }
         }
     }
 
@@ -883,11 +1000,24 @@ impl App {
         let visible: Vec<Line> = lines[start..end].to_vec();
         frame.render_widget(Paragraph::new(visible), chunks[0]);
 
-        // Input: a single prompt line bracketed by top/bottom rules.
-        let input_block = Block::default()
+        // Input: a single prompt line bracketed by top/bottom rules. The
+        // overlay covers the status bar, so a live status message (a
+        // dictation's "✓ Typed" or "✗ Nothing heard", say) is drawn into the
+        // bottom rule instead — except while recording, when the input row
+        // already says so.
+        let mut input_block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.conversation_accent));
+        if !self.conversation.is_recording()
+            && let Some((msg, expires)) = &self.ui_state.status_message
+            && Instant::now() < *expires
+        {
+            input_block = input_block.title_bottom(Line::from(Span::styled(
+                format!(" {msg} "),
+                Style::default().fg(self.theme.text_secondary),
+            )));
+        }
         let input_inner = input_block.inner(chunks[1]);
         frame.render_widget(input_block, chunks[1]);
 
@@ -909,9 +1039,15 @@ impl App {
         let view_scroll = input.visual_scroll(text_width as usize);
         if self.conversation.is_recording() {
             // Recording takes over the input row — show a live indicator instead
-            // of the typing placeholder.
+            // of the typing placeholder. One microphone serves both keys, so
+            // the indicator says which one this recording will answer to.
+            let indicator = if self.conversation.ui_dictating {
+                DICTATING
+            } else {
+                "● Listening… (Alt-V to send)"
+            };
             frame.render_widget(
-                Paragraph::new("● Listening… (Alt-V to send)").style(
+                Paragraph::new(indicator).style(
                     Style::default()
                         .fg(self.theme.modal_error)
                         .add_modifier(Modifier::BOLD),
@@ -1065,13 +1201,13 @@ mod tests {
     fn wired() -> (
         PaneInjector,
         tokio::sync::mpsc::UnboundedReceiver<PaneInput>,
-        tokio::sync::mpsc::Sender<AppEvent>,
-        tokio::sync::mpsc::Receiver<AppEvent>,
+        tokio::sync::mpsc::UnboundedSender<DictationOutcome>,
+        tokio::sync::mpsc::UnboundedReceiver<DictationOutcome>,
     ) {
         let injector = PaneInjector::default();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         injector.install(tx);
-        let (ev_tx, ev_rx) = tokio::sync::mpsc::channel(4);
+        let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel();
         (injector, rx, ev_tx, ev_rx)
     }
 
@@ -1170,17 +1306,141 @@ mod tests {
         ));
     }
 
+    /// The one dictation the UI loop was handed, if any.
+    fn handed_to_ui(
+        ev_rx: &mut tokio::sync::mpsc::UnboundedReceiver<DictationOutcome>,
+    ) -> Option<DictationOutcome> {
+        ev_rx.try_recv().ok()
+    }
+
     #[tokio::test]
-    async fn dictate_with_no_attach_raises_undeliverable() {
-        // Nothing installed: the text has nowhere to go, and the UI loop is
-        // told so it can toast — no notice is attempted (there is no pane).
+    async fn dictate_with_no_attach_hands_the_text_to_the_ui_loop() {
+        // Nothing installed: the UI loop gets the text, so the open modal's
+        // text field (a review comment, say) can take it.
         let injector = PaneInjector::default();
-        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel(4);
+        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
         dictate(&injector, DictationSubmit::Never, &ev_tx, &heard("hello")).await;
-        assert!(matches!(
-            ev_rx.try_recv(),
-            Ok(AppEvent::StateUpdate(StateUpdate::DictationUndeliverable))
-        ));
+        assert_eq!(
+            handed_to_ui(&mut ev_rx),
+            Some(DictationOutcome::Text("hello".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn dictate_with_no_attach_hands_over_one_line_and_never_a_submit() {
+        // A dialog's Enter commits it, so the hand-off is the normalised text
+        // only — no newline from the engine, and no submit even under `Always`.
+        let injector = PaneInjector::default();
+        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
+        dictate(
+            &injector,
+            DictationSubmit::Always,
+            &ev_tx,
+            &heard("  use a\nhelper here\n"),
+        )
+        .await;
+        assert_eq!(
+            handed_to_ui(&mut ev_rx),
+            Some(DictationOutcome::Text("use a helper here".into()))
+        );
+        assert_eq!(handed_to_ui(&mut ev_rx), None, "exactly one hand-off");
+    }
+
+    #[tokio::test]
+    async fn dictate_with_no_attach_reports_nothing_heard_to_the_ui_loop() {
+        let injector = PaneInjector::default();
+        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
+        dictate(&injector, DictationSubmit::Never, &ev_tx, &heard(" \n ")).await;
+        assert_eq!(
+            handed_to_ui(&mut ev_rx),
+            Some(DictationOutcome::NothingHeard)
+        );
+    }
+
+    #[tokio::test]
+    async fn dictate_with_no_attach_reports_a_failure_to_the_ui_loop() {
+        // Without this the error went to a pane notice nobody could see.
+        let injector = PaneInjector::default();
+        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
+        let failed = Transcript {
+            mode: VoiceMode::Dictation,
+            text: String::new(),
+            error: Some("STT down".into()),
+        };
+        dictate(&injector, DictationSubmit::Never, &ev_tx, &failed).await;
+        assert_eq!(
+            handed_to_ui(&mut ev_rx),
+            Some(DictationOutcome::Failed("STT down".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ui_started_dictation_is_never_submitted_even_into_a_pane() {
+        // Started in a dialog, it can still land in a pane attached while it
+        // transcribed — insert-only there, whatever `dictation_submit` says.
+        // The mode rides with that one recording, so the *next* transcript
+        // (a pane-started `Dictation`) is still submitted as configured.
+        let (injector, mut rx, ev_tx, _ev_rx) = wired();
+        injector.set_pane(PaneInfo {
+            kind: AttachKind::Agent,
+            agent: AgentKind::Unknown,
+        });
+        let ui_started = Transcript {
+            mode: VoiceMode::UiDictation,
+            ..heard("run tests")
+        };
+        dictate(&injector, DictationSubmit::Always, &ev_tx, &ui_started).await;
+        assert!(
+            !drain(&mut rx).contains(&PaneInput::Bytes(b"\r".to_vec())),
+            "a UI-started dictation must never submit"
+        );
+        dictate(
+            &injector,
+            DictationSubmit::Always,
+            &ev_tx,
+            &heard("run tests"),
+        )
+        .await;
+        assert!(drain(&mut rx).contains(&PaneInput::Bytes(b"\r".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn the_mailbox_hands_over_without_blocking_and_in_order() {
+        // Unbounded so the consumer can never stall behind a UI loop parked
+        // in an attach (the event channel it replaced was bounded and full).
+        let mailbox = DictationMailbox::default();
+        let injector = PaneInjector::default();
+        let tx = mailbox.sender();
+        for n in 0..300 {
+            dictate(
+                &injector,
+                DictationSubmit::Never,
+                &tx,
+                &heard(&format!("w{n}")),
+            )
+            .await;
+        }
+        let mut rx = mailbox.rx;
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(DictationOutcome::Text("w0".into()))
+        );
+        let mut last = None;
+        while let Ok(o) = rx.try_recv() {
+            last = Some(o);
+        }
+        assert_eq!(last, Some(DictationOutcome::Text("w299".into())));
+    }
+
+    #[tokio::test]
+    async fn dictate_into_an_attached_pane_tells_the_ui_loop_nothing() {
+        // The pane is the destination whenever one is attached: its notices
+        // are the feedback, and the UI loop must not also type the text into
+        // a modal hidden behind the attach.
+        let (injector, _rx, ev_tx, mut ev_rx) = wired();
+        dictate(&injector, DictationSubmit::Never, &ev_tx, &heard("hello")).await;
+        dictate(&injector, DictationSubmit::Never, &ev_tx, &heard("  ")).await;
+        assert_eq!(handed_to_ui(&mut ev_rx), None);
     }
 
     #[test]
