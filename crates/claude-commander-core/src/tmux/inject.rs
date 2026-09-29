@@ -105,6 +105,15 @@ impl PaneInjector {
         })
     }
 
+    /// Whether an attach is live to receive input — what [`send`](Self::send)
+    /// would find, asked without sending anything. The frontend's UI can be on
+    /// screen *during* an attach (the in-session switcher runs over a parked
+    /// pump), so "the UI loop is running" does not by itself mean "nothing is
+    /// attached".
+    pub fn is_attached(&self) -> bool {
+        matches!(&self.0.lock().unwrap().tx, Some(tx) if !tx.is_closed())
+    }
+
     fn push(&self, input: PaneInput) -> bool {
         matches!(&self.0.lock().unwrap().tx, Some(tx) if tx.send(input).is_ok())
     }
@@ -149,6 +158,17 @@ mod tests {
             !injector.send(b"hi"),
             "a dead receiver means the attach is over"
         );
+    }
+
+    #[test]
+    fn is_attached_tracks_the_receiver() {
+        let injector = PaneInjector::default();
+        assert!(!injector.is_attached(), "nothing installed yet");
+        let (tx, rx) = mpsc::unbounded_channel();
+        injector.install(tx);
+        assert!(injector.is_attached());
+        drop(rx);
+        assert!(!injector.is_attached(), "the attach ended");
     }
 
     #[tokio::test]

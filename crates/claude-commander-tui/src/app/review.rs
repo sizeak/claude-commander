@@ -2185,12 +2185,27 @@ impl App {
 
         // Ordered footer items per sub-mode. `Plain` items are non-actionable
         // key legends; `Button`s replay the key they label on click.
+        let live_toast = self
+            .ui_state
+            .status_message
+            .as_ref()
+            .filter(|(_, expires)| Instant::now() < *expires)
+            .map(|(msg, _)| msg.clone());
         let mut items: Vec<FooterItem> = Vec::new();
         if state.comment.is_some() {
-            items.push(FooterItem::Plain("type comment"));
-            items.push(FooterItem::Plain("←→/Home/End move"));
+            // A live status message (e.g. "● Dictating…" while the comment is
+            // being spoken) takes the legends' place, so it is visible exactly
+            // where it applies. It goes *after* the editor's buttons: the row
+            // truncates a toast that overflows and drops everything after it,
+            // and a long error must not cost save/cancel.
+            let toast = live_toast.clone();
+            if toast.is_none() {
+                items.push(FooterItem::Plain("type comment"));
+                items.push(FooterItem::Plain("←→/Home/End move"));
+            }
             items.push(FooterItem::button("save", key(KeyCode::Enter, none)));
             items.push(FooterItem::button("cancel", key(KeyCode::Esc, none)));
+            items.extend(toast.map(FooterItem::Toast));
         } else if state.visual_anchor.is_some() {
             items.push(FooterItem::Plain("↑↓ extend"));
             items.push(FooterItem::button("comment", key(KeyCode::Enter, none)));
@@ -2280,12 +2295,12 @@ impl App {
         // action buttons. Without this the review view — a full-screen takeover
         // that never draws the normal status bar — would silently swallow every
         // `set_review_status` (apply/refresh/mark results, editor errors, …).
-        // Not shown while editing a comment, where the footer hosts the editor.
+        // While editing a comment it shares the row with the editor's buttons
+        // instead (above), so save/cancel stay clickable.
         if state.comment.is_none()
-            && let Some((msg, expires)) = &self.ui_state.status_message
-            && Instant::now() < *expires
+            && let Some(msg) = live_toast
         {
-            items = vec![FooterItem::Toast(msg.clone())];
+            items = vec![FooterItem::Toast(msg)];
         }
 
         // Close is pinned to the right edge (Ctrl-Q always closes the view) —

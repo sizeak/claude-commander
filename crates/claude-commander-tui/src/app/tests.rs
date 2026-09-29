@@ -5730,6 +5730,63 @@ fn review_footer_surfaces_live_status_message() {
     );
 }
 
+#[test]
+fn review_footer_surfaces_a_status_message_while_a_comment_is_open() {
+    // The footer used to drop every toast while a comment was being edited —
+    // exactly when "● Dictating…" matters, since that is where one speaks. It
+    // now shares the row with the editor's buttons, which stay clickable.
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let mut state = review_state_for(SessionId::new());
+    state.begin_comment();
+    app.ui_state.modal = Modal::ReviewDiff(state);
+    app.ui_state.status_message = Some((
+        "● Dictating… (Alt-T to type)".to_string(),
+        Instant::now() + Duration::from_secs(60),
+    ));
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let text = buffer_text(&terminal);
+    assert!(text.contains("● Dictating…"), "toast missing:\n{text}");
+    assert!(
+        text.contains("save") && text.contains("cancel"),
+        "editor buttons gone:\n{text}"
+    );
+}
+
+#[test]
+fn review_footer_keeps_save_and_cancel_when_a_long_toast_overflows() {
+    // The row truncates an overflowing toast and drops what follows it, so the
+    // toast goes after the editor's buttons — a long transcription error on a
+    // narrow terminal must not take save/cancel with it.
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let mut state = review_state_for(SessionId::new());
+    state.begin_comment();
+    app.ui_state.modal = Modal::ReviewDiff(state);
+    app.ui_state.status_message = Some((
+        "✗ Transcription failed: error sending request for url (http://127.0.0.1:8080/v1)"
+            .to_string(),
+        Instant::now() + Duration::from_secs(6),
+    ));
+
+    let mut terminal = Terminal::new(TestBackend::new(50, 20)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let text = buffer_text(&terminal);
+    assert!(text.contains("save") && text.contains("cancel"), "{text}");
+    assert!(
+        text.contains("✗ Transcription") && text.contains('…'),
+        "{text}"
+    );
+}
+
 /// The buffer cell where `needle` starts, searching row by row from the
 /// top-left. `buffer_text` carries glyphs only, so a highlight — which is
 /// colour, not text — needs its own probe.
@@ -10244,23 +10301,145 @@ fn pane_info_for_local_name_is_shell_unknown() {
     assert_eq!(pane.agent, claude_commander_core::agent::AgentKind::Unknown);
 }
 
-#[tokio::test]
-async fn dictation_undeliverable_update_sets_status_toast() {
-    // The transcript consumer runs off the UI loop and cannot touch `&mut App`,
-    // so "there was nothing to type into" comes back as a state update. It has
-    // to land as a toast rather than an error modal — a missed dictation is not
-    // a failure the user must dismiss.
+/// An App with STT on and a stand-in listener, so Alt-T can open "the
+/// microphone" without one; the receiver sees what the listener was told.
+fn app_with_fake_listener() -> (
+    App,
+    tokio::sync::mpsc::UnboundedReceiver<claude_commander_core::conversation::ListenerCommand>,
+) {
     let mut app = make_test_app();
-    app.handle_state_update(StateUpdate::DictationUndeliverable)
-        .await;
-    let (msg, _) = app
-        .ui_state
+    app.config.stt.enabled = true;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    app.conversation.listener.replace(tx);
+    (app, rx)
+}
+
+fn toast(app: &App) -> String {
+    app.ui_state
         .status_message
         .clone()
-        .expect("an undeliverable transcript must toast");
+        .expect("expected a status toast")
+        .0
+}
+
+fn draft_text(app: &App) -> String {
+    match &app.ui_state.modal {
+        Modal::ReviewDiff(state) => state
+            .comment
+            .as_ref()
+            .expect("comment draft closed")
+            .input
+            .value()
+            .to_string(),
+        _ => panic!("review view closed"),
+    }
+}
+
+fn review_with_open_comment(app: &mut App) {
+    let mut state = review_state_for(SessionId::new());
+    state.begin_comment();
+    app.ui_state.modal = Modal::ReviewDiff(state);
+}
+
+#[tokio::test]
+async fn dictated_text_types_into_an_open_review_comment() {
+    let mut app = make_test_app();
+    review_with_open_comment(&mut app);
+    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
+        "use a helper here".into(),
+    )))
+    .await;
+    assert_eq!(draft_text(&app), "use a helper here");
+    assert!(toast(&app).contains("Typed"));
+}
+
+#[tokio::test]
+async fn dictated_text_types_into_a_text_input_modal() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Input {
+        title: String::new(),
+        prompt: String::new(),
+        value: Input::from("fix "),
+        on_submit: InputAction::AddProject,
+        existing_branches: None,
+        project_picker: None,
+        program_picker: None,
+        server_picker: None,
+        section_picker: None,
+        focus: crate::app::InputFocus::Name,
+        expanded: false,
+        mask: false,
+    };
+    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
+        "the login bug".into(),
+    )))
+    .await;
+    match &app.ui_state.modal {
+        Modal::Input { value, .. } => assert_eq!(value.value(), "fix the login bug"),
+        _ => panic!("input modal closed"),
+    }
+}
+
+#[tokio::test]
+async fn dictated_text_types_into_the_conversation_input() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Conversation {
+        input: Input::default(),
+        scroll: 0,
+    };
+    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
+        "what's running".into(),
+    )))
+    .await;
+    match &app.ui_state.modal {
+        Modal::Conversation { input, .. } => assert_eq!(input.value(), "what's running"),
+        _ => panic!("conversation overlay closed"),
+    }
+}
+
+#[tokio::test]
+async fn dictated_text_is_not_typed_into_a_masked_field() {
+    // A masked field holds a secret; speaking one to a transcription server
+    // is not something dictation should invite.
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Input {
+        title: String::new(),
+        prompt: String::new(),
+        value: Input::default(),
+        on_submit: InputAction::AddProject,
+        existing_branches: None,
+        project_picker: None,
+        program_picker: None,
+        server_picker: None,
+        section_picker: None,
+        focus: crate::app::InputFocus::Name,
+        expanded: false,
+        mask: true,
+    };
+    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
+        "hunter2".into(),
+    )))
+    .await;
+    match &app.ui_state.modal {
+        Modal::Input { value, .. } => assert_eq!(value.value(), ""),
+        _ => panic!("input modal closed"),
+    }
+}
+
+#[tokio::test]
+async fn dictated_text_with_no_text_field_toasts() {
+    // The modal closed (or the user detached) while they spoke. It has to
+    // land as a toast rather than an error modal — a missed dictation is not
+    // a failure the user must dismiss.
+    let mut app = make_test_app();
+    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
+        "hello".into(),
+    )))
+    .await;
     assert!(
-        msg.contains("Attach to a session to dictate into it"),
-        "unexpected toast: {msg}"
+        toast(&app).contains("Open a text field or attach to a session to dictate"),
+        "unexpected toast: {}",
+        toast(&app)
     );
     assert!(
         !matches!(app.ui_state.modal, Modal::Error { .. }),
@@ -10269,28 +10448,118 @@ async fn dictation_undeliverable_update_sets_status_toast() {
 }
 
 #[tokio::test]
-async fn toggle_dictation_when_idle_in_list_toasts_and_does_not_record() {
-    // Dictation is attach-only: from the session list there is no pane to type
-    // into, so Alt-T must say so rather than open the microphone and collect a
-    // transcript with nowhere to go.
+async fn dictated_text_with_the_review_open_but_no_comment_is_not_typed() {
+    // The review view only has a text field while a comment draft is open.
     let mut app = make_test_app();
-    app.config.stt.enabled = true;
+    app.ui_state.modal = Modal::ReviewDiff(review_state_for(SessionId::new()));
+    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Text(
+        "hello".into(),
+    )))
+    .await;
+    match &app.ui_state.modal {
+        Modal::ReviewDiff(state) => assert!(state.comment.is_none()),
+        _ => panic!("review view closed"),
+    }
+    assert!(toast(&app).contains("Open a text field"));
+}
+
+#[tokio::test]
+async fn dictation_failures_toast_in_the_ui() {
+    let mut app = make_test_app();
+    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::NothingHeard))
+        .await;
+    assert!(toast(&app).contains("Nothing heard"));
+    app.handle_state_update(StateUpdate::Dictated(DictationOutcome::Failed(
+        "STT down".into(),
+    )))
+    .await;
+    assert!(toast(&app).contains("STT down"));
+}
+
+#[tokio::test]
+async fn toggle_dictation_when_idle_in_list_toasts_and_does_not_record() {
+    // From the bare session list there is nothing to type into, so Alt-T must
+    // say so rather than open the microphone and collect a transcript with
+    // nowhere to go.
+    let (mut app, mut rx) = app_with_fake_listener();
 
     app.toggle_dictation().await;
 
     assert!(
         !app.conversation.is_recording(),
-        "Alt-T must not start recording when nothing is attached"
+        "Alt-T must not start recording with nothing to type into"
     );
-    let (msg, _) = app
-        .ui_state
-        .status_message
-        .clone()
-        .expect("Alt-T must explain why it did nothing");
+    assert!(rx.try_recv().is_err(), "the microphone must not be started");
     assert!(
-        msg.contains("Attach to a session to dictate into it"),
-        "unexpected toast: {msg}"
+        toast(&app).contains("Open a text field or attach to a session to dictate"),
+        "unexpected toast: {}",
+        toast(&app)
     );
+}
+
+#[tokio::test]
+async fn toggle_dictation_starts_recording_with_a_review_comment_open() {
+    use claude_commander_core::conversation::ListenerCommand;
+    let (mut app, mut rx) = app_with_fake_listener();
+    review_with_open_comment(&mut app);
+
+    app.toggle_dictation().await;
+
+    assert!(app.conversation.is_recording());
+    assert!(
+        app.conversation
+            .ui_dictation
+            .load(std::sync::atomic::Ordering::Acquire),
+        "a UI-started recording is marked insert-only"
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ListenerCommand::Start(
+            claude_commander_core::conversation::VoiceMode::Dictation
+        ))
+    ));
+    assert!(toast(&app).contains("Dictating"));
+}
+
+#[tokio::test]
+async fn toggle_dictation_will_not_start_in_the_switcher_over_a_live_attach() {
+    // The in-session switcher is a QuickSwitch modal drawn over a parked
+    // attach. Its transcript would go to the pane behind it (or be lost with
+    // the attach), not into the search box — so Alt-T there records nothing.
+    let (mut app, mut listener_rx) = app_with_fake_listener();
+    let (pane_tx, _pane_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.conversation.injector.install(pane_tx);
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: PaletteMode::Unified,
+        query: Input::default(),
+        matches: Vec::new(),
+        selected_idx: 0,
+        scroll: 0,
+        review: None,
+    };
+
+    app.toggle_dictation().await;
+
+    assert!(!app.conversation.is_recording());
+    assert!(listener_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn toggle_dictation_stop_is_honoured_even_after_the_field_closed() {
+    // Whatever is open when the user stops, the recording must end — the
+    // transcript is placed (or reported) when it comes back.
+    use claude_commander_core::conversation::ListenerCommand;
+    let (mut app, mut rx) = app_with_fake_listener();
+    review_with_open_comment(&mut app);
+    app.toggle_dictation().await;
+    let _ = rx.try_recv();
+    app.ui_state.modal = Modal::None;
+
+    app.toggle_dictation().await;
+
+    assert!(!app.conversation.is_recording());
+    assert!(matches!(rx.try_recv(), Ok(ListenerCommand::Stop)));
+    assert!(toast(&app).contains("Transcribing"));
 }
 
 // ===========================================================================

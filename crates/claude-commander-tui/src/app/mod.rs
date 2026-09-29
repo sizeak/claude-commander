@@ -36,7 +36,9 @@ use ratatui::{
 use tracing::{debug, error, info, warn};
 use tui_input::Input;
 
-use super::event::{AppEvent, EventLoop, InputEvent, RestartKind, StateUpdate, UserCommand};
+use super::event::{
+    AppEvent, DictationOutcome, EventLoop, InputEvent, RestartKind, StateUpdate, UserCommand,
+};
 use super::path_completer::PathCompleter;
 use super::theme::Theme;
 use super::widgets::board::{

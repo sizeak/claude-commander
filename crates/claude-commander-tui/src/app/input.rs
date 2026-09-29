@@ -165,54 +165,106 @@ enum PasteRefilter {
     QuickSwitch,
 }
 
-/// Append clipboard text to the open modal's input field. Newlines are
-/// stripped so a multi-line paste doesn't accidentally submit. Returns
-/// `Some(PasteRefilter::…)` when the caller still needs to recompute a
-/// filtered list via an `&mut self` helper; `None` when handling is
-/// complete (or the modal has no text field).
-fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> {
-    let clean = text.replace(['\n', '\r'], "");
-    match modal {
-        Modal::Input { value, .. } => {
-            super::insert_into_input(value, &clean);
-            None
-        }
+/// The open modal's live text field: where a paste or a dictated transcript
+/// lands. One match ([`text_field`]) decides which modals have one, so paste
+/// and dictation cannot drift apart on it.
+enum TextField<'a> {
+    /// A single-line field with nothing to recompute afterwards.
+    Line(&'a mut Input),
+    /// A single-line query whose filtered list the caller recomputes.
+    Query(&'a mut Input, PasteRefilter),
+    /// The path field, which owns its completer and refilters inline.
+    Path {
+        value: &'a mut Input,
+        completer: &'a mut PathCompleter,
+        scroll: &'a mut usize,
+    },
+    /// The review view's open comment draft.
+    Draft(&'a mut DiffReviewState),
+    /// Settings → Theme: a colour picker, whose text is a hex colour.
+    Colour(&'a mut colour_picker::ColourPicker),
+}
+
+/// The open modal's text field, or `None` when it has none. The review view
+/// only has one while a comment draft is open.
+fn text_field(modal: &mut Modal) -> Option<TextField<'_>> {
+    Some(match modal {
+        Modal::Input { value, .. } => TextField::Line(value),
+        Modal::Conversation { input, .. } => TextField::Line(input),
         Modal::PathInput {
             value,
             completer,
             scroll,
             ..
-        } => {
-            super::insert_into_input(value, &clean);
-            completer.refilter(value.value());
-            *scroll = 0;
-            None
-        }
+        } => TextField::Path {
+            value,
+            completer,
+            scroll,
+        },
         Modal::CheckoutBranch { query, .. } => {
-            super::insert_into_input(query, &clean);
-            Some(PasteRefilter::CheckoutBranch)
+            TextField::Query(query, PasteRefilter::CheckoutBranch)
         }
-        Modal::QuickSwitch { query, .. } => {
-            super::insert_into_input(query, &clean);
-            Some(PasteRefilter::QuickSwitch)
-        }
-        // The comment draft is multi-line capable, so it gets the raw text
-        // (newline handling lives in `paste_into_draft`), not `clean`.
-        Modal::ReviewDiff(state) => {
-            state.paste_into_draft(text);
-            None
-        }
-        // Settings → Theme: a paste over a colour picker is a hex colour,
-        // wherever the picker's focus is.
+        Modal::QuickSwitch { query, .. } => TextField::Query(query, PasteRefilter::QuickSwitch),
+        Modal::ReviewDiff(state) if state.comment.is_some() => TextField::Draft(state),
+        // A paste over a colour picker is a hex colour, wherever the picker's
+        // focus is.
         Modal::Settings(SettingsState {
             editing: Some(super::SettingsEditing::Colour { picker }),
             ..
-        }) => {
-            picker.paste(&clean);
-            None
-        }
-        _ => None,
+        }) => TextField::Colour(picker),
+        _ => return None,
+    })
+}
+
+/// The open modal's text field if dictation may type into it. Narrower than
+/// [`text_field`] in two places: a masked field holds a secret, which is not
+/// something to read aloud to a transcription server (nor could the user see
+/// what was heard), and a colour picker takes hex, which nobody speaks.
+fn dictation_field(modal: &mut Modal) -> Option<TextField<'_>> {
+    if matches!(modal, Modal::Input { mask: true, .. }) {
+        return None;
     }
+    text_field(modal).filter(|f| !matches!(f, TextField::Colour(_)))
+}
+
+impl TextField<'_> {
+    /// Insert `text` at the cursor. Newlines are stripped for every
+    /// single-line field so a multi-line paste doesn't accidentally submit;
+    /// the comment draft is multi-line capable and gets the raw text (newline
+    /// handling lives in `paste_into_draft`). Returns the refilter the caller
+    /// still owes, if any.
+    fn insert(self, text: &str) -> Option<PasteRefilter> {
+        let clean = || text.replace(['\n', '\r'], "");
+        match self {
+            TextField::Line(value) => super::insert_into_input(value, &clean()),
+            TextField::Query(query, refilter) => {
+                super::insert_into_input(query, &clean());
+                return Some(refilter);
+            }
+            TextField::Path {
+                value,
+                completer,
+                scroll,
+            } => {
+                super::insert_into_input(value, &clean());
+                completer.refilter(value.value());
+                *scroll = 0;
+            }
+            TextField::Draft(state) => {
+                state.paste_into_draft(text);
+            }
+            TextField::Colour(picker) => picker.paste(&clean()),
+        }
+        None
+    }
+}
+
+/// Append clipboard text to the open modal's text field (see [`TextField`]).
+/// Returns `Some(PasteRefilter::…)` when the caller still needs to recompute a
+/// filtered list via an `&mut self` helper; `None` when handling is complete
+/// (or the modal has no text field).
+fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> {
+    text_field(modal)?.insert(text)
 }
 
 /// Whether `key` should open the quick-switch palette: the configured leader
@@ -752,13 +804,39 @@ impl App {
                 // A paste refilters the list, so drop any pending first-click.
                 self.ui_state.modal_list_last_click = None;
                 // Handle paste in modal input, ignore otherwise
-                match apply_paste_to_modal(&mut self.ui_state.modal, &text) {
-                    Some(PasteRefilter::CheckoutBranch) => self.refilter_checkout_branches(),
-                    Some(PasteRefilter::QuickSwitch) => self.refilter_quick_switch(),
-                    None => {}
-                }
+                let refilter = apply_paste_to_modal(&mut self.ui_state.modal, &text);
+                self.finish_text_insert(refilter);
             }
         }
+    }
+
+    /// Run the refilter a [`TextField::insert`] left to the caller.
+    fn finish_text_insert(&mut self, refilter: Option<PasteRefilter>) {
+        match refilter {
+            Some(PasteRefilter::CheckoutBranch) => self.refilter_checkout_branches(),
+            Some(PasteRefilter::QuickSwitch) => self.refilter_quick_switch(),
+            None => {}
+        }
+    }
+
+    /// Whether the open modal has a text field dictation may type into.
+    pub(super) fn modal_accepts_dictation(&mut self) -> bool {
+        dictation_field(&mut self.ui_state.modal).is_some()
+    }
+
+    /// Type a dictated transcript into the open modal's text field, exactly as
+    /// a paste would land. Returns `false` (and changes nothing) when there is
+    /// no such field — the modal closed, or changed, while the user spoke.
+    pub(super) fn dictate_into_modal(&mut self, text: &str) -> bool {
+        let Some(field) = dictation_field(&mut self.ui_state.modal) else {
+            return false;
+        };
+        let refilter = field.insert(text);
+        // The insert can refilter a list, so a pending first-click no longer
+        // points at a meaningful row — the same reset a paste does.
+        self.ui_state.modal_list_last_click = None;
+        self.finish_text_insert(refilter);
+        true
     }
 
     /// Handle modal key input
@@ -2381,6 +2459,51 @@ diff --git a/a.rs b/a.rs
             }
             _ => panic!("modal variant changed"),
         }
+    }
+
+    #[test]
+    fn paste_into_the_conversation_input_appends() {
+        // Regression: the overlay's input had no paste arm, so a paste there
+        // was silently dropped. It shares `text_field` with dictation now.
+        let mut modal = Modal::Conversation {
+            input: "hi ".into(),
+            scroll: 0,
+        };
+        assert_eq!(apply_paste_to_modal(&mut modal, "there\n"), None);
+        match modal {
+            Modal::Conversation { input, .. } => assert_eq!(input.value(), "hi there"),
+            _ => panic!("modal variant changed"),
+        }
+    }
+
+    #[test]
+    fn review_without_an_open_comment_has_no_text_field() {
+        let mut modal = review_modal_with_open_draft();
+        if let Modal::ReviewDiff(state) = &mut modal {
+            state.comment = None;
+        }
+        assert!(text_field(&mut modal).is_none());
+        assert!(dictation_field(&mut modal).is_none());
+    }
+
+    #[test]
+    fn dictation_takes_every_text_field_but_secrets() {
+        // Dictation and paste share one list of text fields; dictation only
+        // narrows it by the masked (secret) field.
+        assert!(dictation_field(&mut input_modal("")).is_some());
+        assert!(dictation_field(&mut quick_switch_modal("")).is_some());
+        assert!(dictation_field(&mut checkout_modal("")).is_some());
+        assert!(dictation_field(&mut review_modal_with_open_draft()).is_some());
+        let mut masked = input_modal("");
+        if let Modal::Input { mask, .. } = &mut masked {
+            *mask = true;
+        }
+        assert!(
+            text_field(&mut masked).is_some(),
+            "a secret still takes a paste"
+        );
+        assert!(dictation_field(&mut masked).is_none());
+        assert!(dictation_field(&mut Modal::None).is_none());
     }
 
     #[test]
