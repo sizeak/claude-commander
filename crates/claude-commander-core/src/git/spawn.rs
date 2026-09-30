@@ -119,7 +119,10 @@ fn detach_controlling_terminal() -> io::Result<()> {
         return Ok(());
     }
     unsafe {
-        libc::ioctl(fd, libc::TIOCNOTTY);
+        // `as _`: the ioctl request parameter is `c_ulong` on macOS/BSD and
+        // Linux glibc but `c_int` on musl, and the `TIOC*` constants' own
+        // types vary too (`u32` on macOS), so let the compiler infer it.
+        libc::ioctl(fd, libc::TIOCNOTTY as _);
         libc::close(fd);
     }
     Ok(())
@@ -303,7 +306,8 @@ mod tests {
                 if nix::libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                if nix::libc::ioctl(slave_fd, nix::libc::TIOCSCTTY, 0) < 0 {
+                // `as _`: see `detach_controlling_terminal`.
+                if nix::libc::ioctl(slave_fd, nix::libc::TIOCSCTTY as _, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(())
