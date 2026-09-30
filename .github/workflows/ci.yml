@@ -221,6 +221,52 @@ jobs:
           GIT_CONFIG_GLOBAL: ${{ runner.temp }}/poisoned-gitconfig
         run: nix develop -c cargo test --workspace
 
+  test-macos:
+    name: macOS Build & Test
+    # Every other Rust job runs on Linux, and Client Apple Builds only compiles
+    # client/rust, which does not depend on core. So nothing compiled core for
+    # macOS, and a Linux-only type (`TIOCNOTTY` is `u32` there, where `ioctl`
+    # takes `c_ulong`) broke the macOS build on main unnoticed. Free for public
+    # repositories, like the Client Apple job's runner.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v30
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+
+      # Its own keys: the darwin closure and target dir share nothing with the
+      # Linux jobs' caches, and this job is their only writer.
+      - name: Restore Nix Store Cache
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
+
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-workspace-macos
+
+      # Clippy over --all-targets rather than a plain build: it also compiles
+      # the test-only code, where the same mismatch was hiding (`TIOCSCTTY`).
+      - name: Run Clippy
+        run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
+
+      # Same poisoned signer as the Linux Build & Test job.
+      - name: Poison Git Signing
+        run: bash -c 'source scripts/lib/dev-common.sh && cc_poisoned_gitconfig' > "$RUNNER_TEMP/poisoned-gitconfig"
+
+      - name: Run Tests
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/poisoned-gitconfig
+        run: nix develop -c cargo test --workspace
+
   packaging:
     name: Packaging Install
     runs-on: ubuntu-latest
