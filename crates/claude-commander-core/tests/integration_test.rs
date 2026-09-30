@@ -2219,11 +2219,16 @@ async fn tmux_iso(tmpdir: &std::path::Path, args: &[&str]) -> String {
 }
 
 /// A `HeadlessAttach` to a `window-size manual` session (the birth default, born
-/// at 200×50) must resize the tmux window to the *attaching* client's smaller
-/// size. Without the `resize-window` the attach issues, a `manual` window ignores
-/// the pty's SIGWINCH and keeps painting 200-column lines, which a narrower
-/// client (a phone/browser) then wraps into a scrambled mess — the bug this
-/// guards against. A subsequent `ResizeHandle::resize` must move it again.
+/// at 200×50) must fit the tmux window to the *attaching* client. Without the
+/// `resize-window -A` the attach issues, a `manual` window ignores the pty's
+/// SIGWINCH and keeps painting 200-column lines, which a narrower client (a
+/// phone/browser) then wraps into a scrambled mess — the bug this guards against.
+/// A subsequent `ResizeHandle::resize` must move it again.
+///
+/// The window ends up one row *shorter* than the client (80×24 client → 80×23
+/// window): `-A` fits the window to the client the way the client's own resize
+/// would, reserving a row for tmux's status bar. That off-by-one is the whole
+/// reason for `-A` over a fixed `-x`/`-y`, so the assertions pin it.
 #[tokio::test]
 async fn headless_attach_resizes_a_manual_window_to_the_client() {
     use claude_commander_core::tmux::HeadlessAttach;
@@ -2286,24 +2291,26 @@ async fn headless_attach_resizes_a_manual_window_to_the_client() {
         "precondition: the detached manual window is wide"
     );
 
-    // Attach at a much smaller size, as a phone/browser would.
+    // Attach at a much smaller size, as a phone/browser would. The window fits
+    // the 80×24 client minus the status-bar row → 80×23.
     let attach = HeadlessAttach::spawn(session, 80, 24, Some(sock)).expect("spawn attach");
     // Give tmux a moment to apply the resize-window the spawn issued.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(
         size(sock.to_path_buf(), session).await,
-        "80x24",
-        "the attach must shrink the manual window to the client size"
+        "80x23",
+        "the attach must fit the manual window to the client (less the status row)"
     );
 
-    // A later resize (a browser window resize) must move it again.
+    // A later resize (a browser window resize) must move it again: 120×40 client
+    // → 120×39 window.
     let (_r, _w, resize, mut child) = attach.split();
     resize.resize(120, 40);
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(
         size(sock.to_path_buf(), session).await,
-        "120x40",
-        "a ResizeHandle::resize must re-size the manual window"
+        "120x39",
+        "a ResizeHandle::resize must re-fit the manual window"
     );
 
     child.kill().await;
