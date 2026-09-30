@@ -1877,7 +1877,11 @@ mod input_reader_tests {
         );
 
         gate.open();
-        // A second stop now observes the exit and forgets the reader.
+        // A second stop now observes the exit and forgets the reader. It is
+        // expected to complete, so give it the real grace: the shortened one
+        // exists to time out the wedged stop, and a loaded runner can take
+        // longer than 50ms to schedule the reader's exit.
+        ev.stop_grace = INPUT_STOP_GRACE;
         ev.stop_input().await;
         assert_eq!(overlap.live.load(Ordering::Acquire), 0);
         assert!(ev.input_reader.is_none());
@@ -1914,6 +1918,8 @@ mod input_reader_tests {
         assert_eq!(overlap.live.load(Ordering::Acquire), 0, "wedged one gone");
         assert_eq!(idle.live.load(Ordering::Acquire), 1);
 
+        // A normal stop, so the real grace (see the test above).
+        ev.stop_grace = INPUT_STOP_GRACE;
         ev.stop_input().await;
         assert_eq!(idle.live.load(Ordering::Acquire), 0);
     }

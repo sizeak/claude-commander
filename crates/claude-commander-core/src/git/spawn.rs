@@ -216,22 +216,15 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::AsyncWriteExt;
 
-    /// `tty_nr` is field 7 of `/proc/<pid>/stat` (`proc_pid_stat(5)`): the
-    /// controlling terminal, 0 when there is none. Read from inside the child so
-    /// it is the child's own view.
-    fn tty_nr_of(stat: &str) -> i64 {
-        // The comm field (2) is parenthesised and may contain spaces; split
-        // after its closing paren.
-        let rest = &stat[stat.rfind(')').expect("stat has a comm field") + 2..];
-        rest.split_whitespace()
-            .nth(4) // fields 3..: state, ppid, pgrp, session, tty_nr
-            .expect("tty_nr field")
-            .parse()
-            .expect("tty_nr is numeric")
-    }
+    /// Prints `TTY` if the running shell has a controlling terminal, else
+    /// `NOTTY`. `open("/dev/tty")` fails with `ENXIO` exactly when the caller
+    /// has none (`tty(4)` on both Linux and macOS), so this is the portable
+    /// probe; `/proc/<pid>/stat`'s `tty_nr` would be Linux-only. A subshell
+    /// because a failed redirection is fatal in non-interactive sh.
+    const TTY_PROBE: &str = "( : </dev/tty ) 2>/dev/null && echo TTY || echo NOTTY";
 
-    fn own_tty_nr() -> i64 {
-        tty_nr_of(&std::fs::read_to_string("/proc/self/stat").unwrap())
+    fn probe_output(out: std::process::Output) -> String {
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
     /// Set by [`detach_holds_under_a_real_controlling_terminal`] on the inner
@@ -241,38 +234,47 @@ mod tests {
     /// The property that holds by construction: a child spawned through here
     /// has no controlling terminal, so `open("/dev/tty")` cannot succeed in it
     /// or anything it runs. On its own this is only meaningful when the test
-    /// process *has* a terminal (a developer's `cargo test`; a CI runner reads 0
-    /// on both sides) — which is why the outer test below re-runs it under a
+    /// process *has* a terminal (a developer's `cargo test`; on a CI runner both
+    /// sides are `NOTTY`) — which is why the outer test below re-runs it under a
     /// pty it makes the controlling terminal.
     #[tokio::test]
     async fn children_have_no_controlling_terminal() {
         if std::env::var_os(INNER_RUN).is_some() {
-            assert_ne!(own_tty_nr(), 0, "the outer test promised us a terminal");
+            // Positive control: an ordinary child sees the terminal, so the
+            // probe can detect one and a `NOTTY` below means something.
+            let out = tokio::process::Command::new("sh")
+                .args(["-c", TTY_PROBE])
+                .output()
+                .await
+                .unwrap();
+            assert_eq!(
+                probe_output(out),
+                "TTY",
+                "the outer test promised us a terminal"
+            );
         }
-        let out = detached("cat")
-            .arg("/proc/self/stat")
+        let out = detached("sh")
+            .args(["-c", TTY_PROBE])
             .output()
             .await
             .unwrap();
-        let child = tty_nr_of(&String::from_utf8_lossy(&out.stdout));
         assert_eq!(
-            child,
-            0,
-            "child kept a controlling terminal (ours is {})",
-            own_tty_nr()
+            probe_output(out),
+            "NOTTY",
+            "child kept a controlling terminal"
         );
 
         // And a grandchild, which is where ssh sits under git.
         let out = detached("sh")
-            // A subshell: a failed `exec` redirection is fatal in non-interactive sh.
-            .args([
-                "-c",
-                "( : </dev/tty ) 2>/dev/null && echo TTY || echo NOTTY",
-            ])
+            .args(["-c", &format!("sh -c '{TTY_PROBE}'")])
             .output()
             .await
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "NOTTY");
+        assert_eq!(
+            probe_output(out),
+            "NOTTY",
+            "grandchild found a controlling terminal"
+        );
     }
 
     /// Run `children_have_no_controlling_terminal` in a child that genuinely
@@ -333,8 +335,8 @@ mod tests {
 
     #[test]
     fn the_std_variant_detaches_too() {
-        let out = detached_std("cat").arg("/proc/self/stat").output().unwrap();
-        assert_eq!(tty_nr_of(&String::from_utf8_lossy(&out.stdout)), 0);
+        let out = detached_std("sh").args(["-c", TTY_PROBE]).output().unwrap();
+        assert_eq!(probe_output(out), "NOTTY");
     }
 
     #[tokio::test]
