@@ -17,6 +17,7 @@ import {
   GoneRecovery,
   type Halt,
   parseControl,
+  refreshFrame,
   resizeFrame,
   wsAttachUrl,
 } from "./ws.ts";
@@ -207,7 +208,14 @@ export function sendResize(): void {
 }
 
 function sendResizeNow(): void {
-  if (term?.cols && term.rows) sendControl(resizeFrame(term.cols, term.rows));
+  if (!term?.cols || !term.rows) return;
+  sendControl(resizeFrame(term.cols, term.rows));
+  // Force a full repaint at the new size. A local xterm fit() has already
+  // reflowed the browser buffer to this width, but tmux only repaints
+  // incrementally after a resize, so without this any line it re-wrapped at
+  // the new width stays desynced (words merge, glyphs overlap). Frames are
+  // ordered, so the server applies the resize before this refresh.
+  sendControl(refreshFrame());
 }
 
 // ---- the attach socket -------------------------------------------------------

@@ -10,6 +10,8 @@ import {
   GoneRecovery,
   parseControl,
   RECONNECT_MAX_MS,
+  refreshFrame,
+  resizeFrame,
   selectAction,
   wsAttachUrl,
 } from "../src/ws.ts";
@@ -39,6 +41,11 @@ describe("attach frames", () => {
       type: "attach",
       session_id: "s1",
     });
+  });
+
+  test("resize carries the new geometry; refresh is a bare repaint request", () => {
+    assert.deepEqual(resizeFrame(120, 40), { type: "resize", cols: 120, rows: 40 });
+    assert.deepEqual(refreshFrame(), { type: "refresh" });
   });
 
   test("parseControl rejects what is not a control frame", () => {

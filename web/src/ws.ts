@@ -45,6 +45,18 @@ export function resizeFrame(cols: number, rows: number): ClientControl {
   return { type: "resize", cols, rows };
 }
 
+/**
+ * Ask the server to force a full repaint of the pane (`tmux refresh-client`).
+ * Sent after a resize: a local xterm `fit()` reflows the browser buffer to the
+ * new width *before* tmux is told the new size, and tmux's post-resize repaint
+ * is incremental (no full-screen clear), so any line xterm re-wrapped at the
+ * new width but tmux still believes is at the old one is never corrected —
+ * words run together and glyphs overlap. A full repaint clears that desync.
+ */
+export function refreshFrame(): ClientControl {
+  return { type: "refresh" };
+}
+
 export function parseControl(text: string): ServerControl | null {
   try {
     const msg = JSON.parse(text) as ServerControl;
