@@ -18,6 +18,7 @@
 
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -69,6 +70,41 @@ fn pts_name(master_fd: RawFd) -> Option<String> {
     Some(name.to_string_lossy().into_owned())
 }
 
+/// Set the target session's window to `cols`×`rows` via `tmux resize-window`.
+///
+/// Makes a `window-size manual` session (the birth default, 200×50) follow the
+/// attaching client — see the call site in [`HeadlessAttach::spawn`] for why the
+/// pty's SIGWINCH alone doesn't. Swallows failures with a warning: it is a
+/// best-effort correction, and the attach itself is already live.
+///
+/// Blocks on the (fast, local-socket) `tmux` call and reaps it, rather than
+/// leaking a zombie from a fire-and-forget spawn. Called at attach time (already
+/// a sync path) and from [`ResizeHandle::resize`], where resizes are debounced
+/// well apart client-side, so the brief block does not meaningfully stall the
+/// attach pump.
+fn resize_window(session_name: &str, cols: u16, rows: u16, tmux_tmpdir: Option<&Path>) {
+    let mut cmd = std::process::Command::new("tmux");
+    cmd.args([
+        "resize-window",
+        "-t",
+        session_name,
+        "-x",
+        &cols.to_string(),
+        "-y",
+        &rows.to_string(),
+    ]);
+    match cmd.with_tmux_tmpdir(tmux_tmpdir).status() {
+        Ok(s) if !s.success() => {
+            warn!(
+                "tmux resize-window -t {session_name} {cols}x{rows} exited with {:?}",
+                s.code()
+            )
+        }
+        Err(e) => warn!("failed to spawn tmux resize-window: {e}"),
+        _ => {}
+    }
+}
+
 /// A live `tmux attach-session` running inside a PTY.
 ///
 /// Holds the PTY (for I/O + resize) and the child process. Use [`Self::split`]
@@ -82,9 +118,12 @@ pub struct HeadlessAttach {
     /// `tmux list-clients -F '#{client_tty}'` return the same string. `None` if
     /// the lookup failed, which only disables the repaint.
     client_tty: Option<String>,
-    /// Kept so the refresher's `tmux` subprocess lands on the same socket dir as
-    /// the client it is refreshing (the server bridge runs isolated).
-    tmux_tmpdir: Option<std::path::PathBuf>,
+    /// The tmux session this attach is on. Shared into the [`ResizeHandle`] so a
+    /// resize can drive `resize-window` as well as the pty ioctl.
+    session_name: Arc<str>,
+    /// Kept so the refresher's/resizer's `tmux` subprocess lands on the same
+    /// socket dir as the client it acts on (the server bridge runs isolated).
+    tmux_tmpdir: Option<Arc<Path>>,
 }
 
 impl HeadlessAttach {
@@ -127,11 +166,24 @@ impl HeadlessAttach {
             session_name, client_tty
         );
 
+        // Force the window to the attaching client's size. Sessions are born at
+        // 200x50 with `window-size manual` (so a *detached* session holds a wide
+        // pane for the TUI's capture), and a `manual` window does **not** shrink
+        // to a client that attaches narrower than it — the pty's SIGWINCH is
+        // ignored. Without this, a phone/browser attach to a wide session renders
+        // 200-column lines wrapped into its ~80-column grid: words run together
+        // and glyphs overlap. `resize-window` sets the size directly under
+        // `manual`, and is a harmless no-op on a session that already follows its
+        // client. Non-fatal: a failure leaves the previous (wrong) size, which is
+        // no worse than not trying.
+        resize_window(session_name, cols, rows, tmux_tmpdir);
+
         Ok(Self {
             pty,
             child,
             client_tty,
-            tmux_tmpdir: tmux_tmpdir.map(Path::to_path_buf),
+            session_name: session_name.into(),
+            tmux_tmpdir: tmux_tmpdir.map(Arc::from),
         })
     }
 
@@ -168,6 +220,8 @@ impl HeadlessAttach {
     pub fn resize_handle(&self) -> ResizeHandle {
         ResizeHandle {
             fd: self.pty.as_raw_fd(),
+            session_name: self.session_name.clone(),
+            tmux_tmpdir: self.tmux_tmpdir.clone(),
         }
     }
 
@@ -244,15 +298,21 @@ impl AttachTerminator for PtyTerminator {
     }
 }
 
-/// Resizes a PTY by raw fd via the `TIOCSWINSZ` ioctl. Holds only the fd, so it
-/// is cheap to copy and can live in a different task than the PTY halves.
-#[derive(Debug, Clone, Copy)]
+/// Resizes an attach to `cols`×`rows`. Holds the PTY fd (for the `TIOCSWINSZ`
+/// ioctl) plus the tmux session name and socket dir, so it can also issue a
+/// `resize-window` — the ioctl alone is silently ignored by a `window-size
+/// manual` session (see [`resize_window`] and [`HeadlessAttach::spawn`]). The
+/// `Arc`-shared strings keep it cheap to clone across tasks.
+#[derive(Debug, Clone)]
 pub struct ResizeHandle {
     fd: RawFd,
+    session_name: Arc<str>,
+    tmux_tmpdir: Option<Arc<Path>>,
 }
 
 impl ResizeHandle {
-    /// Resize the PTY to `cols`×`rows`.
+    /// Resize the attach to `cols`×`rows`: the PTY (so the client sees the new
+    /// size) and, because a `manual` window ignores that, the tmux window too.
     pub fn resize(&self, cols: u16, rows: u16) {
         use nix::libc::{TIOCSWINSZ, ioctl, winsize};
 
@@ -266,6 +326,12 @@ impl ResizeHandle {
         // SAFETY: fd comes from a live PTY (`Pty::as_raw_fd`) that outlives this
         // handle in practice; `ws` is a valid stack pointer for the call.
         let rc = unsafe { ioctl(self.fd, TIOCSWINSZ, &ws) };
+
+        // Drive the tmux window too: a `window-size manual` session (the birth
+        // default) won't follow the pty's SIGWINCH, so a browser resize would
+        // otherwise leave the pane at its old width and mis-wrap every line.
+        resize_window(&self.session_name, cols, rows, self.tmux_tmpdir.as_deref());
+
         if rc != 0 {
             // A resize failure is non-fatal (the PTY keeps its previous size),
             // but worth surfacing rather than silently swallowing.

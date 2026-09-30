@@ -2203,3 +2203,109 @@ async fn ensure_project_deduplicates_a_non_canonical_spelling_of_the_same_repo()
         "the symlinked spelling must not register a second project"
     );
 }
+
+/// Run a tmux command against an isolated server (its own `TMUX_TMPDIR`, no
+/// inherited `$TMUX`), returning trimmed stdout. Panics on a spawn failure.
+async fn tmux_iso(tmpdir: &std::path::Path, args: &[&str]) -> String {
+    let out = tokio::process::Command::new("tmux")
+        .args(args)
+        .env("TMUX_TMPDIR", tmpdir)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .expect("failed to spawn tmux");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A `HeadlessAttach` to a `window-size manual` session (the birth default, born
+/// at 200×50) must resize the tmux window to the *attaching* client's smaller
+/// size. Without the `resize-window` the attach issues, a `manual` window ignores
+/// the pty's SIGWINCH and keeps painting 200-column lines, which a narrower
+/// client (a phone/browser) then wraps into a scrambled mess — the bug this
+/// guards against. A subsequent `ResizeHandle::resize` must move it again.
+#[tokio::test]
+async fn headless_attach_resizes_a_manual_window_to_the_client() {
+    use claude_commander_core::tmux::HeadlessAttach;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let sock = tmp.path();
+    let session = "cc-resize-test";
+
+    // A session born the way core births them: wide, and pinned with
+    // `window-size manual` so it holds that size while detached.
+    tmux_iso(
+        sock,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-x",
+            "200",
+            "-y",
+            "50",
+            "sh",
+            "-c",
+            "while true; do sleep 1; done",
+        ],
+    )
+    .await;
+    tmux_iso(
+        sock,
+        &["set-option", "-t", session, "window-size", "manual"],
+    )
+    .await;
+    tmux_iso(
+        sock,
+        &["resize-window", "-t", session, "-x", "200", "-y", "50"],
+    )
+    .await;
+
+    let size = |sock: std::path::PathBuf, session: &'static str| async move {
+        tmux_iso(
+            &sock,
+            &[
+                "display-message",
+                "-t",
+                session,
+                "-p",
+                "#{window_width}x#{window_height}",
+            ],
+        )
+        .await
+    };
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "200x50",
+        "precondition: the detached manual window is wide"
+    );
+
+    // Attach at a much smaller size, as a phone/browser would.
+    let attach = HeadlessAttach::spawn(session, 80, 24, Some(sock)).expect("spawn attach");
+    // Give tmux a moment to apply the resize-window the spawn issued.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "80x24",
+        "the attach must shrink the manual window to the client size"
+    );
+
+    // A later resize (a browser window resize) must move it again.
+    let (_r, _w, resize, mut child) = attach.split();
+    resize.resize(120, 40);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "120x40",
+        "a ResizeHandle::resize must re-size the manual window"
+    );
+
+    child.kill().await;
+    tmux_iso(sock, &["kill-server"]).await;
+}
