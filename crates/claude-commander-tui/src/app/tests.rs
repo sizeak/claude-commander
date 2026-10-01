@@ -1398,6 +1398,64 @@ fn test_apply_stt_pause_media_toggle() {
     assert!(!app.config.stt.pause_media);
 }
 
+/// The label of the Voice tab's "Pause Media While Recording" row.
+fn pause_media_label(app: &App) -> String {
+    app.build_settings_rows(SettingsTab::Voice)
+        .into_iter()
+        .find(|r| r.field_key == "stt_pause_media")
+        .expect("pause media row")
+        .label
+}
+
+/// Mark the mic listener as running, as `ensure_listener_started` would.
+fn start_test_listener(app: &App) {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.conversation.listener.replace(tx);
+}
+
+const PAUSE_MEDIA_PENDING: &str = "Pause Media While Recording (restart to apply)";
+
+#[test]
+fn pause_media_row_has_no_restart_note_before_the_listener_starts() {
+    // Nothing has captured the setting yet: the listener reads it when it
+    // starts, so whatever is saved now is what will apply.
+    let mut app = make_test_app();
+    assert_eq!(pause_media_label(&app), "Pause Media While Recording");
+    app.apply_bool_setting("stt_pause_media", false);
+    assert_eq!(pause_media_label(&app), "Pause Media While Recording");
+}
+
+#[test]
+fn enabling_pause_media_on_a_running_listener_notes_the_restart() {
+    // Started with media pausing off: no gate was spawned, so turning the
+    // setting on changes nothing until a restart.
+    let mut app = make_test_app();
+    app.config.stt.pause_media = false;
+    start_test_listener(&app);
+    assert_eq!(pause_media_label(&app), "Pause Media While Recording");
+
+    app.apply_bool_setting("stt_pause_media", true);
+    assert_eq!(pause_media_label(&app), PAUSE_MEDIA_PENDING);
+
+    // Flipping back to what is running clears the note.
+    app.apply_bool_setting("stt_pause_media", false);
+    assert_eq!(pause_media_label(&app), "Pause Media While Recording");
+}
+
+#[test]
+fn disabling_pause_media_on_a_running_gate_notes_the_restart() {
+    // Started with media pausing on: the running gate keeps pausing players
+    // after the setting is turned off, until a restart.
+    let mut app = make_test_app();
+    start_test_listener(&app);
+    let (gate, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.conversation.gate = Some(gate);
+    assert_eq!(pause_media_label(&app), "Pause Media While Recording");
+
+    app.apply_bool_setting("stt_pause_media", false);
+    assert_eq!(pause_media_label(&app), PAUSE_MEDIA_PENDING);
+}
+
 #[test]
 fn test_apply_stt_text_fields() {
     let mut app = make_test_app();

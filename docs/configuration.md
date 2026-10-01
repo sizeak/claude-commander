@@ -541,7 +541,8 @@ While you're recording (and until the assistant has finished its spoken reply), 
 pauses any other media players so they don't talk over the conversation, then resumes whatever was
 playing once things go quiet. It's best-effort — `playerctl` on Linux, `osascript` (Spotify/Music)
 on macOS — and a silent no-op when neither is available, so it never blocks or breaks voice input.
-On by default; set to `false` to leave your media alone.
+On by default; set to `false` to leave your media alone. Unlike the microphone, changing it takes
+a restart once voice input is running — the settings row says "(restart to apply)" until then.
 
 Audio is captured at the microphone's native rate, downmixed to mono, and encoded as 16-bit PCM
 WAV; the server resamples as needed. Recording isn't chunked yet — the whole utterance is uploaded
