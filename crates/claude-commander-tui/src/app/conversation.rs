@@ -654,6 +654,17 @@ impl App {
         self.build_and_store_listener();
     }
 
+    /// Whether the saved `pause_media` differs from what the running app does.
+    ///
+    /// The media gate is spawned once, with the listener, and never respawned:
+    /// toggling the setting afterwards changes nothing until a restart, in
+    /// either direction. Before the listener starts nothing has read the
+    /// setting yet, so there is nothing pending.
+    pub(super) fn pause_media_needs_restart(&self) -> bool {
+        self.conversation.listener.is_present()
+            && self.config.stt.pause_media != self.conversation.gate.is_some()
+    }
+
     /// Rebuild the voice listener with the current STT config after the selected
     /// microphone changes, so the new device takes effect on the next recording
     /// without an app restart. A no-op when STT is off or no listener is running

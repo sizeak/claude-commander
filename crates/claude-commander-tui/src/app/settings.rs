@@ -276,7 +276,11 @@ impl App {
                     ),
                     SettingsRow::text("Microphone", self.input_device_label(), "stt_input_device"),
                     SettingsRow::toggle(
-                        "Pause Media While Recording",
+                        if self.pause_media_needs_restart() {
+                            "Pause Media While Recording (restart to apply)"
+                        } else {
+                            "Pause Media While Recording"
+                        },
                         s.pause_media,
                         "stt_pause_media",
                     ),
