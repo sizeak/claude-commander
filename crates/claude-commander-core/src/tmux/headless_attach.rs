@@ -178,8 +178,17 @@ impl HeadlessAttach {
         let (pty, pts) = pty_process::open()?;
         pty.resize(pty_process::Size::new(rows, cols))?;
 
+        // `-d` detaches any other client from the session as this one attaches.
+        // A tmux window is one size shared by all its clients, and under
+        // `window-size manual` `resize-window -A` fits it to the *largest* — so a
+        // single stale wide client (a browser tab that never cleanly detached, a
+        // left-open TUI) pins the window wide and re-scrambles every narrower
+        // client, defeating the fit below. Found live: a session with a lingering
+        // 205-col client kept a phone's 80-col attach at 205, wrapping every line.
+        // Making each attach the sole client is also the behaviour a remote
+        // terminal wants — whoever attaches last drives the size.
         let mut cmd = pty_process::Command::new("tmux")
-            .args(["attach-session", "-t", session_name])
+            .args(["attach-session", "-d", "-t", session_name])
             .with_tmux_tmpdir(tmux_tmpdir);
         // `tmux attach` refuses to start (or degrades to no IO) when the
         // inherited TERM is missing or "dumb" — the norm for headless hosts
