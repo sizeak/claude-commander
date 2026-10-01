@@ -2316,3 +2316,88 @@ async fn headless_attach_resizes_a_manual_window_to_the_client() {
     child.kill().await;
     tmux_iso(sock, &["kill-server"]).await;
 }
+
+/// The live-server bug: a lingering *wide* client (a browser tab that never
+/// cleanly detached, a left-open TUI) keeps a `window-size manual` window wide,
+/// so `resize-window -A` — which fits to the *largest* client — leaves it wide
+/// and a new narrow attach is still scrambled. The attach's `-d` flag must
+/// detach that other client first, so the window fits the new narrow one.
+///
+/// Reproduces exactly what was seen on the VM: a 200-col client held the window
+/// at 200 while an 80-col phone attach wrapped every line.
+#[tokio::test]
+async fn headless_attach_detaches_a_lingering_wide_client() {
+    use claude_commander_core::tmux::HeadlessAttach;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let sock = tmp.path();
+    let session = "cc-multi-client";
+
+    tmux_iso(
+        sock,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-x",
+            "200",
+            "-y",
+            "50",
+            "sh",
+            "-c",
+            "while true; do sleep 1; done",
+        ],
+    )
+    .await;
+    tmux_iso(
+        sock,
+        &["set-option", "-t", session, "window-size", "manual"],
+    )
+    .await;
+
+    let size = |sock: std::path::PathBuf, session: &'static str| async move {
+        tmux_iso(
+            &sock,
+            &[
+                "display-message",
+                "-t",
+                session,
+                "-p",
+                "#{window_width}x#{window_height}",
+            ],
+        )
+        .await
+    };
+
+    // A wide client attaches first and stays — the lingering 205-col client.
+    let wide = HeadlessAttach::spawn(session, 205, 58, Some(sock)).expect("spawn wide attach");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "205x57",
+        "precondition: the wide client holds the window wide"
+    );
+
+    // Now a narrow client attaches. `-d` must detach the wide one, so `-A` fits
+    // the window to the narrow client (80×24 → 80×23) rather than staying at the
+    // wide client's size.
+    let narrow = HeadlessAttach::spawn(session, 80, 24, Some(sock)).expect("spawn narrow attach");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "80x23",
+        "the narrow attach must detach the wide client and fit the window to itself"
+    );
+
+    let (_wr, _ww, _wre, mut wide_child) = wide.split();
+    let (_nr, _nw, _nre, mut narrow_child) = narrow.split();
+    wide_child.kill().await;
+    narrow_child.kill().await;
+    tmux_iso(sock, &["kill-server"]).await;
+}
