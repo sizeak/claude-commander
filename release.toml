@@ -52,3 +52,16 @@ allow-branch = ["main"]
 pre-release-replacements = [
   { file = "../../packaging/aur/PKGBUILD", search = "^pkgver=.*$", replace = "pkgver={{version}}", exactly = 1 },
 ]
+
+# The Flutter cdylib (client/rust) is its own workspace with its own lockfile,
+# and it path-depends on protocol, viewmodel, client and (dev) core/server/
+# test-support. cargo-release only refreshes the root Cargo.lock, so without
+# this the release commit leaves client/rust/Cargo.lock on the old version and
+# CI's `cargo test --locked` for the cdylib fails on the tagged commit (it did
+# for v0.38.0). Re-resolving offline touches only those path crates' version
+# lines; `git commit -am` then carries the file into the release commit. The
+# hook runs on dry runs too, which must not write.
+pre-release-hook = [
+  "sh", "-c",
+  '[ "$DRY_RUN" = true ] || cargo metadata --offline --format-version 1 --manifest-path "$WORKSPACE_ROOT/client/rust/Cargo.toml" >/dev/null',
+]
