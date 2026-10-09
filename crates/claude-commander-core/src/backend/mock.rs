@@ -72,6 +72,7 @@ pub struct MockBackend {
     /// `(session, program)` pairs passed to [`Self::change_program`], for
     /// call-recording asserts.
     program_changes: Mutex<Vec<(SessionId, String)>>,
+    session_edits: Mutex<Vec<(SessionId, claude_commander_protocol::api::EditSession)>>,
     base_changes: Mutex<Vec<(SessionId, Option<SessionId>)>>,
     /// Count of [`Self::request_pr_refresh`] calls, for call-recording asserts.
     pr_refresh_calls: Mutex<usize>,
@@ -159,6 +160,7 @@ impl MockBackend {
             restarted: Mutex::new(Vec::new()),
             reset: Mutex::new(Vec::new()),
             program_changes: Mutex::new(Vec::new()),
+            session_edits: Mutex::new(Vec::new()),
             base_changes: Mutex::new(Vec::new()),
             pr_refresh_calls: Mutex::new(0),
             read_marked: Mutex::new(Vec::new()),
@@ -239,6 +241,10 @@ impl MockBackend {
     }
 
     /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
+    pub fn session_edits(&self) -> Vec<(SessionId, claude_commander_protocol::api::EditSession)> {
+        self.session_edits.lock().unwrap().clone()
+    }
+
     pub fn program_changes(&self) -> Vec<(SessionId, String)> {
         self.program_changes.lock().unwrap().clone()
     }
@@ -525,6 +531,16 @@ impl CommanderBackend for MockBackend {
         self.guard()?;
         self.deleted.lock().unwrap().push(id);
         Ok(())
+    }
+
+    async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
+        self.guard()?;
+        self.session_edits.lock().unwrap().push((id, edit));
+        Ok(None)
     }
 
     async fn rename_session(&self, _id: SessionId, _title: String) -> BResult<()> {

@@ -635,6 +635,12 @@ pub trait CommanderBackend: Send + Sync {
     /// doing the opposite.
     async fn restart_session_fresh(&self, id: SessionId) -> BResult<()>;
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
+    async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>>;
+
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
     /// Change a session's launch program (the agent harness that runs) and
     /// relaunch its pane fresh so the new program takes effect. Runs on the

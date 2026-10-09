@@ -108,6 +108,18 @@ abstract class CommanderApi {
 
   Future<void> deleteSession({required String handle, required String id});
 
+  Future<String?> editSession({
+    required String handle,
+    required String id,
+    required String title,
+    required String program,
+    String? section,
+    required bool keepAlive,
+    required bool changeBase,
+    String? parentId,
+    required bool restart,
+  });
+
   Future<void> renameSession({
     required String handle,
     required String id,
@@ -552,6 +564,29 @@ class RustCommanderApi implements CommanderApi {
   @override
   Future<void> deleteSession({required String handle, required String id}) =>
       simple.deleteSession(handle: handle, id: id);
+
+  @override
+  Future<String?> editSession({
+    required String handle,
+    required String id,
+    required String title,
+    required String program,
+    String? section,
+    required bool keepAlive,
+    required bool changeBase,
+    String? parentId,
+    required bool restart,
+  }) => simple.editSession(
+    handle: handle,
+    id: id,
+    title: title,
+    program: program,
+    section: section,
+    keepAlive: keepAlive,
+    changeBase: changeBase,
+    parentId: parentId,
+    restart: restart,
+  );
 
   @override
   Future<void> renameSession({

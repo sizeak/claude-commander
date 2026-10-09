@@ -447,6 +447,20 @@ impl App {
                     }
                 }
             }
+            StateUpdate::SessionEditOptionsLoaded { session, result } => {
+                if let Modal::EditSession(editor) | Modal::EditSessionRestart(editor) =
+                    &mut self.ui_state.modal
+                    && editor.session == session
+                {
+                    match result {
+                        Ok(options) => editor.load_options(options),
+                        Err(message) => {
+                            self.ui_state.status_message =
+                                Some((message, Instant::now() + Duration::from_secs(4)))
+                        }
+                    }
+                }
+            }
             StateUpdate::SessionMutationApplied {
                 backend_id,
                 session_id,

@@ -35,6 +35,7 @@ export * from "./DetachReason";
 export * from "./DiffLine";
 export * from "./DiffSide";
 export * from "./DiffStat";
+export * from "./EditSession";
 export * from "./FileDiff";
 export * from "./FileStatus";
 export * from "./GithubRepo";

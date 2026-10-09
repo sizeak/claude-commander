@@ -150,6 +150,14 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
+    async fn edit_session(
+        &self,
+        _id: SessionId,
+        _edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
+        self.unavailable()
+    }
+
     async fn rename_session(&self, _id: SessionId, _title: String) -> BResult<()> {
         self.unavailable()
     }

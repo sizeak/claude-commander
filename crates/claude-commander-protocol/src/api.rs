@@ -32,7 +32,11 @@ pub struct SessionInfo {
     pub title: String,
     pub branch: String,
     pub status: SessionStatus,
+    // Program used by the current agent pane.
     pub program: String,
+    // Program saved for the next fresh restart, if different from the live one.
+    #[serde(default)]
+    pub pending_program: Option<String>,
     pub project_id: ProjectId,
     pub project_name: String,
     pub pr_number: Option<u32>,
@@ -585,6 +589,21 @@ pub struct ChangeProgram {
     pub program: String,
 }
 
+/// All editable session settings. Omit `base` to preserve the current stack base.
+/// Program changes can be saved for the next restart, or launched fresh now.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EditSession {
+    pub title: String,
+    pub program: String,
+    pub section: Option<String>,
+    pub keep_alive: bool,
+    #[serde(default)]
+    pub base: Option<SetSessionBase>,
+    #[serde(default)]
+    pub restart: bool,
+}
+
 /// `PATCH /sessions/{id}` body: rename a session, move it to a section
 /// (`section: null` clears the manual override), or change its launch program.
 /// Tagged by `op` so a section clear (`null`) is unambiguous.
@@ -595,6 +614,7 @@ pub enum PatchSession {
     Rename(RenameSession),
     SetSection(SetSection),
     ChangeProgram(ChangeProgram),
+    Edit(EditSession),
 }
 
 /// `POST /sessions/unread` body: the session ids (full UUIDs) to flag unread.

@@ -47,6 +47,7 @@ pub enum BindableAction {
     CheckoutBranch,
     DeleteSession,
     DeleteMergedPrSessions,
+    EditSession,
     RenameSession,
     RestartSession,
     ResetSession,
@@ -109,6 +110,7 @@ impl BindableAction {
         Self::Select,
         Self::SelectShell,
         Self::NewSession,
+        Self::EditSession,
         Self::RenameSession,
         Self::RestartSession,
         Self::ResetSession,
@@ -199,6 +201,7 @@ impl BindableAction {
             Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
             Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
+            Self::EditSession => "edit_session",
             Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
             Self::ResetSession => "reset_session",
@@ -269,6 +272,7 @@ impl BindableAction {
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
             Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
+            Self::EditSession => "Edit session…",
             Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
             Self::ResetSession => "Reset session (restart without resuming)",
@@ -345,6 +349,7 @@ impl BindableAction {
             Self::CheckoutBranch => "checkout",
             Self::DeleteSession => "delete",
             Self::DeleteMergedPrSessions => "delete merged",
+            Self::EditSession => "edit",
             Self::RenameSession => "rename",
             Self::RestartSession => "restart",
             Self::ResetSession => "reset",
@@ -407,6 +412,7 @@ impl BindableAction {
             Self::Select
             | Self::SelectShell
             | Self::NewSession
+            | Self::EditSession
             | Self::RenameSession
             | Self::RestartSession
             | Self::ResetSession
@@ -485,6 +491,7 @@ impl FromStr for BindableAction {
             "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
             "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
+            "edit_session" => Ok(Self::EditSession),
             "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
             "reset_session" => Ok(Self::ResetSession),
@@ -848,6 +855,7 @@ impl Default for KeyBindings {
             BindableAction::DeleteSession,
             vec![kb(KeyCode::Char('d'), none)],
         );
+        bindings.insert(BindableAction::EditSession, vec![kb(KeyCode::F(2), none)]);
         // RenameSession has no default key — it's reachable via the command
         // palette. `r` is given to OpenReviewDiff so it pairs with the
         // attached-session Alt-r review toggle.
