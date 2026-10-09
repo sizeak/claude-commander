@@ -1339,6 +1339,24 @@ mod tests {
     }
 
     #[test]
+    fn shift_e_edits_session_and_bare_e_remains_text_input() {
+        let bindings = kb();
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+            assert!(matches!(
+                UserCommand::from_key(KeyEvent::new(KeyCode::Char('E'), modifiers), &bindings),
+                Some(UserCommand::EditSession)
+            ));
+        }
+        assert!(matches!(
+            UserCommand::from_key(
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                &bindings,
+            ),
+            Some(UserCommand::TextInput('e'))
+        ));
+    }
+
+    #[test]
     fn test_session_management_keys() {
         let b = kb();
         let cases: Vec<(KeyCode, KeyModifiers, UserCommand)> = vec![
