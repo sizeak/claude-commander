@@ -174,6 +174,7 @@ class _EditSessionDialogState extends State<EditSessionDialog> {
                 ),
                 if (_options?.programs.isNotEmpty == true)
                   DropdownButtonFormField<String>(
+                    isExpanded: true,
                     initialValue: null,
                     decoration: const InputDecoration(
                       labelText: 'Configured programs',
@@ -182,7 +183,7 @@ class _EditSessionDialogState extends State<EditSessionDialog> {
                       for (final p in _options!.programs)
                         DropdownMenuItem(
                           value: p.command,
-                          child: Text(p.label),
+                          child: Text(p.label, overflow: TextOverflow.ellipsis),
                         ),
                     ],
                     onChanged: (value) {
@@ -190,17 +191,22 @@ class _EditSessionDialogState extends State<EditSessionDialog> {
                     },
                   ),
                 DropdownButtonFormField<String>(
+                  isExpanded: true,
                   initialValue: _section ?? '',
                   decoration: const InputDecoration(labelText: 'Section'),
                   items: [
                     const DropdownMenuItem(value: '', child: Text('Automatic')),
                     for (final s in sections)
-                      DropdownMenuItem(value: s, child: Text(s)),
+                      DropdownMenuItem(
+                        value: s,
+                        child: Text(s, overflow: TextOverflow.ellipsis),
+                      ),
                   ],
                   onChanged: (value) =>
                       setState(() => _section = value == '' ? null : value),
                 ),
                 DropdownButtonFormField<String>(
+                  isExpanded: true,
                   initialValue: _parent ?? '',
                   decoration: const InputDecoration(labelText: 'Stack base'),
                   items: [
@@ -215,12 +221,16 @@ class _EditSessionDialogState extends State<EditSessionDialog> {
                         value: _originalParent,
                         child: Text(
                           'Current base (${widget.session.prBaseBranch ?? 'session unavailable'})',
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
                     for (final p in parents)
                       DropdownMenuItem(
                         value: p.id,
-                        child: Text('${p.title} (${p.branch})'),
+                        child: Text(
+                          '${p.title} (${p.branch})',
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                   ],
                   onChanged: (value) =>

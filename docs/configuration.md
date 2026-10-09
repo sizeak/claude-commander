@@ -449,7 +449,7 @@ A session counts as **idle** only when all of these hold:
 resumes the agent, even if `resume_session = false` globally — hibernation
 always resumes, since that's what makes it non-destructive.
 
-**Keeping a session alive**: open **Edit session** (`F2`) and enable **Keep alive** (or `claude-commander keep-alive <session>
+**Keeping a session alive**: open **Edit session** (`Shift+E`) and enable **Keep alive** (or `claude-commander keep-alive <session>
 [--on|--off]`) to exempt it from hibernation — useful for a long-running build,
 a watched log, or anything you want to keep warm. A kept-alive session shows an
 anchor (`⚓`) marker on the board. The action has no default hotkey; bind
@@ -885,11 +885,11 @@ remote server defines. A hand edit of a workspace's name in
 
 ## Session editing
 
-`F2` opens **Edit session** for the highlighted session in the terminal UI. Rebind it in Settings → Keybindings, or configure it directly:
+`Shift+E` opens **Edit session** for the highlighted session in the terminal UI. Rebind it in Settings → Keybindings, or configure it directly:
 
 ```toml
 [keybindings]
-edit_session = ["F2"]
+edit_session = ["E"]
 ```
 
 ## Session List Sections
