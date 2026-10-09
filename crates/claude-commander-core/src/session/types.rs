@@ -122,6 +122,9 @@ pub struct WorktreeSession {
     pub status: SessionStatus,
     /// Program running in the session (e.g., "claude", "aider")
     pub program: String,
+    /// Launch command saved for the next fresh restart. The live pane is unchanged.
+    #[serde(default)]
+    pub pending_program: Option<String>,
     /// When the session was created
     pub created_at: DateTime<Utc>,
     /// When the session was last active
@@ -244,6 +247,7 @@ impl WorktreeSession {
             worktree_path,
             status: SessionStatus::Running,
             program: program.into(),
+            pending_program: None,
             created_at: now,
             last_active_at: now,
             tmux_session_name,
@@ -294,6 +298,7 @@ impl WorktreeSession {
             worktree_path: PathBuf::new(),
             status: SessionStatus::Creating,
             program: program.into(),
+            pending_program: None,
             created_at: now,
             last_active_at: now,
             tmux_session_name,
@@ -1545,6 +1550,7 @@ mod session_info_stack_node_tests {
             branch: branch.to_string(),
             status: SessionStatus::Running,
             program: "claude".to_string(),
+            pending_program: None,
             project_id: ProjectId::new(),
             project_name: "p".to_string(),
             pr_number: None,

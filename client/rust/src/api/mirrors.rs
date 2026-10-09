@@ -75,6 +75,7 @@ pub struct _SessionInfo {
     pub branch: String,
     pub status: SessionStatus,
     pub program: String,
+    pub pending_program: Option<String>,
     pub project_id: ProjectId,
     pub project_name: String,
     pub pr_number: Option<u32>,

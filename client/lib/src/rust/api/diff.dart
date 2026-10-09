@@ -4,9 +4,7 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
-
 import 'review.dart';
 
 // These functions are ignored because they are not marked as `pub`: `absent`, `build`, `cell`, `content_gutter`, `content_spans`, `emit_row`, `from_wire`, `into_owned`, `intraline_options`, `new`, `parse_all`, `parsed_review`, `strip_gutter`

@@ -258,6 +258,17 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
+    async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
+        self.client
+            .edit_session(id, edit)
+            .await
+            .map_err(into_backend_error)
+    }
+
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()> {
         self.client
             .rename_session(id, title)

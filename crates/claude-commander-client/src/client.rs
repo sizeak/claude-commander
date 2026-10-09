@@ -380,6 +380,16 @@ impl RemoteClient {
     }
 
     /// PATCH a JSON body, discarding the (204) response.
+    async fn patch_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: Url,
+        body: &impl serde::Serialize,
+    ) -> ClientResult<T> {
+        let response = self.send(self.client.patch(url).json(body)).await?;
+        let response = self.check(response).await?;
+        decode_json(response).await
+    }
+
     async fn patch_json_ok<B: Serialize>(&self, url: Url, body: &B) -> ClientResult<()> {
         let response = self.send(self.client.patch(url).json(body)).await?;
         self.check(response).await?;
@@ -653,6 +663,15 @@ impl RemoteClient {
 
     pub async fn delete_session(&self, id: SessionId) -> ClientResult<()> {
         self.delete_ok(self.session_url(id, &[])).await
+    }
+
+    pub async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> ClientResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
+        self.patch_json(self.session_url(id, &[]), &PatchSession::Edit(edit))
+            .await
     }
 
     pub async fn rename_session(&self, id: SessionId, title: String) -> ClientResult<()> {

@@ -5,7 +5,6 @@
 
 import '../frb_generated.dart';
 import 'mirrors.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
@@ -147,6 +146,29 @@ Future<void> restartSession({required String handle, required String id}) =>
 /// Delete a session, its branch, and its worktree.
 Future<void> deleteSession({required String handle, required String id}) =>
     RustLib.instance.api.crateApiSimpleDeleteSession(handle: handle, id: id);
+
+/// Save all session settings; program changes may wait until the next restart.
+Future<String?> editSession({
+  required String handle,
+  required String id,
+  required String title,
+  required String program,
+  String? section,
+  required bool keepAlive,
+  required bool changeBase,
+  String? parentId,
+  required bool restart,
+}) => RustLib.instance.api.crateApiSimpleEditSession(
+  handle: handle,
+  id: id,
+  title: title,
+  program: program,
+  section: section,
+  keepAlive: keepAlive,
+  changeBase: changeBase,
+  parentId: parentId,
+  restart: restart,
+);
 
 /// Rename a session's title.
 Future<void> renameSession({

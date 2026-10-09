@@ -22,6 +22,7 @@ SessionInfo sessionInfo({
   String branch = 'test-branch',
   SessionStatus status = SessionStatus.running,
   String program = 'bash',
+  String? pendingProgram,
   String projectName = 'my-repo',
 
   /// The owning project, defaulting to one derived from [id] — i.e. every
@@ -47,6 +48,7 @@ SessionInfo sessionInfo({
     branch: branch,
     status: status,
     program: program,
+    pendingProgram: pendingProgram,
     projectId: ProjectId(
       field0: projectId == null ? uuid : UuidValue.fromString(projectId),
     ),

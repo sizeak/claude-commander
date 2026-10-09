@@ -69,6 +69,17 @@ impl SessionManager {
             }
         };
 
+        if needs_recreate
+            && self
+                .store
+                .read()
+                .await
+                .get_session(session_id)
+                .is_some_and(|s| s.pending_program.is_some())
+        {
+            self.restart_session_fresh(session_id).await?;
+            return Ok(tmux_name);
+        }
         if needs_recreate {
             // Recreate the tmux session, resuming the prior agent session when
             // configured, or unconditionally when it was auto-hibernated (resume

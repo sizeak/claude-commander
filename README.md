@@ -252,6 +252,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | palette only | Previous workspace, New workspace…, and Move project to workspace… (moves the selected project; unbound by default) |
 | `i` | Show session info in a modal — metadata, diffstat, PR details, stack chain, `g` for AI summary. Same content as the right pane's Info tab, and the only way to reach it from the board |
 | `n` | New worktree session |
+| `F2` | Edit selected session (name, program, section, stack base, keep alive) |
 | `t` | New session stacked on top of the selected session's stack |
 | `N` | Add new project |
 | `c` | Checkout existing branch into a new worktree session (fetches `origin` in the background, filterable list) |
@@ -336,6 +337,10 @@ tree header, or run **"Edit server's program list…"** from the palette, to ope
 Settings → Programs targeting that server. In the Programs tab, `t` cycles which
 backend (local or a remote server) you're editing; edits are saved to the chosen
 backend as you make them.
+
+### Editing a session
+
+Use **Edit session** in the terminal command palette (`F2`), browser toolbar or session menu, or Flutter session overflow menu. Edit the name, program, section, stack base and keep-alive setting. Program changes can restart fresh immediately or wait for the next restart, leaving the current agent running. Stack-base changes update metadata and the PR target without rebasing git history.
 
 ## Web UI
 

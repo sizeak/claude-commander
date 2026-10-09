@@ -23,6 +23,7 @@ import {
   wireContextMenu,
   wireModals,
 } from "./dom.ts";
+import { initSessionEditor, openSessionEditor } from "./edit_session.ts";
 import { initForms, openNewSession, removeProject } from "./forms.ts";
 import type { ProjectInfo, SessionInfo } from "./generated/index.ts";
 import { NotifyTracker, requestPermissionOnFirstClick, showNotifications } from "./notify.ts";
@@ -230,6 +231,7 @@ function renderToolbar(): void {
   const sel = currentSession();
   const active = !!sel && sel.status !== "creating";
   els.restart.disabled = !sel;
+  els.editSession.disabled = !sel;
   els.kill.disabled = !active;
   els.delete.disabled = !sel;
   els.infoBtn.disabled = !sel;
@@ -268,6 +270,7 @@ function sessionMenuItems(s: SessionInfo): MenuItem[] {
   const items: MenuItem[] = [
     { type: "label", text: s.title },
     { text: "Open", onClick: () => selectSession(s.id) },
+    { text: "Edit session", onClick: () => openSessionEditor(s) },
   ];
   if (s.status !== "creating") {
     items.push({ text: "Restart", onClick: () => restartSession(s) });
@@ -352,6 +355,13 @@ function handleViewportChange(): void {
 
 function wire(): void {
   wireModals();
+  initSessionEditor(api, refreshAll, (id) => {
+    if (state.selectedId === id) reattach();
+  });
+  els.editSession.addEventListener("click", () => {
+    const s = currentSession();
+    if (s) void openSessionEditor(s);
+  });
   wireContextMenu();
   requestPermissionOnFirstClick();
   initTerminal(auth, {

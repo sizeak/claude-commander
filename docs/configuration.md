@@ -449,8 +449,7 @@ A session counts as **idle** only when all of these hold:
 resumes the agent, even if `resume_session = false` globally — hibernation
 always resumes, since that's what makes it non-destructive.
 
-**Keeping a session alive**: run the **Toggle keep-alive** action from the
-command palette on a session (or `claude-commander keep-alive <session>
+**Keeping a session alive**: open **Edit session** (`F2`) and enable **Keep alive** (or `claude-commander keep-alive <session>
 [--on|--off]`) to exempt it from hibernation — useful for a long-running build,
 a watched log, or anything you want to keep warm. A kept-alive session shows an
 anchor (`⚓`) marker on the board. The action has no default hotkey; bind
@@ -884,6 +883,15 @@ workspace now owns) and deleting one removes it — including a workspace only a
 remote server defines. A hand edit of a workspace's name in
 `config.toml` does not, so rename through the app.
 
+## Session editing
+
+`F2` opens **Edit session** for the highlighted session in the terminal UI. Rebind it in Settings → Keybindings, or configure it directly:
+
+```toml
+[keybindings]
+edit_session = ["F2"]
+```
+
 ## Session List Sections
 
 Sections are the **columns** of the [board](../README.md#board). Each configured section becomes one column, and a session's card lands in the first column whose predicate it matches.
@@ -971,7 +979,7 @@ Config order is the pipeline. A session's section is re-evaluated on every PR re
 
 ### Moving sessions manually
 
-Select a session and press `m` (or open the palette with `Space`, or `Shift+Space` for commands-only, and run **Move session to section…**), then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
+Select a session and press `m` (or open the palette with `Space`, or `Shift+Space` for commands-only, and run **Edit session** and change **Section**), then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
 
 ### Creating sessions inside a section
 

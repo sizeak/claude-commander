@@ -2170,6 +2170,7 @@ impl CommanderService {
             .mutate(move |state| {
                 if let Some(s) = state.get_session_mut(&sid) {
                     s.program = prog;
+                    s.pending_program = None;
                 }
             })
             .await?;
@@ -2177,6 +2178,65 @@ impl CommanderService {
         // the previous harness's conversation belongs to a different CLI and
         // can't be resumed by the new one.
         self.manager.restart_session_fresh(id).await
+    }
+
+    /// Save session settings, optionally restarting fresh when the program changes.
+    /// A pending program never changes live-agent detection or stops the existing pane.
+    pub async fn edit_session(
+        &self,
+        id: &SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> Result<Option<SetSessionBaseOutcome>> {
+        let title = edit.title.trim().to_string();
+        if title.is_empty() {
+            return Err(SessionError::InvalidName {
+                name: title,
+                reason: "session name cannot be empty".into(),
+            }
+            .into());
+        }
+        let program = edit.program.trim().to_string();
+        if program.is_empty() {
+            return Err(SessionError::InvalidProgram("program cannot be empty".into()).into());
+        }
+        self.ensure_session_exists(id).await?;
+        let base_outcome = if let Some(base) = edit.base {
+            Some(self.set_session_base(id, base.parent_session_id).await?)
+        } else {
+            None
+        };
+        let sections =
+            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
+        let sid = *id;
+        let restart = edit.restart;
+        let pending = self
+            .store
+            .try_mutate(move |state| {
+                let session = state
+                    .get_session_mut(&sid)
+                    .ok_or(SessionError::NotFound(sid))?;
+                session.title = title;
+                session.pending_program = (program != session.program).then_some(program);
+                session.keep_alive = edit.keep_alive;
+                if edit.section != session.section_override {
+                    match edit.section {
+                        Some(name) => {
+                            session.section_override = Some(name);
+                            apply_assignment(session, &sections, chrono::Utc::now());
+                        }
+                        None => {
+                            clear_override_and_reassign(session, &sections, chrono::Utc::now());
+                        }
+                    }
+                }
+                Ok::<_, crate::Error>(session.pending_program.is_some())
+            })
+            .await?;
+        self.telemetry.feature("session.edit");
+        if restart && pending {
+            self.manager.restart_session_fresh(id).await?;
+        }
+        Ok(base_outcome)
     }
 
     /// Move a session to a section (`Some(name)`) or clear its manual override
@@ -3386,6 +3446,7 @@ pub(crate) fn session_info_from_session(
         branch: session.branch.clone(),
         status: session.status,
         program: session.program.clone(),
+        pending_program: session.pending_program.clone(),
         project_id: session.project_id,
         project_name: project_name.to_string(),
         pr_number: session.pr_number,
@@ -5615,6 +5676,146 @@ mod tests {
         // An empty list is accepted and persists as empty.
         svc.set_programs(vec![]).unwrap();
         assert_eq!(svc.create_options().programs.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn edit_session_defers_program_without_touching_running_agent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        let before = svc.store().read().await.get_session(&sid).unwrap().clone();
+        let edit = claude_commander_protocol::api::EditSession {
+            title: " renamed ".into(),
+            program: "codex".into(),
+            section: Some("Review".into()),
+            keep_alive: true,
+            base: None,
+            restart: false,
+        };
+        svc.edit_session(&sid, edit).await.unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "renamed");
+        assert_eq!(session.program, before.program);
+        assert_eq!(session.pending_program.as_deref(), Some("codex"));
+        assert_eq!(session.status, before.status);
+        assert!(session.keep_alive);
+        assert_eq!(session.section_override.as_deref(), Some("Review"));
+        assert_eq!(
+            session_info_from_session(session, "repo").program,
+            before.program
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_session_validates_before_changing_anything() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        let edit = claude_commander_protocol::api::EditSession {
+            title: "new name".into(),
+            program: "  ".into(),
+            section: None,
+            keep_alive: true,
+            base: None,
+            restart: false,
+        };
+        assert!(svc.edit_session(&sid, edit).await.is_err());
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "task");
+        assert!(!session.keep_alive);
+        assert!(session.pending_program.is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_session_can_cancel_a_pending_program_change() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        let original = svc
+            .store()
+            .read()
+            .await
+            .get_session(&sid)
+            .unwrap()
+            .program
+            .clone();
+        let mut edit = claude_commander_protocol::api::EditSession {
+            title: "task".into(),
+            program: "codex".into(),
+            section: None,
+            keep_alive: false,
+            base: None,
+            restart: false,
+        };
+        svc.edit_session(&sid, edit.clone()).await.unwrap();
+        let persisted: crate::config::AppState =
+            serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).unwrap()).unwrap();
+        assert_eq!(
+            persisted
+                .get_session(&sid)
+                .unwrap()
+                .pending_program
+                .as_deref(),
+            Some("codex")
+        );
+        edit.program = original.clone();
+        // Returning to the running program does not need a restart, even if requested.
+        edit.restart = true;
+        svc.edit_session(&sid, edit).await.unwrap();
+        let state = svc.store().read().await;
+        assert_eq!(state.get_session(&sid).unwrap().program, original);
+        assert!(state.get_session(&sid).unwrap().pending_program.is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_session_preserves_automatic_section_when_override_is_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            sections: vec![crate::session::SectionConfig {
+                name: "Later".into(),
+                has_pr: Some(true),
+                ..Default::default()
+            }],
+            ..Config::default()
+        };
+        let svc = service_with_config(&dir, config);
+        let (_, sid) = seed_project_session(&svc).await;
+        let entered = chrono::Utc::now() - chrono::Duration::days(1);
+        svc.store()
+            .mutate(move |state| {
+                let session = state.get_session_mut(&sid).unwrap();
+                session.current_section = Some("Later".into());
+                session.entered_section_at = entered;
+            })
+            .await
+            .unwrap();
+        let program = svc
+            .store()
+            .read()
+            .await
+            .get_session(&sid)
+            .unwrap()
+            .program
+            .clone();
+        svc.edit_session(
+            &sid,
+            claude_commander_protocol::api::EditSession {
+                title: "renamed".into(),
+                program,
+                section: None,
+                keep_alive: false,
+                base: None,
+                restart: false,
+            },
+        )
+        .await
+        .unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.current_section.as_deref(), Some("Later"));
+        assert_eq!(session.entered_section_at, entered);
     }
 
     #[tokio::test]

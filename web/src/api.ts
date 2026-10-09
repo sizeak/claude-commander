@@ -15,12 +15,14 @@ import type {
   CreatedId,
   CreateOptions,
   CreateSessionOpts,
+  EditSession,
   NewComment,
   ProjectId,
   ReviewedToggle,
   ReviewSnapshot,
   ScanResponse,
   SessionId,
+  SetSessionBaseOutcome,
   Snapshot,
   ToggleReviewed,
 } from "./generated/index.ts";
@@ -238,6 +240,8 @@ export class Api {
 
   createSession = (opts: CreateSessionOpts) =>
     this.request<CreatedId<SessionId>>("POST", "/sessions", opts);
+  editSession = (id: SessionId, edit: EditSession) =>
+    this.request<SetSessionBaseOutcome | null>("PATCH", `/sessions/${id}`, { op: "edit", ...edit });
   restartSession = (id: SessionId) => this.request<unknown>("POST", `/sessions/${id}/restart`);
   killSession = (id: SessionId) => this.request<unknown>("POST", `/sessions/${id}/kill`);
   deleteSession = (id: SessionId) => this.request<unknown>("DELETE", `/sessions/${id}`);

@@ -429,6 +429,16 @@ impl SessionManager {
     /// Restart a session (kill tmux and recreate, optionally with --resume)
     #[instrument(skip(self))]
     pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
+        if self
+            .store
+            .read()
+            .await
+            .get_session(session_id)
+            .is_some_and(|s| s.pending_program.is_some())
+        {
+            return self.restart_session_fresh(session_id).await;
+        }
+
         let (
             tmux_session_name,
             shell_tmux_name,
@@ -552,7 +562,11 @@ impl SessionManager {
                 session.id,
                 session.worktree_path.clone(),
                 session.title.clone(),
-                session.program.clone(),
+                session
+                    .pending_program
+                    .as_ref()
+                    .unwrap_or(&session.program)
+                    .clone(),
                 self.status_bar_info(session, &state),
             )
         };
@@ -602,6 +616,10 @@ impl SessionManager {
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
+                    session.program = program.clone();
+                    if session.pending_program.as_deref() == Some(program.as_str()) {
+                        session.pending_program = None;
+                    }
                     session.set_status(SessionStatus::Running);
                     // The pane is live again, so clear the hibernation marker to
                     // uphold the "live pane ⇒ not hibernated" invariant (matches

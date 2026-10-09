@@ -300,6 +300,15 @@ impl CommanderBackend for LocalBackend {
         Ok(run_local(move || async move { svc.delete_session(&id).await }).await?)
     }
 
+    async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
+        let svc = self.service.clone();
+        Ok(run_local(move || async move { svc.edit_session(&id, edit).await }).await?)
+    }
+
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()> {
         // Store-only mutation → `Send`, delegate directly.
         Ok(self.service.rename_session(&id, title).await?)

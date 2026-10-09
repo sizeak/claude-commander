@@ -74,6 +74,10 @@ impl RestartKind {
 /// State updates from background tasks
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
+    SessionEditOptionsLoaded {
+        session: claude_commander_core::backend::SessionRef,
+        result: Result<claude_commander_protocol::api::CreateOptions, String>,
+    },
     /// Periodic config reload completed without holding up input/rendering.
     ConfigReloaded { result: Result<bool, String> },
     /// Session content updated
@@ -426,6 +430,7 @@ pub enum UserCommand {
     /// Delete every session whose PR has merged on GitHub (palette-only)
     DeleteMergedPrSessions,
     /// Rename the currently selected session (UI title only)
+    EditSession,
     RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
@@ -580,6 +585,7 @@ impl UserCommand {
             | UserCommand::NewProject
             | UserCommand::ScanDirectory
             | UserCommand::OpenReviewDiff
+            | UserCommand::EditSession
             | UserCommand::RenameSession
             | UserCommand::RemoveProject
             | UserCommand::CascadeResume
@@ -683,6 +689,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
             BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
+            BindableAction::EditSession => Self::EditSession,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::ResetSession => Self::ResetSession,

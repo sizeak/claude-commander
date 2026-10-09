@@ -297,61 +297,109 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
   });
 
-  testWidgets('rename edits the title via renameSession', (tester) async {
-    final info = sessionInfo(title: 'Old', status: SessionStatus.running);
-    api.getSessionDetailResponse = sessionDetail(info: info);
-    await pump(tester, info);
+  testWidgets(
+    'edit session prefills settings and saves metadata without restart',
+    (tester) async {
+      final info = sessionInfo(title: 'Old', status: SessionStatus.running);
+      api.getSessionDetailResponse = sessionDetail(info: info);
+      await pump(tester, info);
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Edit session'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(TextFormField, 'Old'), findsOneWidget);
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Session name'),
+        'New name',
+      );
+      await tester.tap(find.byType(SwitchListTile));
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(api.countOf('editSession'), 1);
+      final args = api.lastCall('editSession')!.args;
+      expect(args['title'], 'New name');
+      expect(args['program'], info.program);
+      expect(args['keepAlive'], true);
+      expect(args['restart'], false);
+      expect(args['changeBase'], false);
+    },
+  );
 
-    await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Rename'));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.widgetWithText(TextField, 'Title'), 'New name');
-    await tester.tap(
-      find.descendant(
-        of: find.byType(AlertDialog),
-        matching: find.widgetWithText(FilledButton, 'Rename'),
-      ),
-    );
-    await tester.pumpAndSettle();
+  testWidgets(
+    'editor prefills pending program without changing live agent settings',
+    (tester) async {
+      final info = sessionInfo(program: 'claude', pendingProgram: 'codex');
+      api.getSessionDetailResponse = sessionDetail(info: info);
+      await pump(tester, info);
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Edit session'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(TextFormField, 'codex'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(find.text('Restart session?'), findsNothing);
+      final args = api.lastCall('editSession')!.args;
+      expect(args['program'], 'codex');
+      expect(args['restart'], false);
+    },
+  );
 
-    expect(api.countOf('renameSession'), 1);
-    expect(api.lastCall('renameSession')!.args['title'], 'New name');
-  });
+  for (final restart in [false, true]) {
+    testWidgets('program change confirms restart=$restart before saving', (
+      tester,
+    ) async {
+      final info = sessionInfo(status: SessionStatus.running);
+      api.getSessionDetailResponse = sessionDetail(info: info);
+      await pump(tester, info);
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Edit session'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Program'),
+        'codex',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(find.text('Restart session?'), findsOneWidget);
+      expect(api.countOf('editSession'), 0);
+      await tester.tap(
+        find.text(
+          restart ? 'Yes, restart and clear' : 'No, save for next restart',
+        ),
+      );
+      await tester.pumpAndSettle();
+      final args = api.lastCall('editSession')!.args;
+      expect(args['program'], 'codex');
+      expect(args['restart'], restart);
+    });
+  }
 
-  testWidgets('setting a section calls setSection', (tester) async {
-    final info = sessionInfo(status: SessionStatus.running);
-    api.getSessionDetailResponse = sessionDetail(info: info);
-    await pump(tester, info);
-
-    await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Set section'));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.widgetWithText(TextField, 'Section'), 'review');
-    await tester.tap(
-      find.descendant(
-        of: find.byType(AlertDialog),
-        matching: find.widgetWithText(FilledButton, 'Save'),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(api.lastCall('setSection')!.args['section'], 'review');
-  });
-
-  testWidgets('toggling keep-alive calls toggleKeepAlive', (tester) async {
-    final info = sessionInfo(status: SessionStatus.running);
-    api.getSessionDetailResponse = sessionDetail(info: info);
-    await pump(tester, info);
-
-    await tester.tap(find.byIcon(Icons.more_vert));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Keep alive'));
-    await tester.pumpAndSettle();
-
-    expect(api.countOf('toggleKeepAlive'), 1);
-  });
+  testWidgets(
+    'back from restart warning keeps edits and cancellation saves nothing',
+    (tester) async {
+      final info = sessionInfo(status: SessionStatus.running);
+      api.getSessionDetailResponse = sessionDetail(info: info);
+      await pump(tester, info);
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Edit session'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Program'),
+        'codex',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Back'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(TextFormField, 'codex'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(api.countOf('editSession'), 0);
+    },
+  );
 
   testWidgets('opening an unread session marks it read once', (tester) async {
     final info = sessionInfo(unread: true);
