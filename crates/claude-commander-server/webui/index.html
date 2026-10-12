@@ -117,8 +117,7 @@
         <form id="edit-form">
           <div id="edit-fields">
             <label>Session name <input id="edit-title" type="text" required /></label>
-            <label>Program <input id="edit-program" type="text" list="edit-programs" required /></label>
-            <datalist id="edit-programs"></datalist>
+            <label>Program <select id="edit-program" required></select></label>
             <label>Section <select id="edit-section"></select></label>
             <label>Stack base <select id="edit-base"></select></label>
             <p class="hint">Stack base changes metadata and the PR target. Git history is unchanged.</p>

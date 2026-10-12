@@ -1,6 +1,6 @@
 import { type Api, act } from "./api.ts";
-import { byId, closeModal, h, openModal } from "./dom.ts";
-import type { EditSession, SessionInfo } from "./generated/index.ts";
+import { byId, closeModal, openModal } from "./dom.ts";
+import type { EditSession, ProgramInfo, SessionInfo } from "./generated/index.ts";
 import { state } from "./state.ts";
 
 let api: Api;
@@ -13,6 +13,22 @@ let originalParent = "";
 const modal = () => byId("edit-modal");
 const field = (id: string) => byId<HTMLInputElement>(`edit-${id}`);
 const select = (id: string) => byId<HTMLSelectElement>(`edit-${id}`);
+
+/** Show aliases and retain both live and pending commands. */
+export function programChoices(
+  programs: ProgramInfo[],
+  current: string,
+  live = current,
+): ProgramInfo[] {
+  const choices = new Map<string, ProgramInfo>();
+  for (const program of programs) {
+    if (!choices.has(program.command)) choices.set(program.command, program);
+  }
+  for (const command of [current, live]) {
+    if (!choices.has(command)) choices.set(command, { label: command, command });
+  }
+  return [...choices.values()];
+}
 
 /** Build one request from the form. Only an explicitly changed base is retargeted. */
 export function sessionEdit(
@@ -48,7 +64,7 @@ export function initSessionEditor(
     pending = sessionEdit(
       session,
       field("title").value,
-      field("program").value,
+      select("program").value,
       select("section").value,
       field("keep-alive").checked,
       select("base").value,
@@ -96,7 +112,12 @@ export async function openSessionEditor(info: SessionInfo): Promise<void> {
   pending = null;
   showFields();
   field("title").value = info.title;
-  field("program").value = info.pending_program ?? info.program;
+  const program = select("program");
+  const currentProgram = info.pending_program ?? info.program;
+  program.replaceChildren(
+    ...programChoices([], currentProgram, info.program).map((p) => new Option(p.label, p.command)),
+  );
+  program.value = currentProgram;
   field("keep-alive").checked = info.keep_alive;
   const sections = select("section");
   sections.replaceChildren(new Option("Automatic", ""));
@@ -123,7 +144,6 @@ export async function openSessionEditor(info: SessionInfo): Promise<void> {
     );
   }
   base.value = originalParent;
-  byId("edit-programs").replaceChildren();
   byId("edit-options-error").textContent = "";
   openModal(modal());
   field("title").focus();
@@ -135,17 +155,16 @@ export async function openSessionEditor(info: SessionInfo): Promise<void> {
       if (![...sections.options].some((o) => o.value === s)) sections.add(new Option(s, s));
     }
     sections.value = current;
-    byId("edit-programs").replaceChildren(
-      ...options.programs.map((p) => {
-        const option = h("option");
-        option.value = p.command;
-        option.label = p.label;
-        return option;
-      }),
+    const selectedProgram = program.value;
+    program.replaceChildren(
+      ...programChoices(options.programs, currentProgram, info.program).map(
+        (p) => new Option(p.label, p.command),
+      ),
     );
+    program.value = selectedProgram;
   } catch {
     if (session === info)
       byId("edit-options-error").textContent =
-        "Could not load program and section choices. You can still edit the program.";
+        "Could not load program and section choices. Existing settings can still be saved.";
   }
 }
