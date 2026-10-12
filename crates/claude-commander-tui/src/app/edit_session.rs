@@ -1,5 +1,5 @@
 use super::*;
-use claude_commander_protocol::api::{CreateOptions, EditSession, SetSessionBase};
+use claude_commander_protocol::api::{CreateOptions, EditSession, ProgramInfo, SetSessionBase};
 use crossterm::event::{KeyCode, KeyEvent};
 
 #[derive(Debug, Clone)]
@@ -8,6 +8,7 @@ pub struct SessionEditor {
     pub name: Input,
     pub program: Input,
     pub original_program: String,
+    pub live_program: String,
     pub sections: Vec<Option<String>>,
     pub section: usize,
     pub bases: Vec<(Option<SessionId>, String)>,
@@ -15,7 +16,7 @@ pub struct SessionEditor {
     pub original_base_index: usize,
     pub keep_alive: bool,
     pub focus: usize,
-    pub programs: Vec<String>,
+    pub programs: Vec<ProgramInfo>,
     pub restart_now: bool,
 }
 
@@ -73,20 +74,23 @@ impl SessionEditor {
         } else {
             base
         };
+        let program = info.pending_program.as_ref().unwrap_or(&info.program);
+        let mut programs = vec![ProgramInfo {
+            label: program.clone(),
+            command: program.clone(),
+        }];
+        if program != &info.program {
+            programs.push(ProgramInfo {
+                label: info.program.clone(),
+                command: info.program.clone(),
+            });
+        }
         Self {
             session,
             name: info.title.clone().into(),
-            program: info
-                .pending_program
-                .as_ref()
-                .unwrap_or(&info.program)
-                .clone()
-                .into(),
-            original_program: info
-                .pending_program
-                .as_ref()
-                .unwrap_or(&info.program)
-                .clone(),
+            program: program.clone().into(),
+            original_program: program.clone(),
+            live_program: info.program.clone(),
             sections,
             section,
             bases,
@@ -94,12 +98,7 @@ impl SessionEditor {
             original_base_index: base,
             keep_alive: info.keep_alive,
             focus: 0,
-            programs: vec![
-                info.pending_program
-                    .as_ref()
-                    .unwrap_or(&info.program)
-                    .clone(),
-            ],
+            programs,
             restart_now: false,
         }
     }
@@ -109,11 +108,30 @@ impl SessionEditor {
                 self.sections.push(Some(section));
             }
         }
+        self.programs.clear();
         for program in opts.programs {
-            if !self.programs.contains(&program.command) {
-                self.programs.push(program.command);
+            if !self.programs.iter().any(|p| p.command == program.command) {
+                self.programs.push(program);
             }
         }
+        for command in [
+            self.live_program.as_str(),
+            self.original_program.as_str(),
+            self.program.value(),
+        ] {
+            if !self.programs.iter().any(|p| p.command == command) {
+                self.programs.push(ProgramInfo {
+                    label: command.into(),
+                    command: command.into(),
+                });
+            }
+        }
+    }
+    fn program_label(&self) -> &str {
+        self.programs
+            .iter()
+            .find(|p| p.command == self.program.value())
+            .map_or(self.program.value(), |p| p.label.as_str())
     }
     pub fn edit(&self, restart: bool) -> EditSession {
         let base = self.bases[self.base].0;
@@ -141,9 +159,10 @@ impl SessionEditor {
                 let index = self
                     .programs
                     .iter()
-                    .position(|s| s == self.program.value())
+                    .position(|s| s.command == self.program.value())
                     .unwrap_or(0);
                 self.program = self.programs[step(index, self.programs.len(), forward)]
+                    .command
                     .clone()
                     .into();
             }
@@ -233,27 +252,14 @@ impl App {
                     return;
                 }
             }
-            KeyCode::Left | KeyCode::Right
-                if editor.focus == 1
-                    && key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Left | KeyCode::Right if editor.focus >= 1 => {
                 editor.cycle(key.code == KeyCode::Right)
             }
-            KeyCode::Left | KeyCode::Right if editor.focus >= 2 => {
-                editor.cycle(key.code == KeyCode::Right)
+            KeyCode::Char(' ') if editor.focus >= 1 => editor.cycle(true),
+            _ if editor.focus == 0 => {
+                edit_text_input(&mut editor.name, key);
             }
-            KeyCode::Char(' ') if editor.focus >= 2 => editor.cycle(true),
-            _ => match editor.focus {
-                0 => {
-                    edit_text_input(&mut editor.name, key);
-                }
-                1 => {
-                    edit_text_input(&mut editor.program, key);
-                }
-                _ => {}
-            },
+            _ => {}
         }
         self.ui_state.modal = Modal::EditSession(editor);
     }
@@ -341,14 +347,7 @@ pub(super) fn render(
                     editor.name.value().into()
                 }
             ),
-            format!(
-                "Program: {}",
-                if editor.focus == 1 {
-                    input_with_caret(&editor.program)
-                } else {
-                    editor.program.value().into()
-                }
-            ),
+            format!("Program: {}", editor.program_label()),
             format!(
                 "Section: {}",
                 editor.sections[editor.section]
@@ -377,7 +376,7 @@ pub(super) fn render(
             .collect();
         lines.extend([
             Line::from(""),
-            Line::from("Tab/↑/↓ field · ←/→ option · Ctrl+←/→ program"),
+            Line::from("Tab/↑/↓ field · ←/→ or Space choose option"),
             Line::from("Enter save · Esc cancel"),
             Line::from("Stack base changes metadata and PR target; git history is unchanged."),
         ]);

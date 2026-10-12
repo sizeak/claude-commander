@@ -13233,6 +13233,78 @@ async fn edit_session_prefills_selected_remote_and_confirms_both_restart_choices
 }
 
 #[tokio::test]
+async fn edit_session_program_field_shows_alias_and_cycles_commands() {
+    use claude_commander_protocol::api::{CreateOptions, ProgramInfo};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    let session = SessionRef::new(BackendId(1), sid);
+    app.ui_state.selected_session_id = Some(session);
+    let original = app.session(session).unwrap().program.clone();
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+        panic!("editor");
+    };
+    editor.load_options(CreateOptions {
+        default_program: original.clone(),
+        programs: vec![
+            ProgramInfo {
+                label: "Current agent alias".into(),
+                command: original,
+            },
+            ProgramInfo {
+                label: "Codex alias".into(),
+                command: "codex --sandbox workspace-write".into(),
+            },
+        ],
+        sections: vec![],
+    });
+    editor.focus = 1;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    assert!(buffer_text(&terminal).contains("Program: Current agent alias"));
+    app.handle_edit_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(text.contains("Program: Codex alias"));
+    assert!(!text.contains("codex --sandbox workspace-write"));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor");
+    };
+    assert_eq!(
+        editor.edit(false).program,
+        "codex --sandbox workspace-write"
+    );
+}
+
+#[tokio::test]
+async fn edit_session_retains_unconfigured_live_program_with_a_pending_change() {
+    use claude_commander_protocol::api::{CreateOptions, ProgramInfo};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    let session = SessionRef::new(BackendId(1), sid);
+    let mut info = app.session(session).unwrap().clone();
+    info.program = "custom-agent --flag".into();
+    info.pending_program = Some("codex".into());
+    let mut editor = edit_session::SessionEditor::new(session, &info, &[], "main");
+    editor.load_options(CreateOptions {
+        default_program: "codex".into(),
+        programs: vec![ProgramInfo {
+            label: "Codex alias".into(),
+            command: "codex".into(),
+        }],
+        sections: vec![],
+    });
+    assert_eq!(editor.edit(false).program, "codex");
+    editor.focus = 1;
+    app.ui_state.modal = Modal::EditSession(editor);
+    app.handle_edit_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor");
+    };
+    assert_eq!(editor.edit(false).program, "custom-agent --flag");
+}
+
+#[tokio::test]
 async fn edit_session_cancel_and_warning_back_preserve_process() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let (mut app, sid) = app_with_remote_session().await;
@@ -13331,6 +13403,6 @@ async fn session_edit_options_arriving_during_warning_survive_going_back() {
     let Modal::EditSession(editor) = &app.ui_state.modal else {
         panic!("editor restored");
     };
-    assert!(editor.programs.contains(&"omp".into()));
+    assert!(editor.programs.iter().any(|p| p.command == "omp"));
     assert!(editor.sections.contains(&Some("Review".into())));
 }

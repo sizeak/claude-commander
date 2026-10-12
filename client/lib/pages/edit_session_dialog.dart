@@ -141,6 +141,54 @@ class _EditSessionDialogState extends State<EditSessionDialog> {
 
   String? _required(String? value) =>
       value == null || value.trim().isEmpty ? 'Required' : null;
+
+  Widget _programField() {
+    if (_options == null && _optionsError == null) {
+      return const InputDecorator(
+        decoration: InputDecoration(labelText: 'Program'),
+        child: Text('Loading…'),
+      );
+    }
+    final configured = _options?.programs ?? const <ProgramInfo>[];
+    if (configured.isEmpty) {
+      return TextFormField(
+        controller: _program,
+        decoration: const InputDecoration(labelText: 'Program'),
+        validator: _required,
+      );
+    }
+    final choices = <String, ProgramInfo>{};
+    for (final program in configured) {
+      choices.putIfAbsent(program.command, () => program);
+    }
+    // Keep the live command available to cancel a pending change.
+    for (final command in {
+      widget.session.program,
+      ?widget.session.pendingProgram,
+    }) {
+      choices.putIfAbsent(
+        command,
+        () => ProgramInfo(label: command, command: command),
+      );
+    }
+    return DropdownButtonFormField<String>(
+      isExpanded: true,
+      initialValue: _program.text,
+      decoration: const InputDecoration(labelText: 'Program'),
+      items: [
+        for (final program in choices.values)
+          DropdownMenuItem(
+            value: program.command,
+            child: Text(program.label, overflow: TextOverflow.ellipsis),
+          ),
+      ],
+      validator: _required,
+      onChanged: (value) {
+        if (value != null) setState(() => _program.text = value);
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final sections = <String>{?_section, ...?_options?.sections};
@@ -167,29 +215,7 @@ class _EditSessionDialogState extends State<EditSessionDialog> {
                   decoration: const InputDecoration(labelText: 'Session name'),
                   validator: _required,
                 ),
-                TextFormField(
-                  controller: _program,
-                  decoration: const InputDecoration(labelText: 'Program'),
-                  validator: _required,
-                ),
-                if (_options?.programs.isNotEmpty == true)
-                  DropdownButtonFormField<String>(
-                    isExpanded: true,
-                    initialValue: null,
-                    decoration: const InputDecoration(
-                      labelText: 'Configured programs',
-                    ),
-                    items: [
-                      for (final p in _options!.programs)
-                        DropdownMenuItem(
-                          value: p.command,
-                          child: Text(p.label, overflow: TextOverflow.ellipsis),
-                        ),
-                    ],
-                    onChanged: (value) {
-                      if (value != null) setState(() => _program.text = value);
-                    },
-                  ),
+                _programField(),
                 DropdownButtonFormField<String>(
                   isExpanded: true,
                   initialValue: _section ?? '',
@@ -261,7 +287,9 @@ class _EditSessionDialogState extends State<EditSessionDialog> {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: _confirming ? null : _save,
+          onPressed: _confirming || (_options == null && _optionsError == null)
+              ? null
+              : _save,
           child: const Text('Save'),
         ),
       ],

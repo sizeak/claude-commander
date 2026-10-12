@@ -228,8 +228,14 @@ void main() {
     await tester.tap(find.text('Edit session'));
     await waitFor(tester, find.byType(EditSessionDialog));
     await shoot(tester, 'client-edit-session');
-    final program = find.widgetWithText(TextFormField, 'Program');
-    await tester.enterText(program, 'codex');
+    final program = find.widgetWithText(
+      DropdownButtonFormField<String>,
+      'Program',
+    );
+    await tester.tap(program);
+    await settle(tester);
+    await tester.tap(find.text('Codex').last);
+    await settle(tester);
     await tester.tap(find.widgetWithText(FilledButton, 'Save'));
     await waitFor(tester, find.text('Restart session?'));
     await shoot(tester, 'client-edit-session-warning');
