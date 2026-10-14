@@ -170,8 +170,9 @@ It exits with a clear message if the server isn't running or Slack isn't
 enabled. Workers never hold Slack credentials; the server owns the only Slack
 client and performs the delivery.
 
-> The skill that teaches worker agents to call `slack notify` lives in the
-> external claude-marketplace repo, not here.
+Worker agents learn when and how to call this from the bundled
+`claude-commander-slack-notify` skill, which Commander writes into every
+session's worktree (see [Agent skills](usage.md#agent-skills)).
 
 ## Security
 

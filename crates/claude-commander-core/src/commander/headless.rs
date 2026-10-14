@@ -588,9 +588,9 @@ pub fn stream_event_to_wire(ev: StreamEvent) -> claude_commander_protocol::api::
 }
 
 impl HeadlessCommander {
-    /// Construct the manager. `claude_md` is the shared `CLAUDE.md` body (built
-    /// once by the caller from the live CLI — identical to what the interactive
-    /// commander writes) written to `commander_dir` on first use. `deny_read` is
+    /// Construct the manager. `claude_md` is the shared `CLAUDE.md` body (the
+    /// caller passes `commander::claude_md_content()` — identical to what the
+    /// interactive commander writes) written to `commander_dir` on first use. `deny_read` is
     /// the read-deny rule set applied to every spawn (see
     /// [`sensitive_read_denies`]). No IO happens here.
     pub fn new(
@@ -920,7 +920,7 @@ impl HeadlessCommander {
     // -- helpers --
 
     /// One-time directory prep: create the commander dir, write `CLAUDE.md`,
-    /// and seed `NOTES.md`. Once per process is enough: the interactive
+    /// seed `NOTES.md`, and install the bundled agent skills. Once per process is enough: the interactive
     /// commander writes byte-identical content (the Slack section is part of
     /// the single shared prime — see `commander::claude_md_content`), so a
     /// later interactive open can never leave the file meaningfully stale.
@@ -931,6 +931,12 @@ impl HeadlessCommander {
                 tokio::fs::create_dir_all(&self.inner.commander_dir).await?;
                 self.write_claude_md().await?;
                 crate::commander::seed_notes_md(&self.inner.commander_dir).await?;
+                let program = self.inner.config_store.read().commander_program();
+                crate::skills::install_for_launch(
+                    &self.inner.commander_dir,
+                    crate::agent::AgentKind::from_program(&program),
+                )
+                .await;
                 Ok::<(), crate::Error>(())
             })
             .await?;
@@ -1281,6 +1287,12 @@ mod tests {
         // Exactly one process spawned; CLAUDE.md was primed.
         assert_eq!(spawn.spawn_count.load(Ordering::SeqCst), 1);
         assert!(dir.path().join("commander/CLAUDE.md").exists());
+        assert!(
+            dir.path()
+                .join("commander/.claude/skills/claude-commander-cli-reference/SKILL.md")
+                .is_file(),
+            "the headless commander must get the bundled skills"
+        );
     }
 
     #[tokio::test]

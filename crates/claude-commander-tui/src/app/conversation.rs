@@ -34,9 +34,9 @@ const DICTATING: &str = "● Dictating… (Alt-t to type)";
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Preamble seeded into the conversation session's `CLAUDE.md` (`{name}` is
-/// replaced with the configured assistant name). Followed by the generated
-/// `claude-commander` CLI reference so the agent can inspect live session/
-/// project state. Tuned for spoken replies.
+/// replaced with the configured assistant name). Tuned for spoken replies. The
+/// full CLI reference reaches the agent as the bundled
+/// `claude-commander-cli-reference` skill (see `claude_commander_core::skills`).
 const CONVERSATION_PRIME: &str = "\
 # {name}
 
@@ -63,7 +63,8 @@ the CLI (it needs no approval). Good first commands:
 - `claude-commander status <name>` — detail on one session.
 - `claude-commander log <name>` — recent output from a session.
 Run `claude-commander list` early when the user asks anything about what's
-going on. You can read anything on the filesystem the user can.
+going on. You can read anything on the filesystem the user can. Every command
+and flag is in the `claude-commander-cli-reference` skill.
 
 ## Working directory
 This directory is your own scratch space; nothing else in it matters.
@@ -405,7 +406,6 @@ async fn spawn_session_runtime(
     session: &Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
     view: &Arc<Mutex<ConversationView>>,
     speaker_handle: &SpeakerHandle,
-    cli_reference: &str,
 ) {
     if session.lock().await.is_some() {
         return;
@@ -423,13 +423,18 @@ async fn spawn_session_runtime(
     }
 
     // Seed CLAUDE.md so the agent knows it's a (spoken) Claude Commander
-    // assistant and how to inspect live session/project state. Rewritten on
-    // each (re)spawn so the embedded CLI reference stays current.
-    let prime = CONVERSATION_PRIME.replace("{name}", &conv.name);
-    let claude_md = format!("{}\n{}", prime.trim_end(), cli_reference);
+    // assistant and how to inspect live session/project state, plus the
+    // bundled skills (CLI reference included). Rewritten on each (re)spawn so
+    // both match this build.
+    let claude_md = CONVERSATION_PRIME.replace("{name}", &conv.name);
     if let Err(e) = tokio::fs::write(dir.join("CLAUDE.md"), claude_md).await {
         warn!(target: "conversation", "failed to write CLAUDE.md: {e}");
     }
+    claude_commander_core::skills::install_for_launch(
+        &dir,
+        claude_commander_core::agent::AgentKind::from_program(&conv.command),
+    )
+    .await;
 
     // Streaming-TTS speaker (fed directly by the bridge, off the UI loop).
     // Failure (e.g. no audio device) is non-fatal: chat still works, silent.
@@ -628,7 +633,6 @@ impl App {
             &self.conversation.session,
             &self.conversation.view,
             &self.conversation.speaker,
-            &self.cli_reference,
         )
         .await;
     }
@@ -707,9 +711,6 @@ impl App {
         let session = self.conversation.session.clone();
         let view = self.conversation.view.clone();
         let conv = self.config.conversation.clone();
-        // The lazy-heal path below writes the conversation's CLAUDE.md, so this
-        // off-loop task needs its own copy of the injected CLI reference.
-        let cli_reference = self.cli_reference.clone();
         // Dictation's two halves: where to type, and whether an Enter follows.
         // The policy is captured here rather than read per transcript because
         // this task holds no `&App` — a settings change calls `respawn_listener`,
@@ -733,15 +734,8 @@ impl App {
                         // no session is up yet (transcript arrived before the
                         // overlay was opened), spawn one and retry once.
                         if !submit_to_session(&session, &view, &speaker, text.clone()).await {
-                            spawn_session_runtime(
-                                &conv,
-                                gate.clone(),
-                                &session,
-                                &view,
-                                &speaker,
-                                &cli_reference,
-                            )
-                            .await;
+                            spawn_session_runtime(&conv, gate.clone(), &session, &view, &speaker)
+                                .await;
                             submit_to_session(&session, &view, &speaker, text).await;
                         }
                         // If the user spoke from inside an attach, the pane's

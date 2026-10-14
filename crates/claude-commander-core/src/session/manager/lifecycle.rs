@@ -310,9 +310,13 @@ impl SessionManager {
 
             // Create tmux session in the worktree directory
             let tmux_start = std::time::Instant::now();
-            self.tmux
-                .create_session(&tmux_session_name, &worktree_info.path, Some(&launch_cmd))
-                .await?;
+            self.launch_agent_pane(
+                &tmux_session_name,
+                &worktree_info.path,
+                &program,
+                &launch_cmd,
+            )
+            .await?;
             info!(
                 "[timing] tmux create_session took {}ms",
                 tmux_start.elapsed().as_millis()
@@ -392,6 +396,24 @@ impl SessionManager {
         finalized
     }
 
+    /// Start an agent's tmux pane in `worktree`, first writing the bundled
+    /// agent skills there for `program`'s harness (see [`crate::skills`]).
+    /// Every agent launch goes through here — create, restart, fresh restart
+    /// and the hibernation wake — so a newer binary's skills reach an existing
+    /// session on its next launch. A skills failure is logged, never fatal.
+    pub(super) async fn launch_agent_pane(
+        &self,
+        tmux_name: &str,
+        worktree: &Path,
+        program: &str,
+        launch_cmd: &str,
+    ) -> Result<()> {
+        crate::skills::install_for_launch(worktree, AgentKind::from_program(program)).await;
+        self.tmux
+            .create_session(tmux_name, worktree, Some(launch_cmd))
+            .await
+    }
+
     /// Remove a session that is still in `Creating` state (e.g., on failure or startup cleanup).
     #[instrument(skip(self))]
     pub async fn remove_creating_session(&self, session_id: &SessionId) -> Result<()> {
@@ -469,8 +491,12 @@ impl SessionManager {
         let resume_program = program_with_session_name(&resume_program, &title);
         let resume_program = self.maybe_wrap_nix_develop(&resume_program, &worktree_path);
         let create_result = self
-            .tmux
-            .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
+            .launch_agent_pane(
+                &tmux_session_name,
+                &worktree_path,
+                &program,
+                &resume_program,
+            )
             .await;
 
         if let Err(e) = create_result {
@@ -568,8 +594,7 @@ impl SessionManager {
         let launch_cmd = program_with_session_name(&program, &title);
         let launch_cmd = self.maybe_wrap_nix_develop(&launch_cmd, &worktree_path);
         let create_result = self
-            .tmux
-            .create_session(tmux_name, &worktree_path, Some(&launch_cmd))
+            .launch_agent_pane(tmux_name, &worktree_path, &program, &launch_cmd)
             .await;
 
         if let Err(e) = create_result {

@@ -3163,9 +3163,7 @@ fn build_headless(
     spawn: Arc<dyn crate::commander::headless::CommanderSpawn>,
 ) -> crate::commander::headless::HeadlessCommander {
     use crate::commander::{claude_md_content, headless};
-    // Core no longer owns the clap tree (main moved it into the binary), so the
-    // headless prime carries no CLI reference until the bundled skills land.
-    let claude_md = claude_md_content("");
+    let claude_md = claude_md_content();
     let commander_dir = config_store
         .read()
         .commander_dir()

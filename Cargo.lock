@@ -858,6 +858,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rodio",
+ "rust-embed",
  "serde",
  "serde_json",
  "shell-words",

@@ -7,13 +7,15 @@
 //! `claude-commander-core`, which also leaked into the generated commander CLI
 //! reference as unrunnable `claude-commander-core <sub>` invocations.)
 //!
-//! Rendering the CLI reference for the commander and conversation `CLAUDE.md`
-//! files lives here too, for the same reason: walking a clap tree means
-//! depending on clap, and only a binary has a CLI to describe. Core is handed
-//! the finished markdown ([`cli_reference`]) and stays clap-free, so embedders
-//! of the library don't inherit a CLI parser they have no use for.
+//! Rendering the CLI reference lives here too, for the same reason: walking a
+//! clap tree means depending on clap, and only a binary has a CLI to describe.
+//! The rendered markdown is committed as core's bundled
+//! `claude-commander-cli-reference` agent skill and kept fresh by the
+//! `skills_gen` drift test, so core stays clap-free and embedders of the
+//! library don't inherit a CLI parser they have no use for. The renderer is
+//! therefore test-only.
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(version)]
@@ -83,7 +85,8 @@ pub enum Commands {
     /// Delete a session: kill its tmux session and remove the git worktree.
     #[command(visible_alias = "rm")]
     Delete {
-        /// Session name or ID prefix
+        /// Exact session title (case-insensitive) or full session ID. Prefixes
+        /// are rejected so a typo can't delete the wrong session
         session: String,
 
         /// Delete without confirmation
@@ -94,7 +97,7 @@ pub enum Commands {
     /// Toggle (or explicitly set) keep-alive on a session, exempting it from
     /// automatic idle-hibernation. With no flag, toggles the current value.
     KeepAlive {
-        /// Session name or ID prefix
+        /// Exact session title (case-insensitive) or full session ID
         session: String,
 
         /// Turn keep-alive on (never auto-hibernate this session)
@@ -257,37 +260,50 @@ pub enum SlackCommands {
 
 /// The clap command tree for the CLI. Single source of truth for this binary's
 /// argument parsing and for the CLI reference generated from it.
+#[cfg(test)]
 pub fn cli_command() -> clap::Command {
-    Cli::command()
+    <Cli as clap::CommandFactory>::command()
 }
 
-/// Markdown documenting this CLI, for the commander and conversation `CLAUDE.md`
-/// files. Regenerated from the live command tree on each write, so the docs an
-/// agent reads can never drift from the commands it can actually run.
+/// Markdown documenting this CLI: the body of the bundled
+/// `claude-commander-cli-reference` agent skill (see `skills_gen`).
+#[cfg(test)]
 pub fn cli_reference() -> String {
     generate_cli_reference(&cli_command())
 }
 
 /// Render a markdown CLI reference by walking a clap command tree and emitting
-/// each visible subcommand's long help verbatim, labelled with the tree's
-/// program name. Hidden subcommands (e.g. internal popup helpers) are skipped.
+/// each visible subcommand's long help verbatim, recursing into command groups
+/// (e.g. `slack notify`), labelled with the full invocation. Hidden subcommands
+/// (e.g. internal popup helpers) and clap's generated `help` are skipped.
 ///
 /// Split from [`cli_reference`] so the walk is testable against a synthetic tree
 /// with a known shape.
+#[cfg(test)]
 fn generate_cli_reference(cmd: &clap::Command) -> String {
-    let bin = cmd.get_name().to_string();
+    // Building propagates each subcommand's full `bin_name`, so its usage line
+    // reads `Usage: claude-commander new …` rather than a bare `Usage: new`.
+    let mut cmd = cmd.clone();
+    cmd.build();
     let mut out = String::new();
+    render_subcommands(&cmd, &mut out);
+    out
+}
+
+#[cfg(test)]
+fn render_subcommands(cmd: &clap::Command, out: &mut String) {
     for sub in cmd.get_subcommands() {
-        if sub.is_hide_set() {
+        if sub.is_hide_set() || sub.get_name() == "help" {
             continue;
         }
-        out.push_str(&format!("### `{bin} {}`\n\n", sub.get_name()));
+        let invocation = sub.get_bin_name().unwrap_or(sub.get_name());
+        out.push_str(&format!("### `{invocation}`\n\n"));
         let help = sub.clone().render_long_help();
         out.push_str("```\n");
         out.push_str(help.to_string().trim_end());
         out.push_str("\n```\n\n");
+        render_subcommands(sub, out);
     }
-    out
 }
 
 #[cfg(test)]
@@ -352,6 +368,44 @@ mod tests {
         assert!(reference.contains("List all sessions"));
         assert!(reference.contains("sample-bin new"));
         assert!(reference.contains("Create a new session"));
+    }
+
+    #[test]
+    fn cli_reference_usage_lines_name_the_full_invocation() {
+        // An agent copies the usage line; `Usage: list` is not a command it can run.
+        let reference = generate_cli_reference(&sample_cli());
+        assert!(
+            reference.contains("Usage: sample-bin list"),
+            "usage must carry the binary name; got:\n{reference}"
+        );
+    }
+
+    #[test]
+    fn cli_reference_documents_nested_subcommands() {
+        let cmd = sample_cli().subcommand(
+            clap::Command::new("group")
+                .about("A command group")
+                .subcommand(
+                    clap::Command::new("leaf")
+                        .about("The nested command")
+                        .arg(clap::Arg::new("target").long("target").help("Leaf target")),
+                ),
+        );
+        let reference = generate_cli_reference(&cmd);
+        assert!(
+            reference.contains("### `sample-bin group leaf`"),
+            "{reference}"
+        );
+        assert!(
+            reference.contains("Usage: sample-bin group leaf"),
+            "{reference}"
+        );
+        assert!(reference.contains("--target"), "{reference}");
+        // clap's auto-generated `help` subcommand is noise, not a command.
+        assert!(
+            !reference.contains("### `sample-bin group help`"),
+            "{reference}"
+        );
     }
 
     #[test]

@@ -836,13 +836,6 @@ fn make_test_app() -> App {
     make_test_app_with_path().0
 }
 
-/// Stand-in for the CLI reference the binary injects into `App::new`. The real
-/// one is rendered from the clap tree in the `claude-commander` crate; core only
-/// ever passes the markdown through to a `CLAUDE.md`.
-fn test_cli_reference() -> String {
-    "### `claude-commander list`\n".to_string()
-}
-
 #[test]
 fn test_keybinding_rows_are_grouped_under_section_headers() {
     use crate::app::SettingsRowKind;
@@ -2631,7 +2624,6 @@ fn make_test_app_with_path() -> (App, std::path::PathBuf) {
         store,
         claude_commander_core::telemetry::FrontendInfo::new("test", "0.0.0"),
         claude_commander_core::backend::no_remote_backends(),
-        test_cli_reference(),
     );
     // Most existing tests exercise board behaviour (the board was the only view
     // before the list views were revived), so the shared harness defaults to the
@@ -3865,7 +3857,6 @@ fn build_app_with_mock_remotes(servers: Vec<(&str, Snapshot)>) -> App {
         store,
         claude_commander_core::telemetry::FrontendInfo::new("test", "0.0.0"),
         factory,
-        test_cli_reference(),
     );
     // These tests inspect the board sidebar (server headings / version
     // warnings), so drive the board view.
@@ -4124,7 +4115,6 @@ async fn factory_failure_yields_degraded_placeholder() {
         store,
         claude_commander_core::telemetry::FrontendInfo::new("test", "0.0.0"),
         factory,
-        test_cli_reference(),
     );
     // The broken server still occupies a handle, seeded Degraded with the reason.
     let handle = app

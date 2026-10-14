@@ -436,6 +436,79 @@ async fn test_session_manager_create_session() {
     drop(worktrees_dir);
 }
 
+/// Every launch path writes the bundled agent skills into the session's
+/// worktree — create, restart, fresh restart and the hibernation wake — so an
+/// upgraded binary's skills reach existing sessions on their next launch. A
+/// `bash` session is a non-Claude agent, so they land in `.agents/skills/`.
+#[tokio::test]
+async fn test_every_launch_path_installs_agent_skills() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "skills-test".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+
+    let worktree = store
+        .read()
+        .await
+        .get_session(&session_id)
+        .unwrap()
+        .worktree_path
+        .clone();
+    let skills = worktree.join(".agents/skills");
+    let reference = skills.join("claude-commander-cli-reference/SKILL.md");
+    assert!(reference.is_file(), "create must install the skills");
+
+    std::fs::remove_dir_all(&skills).unwrap();
+    manager.restart_session(&session_id).await.unwrap();
+    assert!(reference.is_file(), "restart must reinstall the skills");
+
+    std::fs::remove_dir_all(&skills).unwrap();
+    manager.restart_session_fresh(&session_id).await.unwrap();
+    assert!(
+        reference.is_file(),
+        "fresh restart must reinstall the skills"
+    );
+
+    std::fs::remove_dir_all(&skills).unwrap();
+    manager.hibernate_session(&session_id).await.unwrap();
+    manager.get_attach_command(&session_id).await.unwrap();
+    assert!(
+        reference.is_file(),
+        "waking from hibernation must reinstall the skills"
+    );
+
+    let _ = manager.kill_session(&session_id, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
 #[tokio::test]
 async fn test_session_manager_restart() {
     if !tmux_available().await {
@@ -1372,7 +1445,6 @@ async fn test_commander_session_lifecycle() {
     // Stands in for the markdown the binary renders from its clap tree (out of
     // reach here). This test covers the tmux session lifecycle; the reference's
     // content is covered by unit tests in the binary crate.
-    let cli_reference = "### `claude-commander list`\n";
     let live_config = Config {
         commander_enabled: true,
         commander_dir: Some(dir.path().to_path_buf()),
@@ -1382,7 +1454,7 @@ async fn test_commander_session_lifecycle() {
     };
 
     // --- Create + priming files ---
-    let name = commander::ensure_session(&live_config, &tmux, cli_reference)
+    let name = commander::ensure_session(&live_config, &tmux)
         .await
         .unwrap();
     assert_eq!(name, COMMANDER_TMUX_NAME);
@@ -1391,7 +1463,7 @@ async fn test_commander_session_lifecycle() {
     assert!(commander::is_running(&tmux).await, "live session runs");
 
     // --- Idempotent reuse: second call must not error or double-create ---
-    commander::ensure_session(&live_config, &tmux, cli_reference)
+    commander::ensure_session(&live_config, &tmux)
         .await
         .unwrap();
     assert!(
@@ -1408,7 +1480,7 @@ async fn test_commander_session_lifecycle() {
         commander_program: Some("true".to_string()),
         ..live_config.clone()
     };
-    commander::ensure_session(&dead_config, &tmux, cli_reference)
+    commander::ensure_session(&dead_config, &tmux)
         .await
         .unwrap();
 
@@ -1431,7 +1503,7 @@ async fn test_commander_session_lifecycle() {
     );
 
     // ensure_session must KILL the corpse and recreate a live session.
-    commander::ensure_session(&live_config, &tmux, cli_reference)
+    commander::ensure_session(&live_config, &tmux)
         .await
         .unwrap();
     assert!(

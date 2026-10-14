@@ -80,8 +80,7 @@ impl SessionManager {
                 super::lifecycle::program_with_session_name(&resume_program, &title);
             let resume_program = self.maybe_wrap_nix_develop(&resume_program, &worktree_path);
             info!("Recreating tmux session with: {}", resume_program);
-            self.tmux
-                .create_session(&tmux_name, &worktree_path, Some(&resume_program))
+            self.launch_agent_pane(&tmux_name, &worktree_path, &program, &resume_program)
                 .await?;
 
             // Configure CC status bar on the recreated session

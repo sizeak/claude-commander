@@ -15,10 +15,12 @@ use claude_commander_core::{
 };
 use claude_commander_tui::App;
 
-use crate::cli_args::{Cli, Commands, cli_reference};
+use crate::cli_args::{Cli, Commands};
 
 mod cli_args;
 mod serve;
+#[cfg(test)]
+mod skills_gen;
 
 /// This binary's name and version. Everything user-facing (`--version`, the
 /// startup log line, the telemetry frontend) comes from this package's
@@ -283,13 +285,7 @@ async fn main() -> Result<()> {
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
             let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
-            let mut app = App::new(
-                config_store,
-                store,
-                frontend(),
-                remote_backend_factory(),
-                cli_reference(),
-            );
+            let mut app = App::new(config_store, store, frontend(), remote_backend_factory());
 
             // Held for the rest of `main`: dropping the guard stops the server,
             // so the listener goes away exactly when the TUI does.
@@ -750,9 +746,7 @@ async fn main() -> Result<()> {
             // enable gate lives in `ensure_session`, so the disabled case
             // surfaces as a typed error rather than an inline check here.
             let tmux = claude_commander_core::tmux::TmuxExecutor::new();
-            match claude_commander_core::commander::ensure_session(&config, &tmux, &cli_reference())
-                .await
-            {
+            match claude_commander_core::commander::ensure_session(&config, &tmux).await {
                 Ok(name) => {
                     let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
                     execute_attach(&name, triggers).await;

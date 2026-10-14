@@ -62,6 +62,27 @@ claude-commander config --init
 claude-commander --config /path/to/config.toml
 ```
 
+## Agent skills
+
+Commander ships [Agent Skills](https://agentskills.io) that teach the agents it
+runs how to drive Commander itself: spawning, monitoring and deleting sessions,
+reporting back to Slack, and a complete CLI reference generated from the
+`claude-commander` binary (so it always matches the version you're running).
+There's nothing to install. Every time Commander launches an agent (creating,
+restarting or waking a session, and for the commander and voice sessions), it
+writes the skills into the agent's working directory:
+
+- **Claude Code:** `.claude/skills/claude-commander-*/`
+- **Codex, OpenCode and omp:** `.agents/skills/claude-commander-*/`
+
+Each skill directory carries its own `.gitignore`, so the skills never appear
+in `git status`, the review diff, or a commit. Only `claude-commander-*`
+directories are written or removed; your own skills are left alone.
+
+If you previously installed the `claude-commander` plugin from the
+`sizeak/claude-plugins` marketplace, uninstall it: project skills don't replace
+plugins, so Claude would otherwise see two copies of each skill.
+
 ## Views and the Board
 
 The session list has four views, cycled with `v`: three **list** views (grouped by project, by section, or by section with PR stacks) and the full-screen kanban **board** (see [Views](../README.md#views)). The project list is the default; `v` rotates project → sections → stacks → board → project, skipping the section views when no `[[sections]]` are configured, and the chosen view is remembered across restarts.

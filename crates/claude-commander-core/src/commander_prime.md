@@ -43,5 +43,8 @@ This directory is yours.
 
 ## CLI reference
 
-The following is generated from the live `claude-commander` command
-definitions, so it is always current for the version you are running.
+The full reference for every `claude-commander` command and flag is the
+`claude-commander-cli-reference` skill, written into this directory on every
+launch and generated from the CLI itself, so it always matches the version you
+are running. The `claude-commander-new-session`, `-monitor-sessions` and
+`-delete-session` skills cover the common workflows.

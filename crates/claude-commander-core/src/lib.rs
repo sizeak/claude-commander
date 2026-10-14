@@ -41,6 +41,7 @@ pub mod paste_image;
 pub mod reviewed;
 pub mod server_info;
 pub mod session;
+pub mod skills;
 pub mod slack_notify;
 pub mod stream_json;
 pub mod telemetry;

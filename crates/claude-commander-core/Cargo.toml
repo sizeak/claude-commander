@@ -104,6 +104,10 @@ anyhow = "1.0"
 # them is the binary's, so tracing-subscriber is not a dependency here.
 tracing = { workspace = true }
 
+# Agent skills compiled into the binary and written into each agent's
+# working directory at launch (`skills.rs`).
+rust-embed = "8"
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.23", features = ["v4", "serde"] }

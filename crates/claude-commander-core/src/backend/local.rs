@@ -155,14 +155,8 @@ impl LocalBackend {
     pub async fn ensure_commander(
         &self,
         config: &crate::config::Config,
-        cli_reference: &str,
     ) -> crate::error::Result<String> {
-        crate::commander::ensure_session(
-            config,
-            &self.service.session_manager().tmux,
-            cli_reference,
-        )
-        .await
+        crate::commander::ensure_session(config, &self.service.session_manager().tmux).await
     }
 }
 

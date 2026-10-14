@@ -10,16 +10,16 @@
 //! here. `ensure_session`/`is_running` are thin IO wrappers over tmux and are
 //! exercised by tmux-gated integration tests.
 //!
-//! The CLI reference embedded in `CLAUDE.md` arrives as rendered markdown from
-//! the binary that owns the CLI (`claude-commander`'s `cli_args::cli_reference`).
-//! Only binaries define a CLI, so only binaries depend on clap — a third-party
-//! embedder of this library shouldn't have to. Note this applies to the
-//! *generated* half only: the handwritten preamble (`commander_prime.md`) does
-//! name the `claude-commander` CLI, deliberately, since driving it is the whole
-//! point of the commander session.
+//! The CLI reference is not in `CLAUDE.md`: it ships as the bundled
+//! `claude-commander-cli-reference` skill (see [`crate::skills`]), which
+//! priming writes into this directory like any agent's working directory. So
+//! `CLAUDE.md` is a pure function of this build, and every writer — the
+//! interactive commander, the headless Slack commander, any frontend —
+//! produces it byte-identically without needing the clap tree.
 
 use std::path::{Path, PathBuf};
 
+use crate::agent::AgentKind;
 use crate::config::Config;
 use crate::error::{Result, SessionError};
 use crate::tmux::TmuxExecutor;
@@ -30,8 +30,7 @@ pub mod headless;
 pub const COMMANDER_TMUX_NAME: &str = "cc-commander";
 
 /// Handwritten role/safety preamble. Ships with each build; humans edit this
-/// when the commander's intent changes. The live CLI reference is appended at
-/// runtime so the generated `CLAUDE.md` never drifts from the actual commands.
+/// when the commander's intent changes.
 const COMMANDER_PRIME: &str = include_str!("commander_prime.md");
 
 /// Slack-mode section of `CLAUDE.md`. Included in **every** prime — interactive
@@ -51,52 +50,41 @@ const NOTES_SEED: &str = "# Commander notes\n\n\
     Claude Commander never touches this file.\n\n\
     ## Active workflows\n";
 
-/// Build the `CLAUDE.md` body: the handwritten preamble, `cli_reference` —
-/// markdown documenting the CLI, rendered by the binary that defines it (see
-/// the module docs) — and the (conditionally-worded) Slack-mode section. One
-/// content for every prime path — see [`COMMANDER_SLACK_APPENDIX`] for why it
-/// must not vary by caller.
-pub fn claude_md_content(cli_reference: &str) -> String {
-    let base = format!(
-        "{}
-{}",
-        COMMANDER_PRIME.trim_end(),
-        cli_reference
-    );
+/// Build the `CLAUDE.md` body: the handwritten preamble and the
+/// (conditionally-worded) Slack-mode section. One content for every prime path
+/// — see [`COMMANDER_SLACK_APPENDIX`] for why it must not vary by caller.
+pub fn claude_md_content() -> String {
     format!(
-        "{}
-{}
-",
-        base.trim_end(),
+        "{}\n\n{}\n",
+        COMMANDER_PRIME.trim_end(),
         COMMANDER_SLACK_APPENDIX.trim_end()
     )
 }
 
 /// Write `CLAUDE.md` into the commander directory, overwriting any existing
 /// copy (the file is owned by Claude Commander, not the commander session).
-///
-/// Async because it runs on the TUI/CLI runtime; uses `tokio::fs` so the disk
-/// write never blocks the executor. The body is composed synchronously (pure
-/// CPU) before the `await`.
-pub async fn write_claude_md(dir: &Path, cli_reference: &str) -> Result<()> {
-    tokio::fs::write(dir.join("CLAUDE.md"), claude_md_content(cli_reference)).await?;
+pub async fn write_claude_md(dir: &Path) -> Result<()> {
+    tokio::fs::write(dir.join("CLAUDE.md"), claude_md_content()).await?;
     Ok(())
 }
 
 /// Prepare the commander directory so a commander (interactive or headless) can
-/// run there: create it, (re)write `CLAUDE.md` from the live CLI, and seed
-/// `NOTES.md` when absent. Returns the directory path. Shared by
-/// [`ensure_session`] (interactive tmux) and the headless Slack commander, so
-/// both prime the same directory with **identical** content.
+/// run there: create it, (re)write `CLAUDE.md`, seed `NOTES.md` when absent,
+/// and install the bundled agent skills for the configured commander program.
+/// Returns the directory path. Shared by [`ensure_session`] (interactive tmux)
+/// and the headless Slack commander, so both prime the same directory with
+/// **identical** content.
 ///
 /// Unlike [`ensure_session`], this does **no** tmux work and is **not** gated on
 /// `commander_enabled`: the headless Slack path is gated by `[slack]` config
 /// alone, so priming must not require the interactive feature to be on.
-pub async fn prime_commander_dir(config: &Config, cli_reference: &str) -> Result<PathBuf> {
+pub async fn prime_commander_dir(config: &Config) -> Result<PathBuf> {
     let dir = config.commander_dir()?;
     tokio::fs::create_dir_all(&dir).await?;
-    write_claude_md(&dir, cli_reference).await?;
+    write_claude_md(&dir).await?;
     seed_notes_md(&dir).await?;
+    crate::skills::install_for_launch(&dir, AgentKind::from_program(&config.commander_program()))
+        .await;
     Ok(dir)
 }
 
@@ -138,17 +126,14 @@ fn plan_session_action(exists: bool, pane_dead: bool) -> SessionAction {
 /// refresh `CLAUDE.md`, seed `NOTES.md`, and spawn (or respawn a dead) tmux
 /// session. Returns the tmux session name.
 ///
-/// `CLAUDE.md` is rewritten on every call so the CLI reference stays current;
-/// `NOTES.md` is only seeded when absent so accumulated notes survive.
+/// `CLAUDE.md` and the bundled skills are rewritten on every call so they match
+/// this build; `NOTES.md` is only seeded when absent so accumulated notes
+/// survive.
 ///
 /// Returns [`SessionError::CommanderDisabled`] when the feature is off. This is
 /// the single enforcement point for the enable gate — every caller (CLI, TUI)
 /// routes through here, so a new caller cannot accidentally bypass the check.
-pub async fn ensure_session(
-    config: &Config,
-    tmux: &TmuxExecutor,
-    cli_reference: &str,
-) -> Result<String> {
+pub async fn ensure_session(config: &Config, tmux: &TmuxExecutor) -> Result<String> {
     if !config.commander_enabled {
         return Err(SessionError::CommanderDisabled.into());
     }
@@ -156,7 +141,7 @@ pub async fn ensure_session(
     // Friendly error on tmux-less machines, matching the create-session path.
     tmux.check_installed().await?;
 
-    let dir = prime_commander_dir(config, cli_reference).await?;
+    let dir = prime_commander_dir(config).await?;
 
     let exists = tmux.session_exists(COMMANDER_TMUX_NAME).await?;
     let pane_dead = if exists {
@@ -192,23 +177,18 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Stands in for the markdown the owning binary renders from its clap tree.
-    /// Core never parses it — it only has to reach the file intact — so a
-    /// representative snippet is enough.
-    const SAMPLE_REFERENCE: &str = "### `claude-commander list`\n\n```\nList all sessions\n```\n";
-
     #[test]
-    fn claude_md_starts_with_prime_and_appends_reference() {
-        let content = claude_md_content(SAMPLE_REFERENCE);
+    fn claude_md_leads_with_prime_and_points_at_the_reference_skill() {
+        let content = claude_md_content();
         assert!(
             content.starts_with("# Commander Claude"),
             "generated CLAUDE.md must lead with the handwritten preamble"
         );
         // The safety boundary from the preamble survives.
         assert!(content.contains("cannot do"));
-        // The caller's reference is appended verbatim — core neither generates
-        // nor rewrites it (it can't; only the binary knows its own CLI).
-        assert!(content.contains(SAMPLE_REFERENCE));
+        // The CLI reference lives in a bundled skill, not inline.
+        assert!(content.contains("claude-commander-cli-reference"));
+        assert!(!content.contains("```\nList all sessions"));
     }
 
     #[test]
@@ -217,9 +197,7 @@ mod tests {
         // in the interactive commander's CLAUDE.md too (worded to apply only to
         // Slack-originated prompts), so the two writers can never clobber each
         // other with differing copies.
-        let content = claude_md_content(SAMPLE_REFERENCE);
-        assert!(content.starts_with("# Commander Claude"));
-        assert!(content.contains("claude-commander list"));
+        let content = claude_md_content();
         assert!(content.contains("## Slack mode"));
         assert!(
             content.contains("mrkdwn"),
@@ -234,12 +212,12 @@ mod tests {
             content.contains("only to those requests"),
             "slack section must be scoped to Slack-originated prompts"
         );
-        // The section comes after the base, not before it.
-        assert!(content.find("## Slack mode") > content.find("claude-commander list"));
+        // The section comes after the preamble, not before it.
+        assert!(content.find("## Slack mode") > content.find("# Commander Claude"));
     }
 
     #[tokio::test]
-    async fn prime_commander_dir_regenerates_claude_md_and_seeds_notes() {
+    async fn prime_commander_dir_regenerates_claude_md_seeds_notes_and_installs_skills() {
         let dir = TempDir::new().unwrap();
         let config = Config {
             commander_dir: Some(dir.path().join("commander")),
@@ -248,23 +226,24 @@ mod tests {
 
         // Priming twice regenerates the file (not appended-to twice), and every
         // prime carries the shared Slack section.
-        let primed = prime_commander_dir(&config, SAMPLE_REFERENCE)
-            .await
-            .unwrap();
-        let primed2 = prime_commander_dir(&config, SAMPLE_REFERENCE)
-            .await
-            .unwrap();
+        let primed = prime_commander_dir(&config).await.unwrap();
+        let primed2 = prime_commander_dir(&config).await.unwrap();
         assert_eq!(primed, primed2);
         let content = std::fs::read_to_string(primed2.join("CLAUDE.md")).unwrap();
-        assert!(content.starts_with("# Commander Claude"));
-        assert!(content.contains("## Slack mode"));
-        // Regenerated, not doubled: the preamble appears exactly once.
+        assert_eq!(content, claude_md_content());
         assert_eq!(content.matches("# Commander Claude").count(), 1);
         // NOTES.md is seeded.
         assert!(
             std::fs::read_to_string(primed2.join("NOTES.md"))
                 .unwrap()
                 .starts_with("# Commander notes")
+        );
+        // The default commander program is Claude, so the skills land where
+        // Claude Code looks for them.
+        assert!(
+            primed2
+                .join(".claude/skills/claude-commander-cli-reference/SKILL.md")
+                .is_file()
         );
     }
 
@@ -274,12 +253,10 @@ mod tests {
         let path = dir.path().join("CLAUDE.md");
         std::fs::write(&path, "stale content the commander scribbled").unwrap();
 
-        write_claude_md(dir.path(), SAMPLE_REFERENCE).await.unwrap();
+        write_claude_md(dir.path()).await.unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
-        assert!(!written.contains("stale content"));
-        assert!(written.starts_with("# Commander Claude"));
-        assert!(written.contains("claude-commander list"));
+        assert_eq!(written, claude_md_content());
     }
 
     #[tokio::test]
@@ -325,9 +302,7 @@ mod tests {
         let config = Config::default();
         assert!(!config.commander_enabled);
         let tmux = TmuxExecutor::new();
-        let err = ensure_session(&config, &tmux, SAMPLE_REFERENCE)
-            .await
-            .unwrap_err();
+        let err = ensure_session(&config, &tmux).await.unwrap_err();
         assert!(
             matches!(
                 err,
