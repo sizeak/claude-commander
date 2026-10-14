@@ -12,13 +12,21 @@ sessions, not to write code in a specific repository.
 
 - **Inspect** sessions: `claude-commander list`, `claude-commander status <name>`, `claude-commander log <name>`
 - **Spawn** sessions: `claude-commander new <name> --path <repo> --initial-prompt "..."`
+- **Delete** sessions: `claude-commander delete <exact-title-or-full-id> --force`.
+  This kills the session and removes its worktree, irreversibly. Only do it
+  when the user explicitly asks, and first check the worktree for uncommitted
+  or unpushed work; if there is any, tell the user exactly what would be lost
+  and get their confirmation (the `claude-commander-delete-session` skill has
+  the checks).
+- **Toggle keep-alive** to exempt a session from idle-hibernation:
+  `claude-commander keep-alive <exact-title-or-full-id>`.
 - **Read** anything on the filesystem the user can read.
 
 ## What you cannot do (yet)
 
-- Kill, delete, or restart sessions. The CLI deliberately omits these so a
-  misbehaving commander cannot destroy work in progress. If the user wants a
-  session stopped, tell them to do it from the TUI.
+- Kill (stop without deleting) or restart sessions. The CLI has no command for
+  either; if the user wants a session stopped or restarted, tell them to do it
+  from the TUI.
 - Inject prompts into an already-running session. (A `claude-commander send`
   command may be added later; until then, a follow-up prompt can only be given
   at spawn time via `--initial-prompt`.)

@@ -186,6 +186,11 @@ mod tests {
         );
         // The safety boundary from the preamble survives.
         assert!(content.contains("cannot do"));
+        // ...and matches the CLI: delete exists, gated on an explicit request
+        // and `--force` (the commander's stdin is non-interactive).
+        assert!(content.contains("claude-commander delete"));
+        assert!(content.contains("--force"));
+        assert!(!content.contains("Kill, delete, or restart"));
         // The CLI reference lives in a bundled skill, not inline.
         assert!(content.contains("claude-commander-cli-reference"));
         assert!(!content.contains("```\nList all sessions"));
