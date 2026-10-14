@@ -42,7 +42,13 @@ pub(crate) async fn listen(
         .listen_for(app_token)
         .await
         .map_err(|e| ChatError::new(format!("socket mode: {e}")))?;
-    listener.serve().await;
+    // Not `serve()`: that also waits for SIGTERM/SIGINT/SIGQUIT through a
+    // process-wide signal-hook registration, which strips those signals'
+    // default action from the whole process — `kill` would stop the bridge
+    // instead of the TUI or server hosting it. Start the clients (they
+    // reconnect on their own) and stay connected for the process lifetime.
+    listener.start().await;
+    std::future::pending::<()>().await;
     Ok(())
 }
 

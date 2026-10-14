@@ -19,8 +19,21 @@ async-trait = "0.1"
 regex = "1.12"
 tokio = { workspace = true }
 tracing = { workspace = true }
-# The `hyper` feature pulls in the rustls-based HTTPS connector and the
-# tokio-tungstenite WebSocket transport Socket Mode needs; no default features.
-slack-morphism = { version = "2.23", features = ["hyper"] }
-# Only to pick the process-wide crypto provider (see `install_crypto_provider`).
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# `hyper-base`, not `hyper`: the latter's `rustls-native-certs` feature also
+# turns on rustls's `ring` provider, and a second provider beside reqwest's
+# `aws-lc-rs` leaves rustls unable to pick a process default — every implicit
+# `ClientConfig::builder()` in the binary then panics. So the HTTPS connector
+# is built here on aws-lc-rs, and Socket Mode's WebSocket TLS is enabled
+# directly (provider-neutral; it uses the single process default).
+slack-morphism = { version = "2.23", features = ["hyper-base"] }
+hyper-rustls = { version = "0.27", default-features = false, features = [
+  "aws-lc-rs",
+  "native-tokio",
+  "http1",
+  "http2",
+  "tls12",
+] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
+  "rustls-tls-native-roots",
+] }

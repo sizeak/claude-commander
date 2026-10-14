@@ -83,7 +83,19 @@ fn render_inline(text: &str) -> String {
 
 fn render_span(text: &str) -> String {
     let text = escape(text);
-    let text = LINK.replace_all(&text, "<$2|$1>");
+    // Only real URLs: inside `<…>` Slack reads `!channel`, `@U…` and
+    // `!subteam^…` as pings, so any other target stays literal text.
+    let text = LINK.replace_all(&text, |caps: &regex::Captures| {
+        let target = &caps[2];
+        if ["https://", "http://", "mailto:"]
+            .iter()
+            .any(|scheme| target.starts_with(scheme))
+        {
+            format!("<{target}|{}>", &caps[1])
+        } else {
+            caps[0].to_string()
+        }
+    });
     let bold = format!("{BOLD_MARK}$1{BOLD_MARK}");
     let text = BOLD_STARS.replace_all(&text, bold.as_str());
     let text = BOLD_UNDERSCORES.replace_all(&text, bold.as_str());
@@ -122,6 +134,17 @@ mod tests {
             render("see [the PR](https://github.com/o/r/pull/1?a=1&b=2) & a < b > c"),
             "see <https://github.com/o/r/pull/1?a=1&amp;b=2|the PR> &amp; a &lt; b &gt; c"
         );
+    }
+
+    /// Slack reads `<!channel>`, `<@U…>` and `<!subteam^…>` inside angle
+    /// brackets as pings, so only real URLs may become `<target|text>` links.
+    #[test]
+    fn only_web_and_mail_links_become_slack_links() {
+        assert_eq!(render("[x](mailto:a@b.c)"), "<mailto:a@b.c|x>");
+        for target in ["!channel", "!here", "@U123", "!subteam^S1", "javascript:x"] {
+            let out = render(&format!("[x]({target})"));
+            assert!(!out.contains('<'), "{target} produced {out}");
+        }
     }
 
     #[test]

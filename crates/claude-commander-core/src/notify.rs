@@ -25,6 +25,9 @@ pub enum NotifyPrepError {
     /// session's worktree.
     #[error("no session for the current directory; pass --session <name-or-id>")]
     NoSessionForCwd,
+    /// The message (from `--message` or stdin) is empty.
+    #[error("nothing to send: the message is empty")]
+    EmptyMessage,
     /// No server is advertising itself (no `server-info.json`), so there's
     /// nothing to POST to.
     #[error(
@@ -39,12 +42,21 @@ pub enum NotifyPrepError {
 /// Find the session whose worktree contains `cwd` (equal to, or nested under,
 /// the worktree path). The deepest match wins so a nested worktree beats an
 /// ancestor. Sessions with no worktree path yet (still `Creating`) are skipped.
+///
+/// Paths are compared after resolving symlinks (when they exist), since the
+/// shell's cwd and the stored worktree path can name the same directory
+/// differently — e.g. a worktrees dir reached through a symlink.
 pub fn resolve_cwd_session<'a>(state: &'a AppState, cwd: &Path) -> Option<&'a WorktreeSession> {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let cwd = canonical(cwd);
     state
         .sessions
         .values()
-        .filter(|s| !s.worktree_path.as_os_str().is_empty() && cwd.starts_with(&s.worktree_path))
-        .max_by_key(|s| s.worktree_path.components().count())
+        .filter(|s| !s.worktree_path.as_os_str().is_empty())
+        .map(|s| (s, canonical(&s.worktree_path)))
+        .filter(|(_, worktree)| cwd.starts_with(worktree))
+        .max_by_key(|(_, worktree)| worktree.components().count())
+        .map(|(s, _)| s)
 }
 
 /// Resolve the session query for a notify: an explicit `--session` passes
@@ -73,6 +85,9 @@ pub fn prepare_notify(
     message: String,
     cwd: &Path,
 ) -> Result<(ServerInfo, NotifyRequest), NotifyPrepError> {
+    if message.trim().is_empty() {
+        return Err(NotifyPrepError::EmptyMessage);
+    }
     let query = resolve_notify_query(state, session, cwd)?;
     let info = match ServerInfo::read_from(data_dir) {
         Ok(Some(info)) => info,
@@ -136,6 +151,41 @@ mod tests {
         // An explicit query wins even from an unrelated cwd.
         let q = resolve_notify_query(&state, Some("some-name".into()), root.path()).unwrap();
         assert_eq!(q, "some-name");
+    }
+
+    #[test]
+    fn prepare_notify_refuses_an_empty_message() {
+        let root = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let (state, _) = state_with_worktree(root.path().join("wt"));
+        let err = prepare_notify(
+            &state,
+            data.path(),
+            Some("x".into()),
+            "  \n".into(),
+            root.path(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, NotifyPrepError::EmptyMessage));
+    }
+
+    /// The stored worktree path and the shell's cwd can name the same place
+    /// differently (a symlinked worktrees dir); the lookup must see through it.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cwd_session_sees_through_a_symlinked_worktrees_dir() {
+        let root = TempDir::new().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join("wt/src")).unwrap();
+        std::os::unix::fs::symlink(&real, root.path().join("link")).unwrap();
+        // Stored under the symlink; the shell reports the resolved path.
+        let (state, sid) = state_with_worktree(root.path().join("link/wt"));
+        assert_eq!(
+            resolve_cwd_session(&state, &real.join("wt/src"))
+                .unwrap()
+                .id,
+            sid
+        );
     }
 
     #[test]

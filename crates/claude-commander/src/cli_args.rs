@@ -283,7 +283,13 @@ fn generate_cli_reference(cmd: &clap::Command) -> String {
     // reads `Usage: claude-commander new …` rather than a bare `Usage: new`.
     let mut cmd = cmd.clone();
     cmd.build();
-    let mut out = String::new();
+    // The program itself first: its usage, subcommand list and top-level
+    // options (`--serve`, `--debug`, …), which no subcommand section repeats.
+    let mut out = format!(
+        "### `{}`\n\n```\n{}\n```\n\n",
+        cmd.get_name(),
+        cmd.clone().render_long_help().to_string().trim_end()
+    );
     render_subcommands(&cmd, &mut out);
     out
 }
@@ -366,6 +372,18 @@ mod tests {
         assert!(reference.contains("List all sessions"));
         assert!(reference.contains("sample-bin new"));
         assert!(reference.contains("Create a new session"));
+    }
+
+    /// The reference claims to cover every flag, so the top-level options
+    /// (`--serve`, `--debug`, …) need a section of their own.
+    #[test]
+    fn cli_reference_documents_the_top_level_options() {
+        let reference = cli_reference();
+        assert!(
+            reference.starts_with("### `claude-commander`"),
+            "{reference}"
+        );
+        assert!(reference.contains("--serve"), "{reference}");
     }
 
     #[test]

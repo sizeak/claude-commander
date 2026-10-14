@@ -12,6 +12,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::agent::AgentKind;
 use crate::config::keybindings::KeyBindings;
 use crate::config::migrations;
 use crate::config::theme::ThemeOverrides;
@@ -832,6 +833,14 @@ fn default_pr_review_labels() -> Vec<String> {
 }
 
 impl Config {
+    /// The config as TOML for `claude-commander config`, with every credential
+    /// redacted. Agents can run that command (the headless chat commander's
+    /// `claude-commander:*` allowance), so it must not print tokens; the file
+    /// itself is where a person reads them.
+    pub fn display_toml(&self) -> std::result::Result<String, toml::ser::Error> {
+        toml::to_string_pretty(&self.clone().with_secrets_redacted())
+    }
+
     /// A copy with every credential field cleared, for serving over the wire
     /// (`GET /api/config`). The redacting `Debug` impls don't help serde, so
     /// without this a client holding one server's bearer token could harvest
@@ -1114,15 +1123,15 @@ impl Config {
         program: Option<&str>,
         mode: Option<&str>,
     ) -> std::result::Result<(), SessionError> {
-        if let Some(program) = program {
-            let allowed = program == self.default_session_program()
-                || self.programs.iter().any(|p| p.command == program);
-            if !allowed {
-                return Err(SessionError::ProgramNotAllowed(program.to_string()));
-            }
+        // `None` launches the server default, so it is gated like any other.
+        let program = program.map_or_else(|| self.default_session_program(), str::to_string);
+        let configured = program == self.default_session_program()
+            || self.programs.iter().any(|p| p.command == program);
+        if !configured || !AgentKind::from_program(&program).is_claude() {
+            return Err(SessionError::ProgramNotAllowed(program));
         }
         if let Some(mode) = mode
-            && mode_disables_permission_gate(mode)
+            && !mode_keeps_permission_gate(mode)
         {
             return Err(SessionError::ModeNotAllowed(mode.to_string()));
         }
@@ -1277,21 +1286,15 @@ impl Config {
     }
 }
 
-/// Whether a `--mode` (Claude `--permission-mode`) value disables the
-/// interactive permission prompt, letting an unattended worker run tool calls
-/// with no human gate. Claude Code's permission modes are `default`, `plan`,
-/// `acceptEdits`, and `bypassPermissions`: `default`/`plan` keep the prompt,
-/// while `bypassPermissions` skips every prompt and `acceptEdits` auto-approves
-/// file edits/writes — both let a freshly-created, unattended chat-created worker act
-/// without anyone to approve, so both are forbidden.
-///
-/// Matched case-insensitively after trimming so a case/whitespace variant of a
-/// dangerous mode cannot slip past (fails closed); an unrecognised mode is
-/// treated as safe here — Claude itself rejects it, so it never launches a
-/// bypassing worker.
-fn mode_disables_permission_gate(mode: &str) -> bool {
+/// Whether a `--mode` (Claude `--permission-mode`) value keeps the interactive
+/// permission prompt in front of every tool call: `default` and `plan` do.
+/// Everything else — `bypassPermissions`, `acceptEdits`, `auto`, `dontAsk`, and
+/// any mode Claude adds later — lets an unattended chat-created worker act with
+/// no one to approve it, so this is an allowlist and fails closed. Matched
+/// case-insensitively after trimming.
+fn mode_keeps_permission_gate(mode: &str) -> bool {
     let m = mode.trim();
-    m.eq_ignore_ascii_case("bypassPermissions") || m.eq_ignore_ascii_case("acceptEdits")
+    m.eq_ignore_ascii_case("default") || m.eq_ignore_ascii_case("plan")
 }
 
 /// Parse a key string like `" "`, `"ctrl+k"`, `"f1"` into crossterm types.
@@ -1483,6 +1486,22 @@ linger_secs = 120
         let config: Config = toml::from_str("").expect("empty toml");
         assert!(!config.slack.is_enabled());
         assert_eq!(config.headless_commander.invocation_timeout_secs, 300);
+    }
+
+    /// `claude-commander config` prints this. The headless chat commander may
+    /// run any `claude-commander` subcommand, so the printout must never carry
+    /// a credential that a prompt-injected agent could post into a channel.
+    #[test]
+    fn display_toml_never_prints_a_secret() {
+        let mut c = Config::default();
+        c.slack.app_token = Some("xapp-secret".into());
+        c.slack.bot_token = Some("xoxb-secret".into());
+        c.slack.allowed_user_ids = vec!["U1".into()];
+        c.server.token = Some("server-secret".into());
+        c.stt.api_key = Some("stt-secret".into());
+        let shown = c.display_toml().unwrap();
+        assert!(!shown.contains("secret"), "secret printed:\n{shown}");
+        assert!(shown.contains("U1"), "non-secret settings are still shown");
     }
 
     #[test]
@@ -1794,12 +1813,12 @@ speed = 1.25
                 .is_ok()
         );
 
-        // Any other configured program is allowed, matched exactly (with flags).
-        assert!(
-            config
-                .ensure_headless_create_allowed(Some("codex --model o3"), None)
-                .is_ok()
-        );
+        // A configured program that isn't Claude is refused: only Claude's
+        // permission modes can keep an unattended worker behind a prompt.
+        assert!(matches!(
+            config.ensure_headless_create_allowed(Some("codex --model o3"), None),
+            Err(SessionError::ProgramNotAllowed(_))
+        ));
 
         // An arbitrary injected payload is rejected.
         let err = config
@@ -1833,6 +1852,23 @@ speed = 1.25
                 .ensure_headless_create_allowed(Some("codex"), None)
                 .is_err()
         );
+    }
+
+    /// With no `--program`, the server default launches — so it must pass the
+    /// same Claude-only gate, or a non-Claude default would run unattended.
+    #[test]
+    fn headless_lock_refuses_a_non_claude_default_program() {
+        let config = Config {
+            programs: vec![ProgramEntry {
+                label: "omp".to_string(),
+                command: "omp".to_string(),
+            }],
+            ..Config::default()
+        };
+        assert!(matches!(
+            config.ensure_headless_create_allowed(None, None),
+            Err(SessionError::ProgramNotAllowed(p)) if p == "omp"
+        ));
     }
 
     #[test]
@@ -1887,6 +1923,23 @@ speed = 1.25
                 .is_err()
         );
 
+        // An allowlist, not a denylist: any mode that isn't `default` or `plan`
+        // — `auto`, `dontAsk`, or a mode Claude adds later — is refused.
+        for mode in ["auto", "dontAsk", "someFutureMode"] {
+            assert!(
+                matches!(
+                    config.ensure_headless_create_allowed(Some("claude"), Some(mode)),
+                    Err(SessionError::ModeNotAllowed(_))
+                ),
+                "{mode} must be refused"
+            );
+        }
+        assert!(
+            config
+                .ensure_headless_create_allowed(Some("claude"), Some(" PLAN "))
+                .is_ok()
+        );
+
         // The mode gate applies even when no program override is given (the
         // configured default program is used, but the mode still disables the
         // prompt).
@@ -1906,14 +1959,19 @@ speed = 1.25
     }
 
     #[test]
-    fn mode_disables_permission_gate_classifies_modes() {
-        assert!(mode_disables_permission_gate("bypassPermissions"));
-        assert!(mode_disables_permission_gate("acceptEdits"));
-        assert!(mode_disables_permission_gate("  bypassPermissions  "));
-        assert!(mode_disables_permission_gate("BYPASSPERMISSIONS"));
-        assert!(!mode_disables_permission_gate("default"));
-        assert!(!mode_disables_permission_gate("plan"));
-        assert!(!mode_disables_permission_gate(""));
+    fn mode_keeps_permission_gate_is_an_allowlist() {
+        assert!(mode_keeps_permission_gate("default"));
+        assert!(mode_keeps_permission_gate(" Plan "));
+        for mode in [
+            "bypassPermissions",
+            "acceptEdits",
+            "auto",
+            "dontAsk",
+            "",
+            "x",
+        ] {
+            assert!(!mode_keeps_permission_gate(mode), "{mode:?}");
+        }
     }
 
     #[test]

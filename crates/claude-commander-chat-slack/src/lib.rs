@@ -44,8 +44,7 @@ impl SlackBackend {
         if !config.is_enabled() {
             return None;
         }
-        install_crypto_provider();
-        let connector = match SlackClientHyperConnector::new() {
+        let connector = match https_connector() {
             Ok(c) => c,
             Err(e) => {
                 error!(target: "slack", "could not build Slack HTTP connector: {e}");
@@ -100,14 +99,17 @@ impl SlackBackend {
     }
 }
 
-/// Make sure rustls has a process-wide crypto provider before the Slack HTTPS
-/// connector is built. `slack-morphism`'s connector enables rustls's `ring`
-/// provider, and other crates in the same binary (reqwest) enable `aws-lc-rs`;
-/// with both compiled in, rustls refuses to choose one implicitly and the
-/// connector panics. Installing `ring` is idempotent across calls, and leaves
-/// alone a provider something else installed first.
-fn install_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+/// The HTTPS connector for Slack's Web API, on rustls's `aws-lc-rs` provider —
+/// the one the rest of the binary uses (see `Cargo.toml` for why `ring` must not
+/// be compiled in).
+fn https_connector() -> std::io::Result<SlackClientHyperHttpsConnector> {
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_provider_and_native_roots(rustls::crypto::aws_lc_rs::default_provider())?
+        .https_only()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    Ok(SlackClientHyperConnector::from(https))
 }
 
 /// Map a Slack Web API error to the bridge's opaque error. `slack-morphism`
@@ -209,5 +211,19 @@ impl ChatBackend for SlackBackend {
 
     fn mention(&self, user: &str) -> String {
         format!("<@{user}>")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The rest of the binary (reqwest, the remote client's WebSocket attach)
+    /// builds rustls configs from the process-default provider, which rustls
+    /// only picks implicitly when exactly one provider is compiled in. Pulling
+    /// in a second one (slack-morphism's `hyper` feature adds `ring` beside
+    /// reqwest's `aws-lc-rs`) made every such call panic in `--features slack`
+    /// builds, e.g. attaching to an `https://` remote server.
+    #[test]
+    fn exactly_one_rustls_provider_is_compiled_in() {
+        let _ = rustls::ClientConfig::builder();
     }
 }

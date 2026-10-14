@@ -34,6 +34,7 @@ pub struct FakeBackend {
     allowed: Vec<String>,
     thread: Vec<ThreadMessage>,
     fail_posts: bool,
+    slow_status: Option<(String, std::time::Duration)>,
     calls: Mutex<Vec<Call>>,
     inbox: Mutex<Option<Inbox>>,
 }
@@ -46,6 +47,7 @@ impl FakeBackend {
             allowed: vec!["U1".to_string()],
             thread: Vec::new(),
             fail_posts: false,
+            slow_status: None,
             calls: Mutex::new(Vec::new()),
             inbox: Mutex::new(None),
         }
@@ -64,6 +66,13 @@ impl FakeBackend {
     /// Make every post (reply or direct) fail.
     pub fn failing_posts(mut self) -> Self {
         self.fail_posts = true;
+        self
+    }
+
+    /// Delay every status update on `message_id` by `delay`, to make that
+    /// message's handling slow before it reaches the asker.
+    pub fn with_slow_status(mut self, message_id: &str, delay: std::time::Duration) -> Self {
+        self.slow_status = Some((message_id.to_string(), delay));
         self
     }
 
@@ -137,6 +146,11 @@ impl ChatBackend for FakeBackend {
     }
 
     async fn set_status(&self, _channel: &str, message_id: &str, status: Status) -> ChatResult<()> {
+        if let Some((slow, delay)) = &self.slow_status
+            && slow == message_id
+        {
+            tokio::time::sleep(*delay).await;
+        }
         self.record(Call::Status(message_id.into(), status));
         Ok(())
     }
@@ -167,6 +181,11 @@ impl FakeAsker {
     /// The last `(conversation key, prompt)` asked.
     pub fn seen(&self) -> Option<(String, String)> {
         self.seen.lock().unwrap().last().cloned()
+    }
+
+    /// Every `(conversation key, prompt)` asked, in order.
+    pub fn all(&self) -> Vec<(String, String)> {
+        self.seen.lock().unwrap().clone()
     }
 
     pub fn count(&self) -> usize {

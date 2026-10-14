@@ -50,7 +50,7 @@ fn cli_reference_skill() -> String {
          \n\
          # claude-commander CLI reference\n\
          \n\
-         Each section is the `--help` output of one subcommand.\n\
+         Each section is the `--help` output of the program or one of its subcommands.\n\
          \n\
          {}",
         cli_reference().trim_end()

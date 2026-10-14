@@ -27,7 +27,7 @@ Example response: `Spun up session **fix-auth-bug** in plan mode.`
 
 ## Instructions
 
-`$1` is the user's request describing what the new session should do. Use it to determine the session name, initial prompt, mode, effort, and base branch.
+`$ARGUMENTS` is the user's request describing what the new session should do. Use it to determine the session name, initial prompt, mode, effort, and base branch.
 
 ## Give the new session a way to report back
 

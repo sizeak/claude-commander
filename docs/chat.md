@@ -135,27 +135,27 @@ server machine — so it's locked down by design:
 - **Agent lockdown.** The headless commander runs with a restricted tool set (the
   `claude-commander` CLI plus read-only Read/Grep/Glob) — no arbitrary shell, no
   `Write`/`Edit` — and each invocation is capped by `invocation_timeout_secs`. It
-  **can** create sessions (`claude-commander new`), and a created session runs a
-  program in its own tmux pane. A `new` that descends from the headless commander
-  (detected by an inherited environment marker the agent cannot forge or strip)
-  is therefore restricted on **two** flags that could otherwise turn a created
-  session into unattended code execution:
+  loads only its own project settings (`--setting-sources project`) and no MCP
+  servers (`--strict-mcp-config`), so your user-level allow rules and MCP servers
+  never widen what it can do. It **can** create sessions (`claude-commander new`),
+  and a created session runs a program in its own tmux pane. Any CLI call that
+  descends from the headless commander (detected by an inherited environment
+  marker the agent cannot forge or strip) is restricted:
 
-  - **Program** (`--program`): the launched binary would run *outside* the
-    read-only deny fence, so it may only be an entry from the server's `programs`
-    list or the configured default. An injected `--program "bash -lc '…'"` is
-    rejected before the session is created.
-  - **Permission mode** (`--mode`): even with an allowed program such as `claude`,
-    a mode that disables the interactive permission prompt (`bypassPermissions`,
-    `acceptEdits`) would let the freshly-created, unattended worker execute an
-    attacker-supplied `-i` prompt with no gate. Those modes are rejected; the
-    safe modes (no `--mode`, `default`, `plan`) are allowed. Other agent flags
-    (`--effort`, `--model`, `-i`) are **not** restricted: the launch command is
-    run by `/bin/sh -c`, and each folded value is shell-escaped where it is
-    interpolated, so a value cannot inject shell execution. A default-mode
-    worker also still prompts before acting.
+  - **Program** (`--program`, or the default when omitted): only a **Claude**
+    program from the server's `programs` list or the configured default. Other
+    agents (Codex, OpenCode, omp) are refused, because only Claude's permission
+    modes can keep an unattended worker behind a prompt; an injected
+    `--program "bash -lc '…'"` is refused before anything is created.
+  - **Permission mode** (`--mode`): only no mode, `default` or `plan` — modes that
+    keep the interactive permission prompt. Everything else (`bypassPermissions`,
+    `acceptEdits`, `auto`, `dontAsk`, and any future mode) is refused, so an
+    attacker-supplied `-i` prompt can't run unattended. Other agent flags
+    (`--effort`, `--model`, `-i`) are shell-escaped where they're folded into the
+    launch command, so a value can't inject shell execution.
+  - **`delete`** is refused outright, `--force` or not: deleting is irreversible
+    and the commander can't check a worktree for unsaved work first.
 
-  Together these mean an injected `new` cannot achieve unattended code execution.
   This does not make the agent untrusted-input-proof in general: allowlisted
   **users** are trusted, thread **history** is treated as untrusted and fenced
   (see above), and the CLI's own guarded surface is the boundary — do not widen
@@ -163,15 +163,18 @@ server machine — so it's locked down by design:
 - **Read fencing.** Read access is broad by necessity (the agent inspects
   worktrees, which live outside its working directory), so a `permissions.deny`
   rule set blocks reads of sensitive locations regardless: `~/.ssh`, `~/.aws`,
-  `~/.gnupg`, `.env`/`.env.*` files anywhere, the commander **config dir** (where
-  `config.toml` holds the chat tokens), and the JSON state files in the **data
-  dir** (`server-info.json`'s bearer token, `state.json`, `conversations.json`). This is enforced by
-  Claude Code's permission model, which applies `Read` deny rules to every
-  built-in file tool (`Read`/`Grep`/`Glob`) and to `cat`/`head`-style Bash
-  commands. It does **not** extend to arbitrary subprocesses — but the tool set
-  above permits none — and everything the deny list does not name (all ordinary
-  repo and worktree files) the agent **can** read. Do not rely on file secrecy
-  for anything outside the denied paths on a machine running a bridge.
+  `~/.gnupg`, `~/.git-credentials`, `~/.netrc`, `~/.config/gh`, `~/.docker/config.json`,
+  `~/.kube`, Claude Code's login and transcripts (`~/.claude.json`,
+  `~/.claude/.credentials.json`, `~/.claude/projects`), `.env`/`.env.*` files
+  anywhere, the commander **config dir** (where `config.toml` holds the chat
+  tokens), and the JSON state files in the **data dir** (`server-info.json`'s
+  bearer token, `state.json`, `conversations.json`). This is enforced by Claude
+  Code's permission model, which applies `Read` deny rules to every built-in file
+  tool (`Read`/`Grep`/`Glob`) and to `cat`/`head`-style Bash commands. Everything
+  the deny list does not name (all ordinary repo and worktree files) the agent
+  **can** read. Do not rely on file secrecy for anything outside the denied paths
+  on a machine running a bridge. `claude-commander config` prints the config with
+  every credential redacted, since the agent may run it.
 - **Secrets stay local.** Chat tokens never leave the server's `config.toml`
   (redacted from the API, not remotely patchable), and worker sessions relay
   through the server rather than holding platform credentials themselves.

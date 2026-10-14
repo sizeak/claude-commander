@@ -73,11 +73,13 @@ restarting or waking a session, and for the commander and voice sessions), it
 writes the skills into the agent's working directory:
 
 - **Claude Code:** `.claude/skills/claude-commander-*/`
-- **Codex, OpenCode and omp:** `.agents/skills/claude-commander-*/`
+- **Codex, OpenCode and omp:** `.agents/skills/claude-commander-*/` (an unrecognised program gets both)
 
 Each skill directory carries its own `.gitignore`, so the skills never appear
-in `git status`, the review diff, or a commit. Only `claude-commander-*`
-directories are written or removed; your own skills are left alone.
+in `git status`, the review diff, or a commit. Apart from creating the
+`.claude/skills/` or `.agents/skills/` folder itself, only `claude-commander-*`
+directories that Commander wrote are ever written or removed; your own skills
+are left alone.
 
 If you previously installed the `claude-commander` plugin from the
 `sizeak/claude-plugins` marketplace, uninstall it: project skills don't replace

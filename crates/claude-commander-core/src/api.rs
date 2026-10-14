@@ -999,6 +999,7 @@ impl CommanderService {
         // chat request via `new --origin-*`): stamp it on the record so
         // `notify` can route a worker's message back to the originating
         // thread.
+        let initial_prompt = with_report_back(opts.initial_prompt, opts.origin.as_ref());
         if let Some(origin) = opts.origin {
             self.store
                 .mutate(move |state| {
@@ -1014,7 +1015,7 @@ impl CommanderService {
                 .link_stack_parent_by_branch(&session_id, opts.base_branch.as_deref())
                 .await?;
             self.manager
-                .finalize_session(&session_id, opts.initial_prompt, opts.base_branch)
+                .finalize_session(&session_id, initial_prompt, opts.base_branch)
                 .await?;
             Ok::<(), crate::Error>(())
         }
@@ -3392,6 +3393,26 @@ fn find_session_info(state: &AppState, query: &str) -> Option<SessionInfo> {
     Some(session_info_from_session(session, project_name))
 }
 
+/// The initial prompt for a session, with — when it was requested from chat —
+/// an instruction to report back there. Appended here rather than left to the
+/// commander that wrote the prompt, so a chat-created worker always knows the
+/// requester is waiting in a thread, not watching its terminal.
+fn with_report_back(prompt: Option<String>, origin: Option<&ChatOrigin>) -> Option<String> {
+    let Some(origin) = origin else {
+        return prompt;
+    };
+    let note = format!(
+        "This task was requested from a {} thread, and the requester isn't watching this \
+         terminal. When you finish — or need a decision only they can make — report back \
+         with `claude-commander notify` (see the claude-commander-notify skill).",
+        origin.backend
+    );
+    Some(match prompt {
+        Some(prompt) => format!("{prompt}\n\n---\n{note}"),
+        None => note,
+    })
+}
+
 /// A short human label identifying a session for the direct-message fallback
 /// prefix, so a worker's message names its source when there's no thread to
 /// reply in.
@@ -3696,6 +3717,31 @@ mod tests {
         assert_eq!(info.project_name, "my-project");
         assert_eq!(info.session_id, session.id);
         assert!(uuid::Uuid::parse_str(&info.id).is_ok());
+    }
+
+    #[test]
+    fn a_chat_created_session_is_told_to_report_back() {
+        let origin = ChatOrigin {
+            backend: "slack".into(),
+            channel: "C1".into(),
+            thread: "1.2".into(),
+            permalink: None,
+        };
+        let prompt = with_report_back(Some("Fix the login bug.".into()), Some(&origin)).unwrap();
+        assert!(prompt.starts_with("Fix the login bug."));
+        assert!(prompt.contains("claude-commander notify"));
+        assert!(prompt.contains("slack"));
+        // No prompt still gets the instruction; no origin changes nothing.
+        assert!(
+            with_report_back(None, Some(&origin))
+                .unwrap()
+                .contains("notify")
+        );
+        assert_eq!(
+            with_report_back(Some("x".into()), None).as_deref(),
+            Some("x")
+        );
+        assert_eq!(with_report_back(None, None), None);
     }
 
     #[test]

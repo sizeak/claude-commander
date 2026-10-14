@@ -40,7 +40,7 @@ Deletion uses **exact match only** — deliberately stricter than the read-only 
 
 ## Instructions
 
-`$1` is the session the user wants to delete. Resolve it to the exact title or full ID before calling — do not pass a prefix.
+`$ARGUMENTS` is the session the user wants to delete. Resolve it to the exact title or full ID before calling — do not pass a prefix.
 
 ## Examples
 
@@ -58,7 +58,8 @@ claude-commander rm 5f3c9a21-8b4e-4d77-9c2a-1e6f0b3d8a4c --force
 - **Reference the session by its exact title or full ID, never a prefix.** Prefix matching is intentionally disabled for delete. If you only know the short ID prefix from `claude-commander list`, look up the full title or ID first.
 - If the command reports an ambiguity error, two sessions share that title — re-run with the full session ID to disambiguate.
 - **Never delete a session unless the user explicitly asks you to.** Deletion is irreversible and destroys uncommitted work. Wait for a clear instruction like "delete that session", "clean up the fix-auth-bug session", or "tear it down".
+- **From a chat request, `delete` is refused outright** (`--force` or not): tell the user to delete it from the TUI or a terminal.
 - **If you cannot run `git` (your tools don't allow it), do not delete.** Without the checks below you can't tell whether work would be lost; tell the user to delete it from the TUI instead.
-- **Because you pass `--force`, the CLI's safety prompt is skipped — so you must guard against data loss yourself.** Before deleting, check the session's worktree for work that exists nowhere else: uncommitted changes (`git -C <worktree> status --porcelain`) or commits on the session's branch not pushed to a remote (`git -C <worktree> log HEAD --not --remotes --oneline`). If either is non-empty, do NOT delete — surface exactly what would be lost and get explicit user confirmation that they want it gone anyway before proceeding.
+- **Because you pass `--force`, the CLI's safety prompt is skipped — so you must guard against data loss yourself.** Before deleting, find the session's worktree (`worktree_path` in `claude-commander status <session> --json`) and check it for work that exists nowhere else: uncommitted changes (`git -C <worktree> status --porcelain`) or commits on the session's branch not pushed to a remote (`git -C <worktree> log HEAD --not --remotes --oneline`). If either is non-empty, do NOT delete — surface exactly what would be lost and get explicit user confirmation that they want it gone anyway before proceeding.
 - Confirm what you deleted after the command succeeds, and tell the user the work in that worktree is gone.
 - Always use the long-form flag (`--force`) rather than `-f`, to avoid ambiguity.

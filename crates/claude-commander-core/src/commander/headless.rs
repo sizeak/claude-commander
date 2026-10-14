@@ -96,6 +96,14 @@ const TIMEOUT_NUDGE: &str = "Your previous attempt timed out — be brief and di
 /// prompt no headless process can answer.
 pub const PROGRAM_LOCK_ENV: &str = "CLAUDE_COMMANDER_PROGRAM_LOCK";
 
+/// Whether this process descends from the headless commander — i.e. inherited
+/// [`PROGRAM_LOCK_ENV`]. Read once at the CLI boundary; the gates it feeds
+/// ([`Config::ensure_headless_create_allowed`](crate::config::Config::ensure_headless_create_allowed),
+/// [`crate::cli::delete_guard`]) stay pure.
+pub fn program_lock_active() -> bool {
+    std::env::var(PROGRAM_LOCK_ENV).as_deref() == Ok("1")
+}
+
 /// Current schema of the persisted `conversations.json` map.
 const CONVERSATIONS_SCHEMA_VERSION: u32 = 1;
 
@@ -126,6 +134,50 @@ pub struct SpawnSpec {
     pub permission_mode: String,
 }
 
+impl SpawnSpec {
+    /// The `claude` flags for this spawn, after the program's own.
+    fn claude_args(&self) -> Vec<String> {
+        let mut args: Vec<String> = [
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--permission-mode",
+            &self.permission_mode,
+            "--include-partial-messages",
+            "--verbose",
+            // Load only project settings (the commander dir's), not the
+            // operator's user settings: their allow rules and MCP servers would
+            // otherwise merge into this agent's permissions — e.g. a user-level
+            // `Bash(cargo test:*)` allowance is code execution, and an MCP
+            // server is a way out of the machine.
+            "--setting-sources",
+            "project",
+            "--strict-mcp-config",
+        ]
+        .map(String::from)
+        .to_vec();
+        if let Some(id) = self.resume.as_deref().filter(|id| !id.is_empty()) {
+            args.extend(["--resume".to_string(), id.to_string()]);
+        }
+        // Read-deny rules ride in on `--settings` (accepts an inline JSON
+        // string). Must precede the variadic `--allowedTools`.
+        if !self.deny_read.is_empty() {
+            let settings = serde_json::json!({ "permissions": { "deny": self.deny_read } });
+            args.extend(["--settings".to_string(), settings.to_string()]);
+        }
+        // `--allowedTools` is variadic (`<tools...>`), so it must come last: it
+        // greedily consumes the remaining argv. With stream-json input there is
+        // no trailing positional prompt to be swallowed.
+        if !self.allowed_tools.is_empty() {
+            args.push("--allowedTools".to_string());
+            args.extend(self.allowed_tools.iter().cloned());
+        }
+        args
+    }
+}
+
 /// Build the `permissions.deny` Read rules that fence the headless chat agent
 /// off from credential and secret locations. These are *deny* rules, which take
 /// precedence over the broad `Read`/`Grep`/`Glob` allowance ([`ALLOWED_TOOLS`]),
@@ -140,6 +192,18 @@ pub(crate) fn sensitive_read_denies(config_dir: Option<&Path>, data_dir: &Path) 
         "Read(~/.ssh/**)".to_string(),
         "Read(~/.aws/**)".to_string(),
         "Read(~/.gnupg/**)".to_string(),
+        // Other tools' credentials.
+        "Read(~/.git-credentials)".to_string(),
+        "Read(~/.netrc)".to_string(),
+        "Read(~/.config/gh/**)".to_string(),
+        "Read(~/.docker/config.json)".to_string(),
+        "Read(~/.kube/**)".to_string(),
+        // Claude Code's own login, and its transcripts — which include earlier
+        // conversations (direct messages too) that must not be read back out
+        // into a shared channel.
+        "Read(~/.claude/.credentials.json)".to_string(),
+        "Read(~/.claude.json)".to_string(),
+        "Read(~/.claude/projects/**)".to_string(),
         // `.env` / `.env.*` files anywhere on the filesystem.
         "Read(//**/.env)".to_string(),
         "Read(//**/.env.*)".to_string(),
@@ -256,30 +320,7 @@ impl RealChild {
             // without prefixing a different (disallowed) leading command.
             .env(PROGRAM_LOCK_ENV, "1")
             .args(args)
-            .arg("-p")
-            .args(["--input-format", "stream-json"])
-            .args(["--output-format", "stream-json"])
-            .args(["--permission-mode", &spec.permission_mode])
-            .arg("--include-partial-messages")
-            .arg("--verbose");
-        if let Some(id) = spec.resume.as_deref().filter(|id| !id.is_empty()) {
-            cmd.args(["--resume", id]);
-        }
-        // Read-deny rules ride in on `--settings` (accepts an inline JSON string).
-        // Must precede the variadic `--allowedTools` below, which greedily
-        // consumes the remaining argv.
-        if !spec.deny_read.is_empty() {
-            let settings = serde_json::json!({
-                "permissions": { "deny": spec.deny_read }
-            });
-            cmd.args(["--settings", &settings.to_string()]);
-        }
-        // `--allowedTools` is variadic (`<tools...>`), so it must come last: it
-        // greedily consumes the remaining argv. With stream-json input there is
-        // no trailing positional prompt to be swallowed.
-        if !spec.allowed_tools.is_empty() {
-            cmd.arg("--allowedTools").args(&spec.allowed_tools);
-        }
+            .args(spec.claude_args());
 
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -1434,6 +1475,38 @@ mod tests {
         );
     }
 
+    fn spec(resume: Option<&str>) -> SpawnSpec {
+        SpawnSpec {
+            program: "claude".into(),
+            cwd: PathBuf::from("/c"),
+            resume: resume.map(String::from),
+            allowed_tools: ALLOWED_TOOLS.iter().map(|t| t.to_string()).collect(),
+            deny_read: vec!["Read(~/.ssh/**)".into()],
+            permission_mode: "default".into(),
+        }
+    }
+
+    #[test]
+    fn claude_args_ignore_the_operators_own_settings_and_mcp_servers() {
+        let args = spec(None).claude_args();
+        let has_pair =
+            |flag: &str, value: &str| args.windows(2).any(|w| w[0] == flag && w[1] == value);
+        assert!(has_pair("--setting-sources", "project"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
+        assert!(has_pair("--permission-mode", "default"));
+    }
+
+    #[test]
+    fn claude_args_end_with_the_variadic_allowed_tools() {
+        let args = spec(Some("sess-1")).claude_args();
+        let tools_at = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[tools_at + 1..], *ALLOWED_TOOLS);
+        for flag in ["--resume", "--settings", "--strict-mcp-config"] {
+            let at = args.iter().position(|a| a == flag).unwrap();
+            assert!(at < tools_at, "{flag} must precede --allowedTools");
+        }
+    }
+
     #[test]
     fn sensitive_read_denies_covers_secrets_and_spares_worktrees() {
         let config_dir = Path::new("/home/u/.config/claude-commander");
@@ -1446,6 +1519,10 @@ mod tests {
             "Read(~/.gnupg/**)",
             "Read(//**/.env)",
             "Read(//**/.env.*)",
+            "Read(~/.git-credentials)",
+            "Read(~/.config/gh/**)",
+            "Read(~/.claude/.credentials.json)",
+            "Read(~/.claude/projects/**)",
             // Config dir denied wholesale (leading `//` anchors an absolute path).
             "Read(//home/u/.config/claude-commander/**)",
             // Data-dir JSON denied at the root only.

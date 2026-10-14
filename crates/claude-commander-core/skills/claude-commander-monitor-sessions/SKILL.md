@@ -13,7 +13,7 @@ All three are read-only and safe to run at any time — they never modify a sess
 
 ## Picking a session
 
-`status` and `log` take a `<session>` argument that matches by **exact title OR ID prefix**. Prefix matching is supported here precisely because these commands are read-only (this differs from `delete`, which requires an exact match for safety). So `claude-commander status fix-au` will resolve to the `fix-auth-bug` session if that prefix is unambiguous.
+`status` and `log` take a `<session>` argument that matches an **exact title** (case-insensitive) or an **ID** — the full ID, or a prefix of the 8-character ID that `list` shows. Title prefixes don't match: `claude-commander status fix-au` won't find `fix-auth-bug`. ID prefixes are allowed here because these commands are read-only (unlike `delete`, which needs an exact title or full ID). If two IDs share your prefix you get one of them, so use the full 8 characters.
 
 ## list — list all sessions
 
@@ -41,7 +41,7 @@ Dumps the recent terminal output (scrollback) for a session. Use this to see wha
 
 ## Instructions
 
-`$1` is the session the user wants to inspect, when they name one. Resolve it against session titles or ID prefixes. If the user hasn't named a session (e.g. "what are my sessions doing?"), start with `list` to discover what exists, then drill in with `status` or `log`.
+`$ARGUMENTS` is the session the user wants to inspect, when they name one. Resolve it against session titles or IDs. If the user hasn't named a session (e.g. "what are my sessions doing?"), start with `list` to discover what exists, then drill in with `status` or `log`.
 
 ## Examples
 
@@ -71,5 +71,5 @@ claude-commander log fix-auth-bug --lines 500
 - When you (an agent) need to parse the output, always pass `--json` to `list` and `status`. Parse the structured fields rather than scraping the human-readable text.
 - `status --json` includes a git diffstat, making it the best way to gauge how much a session has accomplished without attaching to its tmux session.
 - Use `log` when a session appears idle or finished: read the recent output to determine whether it completed, hit an error, or is blocked waiting for input. Increase `--lines` if the relevant output has scrolled off.
-- `<session>` accepts a name or an ID prefix — a short unambiguous prefix is enough. (This is unlike `delete`, which requires an exact match.)
+- `<session>` accepts an exact title or an ID (full, or a prefix of the 8-character ID). (This is unlike `delete`, which requires an exact title or full ID.)
 - Always use long-form flags (`--all`, `--json`, `--lines`) for clarity.

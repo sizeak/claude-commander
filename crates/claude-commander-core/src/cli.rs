@@ -17,9 +17,15 @@ use crate::git::{PrState, ReviewDecision, effective_pr_state};
 use crate::session::{AgentState, WorktreeSession};
 
 /// What the `delete` command should do before mutating, given the `--force`
-/// flag and whether stdin is an interactive terminal.
+/// flag, whether stdin is an interactive terminal, and whether the caller
+/// descends from the headless chat commander.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeleteGuard {
+    /// Run by the headless chat commander (or something it launched): refuse
+    /// outright, `--force` or not. Deleting is irreversible and the commander
+    /// can't check a worktree for unsaved work, so a prompt-injected thread
+    /// must not be able to destroy one.
+    RefuseFromChat,
     /// `--force` was given: delete without asking.
     Proceed,
     /// Interactive terminal: prompt the user for confirmation.
@@ -29,8 +35,11 @@ pub enum DeleteGuard {
 }
 
 /// Decide how the `delete` command should guard against accidental deletion.
-pub fn delete_guard(force: bool, stdin_is_tty: bool) -> DeleteGuard {
-    if force {
+/// `program_locked` is [`crate::commander::headless::program_lock_active`].
+pub fn delete_guard(force: bool, stdin_is_tty: bool, program_locked: bool) -> DeleteGuard {
+    if program_locked {
+        DeleteGuard::RefuseFromChat
+    } else if force {
         DeleteGuard::Proceed
     } else if stdin_is_tty {
         DeleteGuard::Prompt
@@ -64,6 +73,8 @@ pub struct SessionJsonEntry {
     pub created_at: DateTime<Utc>,
     /// The session's workspace (its project's tag); `null` is Main.
     pub workspace: Option<String>,
+    /// Where the session's git worktree is, e.g. to check it for unsaved work.
+    pub worktree_path: String,
 }
 
 impl SessionJsonEntry {
@@ -88,6 +99,7 @@ impl SessionJsonEntry {
             pr_labels: info.pr_labels.clone(),
             created_at: info.created_at,
             workspace: None,
+            worktree_path: info.worktree_path.clone(),
         }
     }
 
@@ -106,6 +118,7 @@ impl SessionJsonEntry {
             pr_labels: session.pr_labels.clone(),
             created_at: session.created_at,
             workspace: None,
+            worktree_path: session.worktree_path.display().to_string(),
         }
     }
 }
@@ -225,6 +238,8 @@ pub struct StatusJsonEntry {
     pub review_decision: Option<ReviewDecision>,
     pub pr_reviewers: Vec<String>,
     pub created_at: DateTime<Utc>,
+    /// Where the session's git worktree is, e.g. to check it for unsaved work.
+    pub worktree_path: String,
 }
 
 impl StatusJsonEntry {
@@ -247,6 +262,7 @@ impl StatusJsonEntry {
             review_decision: info.review_decision,
             pr_reviewers: info.pr_reviewers.clone(),
             created_at: info.created_at,
+            worktree_path: info.worktree_path.clone(),
         }
     }
 
@@ -273,6 +289,7 @@ impl StatusJsonEntry {
             review_decision: session.review_decision,
             pr_reviewers: session.pr_reviewers.clone(),
             created_at: session.created_at,
+            worktree_path: session.worktree_path.display().to_string(),
         }
     }
 }
@@ -290,6 +307,7 @@ pub fn format_status_human(entry: &StatusJsonEntry) -> String {
         "Program: {} | Project: {}",
         entry.program, entry.project_name
     ));
+    lines.push(format!("Worktree: {}", entry.worktree_path));
 
     if let Some(ref stat) = entry.diff_stat {
         lines.push(format!("Diff:    {}", stat.trim()));
@@ -644,20 +662,48 @@ mod tests {
         assert!(!output.contains("Labels:"));
     }
 
+    /// `delete`'s safety check (look for uncommitted or unpushed work first)
+    /// needs the worktree path, so `list`/`status` must say where it is.
+    #[test]
+    fn json_and_human_output_name_the_worktree() {
+        let session = WorktreeSession::new(
+            crate::session::ProjectId::new(),
+            "t",
+            "b",
+            std::path::PathBuf::from("/wt/t"),
+            "claude",
+        );
+        let listed = serde_json::to_value(SessionJsonEntry::from_session(&session, "p")).unwrap();
+        assert_eq!(listed["worktree_path"], "/wt/t");
+        let status = StatusJsonEntry::from_session(&session, "p", AgentState::Idle, None);
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["worktree_path"],
+            "/wt/t"
+        );
+        assert!(format_status_human(&status).contains("Worktree: /wt/t"));
+    }
+
     #[test]
     fn delete_guard_force_always_proceeds() {
-        assert_eq!(delete_guard(true, true), DeleteGuard::Proceed);
-        assert_eq!(delete_guard(true, false), DeleteGuard::Proceed);
+        assert_eq!(delete_guard(true, true, false), DeleteGuard::Proceed);
+        assert_eq!(delete_guard(true, false, false), DeleteGuard::Proceed);
     }
 
     #[test]
     fn delete_guard_interactive_prompts() {
-        assert_eq!(delete_guard(false, true), DeleteGuard::Prompt);
+        assert_eq!(delete_guard(false, true, false), DeleteGuard::Prompt);
     }
 
     #[test]
     fn delete_guard_non_tty_requires_force() {
-        assert_eq!(delete_guard(false, false), DeleteGuard::RequireForce);
+        assert_eq!(delete_guard(false, false, false), DeleteGuard::RequireForce);
+    }
+
+    #[test]
+    fn delete_guard_refuses_the_chat_commander_even_with_force() {
+        for (force, tty) in [(true, false), (true, true), (false, false)] {
+            assert_eq!(delete_guard(force, tty, true), DeleteGuard::RefuseFromChat);
+        }
     }
 
     #[test]

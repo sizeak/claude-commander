@@ -468,7 +468,19 @@ async fn main() -> Result<()> {
                 }
             };
 
-            match claude_commander_core::cli::delete_guard(force, std::io::stdin().is_terminal()) {
+            match claude_commander_core::cli::delete_guard(
+                force,
+                std::io::stdin().is_terminal(),
+                claude_commander_core::commander::headless::program_lock_active(),
+            ) {
+                claude_commander_core::cli::DeleteGuard::RefuseFromChat => {
+                    eprintln!(
+                        "Refusing to delete \"{}\" from a chat request: deleting is irreversible. \
+                         Delete it from the TUI or a terminal.",
+                        info.title
+                    );
+                    std::process::exit(1);
+                }
                 claude_commander_core::cli::DeleteGuard::RequireForce => {
                     eprintln!(
                         "Refusing to delete \"{}\" without confirmation. Re-run with --force.",
@@ -590,10 +602,7 @@ async fn main() -> Result<()> {
             // ever over-rejects (fails closed) — a program the remote allows but
             // the local config doesn't is refused — so it's a safety edge, never
             // a bypass. The headless agent's create path is local anyway.
-            let program_locked =
-                std::env::var(claude_commander_core::commander::headless::PROGRAM_LOCK_ENV)
-                    .as_deref()
-                    == Ok("1");
+            let program_locked = claude_commander_core::commander::headless::program_lock_active();
             if program_locked
                 && let Err(e) =
                     config.ensure_headless_create_allowed(program.as_deref(), mode.as_deref())
@@ -835,7 +844,8 @@ async fn main() -> Result<()> {
                 );
             } else {
                 println!("Configuration:");
-                println!("{}", toml::to_string_pretty(&config)?);
+                // Redacted: agents may run this (see `Config::display_toml`).
+                println!("{}", config.display_toml()?);
                 println!("\nConfig file: {:?}", Config::config_file_path()?);
                 println!("Data dir: {:?}", Config::data_dir()?);
                 println!("State file: {:?}", Config::state_file_path()?);

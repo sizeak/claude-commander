@@ -7,7 +7,49 @@ description: Complete reference for the `claude-commander` CLI — every subcomm
 
 # claude-commander CLI reference
 
-Each section is the `--help` output of one subcommand.
+Each section is the `--help` output of the program or one of its subcommands.
+
+### `claude-commander`
+
+```
+A high-performance terminal UI for managing Claude coding sessions
+
+Usage: claude-commander [OPTIONS] [COMMAND]
+
+Commands:
+  tui            Start the interactive TUI (default)
+  list           List all sessions
+  status         Show detailed status of a session
+  delete         Delete a session: kill its tmux session and remove the git worktree [aliases: rm]
+  keep-alive     Toggle (or explicitly set) keep-alive on a session, exempting it from automatic idle-hibernation. With no flag, toggles the current value
+  log            Dump recent terminal output from a session
+  new            Create a new session
+  attach         Attach to an existing session
+  commander      Open the persistent commander session — a project-less Claude session that coordinates other sessions via this CLI. Creates it on first use
+  notify         Relay a message to chat about a session. A session created from a chat request posts back into its originating thread; any other session is sent as a direct message on the default chat backend. Worker sessions run this to report progress. The message is Markdown; the chat backend converts it
+  config         Show configuration
+  listen-toggle  Toggle voice input in the running TUI. Intended for binding to a desktop global keyboard shortcut (e.g. a KDE Plasma custom shortcut) so STT can be triggered system-wide, not just when the terminal is focused. Talks to the already-running instance over a local socket; with no flag it toggles
+  help           Print this message or the help of the given subcommand(s)
+
+Options:
+  -d, --debug
+          Enable debug logging
+
+  -c, --config <CONFIG>
+          Path to config file
+
+      --serve
+          Run the HTTP server in this process for as long as the TUI is open, so clients on this machine (or the LAN, with `[server] bind`) can reach it without starting `claude-commander-server` separately. Overrides `[server] auto_start` for one run. TUI only
+
+      --no-serve
+          Do not run the HTTP server, even if `[server] auto_start` is on. TUI only
+
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version
+```
 
 ### `claude-commander tui`
 
