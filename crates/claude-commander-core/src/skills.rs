@@ -10,16 +10,22 @@
 //!
 //! Every agent Commander drives discovers project skills from its working
 //! directory by convention: Claude Code reads `.claude/skills/`, and Codex,
-//! OpenCode and omp all read `.agents/skills/`. Exactly one of the two is
-//! written per launch — omp and OpenCode read *both*, so writing both would
-//! show them every skill twice — and our copies are removed from the other, so
-//! switching a session's program leaves no stale duplicates behind.
+//! OpenCode and omp all read `.agents/skills/`. A recognised agent gets exactly
+//! one of the two — omp and OpenCode read *both*, so writing both would show
+//! them every skill twice — and our copies are removed from the other, so
+//! switching a session's program leaves no stale duplicates behind. An
+//! unrecognised program (possibly Claude behind a wrapper) gets both.
 //!
-//! Each skill directory carries a `.gitignore` of `*`, which ignores the
-//! directory *and itself*: the skills never show in `git status`, the review
-//! diff, or an agent's `git add -A`, and no file of the user's (the repo's
-//! `.gitignore`, `.git/info/exclude`) is touched. Only directories named
-//! [`SKILL_PREFIX`]`*` are ever written or removed.
+//! Each skill directory carries an [`OWNER_MARKER`] `.gitignore`, which ignores
+//! the directory *and itself*: the skills never show in `git status`, the
+//! review diff, or an agent's `git add -A`, and no file of the user's (the
+//! repo's `.gitignore`, `.git/info/exclude`) is touched. The marker is also how
+//! a directory is recognised as ours: only a [`SKILL_PREFIX`]`*` directory
+//! carrying it (or one we create) is ever written, pruned or removed, so a
+//! user's or repository's own `claude-commander-*` skill is never touched.
+//! Symlinks are never followed — not a symlinked skill directory, and not a
+//! skills root that resolves outside the working directory (e.g.
+//! `.claude -> ~/.claude`).
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -45,19 +51,24 @@ pub const SKILL_PREFIX: &str = "claude-commander-";
 const CLAUDE_SKILLS_DIR: &str = ".claude/skills";
 /// Where Codex, OpenCode and omp discover project skills.
 const AGENTS_SKILLS_DIR: &str = ".agents/skills";
-/// A `.gitignore` that ignores everything beside it, itself included.
-const SELF_IGNORE: &[u8] = b"*\n";
+/// The `.gitignore` in each skill directory we write: ignores everything beside
+/// it, itself included, and marks the directory as ours to manage.
+const OWNER_MARKER: &[u8] =
+    b"# Written by Claude Commander on every agent launch; edits are overwritten.\n*\n";
 
 /// Disambiguates temp files when two launches install into one directory at
 /// once (e.g. the TUI and a server sharing a commander directory).
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// The skills root `kind` reads, and the one it doesn't.
-fn roots(kind: AgentKind) -> (&'static str, &'static str) {
-    if kind.is_claude() {
-        (CLAUDE_SKILLS_DIR, AGENTS_SKILLS_DIR)
-    } else {
-        (AGENTS_SKILLS_DIR, CLAUDE_SKILLS_DIR)
+/// The skills roots to write for `kind`, and the roots to clear our copies
+/// from.
+fn roots(kind: AgentKind) -> (&'static [&'static str], &'static [&'static str]) {
+    match kind {
+        AgentKind::Claude => (&[CLAUDE_SKILLS_DIR], &[AGENTS_SKILLS_DIR]),
+        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Omp => {
+            (&[AGENTS_SKILLS_DIR], &[CLAUDE_SKILLS_DIR])
+        }
+        AgentKind::Unknown => (&[CLAUDE_SKILLS_DIR, AGENTS_SKILLS_DIR], &[]),
     }
 }
 
@@ -92,28 +103,87 @@ fn bundled_skills() -> BTreeMap<String, Vec<BundledFile>> {
 /// Write the bundled skills into `dir` for an agent of `kind`, returning how
 /// many files were (re)written — zero when everything was already current.
 pub fn install(dir: &Path, kind: AgentKind) -> io::Result<usize> {
-    let (target, other) = roots(kind);
-    let target = dir.join(target);
+    let dir_canon = dir.canonicalize()?;
+    let (write, sweep) = roots(kind);
     let skills = bundled_skills();
     let mut written = 0;
-    for (skill, files) in &skills {
-        let skill_dir = target.join(skill);
-        std::fs::create_dir_all(&skill_dir)?;
-        written += usize::from(write_if_changed(
-            &skill_dir.join(".gitignore"),
-            SELF_IGNORE,
-        )?);
-        for file in files {
-            written += usize::from(write_if_changed(&skill_dir.join(&file.rel), &file.data)?);
+    let mut written_roots = Vec::new();
+    for root in write {
+        let root = dir.join(root);
+        if !resolves_inside(&root, &dir_canon)? {
+            warn!(
+                "not installing agent skills into {}: it leads outside {}",
+                root.display(),
+                dir.display()
+            );
+            continue;
         }
-        let keep: Vec<&str> = files.iter().map(|file| file.rel.as_str()).collect();
-        remove_unlisted_files(&skill_dir, &skill_dir, &keep)?;
+        std::fs::create_dir_all(&root)?;
+        for (skill, files) in &skills {
+            written += install_skill(&root.join(skill), files)?;
+        }
+        // A skill a newer build dropped or renamed.
+        remove_owned_skill_dirs(&root, |name| !skills.contains_key(name))?;
+        written_roots.push(root.canonicalize()?);
     }
-    // A skill a newer build dropped or renamed, then every copy in the root
-    // this agent doesn't read.
-    remove_our_skill_dirs(&target, |name| !skills.contains_key(name))?;
-    remove_our_skill_dirs(&dir.join(other), |_| true)?;
+    for root in sweep {
+        let root = dir.join(root);
+        let Ok(canon) = root.canonicalize() else {
+            continue;
+        };
+        // A root symlinked onto one we just wrote is the same directory.
+        if canon.starts_with(&dir_canon) && !written_roots.contains(&canon) {
+            remove_owned_skill_dirs(&root, |_| true)?;
+        }
+    }
     Ok(written)
+}
+
+/// Whether `path` — which may not exist yet — stays inside `dir_canon` once
+/// symlinks are resolved. Its deepest existing ancestor decides: anything
+/// below that is created fresh, as a real directory.
+fn resolves_inside(path: &Path, dir_canon: &Path) -> io::Result<bool> {
+    for ancestor in path.ancestors() {
+        match ancestor.canonicalize() {
+            Ok(canon) => return Ok(canon.starts_with(dir_canon)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
+/// Write one skill into `skill_dir` if the directory is ours (or absent),
+/// returning how many files were written. A directory we didn't write — the
+/// user's or the repository's own skill of the same name, or a symlink — is
+/// left exactly as it is.
+fn install_skill(skill_dir: &Path, files: &[BundledFile]) -> io::Result<usize> {
+    match std::fs::symlink_metadata(skill_dir) {
+        Ok(meta) if !meta.is_dir() || !is_owned(skill_dir)? => return Ok(0),
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => std::fs::create_dir(skill_dir)?,
+        Err(e) => return Err(e),
+    }
+    // The marker first: it is what makes a half-written directory ours.
+    let mut written = usize::from(write_if_changed(
+        &skill_dir.join(".gitignore"),
+        OWNER_MARKER,
+    )?);
+    for file in files {
+        written += usize::from(write_if_changed(&skill_dir.join(&file.rel), &file.data)?);
+    }
+    let keep: Vec<&str> = files.iter().map(|file| file.rel.as_str()).collect();
+    remove_unlisted_files(skill_dir, skill_dir, &keep)?;
+    Ok(written)
+}
+
+/// Whether we wrote `skill_dir`: it carries our marker, or it's empty (we
+/// created it and were interrupted before the marker landed).
+fn is_owned(skill_dir: &Path) -> io::Result<bool> {
+    if std::fs::read(skill_dir.join(".gitignore")).is_ok_and(|m| m == OWNER_MARKER) {
+        return Ok(true);
+    }
+    Ok(std::fs::read_dir(skill_dir)?.next().is_none())
 }
 
 /// [`install`] for a launch path: runs off the async executor, and a failure
@@ -153,7 +223,9 @@ fn write_if_changed(path: &Path, data: &[u8]) -> io::Result<bool> {
 }
 
 /// Remove files under `dir` (recursively) that are not in `keep` (paths
-/// relative to `root`, `/`-separated) and aren't the `.gitignore`.
+/// relative to `root`, `/`-separated) and aren't the marker. Another
+/// installer's in-flight temp file is left for it to rename, and a file that
+/// vanishes first (that installer finished) is fine.
 fn remove_unlisted_files(root: &Path, dir: &Path, keep: &[&str]) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -163,11 +235,20 @@ fn remove_unlisted_files(root: &Path, dir: &Path, keep: &[&str]) -> io::Result<(
             continue;
         }
         let rel = relative_slash_path(root, &path);
-        if rel != ".gitignore" && !keep.contains(&rel.as_str()) {
-            std::fs::remove_file(&path)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let in_flight = name.starts_with('.') && name.contains(".tmp.");
+        if rel != ".gitignore" && !in_flight && !keep.contains(&rel.as_str()) {
+            ignore_not_found(std::fs::remove_file(&path))?;
         }
     }
     Ok(())
+}
+
+fn ignore_not_found(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
 }
 
 fn relative_slash_path(root: &Path, path: &Path) -> String {
@@ -178,10 +259,10 @@ fn relative_slash_path(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// Remove the [`SKILL_PREFIX`] directories directly under `root` whose name
-/// satisfies `remove`. Anything else there is the user's and left alone; a
-/// missing `root` is fine.
-fn remove_our_skill_dirs(root: &Path, remove: impl Fn(&str) -> bool) -> io::Result<()> {
+/// Remove the directories directly under `root` that are ours — prefixed,
+/// real (not symlinked) and marked — and whose name satisfies `remove`.
+/// Anything else there is the user's and left alone; a missing `root` is fine.
+fn remove_owned_skill_dirs(root: &Path, remove: impl Fn(&str) -> bool) -> io::Result<()> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -192,8 +273,12 @@ fn remove_our_skill_dirs(root: &Path, remove: impl Fn(&str) -> bool) -> io::Resu
         let name = entry.file_name().to_string_lossy().into_owned();
         // `file_type` doesn't follow symlinks, so a link named like ours is
         // never traversed into.
-        if entry.file_type()?.is_dir() && name.starts_with(SKILL_PREFIX) && remove(&name) {
-            std::fs::remove_dir_all(entry.path())?;
+        if entry.file_type()?.is_dir()
+            && name.starts_with(SKILL_PREFIX)
+            && remove(&name)
+            && is_owned(&entry.path())?
+        {
+            ignore_not_found(std::fs::remove_dir_all(entry.path()))?;
         }
     }
     Ok(())
@@ -271,19 +356,14 @@ mod tests {
             assert!(skill_dir.join("SKILL.md").is_file());
             assert_eq!(
                 std::fs::read(skill_dir.join(".gitignore")).unwrap(),
-                SELF_IGNORE
+                OWNER_MARKER
             );
         }
     }
 
     #[test]
     fn other_agents_get_the_skills_under_dot_agents() {
-        for kind in [
-            AgentKind::Codex,
-            AgentKind::OpenCode,
-            AgentKind::Omp,
-            AgentKind::Unknown,
-        ] {
+        for kind in [AgentKind::Codex, AgentKind::OpenCode, AgentKind::Omp] {
             let dir = TempDir::new().unwrap();
             install(dir.path(), kind).unwrap();
             assert_eq!(
@@ -316,6 +396,146 @@ mod tests {
         );
     }
 
+    fn write_skill(dir: &Path, root: &str, name: &str, body: &str) -> PathBuf {
+        let skill = dir.join(root).join(name);
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), body).unwrap();
+        skill
+    }
+
+    #[test]
+    fn unknown_programs_get_both_roots() {
+        // An unrecognised program might be Claude behind a wrapper
+        // (`env X=1 claude`, `npx …`): give it both, and sweep neither.
+        let dir = TempDir::new().unwrap();
+        install(dir.path(), AgentKind::Unknown).unwrap();
+        assert_eq!(installed(dir.path(), CLAUDE_SKILLS_DIR), skill_names());
+        assert_eq!(installed(dir.path(), AGENTS_SKILLS_DIR), skill_names());
+    }
+
+    #[test]
+    fn a_prefixed_dir_we_did_not_write_is_never_touched() {
+        let dir = TempDir::new().unwrap();
+        // The user's own skill that happens to share our prefix, in both roots,
+        // plus one that collides with a bundled skill's exact name.
+        let mine = write_skill(
+            dir.path(),
+            CLAUDE_SKILLS_DIR,
+            "claude-commander-mytool",
+            "mine",
+        );
+        let theirs = write_skill(
+            dir.path(),
+            AGENTS_SKILLS_DIR,
+            "claude-commander-x",
+            "theirs",
+        );
+        let clash = write_skill(
+            dir.path(),
+            CLAUDE_SKILLS_DIR,
+            "claude-commander-new-session",
+            "repo's own",
+        );
+        std::fs::write(clash.join("notes.md"), "extra").unwrap();
+
+        install(dir.path(), AgentKind::Claude).unwrap();
+        install(dir.path(), AgentKind::Codex).unwrap();
+        install(dir.path(), AgentKind::Claude).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(mine.join("SKILL.md")).unwrap(),
+            "mine"
+        );
+        assert_eq!(
+            std::fs::read_to_string(theirs.join("SKILL.md")).unwrap(),
+            "theirs"
+        );
+        assert_eq!(
+            std::fs::read_to_string(clash.join("SKILL.md")).unwrap(),
+            "repo's own"
+        );
+        assert!(clash.join("notes.md").exists());
+        assert!(!clash.join(".gitignore").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn roots_symlinked_together_keep_the_skills() {
+        // `.agents/skills -> ../.claude/skills` shares one directory between
+        // agents; sweeping "the other root" must not delete what we just wrote.
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(CLAUDE_SKILLS_DIR)).unwrap();
+        std::fs::create_dir_all(dir.path().join(".agents")).unwrap();
+        std::os::unix::fs::symlink("../.claude/skills", dir.path().join(AGENTS_SKILLS_DIR))
+            .unwrap();
+
+        install(dir.path(), AgentKind::Claude).unwrap();
+        assert_eq!(installed(dir.path(), CLAUDE_SKILLS_DIR), skill_names());
+        install(dir.path(), AgentKind::Codex).unwrap();
+        assert_eq!(installed(dir.path(), AGENTS_SKILLS_DIR), skill_names());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_leads_outside_the_directory_is_left_alone() {
+        // `.claude -> ~/.claude` would otherwise put our skills in the user's
+        // global config, where every Claude session would see a stale copy.
+        let dir = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), dir.path().join(".claude")).unwrap();
+        let outside_mine = write_skill(elsewhere.path(), "skills", "claude-commander-old", "x");
+        std::fs::write(outside_mine.join(".gitignore"), OWNER_MARKER).unwrap();
+
+        install(dir.path(), AgentKind::Claude).unwrap();
+        install(dir.path(), AgentKind::Codex).unwrap();
+
+        assert!(
+            installed(elsewhere.path(), "skills").len() == 1,
+            "nothing written outside"
+        );
+        assert!(outside_mine.exists(), "nothing removed outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_skill_dir_is_not_followed() {
+        let dir = TempDir::new().unwrap();
+        let dotfiles = TempDir::new().unwrap();
+        std::fs::write(dotfiles.path().join("precious.md"), "keep me").unwrap();
+        std::fs::create_dir_all(dir.path().join(CLAUDE_SKILLS_DIR)).unwrap();
+        std::os::unix::fs::symlink(
+            dotfiles.path(),
+            dir.path()
+                .join(CLAUDE_SKILLS_DIR)
+                .join("claude-commander-new-session"),
+        )
+        .unwrap();
+
+        install(dir.path(), AgentKind::Claude).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dotfiles.path().join("precious.md")).unwrap(),
+            "keep me"
+        );
+        assert!(!dotfiles.path().join("SKILL.md").exists());
+    }
+
+    #[test]
+    fn another_installers_temp_file_is_not_pruned() {
+        let dir = TempDir::new().unwrap();
+        install(dir.path(), AgentKind::Claude).unwrap();
+        let skill = dir
+            .path()
+            .join(CLAUDE_SKILLS_DIR)
+            .join("claude-commander-new-session");
+        let in_flight = skill.join(".SKILL.md.tmp.99999.0");
+        std::fs::write(&in_flight, "half written by another process").unwrap();
+        std::fs::write(skill.join("SKILL.md"), "stale").unwrap();
+
+        install(dir.path(), AgentKind::Claude).unwrap();
+        assert!(in_flight.exists());
+    }
+
     #[test]
     fn reinstalling_unchanged_skills_writes_nothing() {
         let dir = TempDir::new().unwrap();
@@ -334,6 +554,8 @@ mod tests {
         let retired = root.join("claude-commander-retired-skill");
         std::fs::create_dir_all(&retired).unwrap();
         std::fs::write(retired.join("SKILL.md"), "gone").unwrap();
+        // Written by an older build, so it carries our marker.
+        std::fs::write(retired.join(".gitignore"), OWNER_MARKER).unwrap();
 
         install(dir.path(), AgentKind::Claude).unwrap();
 

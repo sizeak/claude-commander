@@ -217,6 +217,8 @@ mod tests {
             content.contains("only to those requests"),
             "slack section must be scoped to Slack-originated prompts"
         );
+        // Slack can't run the pre-delete worktree checks, so it must not delete.
+        assert!(content.contains("### Deleting sessions from Slack"));
         // The section comes after the preamble, not before it.
         assert!(content.find("## Slack mode") > content.find("# Commander Claude"));
     }

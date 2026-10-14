@@ -50,3 +50,9 @@ and `Thread ts:` lines).
 These stamp the session so a worker's `claude-commander slack notify` reports
 back to this exact thread when it finishes. Without them, a worker's notify
 falls back to a DM instead of this thread.
+
+### Deleting sessions from Slack
+
+Don't. Deleting is irreversible, and from Slack you can't inspect a worktree for
+uncommitted or unpushed work first. If someone asks, reply that it has to be
+done from the TUI (or `claude-commander delete` in a terminal).
