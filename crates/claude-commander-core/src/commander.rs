@@ -14,7 +14,7 @@
 //! `claude-commander-cli-reference` skill (see [`crate::skills`]), which
 //! priming writes into this directory like any agent's working directory. So
 //! `CLAUDE.md` is a pure function of this build, and every writer — the
-//! interactive commander, the headless Slack commander, any frontend —
+//! interactive commander, the headless chat commander, any frontend —
 //! produces it byte-identically without needing the clap tree.
 
 use std::path::{Path, PathBuf};
@@ -33,15 +33,15 @@ pub const COMMANDER_TMUX_NAME: &str = "cc-commander";
 /// when the commander's intent changes.
 const COMMANDER_PRIME: &str = include_str!("commander_prime.md");
 
-/// Slack-mode section of `CLAUDE.md`. Included in **every** prime — interactive
+/// Chat-mode section of `CLAUDE.md`. Included in **every** prime — interactive
 /// and headless share one directory and must write identical content, or each
 /// would clobber the other's copy (the interactive commander rewrites the file
 /// on every open). The section is worded conditionally: it applies only when a
-/// prompt announces it came from Slack, so the interactive commander carries it
-/// harmlessly. It tells the agent it is short-lived, to emit Slack mrkdwn,
-/// thread etiquette, and to pass the `--slack-*` origin flags when creating
-/// sessions.
-const COMMANDER_SLACK_APPENDIX: &str = include_str!("commander_slack_appendix.md");
+/// prompt announces it came from a chat platform, so the interactive commander
+/// carries it harmlessly. It is platform-neutral — which backend a request came
+/// from (and anything platform-specific) is in that request's own prompt — so
+/// the content cannot depend on which chat backends are configured.
+const COMMANDER_CHAT_APPENDIX: &str = include_str!("commander_chat_appendix.md");
 
 /// Seed contents for `NOTES.md`. Written only if the file is absent, so the
 /// commander's accumulated notes are never clobbered.
@@ -51,13 +51,13 @@ const NOTES_SEED: &str = "# Commander notes\n\n\
     ## Active workflows\n";
 
 /// Build the `CLAUDE.md` body: the handwritten preamble and the
-/// (conditionally-worded) Slack-mode section. One content for every prime path
-/// — see [`COMMANDER_SLACK_APPENDIX`] for why it must not vary by caller.
+/// (conditionally-worded) chat-mode section. One content for every prime path
+/// — see [`COMMANDER_CHAT_APPENDIX`] for why it must not vary by caller.
 pub fn claude_md_content() -> String {
     format!(
         "{}\n\n{}\n",
         COMMANDER_PRIME.trim_end(),
-        COMMANDER_SLACK_APPENDIX.trim_end()
+        COMMANDER_CHAT_APPENDIX.trim_end()
     )
 }
 
@@ -72,11 +72,11 @@ pub async fn write_claude_md(dir: &Path) -> Result<()> {
 /// run there: create it, (re)write `CLAUDE.md`, seed `NOTES.md` when absent,
 /// and install the bundled agent skills for the configured commander program.
 /// Returns the directory path. Shared by [`ensure_session`] (interactive tmux)
-/// and the headless Slack commander, so both prime the same directory with
+/// and the headless chat commander, so both prime the same directory with
 /// **identical** content.
 ///
 /// Unlike [`ensure_session`], this does **no** tmux work and is **not** gated on
-/// `commander_enabled`: the headless Slack path is gated by `[slack]` config
+/// `commander_enabled`: the headless chat path is gated by the chat backends'
 /// alone, so priming must not require the interactive feature to be on.
 pub async fn prime_commander_dir(config: &Config) -> Result<PathBuf> {
     let dir = config.commander_dir()?;
@@ -197,30 +197,28 @@ mod tests {
     }
 
     #[test]
-    fn claude_md_includes_conditional_slack_section() {
-        // One shared content for every prime path: the Slack section rides along
+    fn claude_md_includes_conditional_chat_section() {
+        // One shared content for every prime path: the chat section rides along
         // in the interactive commander's CLAUDE.md too (worded to apply only to
-        // Slack-originated prompts), so the two writers can never clobber each
+        // chat-originated prompts), so the two writers can never clobber each
         // other with differing copies.
         let content = claude_md_content();
-        assert!(content.contains("## Slack mode"));
-        assert!(
-            content.contains("mrkdwn"),
-            "slack section must instruct the agent to emit mrkdwn"
-        );
-        assert!(
-            content.contains("--slack-channel") && content.contains("--slack-thread-ts"),
-            "slack section must name the concrete origin flags"
-        );
-        // Worded conditionally: it must scope itself to Slack-originated prompts.
+        assert!(content.contains("## Chat mode"));
+        // Platform-neutral: the backend renders Markdown, so no dialect rules.
+        assert!(content.contains("ordinary Markdown"));
+        assert!(!content.contains("mrkdwn"));
+        for flag in ["--origin-backend", "--origin-channel", "--origin-thread"] {
+            assert!(content.contains(flag), "chat section must name {flag}");
+        }
+        assert!(!content.contains("--slack-"), "no platform-specific flags");
+        // Worded conditionally: it must scope itself to chat-originated prompts.
         assert!(
             content.contains("only to those requests"),
-            "slack section must be scoped to Slack-originated prompts"
+            "chat section must be scoped to chat-originated prompts"
         );
-        // Slack can't run the pre-delete worktree checks, so it must not delete.
-        assert!(content.contains("### Deleting sessions from Slack"));
-        // The section comes after the preamble, not before it.
-        assert!(content.find("## Slack mode") > content.find("# Commander Claude"));
+        // Chat can't run the pre-delete worktree checks, so it must not delete.
+        assert!(content.contains("### Deleting sessions from chat"));
+        assert!(content.find("## Chat mode") > content.find("# Commander Claude"));
     }
 
     #[tokio::test]
@@ -232,7 +230,7 @@ mod tests {
         };
 
         // Priming twice regenerates the file (not appended-to twice), and every
-        // prime carries the shared Slack section.
+        // prime carries the shared chat section.
         let primed = prime_commander_dir(&config).await.unwrap();
         let primed2 = prime_commander_dir(&config).await.unwrap();
         assert_eq!(primed, primed2);

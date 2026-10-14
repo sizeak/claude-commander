@@ -8,11 +8,11 @@ pub mod commander;
 pub mod config;
 pub mod github;
 pub mod health;
+pub mod notify;
 pub mod paste;
 pub mod projects;
 pub mod review;
 pub mod sessions;
-pub mod slack;
 pub mod snapshot;
 
 #[cfg(test)]

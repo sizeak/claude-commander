@@ -47,10 +47,10 @@ claude-commander attach feature-remote --remote workstation
 # Dump recent terminal output from a session (default 100 lines, max 10000)
 claude-commander log feature-auth --lines 200
 
-# Report a message back to Slack about a session (worker sessions use this to
-# report progress; needs a running server with Slack configured — see
-# docs/slack.md). Defaults to the session for the current directory.
-claude-commander slack notify --message "Tests pass, PR is up"
+# Report a message back to chat about a session (worker sessions use this to
+# report progress; needs a running server with a chat backend — see
+# docs/chat.md). Defaults to the session for the current directory.
+claude-commander notify --message "Tests pass, PR is up"
 
 # Show configuration
 claude-commander config
@@ -66,7 +66,7 @@ claude-commander --config /path/to/config.toml
 
 Commander ships [Agent Skills](https://agentskills.io) that teach the agents it
 runs how to drive Commander itself: spawning, monitoring and deleting sessions,
-reporting back to Slack, and a complete CLI reference generated from the
+reporting back to chat, and a complete CLI reference generated from the
 `claude-commander` binary (so it always matches the version you're running).
 There's nothing to install. Every time Commander launches an agent (creating,
 restarting or waking a session, and for the commander and voice sessions), it

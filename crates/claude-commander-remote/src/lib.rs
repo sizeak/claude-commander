@@ -64,7 +64,7 @@ mod attach;
 mod backend;
 mod error;
 
-pub use backend::{RemoteBackend, slack_notify};
+pub use backend::{RemoteBackend, notify};
 
 // Re-export the client crate's public knobs so this crate's downstream API
 // (the TUI and `claude-commander` bin) is unchanged by the transport extraction.

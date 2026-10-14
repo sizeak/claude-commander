@@ -1,14 +1,16 @@
 //! Runtime info file for a running `claude-commander-server`.
 //!
-//! On boot the server writes `server-info.json` into its data dir (alongside
-//! `state.json`) recording the base `url` clients should hit and the bearer
-//! `token` they must present (or `null` when auth is disabled). The CLI reads it
-//! to discover a locally-running server without any configuration — e.g. the
-//! `slack notify` path a worker session invokes.
+//! A serving process — the standalone server, or the TUI running it in-process
+//! — writes `server-info.json` into its data dir (alongside `state.json`)
+//! recording the base `url` clients should hit and the bearer `token` they must
+//! present (or `null` when auth is disabled). The CLI reads it to discover a
+//! locally-running server without any configuration — e.g. the `notify` path a
+//! worker session invokes.
 //!
 //! The file can carry a bearer secret, so it is written `0o600` via the same
 //! atomic-rename helper the config file uses, and is best-effort removed on a
-//! clean server shutdown. A reader must treat an absent file as "no server
+//! clean server shutdown — via [`ServerInfoGuard`], which only removes the file
+//! if it still describes *this* server. A reader must treat an absent file as "no server
 //! running"; a present-but-unreachable server (connection refused) is the
 //! caller's concern once it tries to connect, not this reader's.
 
@@ -77,9 +79,67 @@ impl ServerInfo {
     }
 }
 
+impl ServerInfo {
+    /// Write the info file into `dir` and return a guard that removes it again
+    /// when dropped — but only if it still names this server's `url`, so a
+    /// second server that has since advertised itself in the same data dir
+    /// stays discoverable after this one shuts down.
+    pub fn publish(self, dir: &Path) -> std::io::Result<ServerInfoGuard> {
+        self.write_to(dir)?;
+        Ok(ServerInfoGuard {
+            dir: dir.to_path_buf(),
+            url: self.url,
+        })
+    }
+}
+
+/// Removes this server's `server-info.json` on drop (see [`ServerInfo::publish`]).
+#[derive(Debug)]
+pub struct ServerInfoGuard {
+    dir: PathBuf,
+    url: String,
+}
+
+impl Drop for ServerInfoGuard {
+    fn drop(&mut self) {
+        if let Ok(Some(info)) = ServerInfo::read_from(&self.dir)
+            && info.url == self.url
+        {
+            ServerInfo::remove_from(&self.dir);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_published_file_is_removed_when_its_guard_drops() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let guard = ServerInfo::new("http://127.0.0.1:7878", None)
+            .publish(dir.path())
+            .unwrap();
+        assert!(ServerInfo::read_from(dir.path()).unwrap().is_some());
+        drop(guard);
+        assert!(ServerInfo::read_from(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_guard_leaves_another_servers_file_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let first = ServerInfo::new("http://127.0.0.1:7878", None)
+            .publish(dir.path())
+            .unwrap();
+        // A second server on another port advertises itself afterwards.
+        let _second = ServerInfo::new("http://127.0.0.1:7879", None)
+            .publish(dir.path())
+            .unwrap();
+        drop(first);
+        let left = ServerInfo::read_from(dir.path()).unwrap().unwrap();
+        assert_eq!(left.url, "http://127.0.0.1:7879");
+    }
+
     use tempfile::TempDir;
 
     #[test]

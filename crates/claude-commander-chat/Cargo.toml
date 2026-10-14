@@ -1,0 +1,26 @@
+[package]
+name = "claude-commander-chat"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Platform-neutral chat bridge for Claude Commander: the backend trait, the shared request bridge, and notify routing"
+publish = false
+
+# Only the `claude-commander` bin crate drives the release (single shared tag).
+[package.metadata.release]
+release = false
+
+[dependencies]
+# No host audio I/O here; drop core's default `audio` feature like the server.
+claude-commander-core = { path = "../claude-commander-core", default-features = false }
+claude-commander-protocol = { path = "../claude-commander-protocol" }
+async-trait = "0.1"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+# `testing::FakeBackend`, an in-memory backend for other crates' tests.
+test-support = []

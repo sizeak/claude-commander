@@ -165,14 +165,17 @@ Options:
       --remote <REMOTE>
           Create the session on a configured remote server (by name from `[[remote_servers]]`) instead of locally. Pair with `--project` to pick an existing server-side project by name, or `--path` to seed a new one (the path is resolved on the server, not this machine)
 
-      --slack-channel <SLACK_CHANNEL>
-          Slack channel id to record as this session's origin. Set by the commander agent when creating a session from a Slack request so a worker's `slack notify` can report back to the thread. Requires `--slack-thread-ts`
+      --origin-backend <ORIGIN_BACKEND>
+          Chat backend the session was requested from (e.g. `slack`), recorded as its origin so a worker's `notify` reports back to the thread. Set by the commander agent when creating a session from a chat request. Requires `--origin-channel` and `--origin-thread`
 
-      --slack-thread-ts <SLACK_THREAD_TS>
-          Slack thread timestamp for the session's origin. Requires `--slack-channel` (the two are all-or-none)
+      --origin-channel <ORIGIN_CHANNEL>
+          Conversation the session was requested in (a Slack channel id, …). Requires `--origin-backend`
 
-      --slack-permalink <SLACK_PERMALINK>
-          Permalink to the originating Slack message, embedded in the session origin. Requires `--slack-channel` (and thus `--slack-thread-ts`)
+      --origin-thread <ORIGIN_THREAD>
+          Thread within that conversation that replies go to (a Slack thread timestamp, …). Requires `--origin-backend`
+
+      --origin-permalink <ORIGIN_PERMALINK>
+          Link to the originating message, when the platform has one. Requires `--origin-backend`
 
   -w, --workspace <WORKSPACE>
           Workspace for the project when `--path` registers a new one (an existing project keeps its workspace). An unknown name creates the workspace; `main` is the built-in one
@@ -212,30 +215,14 @@ Options:
           Print help
 ```
 
-### `claude-commander slack`
+### `claude-commander notify`
 
 ```
-Slack integration commands
+Relay a message to chat about a session. A session created from a chat request posts back into its originating thread; any other session is sent as a direct message on the default chat backend. Worker sessions run this to report progress. The message is Markdown; the chat backend converts it.
 
-Usage: claude-commander slack <COMMAND>
+Requires a running server with a chat backend enabled — the TUI with `[server] auto_start` (or `--serve`), or `claude-commander-server` — discovered via its runtime info file.
 
-Commands:
-  notify  Relay a message to Slack about a session. A session created from Slack posts back into its originating thread; any other session is DM'd to the first allowlisted user. Worker sessions run this to report progress
-  help    Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
-
-### `claude-commander slack notify`
-
-```
-Relay a message to Slack about a session. A session created from Slack posts back into its originating thread; any other session is DM'd to the first allowlisted user. Worker sessions run this to report progress.
-
-Requires a running `claude-commander-server` (the server owns the Slack client and is discovered via its runtime info file).
-
-Usage: claude-commander slack notify [OPTIONS]
+Usage: claude-commander notify [OPTIONS]
 
 Options:
       --session <SESSION>

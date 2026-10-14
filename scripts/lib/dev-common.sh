@@ -141,6 +141,7 @@ cc_exit_code_for_lane() {
     clippy) printf '11\n' ;;
     build) printf '12\n' ;;
     test) printf '13\n' ;;
+    chat) printf '14\n' ;;
     # Client lanes: 20-29 (Flutter 20-26, web 27-28)
     pub-get) printf '20\n' ;;
     dart-format) printf '21\n' ;;
@@ -171,6 +172,7 @@ cc_lane_description() {
     clippy) printf 'cargo clippy --workspace --all-targets -- -D warnings\n' ;;
     build) printf 'cargo build --workspace --all-targets\n' ;;
     test) printf 'cargo test --workspace\n' ;;
+    chat) printf 'clippy + server tests with --features slack (chat backends are opt-in)\n' ;;
     pub-get) printf 'flutter pub get (client lanes need resolved packages)\n' ;;
     dart-format) printf 'client/tool/dart-format.sh --check\n' ;;
     analyze) printf 'flutter analyze lib test integration_test\n' ;;
@@ -205,13 +207,13 @@ cc_lane_description() {
 # is how the goldens lane was silently skipped when the runner walked the `all`
 # tier instead.
 cc_lane_run_order() {
-  printf 'fmt clippy build test pub-get dart-format analyze flutter-test goldens cdylib shellcheck selftest nix-src-filter web e2e web-e2e nix-build packaging\n'
+  printf 'fmt clippy build test chat pub-get dart-format analyze flutter-test goldens cdylib shellcheck selftest nix-src-filter web e2e web-e2e nix-build packaging\n'
 }
 
 cc_lanes_for_tier() {
   case "${1:-}" in
     fast) printf 'fmt clippy\n' ;;
-    rust) printf 'fmt clippy build test\n' ;;
+    rust) printf 'fmt clippy build test chat\n' ;;
     client) printf 'pub-get dart-format analyze flutter-test cdylib\n' ;;
     # A focused subset of flutter-test, for the golden-image loop. Deliberately
     # NOT in the client or all tiers: `flutter test` already runs the goldens, so
@@ -221,7 +223,7 @@ cc_lanes_for_tier() {
     # headless), which is why CI can run web-e2e when it cannot run e2e.
     web) printf 'web web-e2e\n' ;;
     all)
-      printf 'fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter web e2e web-e2e nix-build packaging\n'
+      printf 'fmt clippy build test chat pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter web e2e web-e2e nix-build packaging\n'
       ;;
     *)
       cc_error "unknown tier '${1:-}' (try: fast rust client goldens web all)"

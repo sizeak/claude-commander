@@ -566,14 +566,15 @@ async fn main() -> Result<()> {
             base_branch,
             section,
             remote,
-            slack_channel,
-            slack_thread_ts,
-            slack_permalink,
+            origin_backend,
+            origin_channel,
+            origin_thread,
+            origin_permalink,
             workspace,
         }) => {
             setup_logging(cli.debug, false)?;
 
-            // A `claude-commander new` that descends from the headless Slack
+            // A `claude-commander new` that descends from the headless chat
             // commander (marked by an inherited env var the agent can neither
             // forge nor strip — see `commander::headless::PROGRAM_LOCK_ENV`) may
             // only launch a program the server has configured AND may not disable
@@ -595,21 +596,21 @@ async fn main() -> Result<()> {
                     == Ok("1");
             if program_locked
                 && let Err(e) =
-                    config.ensure_slack_create_allowed(program.as_deref(), mode.as_deref())
+                    config.ensure_headless_create_allowed(program.as_deref(), mode.as_deref())
             {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
 
-            // clap's `requires` guarantees channel + thread-ts are all-or-none
-            // and permalink implies both, so a present channel means a full
-            // origin (permalink optional).
-            let slack_origin = match (slack_channel, slack_thread_ts) {
-                (Some(channel), Some(thread_ts)) => {
-                    Some(claude_commander_core::session::SlackOrigin {
+            // clap's `requires` makes backend + channel + thread all-or-none
+            // (permalink optional), so a present backend means a full origin.
+            let origin = match (origin_backend, origin_channel, origin_thread) {
+                (Some(backend), Some(channel), Some(thread)) => {
+                    Some(claude_commander_core::session::ChatOrigin {
+                        backend,
                         channel,
-                        thread_ts,
-                        permalink: slack_permalink.unwrap_or_default(),
+                        thread,
+                        permalink: origin_permalink,
                     })
                 }
                 _ => None,
@@ -685,7 +686,7 @@ async fn main() -> Result<()> {
                     base_branch,
                     section,
                     stack_parent: None,
-                    slack_origin,
+                    origin,
                 })
                 .await
             {
@@ -763,43 +764,39 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Slack { command }) => {
+        Some(Commands::Notify { session, message }) => {
             setup_logging(cli.debug, false)?;
 
-            match command {
-                crate::cli_args::SlackCommands::Notify { session, message } => {
-                    // Message: the flag, else stdin to EOF (the worker pipes it).
-                    let message = match message {
-                        Some(m) => m,
-                        None => {
-                            let mut buf = String::new();
-                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-                            buf.trim_end().to_string()
-                        }
-                    };
+            // Message: the flag, else stdin to EOF (the worker pipes it).
+            let message = match message {
+                Some(m) => m,
+                None => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    buf.trim_end().to_string()
+                }
+            };
 
-                    // Session resolution + server discovery live in the library
-                    // so they're unit-tested; main.rs only wires IO + transport.
-                    let app_state = AppState::load_or_exit();
-                    let data_dir = Config::data_dir()?;
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    let (info, req) = match claude_commander_core::slack_notify::prepare_notify(
-                        &app_state, &data_dir, session, message, &cwd,
-                    ) {
-                        Ok(prepared) => prepared,
-                        Err(e) => {
-                            eprintln!("{e}");
-                            std::process::exit(1);
-                        }
-                    };
+            // Session resolution + server discovery live in the library so
+            // they're unit-tested; main.rs only wires IO + transport.
+            let app_state = AppState::load_or_exit();
+            let data_dir = Config::data_dir()?;
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let (info, req) = match claude_commander_core::notify::prepare_notify(
+                &app_state, &data_dir, session, message, &cwd,
+            ) {
+                Ok(prepared) => prepared,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            };
 
-                    match claude_commander_remote::slack_notify(&info, &req).await {
-                        Ok(()) => println!("Message relayed to Slack."),
-                        Err(e) => {
-                            eprintln!("slack notify failed: {e}");
-                            std::process::exit(1);
-                        }
-                    }
+            match claude_commander_remote::notify(&info, &req).await {
+                Ok(()) => println!("Message relayed."),
+                Err(e) => {
+                    eprintln!("notify failed: {e}");
+                    std::process::exit(1);
                 }
             }
         }

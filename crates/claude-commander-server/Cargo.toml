@@ -63,21 +63,25 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI (derive macros)
 clap = { version = "4.6", features = ["derive"] }
 
-# Slack Socket Mode bridge (config-gated background task). The `hyper` feature
-# pulls in the rustls-based HTTPS connector + the tokio-tungstenite WebSocket
-# transport Socket Mode needs; no default features.
-slack-morphism = { version = "2.23", features = ["hyper"] }
-async-trait = "0.1"
+# Chat bridge: the platform-neutral hub every backend plugs into. Each platform
+# is its own crate behind an opt-in feature below, so a default build carries
+# no chat SDK.
+claude-commander-chat = { path = "../claude-commander-chat" }
+claude-commander-chat-slack = { path = "../claude-commander-chat-slack", optional = true }
 
 [features]
 default = []
 tls = ["dep:axum-server"]
+# Chat backends (opt-in): `--features slack` builds the Slack bridge.
+slack = ["dep:claude-commander-chat-slack"]
 
 [dev-dependencies]
 # Shared hermetic-server + git/tmux harness for the integration tests. This is a
 # dev-dependency cycle (test-support depends on this crate); Cargo allows it
 # because it only closes through this crate's test targets, not its library.
 claude-commander-test-support = { path = "../claude-commander-test-support" }
+claude-commander-chat = { path = "../claude-commander-chat", features = ["test-support"] }
+async-trait = "0.1"
 tempfile = "3.27"
 # Embed `webui/` in debug test builds too (by default a debug build reads it
 # from disk at request time), so the router tests assert what actually ships.

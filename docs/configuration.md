@@ -284,18 +284,26 @@ state_sync_interval_ms = 2000
 # Working directory for the commander; defaults to <data dir>/commander.
 # commander_dir = "/path/to/commander"
 
-# Slack integration: let allowlisted users drive the commander from Slack by
-# @mentioning the bot in a channel or DMing it. Runs inside
-# `claude-commander-server` (not the TUI) and is gated by this table alone,
-# independent of `commander_enabled`. The bridge is active only when
-# `app_token` and `bot_token` are both set AND `allowed_user_ids` is non-empty
-# (an empty allowlist keeps it disabled, so a misconfigured token pair can't
-# accidentally accept everyone). See docs/slack.md for the full setup walkthrough
-# and the Slack app manifest.
+# Chat integration: let allowlisted users drive the commander from a chat
+# platform by mentioning the bot or messaging it directly. Backends are opt-in at
+# build time (`--features slack`) and run inside the Commander server — the
+# standalone `claude-commander-server`, or the TUI's in-process one
+# (`[server] auto_start`). Gated by the backend tables alone, independent of
+# `commander_enabled`. See docs/chat.md for the setup walkthrough.
+# [chat]
+# default_notify = "slack"        # backend for notifies from sessions with no
+#                                 # chat origin (default: first enabled backend)
+
+# Slack backend. Active only when `app_token` and `bot_token` are both set AND
+# `allowed_user_ids` is non-empty (an empty allowlist keeps it disabled, so a
+# misconfigured token pair can't accidentally accept everyone).
 # [slack]
 # app_token = "xapp-..."          # Socket Mode app-level token (SECRET)
 # bot_token = "xoxb-..."          # bot user OAuth token (SECRET)
 # allowed_user_ids = ["U0123456"] # Slack user ids allowed to invoke the bridge
+
+# Tuning for the headless commander that answers chat requests.
+# [headless_commander]
 # invocation_timeout_secs = 300   # hard cap on one headless invocation before it
 #                                 # is killed and retried once with a "be brief"
 #                                 # nudge (default 300 = 5 min)
@@ -435,17 +443,17 @@ loopback server is fine only when it runs against a **separate** data directory.
 claude-commander logs a warning when a configured server's URL is a loopback
 address as a reminder.
 
-The `[slack]` `app_token` and `bot_token` are **secrets**. Like other credential
-fields, they are stripped from `GET /api/config` (redacted before the config is
-served over the wire) and are **not** accepted by the remote config-patch route,
-so a remote client can neither read nor set them — set them only by editing this
-file. They're likewise redacted from any debug log of the config. See
-[Slack integration](slack.md) for the end-to-end setup.
+Chat backend tokens (the `[slack]` `app_token` and `bot_token`) are **secrets**.
+Like other credential fields, they are stripped from `GET /api/config` (redacted
+before the config is served over the wire) and are **not** accepted by the
+remote config-patch route, so a remote client can neither read nor set them —
+set them only by editing this file. They're likewise redacted from any debug log
+of the config. See [Chat integration](chat.md) for the end-to-end setup.
 
-The entire `[slack]` table (tokens, allowlist, and the timeout/linger/warm-pool
-tunables) is read once at server boot when the bridge and its warm pool start;
-`POST /api/config/reload` does not reconfigure a running bridge, so **`[slack]`
-changes require a `claude-commander-server` restart** to take effect.
+The backend tables and `[headless_commander]` are read once when the server
+starts its chat backends; `POST /api/config/reload` does not reconfigure a
+running bridge, so **chat changes require restarting whichever process serves**
+(`claude-commander-server`, or the TUI with `auto_start`).
 
 ## Idle-session hibernation
 

@@ -2883,6 +2883,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ChatOrigin dco_decode_box_autoadd_chat_origin(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_chat_origin(raw);
+  }
+
+  @protected
   CloneJobDto dco_decode_box_autoadd_clone_job_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_clone_job_dto(raw);
@@ -2995,6 +3001,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return BranchInfo(
       name: dco_decode_String(arr[0]),
       isRemote: dco_decode_bool(arr[1]),
+    );
+  }
+
+  @protected
+  ChatOrigin dco_decode_chat_origin(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return ChatOrigin(
+      backend: dco_decode_String(arr[0]),
+      channel: dco_decode_String(arr[1]),
+      thread: dco_decode_String(arr[2]),
+      permalink: dco_decode_opt_String(arr[3]),
     );
   }
 
@@ -3463,6 +3483,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ChatOrigin? dco_decode_opt_box_autoadd_chat_origin(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_chat_origin(raw);
+  }
+
+  @protected
   CloneJobDto? dco_decode_opt_box_autoadd_clone_job_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_clone_job_dto(raw);
@@ -3784,8 +3810,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SessionInfo dco_decode_session_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 27)
-      throw Exception('unexpected arr length: expect 27 but see ${arr.length}');
+    if (arr.length != 28)
+      throw Exception('unexpected arr length: expect 28 but see ${arr.length}');
     return SessionInfo(
       id: dco_decode_String(arr[0]),
       sessionId: dco_decode_session_id(arr[1]),
@@ -3814,6 +3840,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       worktreePath: dco_decode_String(arr[24]),
       tmuxSessionName: dco_decode_String(arr[25]),
       keepAlive: dco_decode_bool(arr[26]),
+      origin: dco_decode_opt_box_autoadd_chat_origin(arr[27]),
     );
   }
 
@@ -4050,6 +4077,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ChatOrigin sse_decode_box_autoadd_chat_origin(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_chat_origin(deserializer));
+  }
+
+  @protected
   CloneJobDto sse_decode_box_autoadd_clone_job_dto(
     SseDeserializer deserializer,
   ) {
@@ -4181,6 +4214,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_name = sse_decode_String(deserializer);
     var var_isRemote = sse_decode_bool(deserializer);
     return BranchInfo(name: var_name, isRemote: var_isRemote);
+  }
+
+  @protected
+  ChatOrigin sse_decode_chat_origin(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_backend = sse_decode_String(deserializer);
+    var var_channel = sse_decode_String(deserializer);
+    var var_thread = sse_decode_String(deserializer);
+    var var_permalink = sse_decode_opt_String(deserializer);
+    return ChatOrigin(
+      backend: var_backend,
+      channel: var_channel,
+      thread: var_thread,
+      permalink: var_permalink,
+    );
   }
 
   @protected
@@ -4826,6 +4874,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ChatOrigin? sse_decode_opt_box_autoadd_chat_origin(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_chat_origin(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   CloneJobDto? sse_decode_opt_box_autoadd_clone_job_dto(
     SseDeserializer deserializer,
   ) {
@@ -5282,6 +5343,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_worktreePath = sse_decode_String(deserializer);
     var var_tmuxSessionName = sse_decode_String(deserializer);
     var var_keepAlive = sse_decode_bool(deserializer);
+    var var_origin = sse_decode_opt_box_autoadd_chat_origin(deserializer);
     return SessionInfo(
       id: var_id,
       sessionId: var_sessionId,
@@ -5310,6 +5372,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       worktreePath: var_worktreePath,
       tmuxSessionName: var_tmuxSessionName,
       keepAlive: var_keepAlive,
+      origin: var_origin,
     );
   }
 
@@ -5580,6 +5643,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_chat_origin(
+    ChatOrigin self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_chat_origin(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_clone_job_dto(
     CloneJobDto self,
     SseSerializer serializer,
@@ -5731,6 +5803,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.name, serializer);
     sse_encode_bool(self.isRemote, serializer);
+  }
+
+  @protected
+  void sse_encode_chat_origin(ChatOrigin self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.backend, serializer);
+    sse_encode_String(self.channel, serializer);
+    sse_encode_String(self.thread, serializer);
+    sse_encode_opt_String(self.permalink, serializer);
   }
 
   @protected
@@ -6288,6 +6369,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_chat_origin(
+    ChatOrigin? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_chat_origin(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_clone_job_dto(
     CloneJobDto? self,
     SseSerializer serializer,
@@ -6706,6 +6800,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.worktreePath, serializer);
     sse_encode_String(self.tmuxSessionName, serializer);
     sse_encode_bool(self.keepAlive, serializer);
+    sse_encode_opt_box_autoadd_chat_origin(self.origin, serializer);
   }
 
   @protected

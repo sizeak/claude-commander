@@ -13,14 +13,15 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use claude_commander_chat::{ChatHub, CommanderAsker};
 use claude_commander_core::api::CommanderService;
 use claude_commander_core::config::ServerConfig;
+use claude_commander_core::{ServerInfo, ServerInfoGuard};
 use tokio::task::JoinHandle;
 
 use crate::auth::AuthConfig;
 use crate::config::check_no_auth_bind;
 use crate::router::build_router;
-use crate::slack::handler::SlackApi;
 use crate::state::AppState;
 
 /// Where the bearer token for this run came from.
@@ -125,7 +126,10 @@ pub struct EmbeddedServer {
     /// `Option` only so [`join`](Self::join) can take the handle out and await
     /// it: a `Drop` type cannot be destructured, and awaiting a handle `Drop`
     /// would then abort is not much of an await.
-    task: Option<JoinHandle<()>>,
+    task: Option<JoinHandle<std::io::Result<()>>>,
+    /// This server's `server-info.json`, removed when the server is dropped.
+    /// Set by [`start_with_integrations`] only.
+    info: Option<ServerInfoGuard>,
 }
 
 impl EmbeddedServer {
@@ -141,12 +145,14 @@ impl EmbeddedServer {
         server_url(self.addr)
     }
 
-    /// Serve until the task ends (i.e. forever, absent an error).
-    pub async fn join(mut self) {
+    /// Serve until the task ends — forever, absent an error, which is
+    /// returned so the standalone binary can exit non-zero.
+    pub async fn join(mut self) -> std::io::Result<()> {
         // Taking the handle disarms `Drop`, so awaiting here cannot race the
         // abort that dropping this value would otherwise perform.
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
+        match self.task.take() {
+            Some(task) => task.await.map_err(std::io::Error::other)?,
+            None => Ok(()),
         }
     }
 }
@@ -186,23 +192,58 @@ pub fn server_url(addr: SocketAddr) -> String {
 /// The `service` is shared with the caller, so this deliberately does **not**
 /// start background loops or the hibernation loop — a frontend that already runs
 /// them (the TUI) would end up with two of each. The standalone binary starts
-/// them itself before calling this.
+/// them itself before calling this. Nor does it start chat backends or publish
+/// `server-info.json`; [`start_with_integrations`] does.
 pub async fn start(
     service: CommanderService,
     cfg: &ServerConfig,
     auth: AuthConfig,
 ) -> Result<EmbeddedServer, StartError> {
-    start_with_slack(service, cfg, auth, None).await
+    serve(service, cfg, auth, Arc::new(ChatHub::new(Vec::new(), None))).await
 }
 
-/// [`start`], additionally wiring the Slack Web API client the notify route
-/// posts through (`None` → the route replies 503). Only the standalone binary
-/// runs the Slack bridge, so only it passes `Some`.
-pub async fn start_with_slack(
+/// [`start`], plus everything a serving frontend runs alongside the API — the
+/// single bring-up path for the standalone binary *and* the TUI's in-process
+/// server, so `notify` and chat work with either:
+///
+/// - the chat backends `config.toml` enables (and this build was compiled
+///   with — see [`crate::chat`]), each with its bridge, plus the headless
+///   commander's warm pool when any runs. They start only once the listener
+///   is bound, so a failed bind never leaves a bridge answering for a server
+///   that isn't there;
+/// - `server-info.json` in the service's data dir, which is how a local CLI
+///   (`claude-commander notify`) finds this server. It is removed when the
+///   returned server drops, unless another server has since replaced it.
+pub async fn start_with_integrations(
     service: CommanderService,
     cfg: &ServerConfig,
     auth: AuthConfig,
-    slack: Option<Arc<dyn SlackApi>>,
+) -> Result<EmbeddedServer, StartError> {
+    let hub = Arc::new(crate::chat::hub_from_config(&service.read_config()));
+    let token = match &auth {
+        AuthConfig::Token(token) => Some(token.clone()),
+        AuthConfig::Disabled => None,
+    };
+    let mut server = serve(service.clone(), cfg, auth, hub.clone()).await?;
+
+    if !hub.is_empty() {
+        service.start_commander_warm_pool();
+        hub.start(Arc::new(CommanderAsker::new(service.clone())));
+        tracing::info!("chat backends running: {}", hub.backend_ids().join(", "));
+    }
+    match ServerInfo::new(server.url(), token).publish(&service.store().data_dir()) {
+        Ok(guard) => server.info = Some(guard),
+        // Best-effort: serving matters more than local discoverability.
+        Err(e) => tracing::warn!("could not write server runtime info file: {e}"),
+    }
+    Ok(server)
+}
+
+async fn serve(
+    service: CommanderService,
+    cfg: &ServerConfig,
+    auth: AuthConfig,
+    chat: Arc<ChatHub>,
 ) -> Result<EmbeddedServer, StartError> {
     check_no_auth_bind(cfg.bind, matches!(auth, AuthConfig::Disabled))
         .map_err(StartError::UnauthenticatedBind)?;
@@ -220,18 +261,21 @@ pub async fn start_with_slack(
 
     let state = AppState::new(service, auth)
         .with_cors(cfg.cors_allowed_origins.clone())
-        .with_slack(slack);
+        .with_chat(chat);
     let app = build_router(state);
 
     let task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
+        let result = axum::serve(listener, app).await;
+        if let Err(e) = &result {
             tracing::error!("server stopped: {e}");
         }
+        result
     });
 
     Ok(EmbeddedServer {
         addr,
         task: Some(task),
+        info: None,
     })
 }
 

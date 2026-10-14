@@ -2,30 +2,32 @@
 //!
 //! Where the interactive [`commander`](crate::commander) runs one long-lived
 //! `claude` inside tmux, the **headless** commander answers one-shot requests
-//! (from the Slack bridge, or the `POST /api/commander/ask` route) by driving a
+//! (from a chat bridge, or the `POST /api/commander/ask` route) by driving a
 //! `claude -p --input-format stream-json …` subprocess in the same primed
 //! commander directory. It is *not* gated on `commander_enabled` — callers gate
-//! it (the Slack bridge by `[slack]` config; the HTTP route serves whenever a
-//! program is resolvable).
+//! it (a chat bridge runs only when a backend is enabled; the HTTP route serves
+//! whenever a program is resolvable).
 //!
 //! # What [`HeadlessCommander`] owns
 //!
 //! - **Per-conversation processes.** A conversation is an opaque string key
-//!   (the Slack bridge uses `slack:<channel>:<thread_ts>`). Asks on the *same*
+//!   (the chat bridges use `<backend>:<channel>:<thread>`). Asks on the *same*
 //!   key are serialized (one process, in order); different keys run
 //!   concurrently.
 //! - **Linger + reuse.** After a turn completes the process is kept alive for
-//!   `slack.linger_secs`, so an immediate follow-up on the same key reuses it
+//!   `headless_commander.linger_secs`, so an immediate follow-up on the same key reuses it
 //!   with no cold start. After the linger window it is reaped and its Claude
 //!   session id recorded so the *next* ask can `--resume` the conversation.
-//! - **A warm pool of one.** When `slack.warm_pool` is set, one fresh (non-
+//! - **A warm pool of one.** When `headless_commander.warm_pool` is set, one fresh (non-
 //!   resume) process is kept ready so a brand-new key skips cold-start latency;
-//!   it is respawned every `slack.warm_respawn_secs` to avoid staleness.
-//! - **Timeout + one retry.** A turn exceeding `slack.invocation_timeout_secs`
+//!   it is respawned every
+//!   `headless_commander.warm_respawn_secs` to avoid staleness.
+//! - **Timeout + one retry.** A turn exceeding
+//!   `headless_commander.invocation_timeout_secs`
 //!   is killed and retried once (resuming the conversation) with a "be brief"
 //!   nudge; a second timeout surfaces a single [`StreamEvent::Error`].
-//! - **`key → claude session id` persistence** in `slack.json` (see
-//!   [`SlackSessionStore`]).
+//! - **`key → claude session id` persistence** in `conversations.json` (see
+//!   [`ConversationStore`]).
 //!
 //! # Testability
 //!
@@ -55,7 +57,7 @@ use crate::stream_json::{StreamEvent, parse_event, user_message_line};
 
 /// Tools the headless commander is permitted to use. Deliberately locked down:
 /// the `claude-commander` CLI (to inspect/create sessions) plus read-only
-/// filesystem tools. No arbitrary `Bash`, no `Write`/`Edit` — a Slack-driven
+/// filesystem tools. No arbitrary `Bash`, no `Write`/`Edit` — a chat-driven
 /// agent must never mutate the host beyond the CLI's own guarded surface.
 ///
 /// The `Read`/`Grep`/`Glob` entries are **not** redundant: within the commander
@@ -80,10 +82,10 @@ const TIMEOUT_NUDGE: &str = "Your previous attempt timed out — be brief and di
 /// [`RealChild::spawn`]). It is inherited by that `claude` process and, in turn,
 /// by any `claude-commander` the agent launches through its
 /// `Bash(claude-commander:*)` allowance — so a `claude-commander new` invocation
-/// can tell it descends from the headless Slack commander and must restrict both
+/// can tell it descends from the headless commander and must restrict both
 /// `--program` (to the server's configured set) and `--mode` (no permission-
 /// bypassing mode)
-/// ([`Config::ensure_slack_create_allowed`](crate::config::Config::ensure_slack_create_allowed),
+/// ([`Config::ensure_headless_create_allowed`](crate::config::Config::ensure_headless_create_allowed),
 /// enforced at the CLI boundary in `main.rs`).
 ///
 /// The agent cannot forge or strip it: its Bash allowance matches
@@ -94,8 +96,8 @@ const TIMEOUT_NUDGE: &str = "Your previous attempt timed out — be brief and di
 /// prompt no headless process can answer.
 pub const PROGRAM_LOCK_ENV: &str = "CLAUDE_COMMANDER_PROGRAM_LOCK";
 
-/// Current schema of the persisted `slack.json` map.
-const SLACK_SCHEMA_VERSION: u32 = 1;
+/// Current schema of the persisted `conversations.json` map.
+const CONVERSATIONS_SCHEMA_VERSION: u32 = 1;
 
 /// Per-process counter making each `CLAUDE.md` temp file name unique, so two
 /// conversations priming the shared commander dir concurrently can't collide on
@@ -124,7 +126,7 @@ pub struct SpawnSpec {
     pub permission_mode: String,
 }
 
-/// Build the `permissions.deny` Read rules that fence the headless Slack agent
+/// Build the `permissions.deny` Read rules that fence the headless chat agent
 /// off from credential and secret locations. These are *deny* rules, which take
 /// precedence over the broad `Read`/`Grep`/`Glob` allowance ([`ALLOWED_TOOLS`]),
 /// so an agent acting on prompt-injected thread text still cannot read them.
@@ -142,13 +144,13 @@ pub(crate) fn sensitive_read_denies(config_dir: Option<&Path>, data_dir: &Path) 
         "Read(//**/.env)".to_string(),
         "Read(//**/.env.*)".to_string(),
     ];
-    // The commander config dir holds `config.toml` (Slack + other tokens) and is
+    // The commander config dir holds `config.toml` (chat + other tokens) and is
     // never something the agent legitimately reads, so deny it wholesale.
     if let Some(dir) = config_dir {
         denies.push(deny_abs_glob(dir, "**"));
     }
     // The data-dir root holds `server-info.json` (server bearer token),
-    // `state.json` and `slack.json`. Deny only the JSON files at the root — NOT
+    // `state.json` and `conversations.json`. Deny only the JSON files at the root — NOT
     // the whole dir, since the worktrees the agent must read live under it (and
     // `*` never crosses a path separator, so `worktrees/…` is untouched).
     denies.push(deny_abs_glob(data_dir, "*.json"));
@@ -369,46 +371,60 @@ async fn log_stderr(stderr: ChildStderr) {
 }
 
 // ---------------------------------------------------------------------------
-// Persistent key → claude session id map (slack.json)
+// Persistent key → claude session id map (conversations.json)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SlackSessionData {
+struct ConversationData {
     /// Persisted schema version, so a future shape change can migrate on read.
     schema_version: u32,
     /// Conversation key → Claude Code session id (for `--resume`).
     sessions: BTreeMap<String, String>,
 }
 
-impl Default for SlackSessionData {
+impl Default for ConversationData {
     fn default() -> Self {
         Self {
-            schema_version: SLACK_SCHEMA_VERSION,
+            schema_version: CONVERSATIONS_SCHEMA_VERSION,
             sessions: BTreeMap::new(),
         }
     }
 }
 
-/// Persists the `conversation key → claude session id` map to `slack.json` in
+/// Persists the `conversation key → claude session id` map to `conversations.json` in
 /// the server data dir. Single-owner file (only the server writes it), so — like
 /// `tui.json` — a schema counter is sound (unlike multi-writer `state.json`).
-pub struct SlackSessionStore {
+pub struct ConversationStore {
     path: PathBuf,
-    data: StdMutex<SlackSessionData>,
+    data: StdMutex<ConversationData>,
 }
 
-impl SlackSessionStore {
+impl ConversationStore {
     /// Load from `path`, tolerating a missing or unreadable file (starts empty).
     pub fn load(path: PathBuf) -> Self {
         let data = std::fs::read(&path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<SlackSessionData>(&bytes).ok())
+            .and_then(|bytes| serde_json::from_slice::<ConversationData>(&bytes).ok())
             .map(migrate)
             .unwrap_or_default();
         Self {
             path,
             data: StdMutex::new(data),
         }
+    }
+
+    /// [`Self::load`] from `path`, first adopting `legacy` (the pre-release
+    /// Slack-only `slack.json`, same shape) by renaming it into place when
+    /// `path` doesn't exist yet. Best-effort: a failed rename just starts
+    /// empty, which costs a cold start, not correctness.
+    pub fn load_or_adopt(path: PathBuf, legacy: &Path) -> Self {
+        if !path.exists()
+            && legacy.exists()
+            && let Err(e) = std::fs::rename(legacy, &path)
+        {
+            warn!(target: "commander", "could not adopt {}: {e}", legacy.display());
+        }
+        Self::load(path)
     }
 
     /// Recorded Claude session id for `key`, if any.
@@ -424,7 +440,7 @@ impl SlackSessionStore {
         data.sessions
             .insert(key.to_string(), session_id.to_string());
         if let Err(e) = persist(&self.path, &data) {
-            warn!(target: "commander", "failed to persist slack.json: {e}");
+            warn!(target: "commander", "failed to persist conversations.json: {e}");
         }
     }
 
@@ -438,16 +454,16 @@ impl SlackSessionStore {
             return; // nothing changed → nothing to persist
         }
         if let Err(e) = persist(&self.path, &data) {
-            warn!(target: "commander", "failed to persist slack.json after remove: {e}");
+            warn!(target: "commander", "failed to persist conversations.json after remove: {e}");
         }
     }
 }
 
 /// Migrate an older on-disk shape forward. No prior versions exist yet; the hook
 /// is here so a future bump has a home (and stamps the current version).
-fn migrate(mut data: SlackSessionData) -> SlackSessionData {
-    if data.schema_version < SLACK_SCHEMA_VERSION {
-        data.schema_version = SLACK_SCHEMA_VERSION;
+fn migrate(mut data: ConversationData) -> ConversationData {
+    if data.schema_version < CONVERSATIONS_SCHEMA_VERSION {
+        data.schema_version = CONVERSATIONS_SCHEMA_VERSION;
     }
     data
 }
@@ -457,13 +473,13 @@ fn migrate(mut data: SlackSessionData) -> SlackSessionData {
 /// name carries pid + a per-process sequence (shared with the `CLAUDE.md`
 /// writer's [`PRIME_SEQ`]) so two writers can't collide on it.
 ///
-/// Callers ([`SlackSessionStore::set`]/[`remove`](SlackSessionStore::remove))
+/// Callers ([`ConversationStore::set`]/[`remove`](ConversationStore::remove))
 /// hold the store mutex across this call. That is deliberate: it serializes
 /// writers so the rename order matches the in-memory-state order, otherwise a
 /// slow writer holding an older snapshot could rename last and transiently drop
 /// a concurrent *other* key's mapping. The write is a tiny JSON blob, so holding
 /// the (sync) lock across it is cheap.
-fn persist(path: &Path, data: &SlackSessionData) -> std::io::Result<()> {
+fn persist(path: &Path, data: &ConversationData) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -472,7 +488,7 @@ fn persist(path: &Path, data: &SlackSessionData) -> std::io::Result<()> {
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("slack.json");
+        .unwrap_or("conversations.json");
     let tmp = path.with_file_name(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
     if let Err(e) = std::fs::write(&tmp, &bytes) {
         let _ = std::fs::remove_file(&tmp);
@@ -510,8 +526,8 @@ struct WarmState {
 struct Inner {
     config_store: Arc<ConfigStore>,
     spawn: Arc<dyn CommanderSpawn>,
-    sessions: Arc<SlackSessionStore>,
-    /// Pre-rendered Slack-primed `CLAUDE.md` (written on first use).
+    sessions: Arc<ConversationStore>,
+    /// Pre-rendered shared `CLAUDE.md` (written on first use).
     claude_md: String,
     commander_dir: PathBuf,
     /// `permissions.deny` Read rules applied to every spawn (see
@@ -520,7 +536,7 @@ struct Inner {
     deny_read: Vec<String>,
     /// Per-conversation entries. Grows by one small `Arc` per distinct thread
     /// key ever seen and is never evicted: the growth is bounded in practice
-    /// (one entry per Slack thread the bot is used in), and eviction would have
+    /// (one entry per chat thread the bot is used in), and eviction would have
     /// to race the per-key serialization lock for a negligible memory win, so it
     /// is deliberately omitted.
     keys: StdMutex<HashMap<String, Arc<KeyEntry>>>,
@@ -598,7 +614,7 @@ impl HeadlessCommander {
         claude_md: String,
         commander_dir: PathBuf,
         spawn: Arc<dyn CommanderSpawn>,
-        sessions: Arc<SlackSessionStore>,
+        sessions: Arc<ConversationStore>,
         deny_read: Vec<String>,
     ) -> Self {
         Self {
@@ -632,8 +648,8 @@ impl HeadlessCommander {
     }
 
     /// Start the warm-pool maintenance loop: keep one fresh process ready (when
-    /// `slack.warm_pool`), refill it when consumed, and respawn it every
-    /// `slack.warm_respawn_secs` to avoid staleness. Long-lived callers (the
+    /// `headless_commander.warm_pool`), refill it when consumed, and respawn it
+    /// every `headless_commander.warm_respawn_secs` to avoid staleness. Long-lived callers (the
     /// server) start this once; it runs for the process lifetime.
     pub fn spawn_maintenance(&self) {
         let this = self.clone();
@@ -644,7 +660,7 @@ impl HeadlessCommander {
                     this.inner
                         .config_store
                         .read()
-                        .slack
+                        .headless_commander
                         .warm_respawn_secs
                         .max(1),
                 );
@@ -887,7 +903,7 @@ impl HeadlessCommander {
 
     /// Ensure a warm process is ready (when enabled and none is held).
     async fn ensure_warm(&self) {
-        if !self.inner.config_store.read().slack.warm_pool {
+        if !self.inner.config_store.read().headless_commander.warm_pool {
             return;
         }
         if self.ensure_primed().await.is_err() {
@@ -921,7 +937,7 @@ impl HeadlessCommander {
 
     /// One-time directory prep: create the commander dir, write `CLAUDE.md`,
     /// seed `NOTES.md`, and install the bundled agent skills. Once per process is enough: the interactive
-    /// commander writes byte-identical content (the Slack section is part of
+    /// commander writes byte-identical content (the chat section is part of
     /// the single shared prime — see `commander::claude_md_content`), so a
     /// later interactive open can never leave the file meaningfully stale.
     async fn ensure_primed(&self) -> Result<()> {
@@ -991,14 +1007,20 @@ impl HeadlessCommander {
             self.inner
                 .config_store
                 .read()
-                .slack
+                .headless_commander
                 .invocation_timeout_secs
                 .max(1),
         )
     }
 
     fn linger(&self) -> Duration {
-        Duration::from_secs(self.inner.config_store.read().slack.linger_secs)
+        Duration::from_secs(
+            self.inner
+                .config_store
+                .read()
+                .headless_commander
+                .linger_secs,
+        )
     }
 }
 
@@ -1010,48 +1032,66 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
 
-    // -- slack.json persistence --
+    // -- conversations.json persistence --
 
     #[test]
-    fn slack_store_roundtrips_and_stamps_schema_version() {
+    fn conversation_store_roundtrips_and_stamps_schema_version() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("slack.json");
+        let path = dir.path().join("conversations.json");
 
-        let store = SlackSessionStore::load(path.clone());
+        let store = ConversationStore::load(path.clone());
         assert_eq!(store.get("slack:C1:T1"), None);
         store.set("slack:C1:T1", "sess-abc");
         store.set("slack:C2:T2", "sess-def");
 
         // Reload from disk: the mapping survives.
-        let reloaded = SlackSessionStore::load(path.clone());
+        let reloaded = ConversationStore::load(path.clone());
         assert_eq!(reloaded.get("slack:C1:T1").as_deref(), Some("sess-abc"));
         assert_eq!(reloaded.get("slack:C2:T2").as_deref(), Some("sess-def"));
 
         // The persisted file carries the current schema version.
         let raw = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["schema_version"], SLACK_SCHEMA_VERSION);
+        assert_eq!(v["schema_version"], CONVERSATIONS_SCHEMA_VERSION);
     }
 
     #[test]
-    fn slack_store_tolerates_missing_and_corrupt_file() {
+    fn conversation_store_adopts_the_legacy_slack_file_once() {
+        let dir = TempDir::new().unwrap();
+        let legacy = dir.path().join("slack.json");
+        let path = dir.path().join("conversations.json");
+        ConversationStore::load(legacy.clone()).set("slack:C1:T1", "sess-old");
+
+        let store = ConversationStore::load_or_adopt(path.clone(), &legacy);
+        assert_eq!(store.get("slack:C1:T1").as_deref(), Some("sess-old"));
+        assert!(path.exists() && !legacy.exists(), "renamed into place");
+
+        // Once the new file exists a stray legacy file is ignored, not merged.
+        ConversationStore::load(legacy.clone()).set("slack:C9:T9", "stray");
+        let again = ConversationStore::load_or_adopt(path, &legacy);
+        assert_eq!(again.get("slack:C9:T9"), None);
+        assert_eq!(again.get("slack:C1:T1").as_deref(), Some("sess-old"));
+    }
+
+    #[test]
+    fn conversation_store_tolerates_missing_and_corrupt_file() {
         let dir = TempDir::new().unwrap();
         // Missing file → empty, current schema.
-        let missing = SlackSessionStore::load(dir.path().join("nope.json"));
+        let missing = ConversationStore::load(dir.path().join("nope.json"));
         assert_eq!(missing.get("x"), None);
 
         // Corrupt file → empty, does not panic.
         let corrupt = dir.path().join("bad.json");
         std::fs::write(&corrupt, b"not json at all").unwrap();
-        let store = SlackSessionStore::load(corrupt);
+        let store = ConversationStore::load(corrupt);
         assert_eq!(store.get("x"), None);
     }
 
     #[test]
-    fn slack_store_remove_drops_key_and_persists_atomically() {
+    fn conversation_store_remove_drops_key_and_persists_atomically() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("slack.json");
-        let store = SlackSessionStore::load(path.clone());
+        let path = dir.path().join("conversations.json");
+        let store = ConversationStore::load(path.clone());
         store.set("k1", "v1");
         store.set("k2", "v2");
 
@@ -1060,7 +1100,7 @@ mod tests {
         assert_eq!(store.get("k2").as_deref(), Some("v2"));
 
         // The removal is durable across a reload, and no temp file leaks.
-        let reloaded = SlackSessionStore::load(path);
+        let reloaded = ConversationStore::load(path);
         assert_eq!(reloaded.get("k1"), None);
         assert_eq!(reloaded.get("k2").as_deref(), Some("v2"));
         let leftover: Vec<_> = std::fs::read_dir(dir.path())
@@ -1075,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn slack_store_concurrent_writes_across_keys_all_survive() {
+    fn conversation_store_concurrent_writes_across_keys_all_survive() {
         // Regression: `set` persists while holding the store lock, so concurrent
         // writes to *different* keys can't clobber each other. If the file write
         // happened outside the lock, a writer holding an older snapshot could
@@ -1084,8 +1124,8 @@ mod tests {
         use std::sync::Barrier;
 
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("slack.json");
-        let store = Arc::new(SlackSessionStore::load(path.clone()));
+        let path = dir.path().join("conversations.json");
+        let store = Arc::new(ConversationStore::load(path.clone()));
 
         const N: usize = 32;
         let barrier = Arc::new(Barrier::new(N));
@@ -1104,7 +1144,7 @@ mod tests {
         }
 
         // Every mapping is durable on disk after all writers finish.
-        let reloaded = SlackSessionStore::load(path);
+        let reloaded = ConversationStore::load(path);
         for i in 0..N {
             assert_eq!(
                 reloaded.get(&format!("k{i}")).as_deref(),
@@ -1115,22 +1155,22 @@ mod tests {
     }
 
     #[test]
-    fn slack_store_migrates_old_schema_version_forward() {
+    fn conversation_store_migrates_old_schema_version_forward() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("slack.json");
+        let path = dir.path().join("conversations.json");
         std::fs::write(
             &path,
             serde_json::json!({ "schema_version": 0, "sessions": { "k": "old" } }).to_string(),
         )
         .unwrap();
 
-        let store = SlackSessionStore::load(path.clone());
+        let store = ConversationStore::load(path.clone());
         assert_eq!(store.get("k").as_deref(), Some("old"));
         // Writing back stamps the current version.
         store.set("k2", "v2");
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw["schema_version"], SLACK_SCHEMA_VERSION);
+        assert_eq!(raw["schema_version"], CONVERSATIONS_SCHEMA_VERSION);
     }
 
     // -- fake process seam --
@@ -1236,7 +1276,9 @@ mod tests {
             config,
             dir.path().join("config.toml"),
         ));
-        let sessions = Arc::new(SlackSessionStore::load(dir.path().join("slack.json")));
+        let sessions = Arc::new(ConversationStore::load(
+            dir.path().join("conversations.json"),
+        ));
         // Realistic deny rules (config dir + data dir both the temp dir) so the
         // spec-assertion test sees what production would generate.
         let deny_read = sensitive_read_denies(Some(dir.path()), dir.path());
@@ -1322,7 +1364,7 @@ mod tests {
     async fn recorded_session_id_is_resumed_on_a_fresh_ask() {
         let dir = TempDir::new().unwrap();
         // Pre-seed a recorded conversation id.
-        let sessions = SlackSessionStore::load(dir.path().join("slack.json"));
+        let sessions = ConversationStore::load(dir.path().join("conversations.json"));
         sessions.set("slack:C:T", "prior-sess");
         drop(sessions);
 
@@ -1355,7 +1397,7 @@ mod tests {
         // Pre-seed a dead recorded id: the first (resumed) spawn's stream closes
         // immediately — as `claude -p --resume <dead-id>` does when that Claude
         // session no longer exists.
-        let sessions = SlackSessionStore::load(dir.path().join("slack.json"));
+        let sessions = ConversationStore::load(dir.path().join("conversations.json"));
         sessions.set("slack:C:T", "dead-id");
         drop(sessions);
 
@@ -1476,7 +1518,7 @@ mod tests {
             },
         ]);
         let mut config = Config::default();
-        config.slack.invocation_timeout_secs = 60;
+        config.headless_commander.invocation_timeout_secs = 60;
         let mgr = manager(&dir, spawn.clone(), config);
 
         let events = drain(mgr.ask("slack:C:T", "do the thing")).await;
@@ -1555,7 +1597,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let spawn = FakeSpawn::new(vec![]);
         let mut config = Config::default();
-        config.slack.warm_pool = false;
+        config.headless_commander.warm_pool = false;
         let mgr = manager(&dir, spawn.clone(), config);
 
         mgr.ensure_warm().await;
@@ -1666,12 +1708,14 @@ mod tests {
 
     fn concurrency_manager(dir: &TempDir, counters: Arc<Counters>) -> HeadlessCommander {
         let mut config = Config::default();
-        config.slack.warm_pool = false;
+        config.headless_commander.warm_pool = false;
         let config_store = Arc::new(ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),
         ));
-        let sessions = Arc::new(SlackSessionStore::load(dir.path().join("slack.json")));
+        let sessions = Arc::new(ConversationStore::load(
+            dir.path().join("conversations.json"),
+        ));
         HeadlessCommander::new(
             config_store,
             "# primed".to_string(),

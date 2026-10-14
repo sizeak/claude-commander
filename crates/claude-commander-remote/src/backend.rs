@@ -507,14 +507,14 @@ impl CommanderBackend for RemoteBackend {
     }
 }
 
-/// One-shot Slack notify for the CLI `slack notify` path: POST to the server
+/// One-shot notify for the CLI `notify` path: POST to the server
 /// described by `info` (its runtime `server-info.json`) without spinning up a
 /// [`RemoteBackend`]'s background poller. Maps any failure to a human string —
 /// the server's error message when it sent one, else the transport error — so
 /// the CLI can print it and exit non-zero.
-pub async fn slack_notify(
+pub async fn notify(
     info: &claude_commander_core::ServerInfo,
-    req: &claude_commander_protocol::api::SlackNotifyRequest,
+    req: &claude_commander_protocol::api::NotifyRequest,
 ) -> Result<(), String> {
     use claude_commander_client::SecretString;
     let spec = RemoteServerSpec {
@@ -523,7 +523,7 @@ pub async fn slack_notify(
         token: info.token.clone().map(SecretString::new),
     };
     let client = RemoteClient::new(spec).map_err(|e| e.to_string())?;
-    client.slack_notify(req).await.map_err(|e| e.to_string())
+    client.notify(req).await.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1370,7 +1370,7 @@ mod tests {
                 base_branch: None,
                 section: None,
                 stack_parent: None,
-                slack_origin: None,
+                origin: None,
             })
             .await
             .unwrap();
@@ -1462,7 +1462,7 @@ mod tests {
                 base_branch: None,
                 section: None,
                 stack_parent: None,
-                slack_origin: None,
+                origin: None,
             })
             .await
             .unwrap();
@@ -1563,7 +1563,7 @@ mod tests {
                 base_branch: None,
                 section: None,
                 stack_parent: None,
-                slack_origin: None,
+                origin: None,
             })
             .await
             .unwrap();

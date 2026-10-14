@@ -313,7 +313,7 @@ mod tests {
             "claude-commander-new-session",
             "claude-commander-monitor-sessions",
             "claude-commander-delete-session",
-            "claude-commander-slack-notify",
+            "claude-commander-notify",
         ] {
             assert!(skills.contains_key(expected), "missing {expected}");
         }

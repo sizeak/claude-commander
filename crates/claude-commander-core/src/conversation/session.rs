@@ -17,7 +17,7 @@ use tracing::warn;
 
 use crate::error::TtsError;
 
-// The NDJSON event model and its parsing are shared with the headless Slack
+// The NDJSON event model and its parsing are shared with the headless chat
 // commander, so they live in [`crate::stream_json`]. Re-exported under the
 // historical names so this module's API (and the TTS callers) are unchanged.
 pub use crate::stream_json::{StreamEvent as ConversationEvent, parse_event, user_message_line};

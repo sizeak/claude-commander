@@ -37,12 +37,12 @@ pub mod config;
 pub mod conversation;
 pub mod error;
 pub mod git;
+pub mod notify;
 pub mod paste_image;
 pub mod reviewed;
 pub mod server_info;
 pub mod session;
 pub mod skills;
-pub mod slack_notify;
 pub mod stream_json;
 pub mod telemetry;
 pub mod term_caps;
@@ -51,7 +51,7 @@ pub mod tmux;
 pub use config::keybindings::editor_trigger_bytes;
 pub use config::{AppState, Config, StateStore};
 pub use error::{Error, Result};
-pub use server_info::ServerInfo;
+pub use server_info::{ServerInfo, ServerInfoGuard};
 pub use session::{
     AgentState, Project, ProjectId, SessionId, SessionListItem, SessionStatus, WorktreeSession,
 };

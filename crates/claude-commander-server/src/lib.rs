@@ -3,7 +3,7 @@
 //! The server has two frontends: the `claude-commander-server` binary
 //! (`src/main.rs`) and the TUI, which embeds it in-process and shares its
 //! `CommanderService` (see [`embed`]). Both are thin wrappers that resolve
-//! config + auth and hand off to [`embed::start`], so the policy worth testing
+//! config + auth and hand off to [`embed::start_with_integrations`], so the policy worth testing
 //! lives here rather than in either `main` — matching the project's "keep main
 //! thin; logic in lib for testability" rule. Integration tests under `tests/`
 //! build a router in-process and drive it with a real client.
@@ -13,13 +13,13 @@
 //! [`config`] explains why it lives there.
 
 pub mod auth;
+pub mod chat;
 pub mod config;
 pub mod embed;
 pub mod error;
 pub mod extract;
 pub mod handlers;
 pub mod router;
-pub mod slack;
 pub mod state;
 pub mod webui;
 pub mod ws;

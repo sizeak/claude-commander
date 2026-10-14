@@ -82,6 +82,7 @@ assert_eq "10" "$(cc_exit_code_for_lane fmt)" "fmt -> 10"
 assert_eq "11" "$(cc_exit_code_for_lane clippy)" "clippy -> 11"
 assert_eq "12" "$(cc_exit_code_for_lane build)" "build -> 12"
 assert_eq "13" "$(cc_exit_code_for_lane test)" "test -> 13"
+assert_eq "14" "$(cc_exit_code_for_lane chat)" "chat -> 14"
 assert_eq "20" "$(cc_exit_code_for_lane pub-get)" "pub-get -> 20"
 assert_eq "21" "$(cc_exit_code_for_lane dart-format)" "dart-format -> 21"
 assert_eq "22" "$(cc_exit_code_for_lane analyze)" "analyze -> 22"
@@ -118,8 +119,8 @@ assert_eq "$lane_count" "$uniq_count" "every lane in every tier has a distinct e
 # Counted from the `all` tier alone, not the widened union above: this pins what
 # CI's mirror covers, which is a different question from code uniqueness.
 all_tier_count=$(cc_lanes_for_tier all | tr ' ' '\n' | grep -c .)
-assert_eq "17" "$all_tier_count" "the all tier covers 17 lanes"
-assert_eq "18" "$lane_count" "the run order covers 18 lanes (all + goldens)"
+assert_eq "18" "$all_tier_count" "the all tier covers 18 lanes"
+assert_eq "19" "$lane_count" "the run order covers 19 lanes (all + goldens)"
 
 # The runner walks cc_lane_run_order, so a lane missing from it can never execute
 # however it is selected -- which is exactly how the goldens lane was first
@@ -149,13 +150,13 @@ done
 
 echo "== cc_lanes_for_tier =="
 assert_eq "fmt clippy" "$(cc_lanes_for_tier fast)" "fast tier is fmt + clippy only"
-assert_eq "fmt clippy build test" "$(cc_lanes_for_tier rust)" "rust tier is the four cargo lanes"
+assert_eq "fmt clippy build test chat" "$(cc_lanes_for_tier rust)" "rust tier is the cargo lanes"
 assert_eq "pub-get dart-format analyze flutter-test cdylib" "$(cc_lanes_for_tier client)" \
   "client tier resolves packages before checking them"
 
 assert_eq "pub-get goldens" "$(cc_lanes_for_tier goldens)" \
   "goldens tier resolves packages, then rasterises only test/goldens"
-assert_eq "fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter web e2e web-e2e nix-build packaging" \
+assert_eq "fmt clippy build test chat pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter web e2e web-e2e nix-build packaging" \
   "$(cc_lanes_for_tier all)" "all tier is every lane, cheap-to-slow"
 
 # pub-get is not a check but a precondition: `dart format` reads each file's

@@ -104,6 +104,11 @@ jobs:
       - name: Run Clippy
         run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 
+      # Chat backends are opt-in cargo features, so the default lint above never
+      # sees the feature-on wiring.
+      - name: Run Clippy With Chat Backends
+        run: nix develop -c cargo clippy -p claude-commander-server -p claude-commander --all-targets --features slack -- -D warnings
+
   nix:
     name: Nix Build
     runs-on: ubuntu-latest
@@ -220,6 +225,11 @@ jobs:
         env:
           GIT_CONFIG_GLOBAL: ${{ runner.temp }}/poisoned-gitconfig
         run: nix develop -c cargo test --workspace
+
+      - name: Run Server Tests With Chat Backends
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/poisoned-gitconfig
+        run: nix develop -c cargo test -p claude-commander-server --features slack --lib
 
   test-macos:
     name: macOS Build & Test

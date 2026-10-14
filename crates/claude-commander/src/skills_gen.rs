@@ -78,7 +78,7 @@ fn cli_reference_skill_is_up_to_date() {
 fn cli_reference_skill_documents_the_session_creation_flags() {
     let skill = cli_reference_skill();
     assert!(skill.starts_with(&format!("---\nname: {SKILL_NAME}\n")));
-    for flag in ["--slack-channel", "--workspace", "--initial-prompt"] {
+    for flag in ["--origin-backend", "--workspace", "--initial-prompt"] {
         assert!(skill.contains(flag), "reference is missing {flag}");
     }
 }

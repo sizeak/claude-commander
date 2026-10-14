@@ -127,12 +127,12 @@ async fn http_session_lifecycle_round_trip() {
     drop(worktrees_dir);
 }
 
-/// Creating a session with a `slack_origin` (as the commander agent does via
-/// `new --slack-*`) must persist that origin on the session record, so the
+/// Creating a session with a chat `origin` (as the commander agent does via
+/// `new --origin-*`) must persist that origin on the session record, so the
 /// notify path can later route a worker's message back to the thread. Runs
 /// through real tmux + git.
 #[tokio::test]
-async fn create_session_persists_slack_origin() {
+async fn create_session_persists_chat_origin() {
     if !tmux_available().await {
         eprintln!("Skipping test: tmux not available");
         return;
@@ -148,7 +148,7 @@ async fn create_session_persists_slack_origin() {
     let session_id = service
         .create_session(claude_commander_core::api::CreateSessionOpts {
             project_path: repo_path.clone(),
-            title: "from-slack".to_string(),
+            title: "from-chat".to_string(),
             program: Some("bash".to_string()),
             initial_prompt: None,
             effort: None,
@@ -157,10 +157,11 @@ async fn create_session_persists_slack_origin() {
             base_branch: None,
             section: None,
             stack_parent: None,
-            slack_origin: Some(claude_commander_core::session::SlackOrigin {
+            origin: Some(claude_commander_core::session::ChatOrigin {
+                backend: "slack".to_string(),
                 channel: "C0AR48X88L9".to_string(),
-                thread_ts: "1717000000.001".to_string(),
-                permalink: "https://slack.example/archives/C0AR48X88L9/p1".to_string(),
+                thread: "1717000000.001".to_string(),
+                permalink: Some("https://slack.example/archives/C0AR48X88L9/p1".to_string()),
             }),
         })
         .await
@@ -173,11 +174,12 @@ async fn create_session_persists_slack_origin() {
         .find(|s| s.session_id == session_id)
         .expect("created session should be listed");
     let origin = info
-        .slack_origin
+        .origin
         .as_ref()
-        .expect("slack_origin must persist through the create path");
+        .expect("origin must persist through the create path");
     assert_eq!(origin.channel, "C0AR48X88L9");
-    assert_eq!(origin.thread_ts, "1717000000.001");
+    assert_eq!(origin.thread, "1717000000.001");
+    assert_eq!(origin.backend, "slack");
 
     service.kill_session(&session_id).await.unwrap();
 
@@ -219,7 +221,7 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
             base_branch: None,
             section: None,
             stack_parent: None,
-            slack_origin: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -342,7 +344,7 @@ async fn ws_attach_with_empty_session_id_is_rejected() {
             base_branch: None,
             section: None,
             stack_parent: None,
-            slack_origin: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -413,7 +415,7 @@ async fn ws_agent_attach_revives_dead_tmux_session() {
             base_branch: None,
             section: None,
             stack_parent: None,
-            slack_origin: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -523,7 +525,7 @@ async fn ws_attach_handshake_size_reaches_tmux_without_any_resize() {
             base_branch: None,
             section: None,
             stack_parent: None,
-            slack_origin: None,
+            origin: None,
         })
         .await
         .unwrap();
@@ -634,7 +636,7 @@ async fn ws_attach_stamps_last_attached_at() {
             base_branch: None,
             section: None,
             stack_parent: None,
-            slack_origin: None,
+            origin: None,
         })
         .await
         .unwrap();

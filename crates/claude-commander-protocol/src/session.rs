@@ -165,25 +165,37 @@ impl fmt::Display for SessionStatus {
     }
 }
 
-/// Where a session was created from Slack: the channel, the thread it belongs
-/// to, and a permalink back to the originating message.
+/// Where a session was requested from in a chat platform (Slack today; the
+/// backend id names which): the conversation, the thread within it, and a link
+/// back to the originating message when the platform has one.
 ///
-/// Recorded on a session created via the Slack bridge so the notify path can
-/// route a worker's message back to the right thread. Persisted on the session
-/// record and carried on the wire DTO; `#[serde(default,
-/// skip_serializing_if = "Option::is_none")]` on the enclosing field keeps old
-/// `state.json` files and old binaries round-tripping safely.
+/// Recorded on a session created via a chat bridge so a worker's `notify` can
+/// route back to the right thread. Persisted on the session record and carried
+/// on the wire DTO; `#[serde(default, skip_serializing_if = "Option::is_none")]`
+/// on the enclosing field keeps old `state.json` files and old binaries
+/// round-tripping safely.
+///
+/// Reads the earlier Slack-only shape too (`{channel, thread_ts, permalink}`,
+/// stored as `slack_origin`): `backend` defaults to `slack` and `thread_ts` is
+/// an alias, so records written by pre-release builds of the Slack bridge load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-pub struct SlackOrigin {
-    /// Slack channel id the session was requested in (e.g. `C0AR48X88L9`).
+pub struct ChatOrigin {
+    /// The chat backend's id (e.g. `slack`), matching a configured backend.
+    #[serde(default = "default_origin_backend")]
+    pub backend: String,
+    /// The conversation the request came from (a Slack channel id, …).
     pub channel: String,
-    /// Thread timestamp identifying the conversation (`app_mention`/`message.im`
-    /// thread root, or the message ts when not yet threaded).
-    pub thread_ts: String,
-    /// Permalink to the originating Slack message, embedded in the agent's
-    /// initial prompt so it can reference the source.
-    pub permalink: String,
+    /// The thread within it that replies go to (a Slack thread ts, …).
+    #[serde(alias = "thread_ts")]
+    pub thread: String,
+    /// A link to the originating message, when the platform provides one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permalink: Option<String>,
+}
+
+fn default_origin_backend() -> String {
+    "slack".to_string()
 }
 
 /// Sub-state of a Running Claude Code session, detected via pane content parsing.
@@ -300,15 +312,43 @@ mod tests {
     }
 
     #[test]
-    fn slack_origin_round_trips() {
-        let origin = SlackOrigin {
+    fn chat_origin_round_trips() {
+        let origin = ChatOrigin {
+            backend: "slack".to_string(),
             channel: "C0AR48X88L9".to_string(),
-            thread_ts: "1700000000.000100".to_string(),
-            permalink: "https://slack.example/archives/C0AR48X88L9/p1700000000000100".to_string(),
+            thread: "1700000000.000100".to_string(),
+            permalink: Some("https://slack.example/archives/C0AR48X88L9/p1".to_string()),
         };
         let json = serde_json::to_string(&origin).unwrap();
-        let back: SlackOrigin = serde_json::from_str(&json).unwrap();
+        let back: ChatOrigin = serde_json::from_str(&json).unwrap();
         assert_eq!(back, origin);
+    }
+
+    #[test]
+    fn chat_origin_reads_the_legacy_slack_shape() {
+        let legacy = r#"{"channel":"C1","thread_ts":"100.1","permalink":"https://slack/x"}"#;
+        let origin: ChatOrigin = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            origin,
+            ChatOrigin {
+                backend: "slack".to_string(),
+                channel: "C1".to_string(),
+                thread: "100.1".to_string(),
+                permalink: Some("https://slack/x".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn chat_origin_permalink_is_optional_and_elided() {
+        let origin: ChatOrigin =
+            serde_json::from_str(r#"{"backend":"discord","channel":"1","thread":"2"}"#).unwrap();
+        assert!(origin.permalink.is_none());
+        assert!(
+            !serde_json::to_string(&origin)
+                .unwrap()
+                .contains("permalink")
+        );
     }
 
     #[test]

@@ -171,22 +171,27 @@ pub enum Commands {
         #[arg(long)]
         remote: Option<String>,
 
-        /// Slack channel id to record as this session's origin. Set by the
-        /// commander agent when creating a session from a Slack request so a
-        /// worker's `slack notify` can report back to the thread. Requires
-        /// `--slack-thread-ts`.
-        #[arg(long, requires = "slack_thread_ts")]
-        slack_channel: Option<String>,
+        /// Chat backend the session was requested from (e.g. `slack`), recorded
+        /// as its origin so a worker's `notify` reports back to the thread. Set
+        /// by the commander agent when creating a session from a chat request.
+        /// Requires `--origin-channel` and `--origin-thread`.
+        #[arg(long, requires_all = ["origin_channel", "origin_thread"])]
+        origin_backend: Option<String>,
 
-        /// Slack thread timestamp for the session's origin. Requires
-        /// `--slack-channel` (the two are all-or-none).
-        #[arg(long, requires = "slack_channel")]
-        slack_thread_ts: Option<String>,
+        /// Conversation the session was requested in (a Slack channel id, …).
+        /// Requires `--origin-backend`.
+        #[arg(long, requires = "origin_backend")]
+        origin_channel: Option<String>,
 
-        /// Permalink to the originating Slack message, embedded in the session
-        /// origin. Requires `--slack-channel` (and thus `--slack-thread-ts`).
-        #[arg(long, requires = "slack_channel")]
-        slack_permalink: Option<String>,
+        /// Thread within that conversation that replies go to (a Slack thread
+        /// timestamp, …). Requires `--origin-backend`.
+        #[arg(long, requires = "origin_backend")]
+        origin_thread: Option<String>,
+
+        /// Link to the originating message, when the platform has one.
+        /// Requires `--origin-backend`.
+        #[arg(long, requires = "origin_backend")]
+        origin_permalink: Option<String>,
         /// Workspace for the project when `--path` registers a new one (an
         /// existing project keeps its workspace). An unknown name creates the
         /// workspace; `main` is the built-in one.
@@ -209,10 +214,24 @@ pub enum Commands {
     /// that coordinates other sessions via this CLI. Creates it on first use.
     Commander,
 
-    /// Slack integration commands.
-    Slack {
-        #[command(subcommand)]
-        command: SlackCommands,
+    /// Relay a message to chat about a session. A session created from a chat
+    /// request posts back into its originating thread; any other session is
+    /// sent as a direct message on the default chat backend. Worker sessions run
+    /// this to report progress. The message is Markdown; the chat backend
+    /// converts it.
+    ///
+    /// Requires a running server with a chat backend enabled — the TUI with
+    /// `[server] auto_start` (or `--serve`), or `claude-commander-server` —
+    /// discovered via its runtime info file.
+    Notify {
+        /// Session to notify about (name or id prefix). Defaults to the session
+        /// whose worktree contains the current directory.
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Message text. If omitted, the message is read from stdin to EOF.
+        #[arg(short, long)]
+        message: Option<String>,
     },
 
     /// Show configuration
@@ -237,27 +256,6 @@ pub enum Commands {
     },
 }
 
-/// `claude-commander slack …` subcommands.
-#[derive(Subcommand)]
-pub enum SlackCommands {
-    /// Relay a message to Slack about a session. A session created from Slack
-    /// posts back into its originating thread; any other session is DM'd to the
-    /// first allowlisted user. Worker sessions run this to report progress.
-    ///
-    /// Requires a running `claude-commander-server` (the server owns the Slack
-    /// client and is discovered via its runtime info file).
-    Notify {
-        /// Session to notify about (name or id prefix). Defaults to the session
-        /// whose worktree contains the current directory.
-        #[arg(long)]
-        session: Option<String>,
-
-        /// Message text. If omitted, the message is read from stdin to EOF.
-        #[arg(short, long)]
-        message: Option<String>,
-    },
-}
-
 /// The clap command tree for the CLI. Single source of truth for this binary's
 /// argument parsing and for the CLI reference generated from it.
 #[cfg(test)]
@@ -274,7 +272,7 @@ pub fn cli_reference() -> String {
 
 /// Render a markdown CLI reference by walking a clap command tree and emitting
 /// each visible subcommand's long help verbatim, recursing into command groups
-/// (e.g. `slack notify`), labelled with the full invocation. Hidden subcommands
+/// (a group's subcommands), labelled with the full invocation. Hidden subcommands
 /// (e.g. internal popup helpers) and clap's generated `help` are skipped.
 ///
 /// Split from [`cli_reference`] so the walk is testable against a synthetic tree
@@ -431,7 +429,7 @@ mod tests {
             "commander",
             "listen-toggle",
             "keep-alive",
-            "slack",
+            "notify",
         ] {
             assert!(
                 names.contains(&expected),
@@ -440,39 +438,51 @@ mod tests {
         }
     }
 
-    /// The `slack` group exposes `notify`, and the generated commander CLI
-    /// reference (built from this tree) must surface it so the agent knows the
-    /// command exists.
+    /// The `new` command carries the chat-origin flags the commander agent
+    /// uses when creating a session from a chat request.
     #[test]
-    fn slack_group_exposes_notify() {
-        let cmd = cli_command();
-        let slack = cmd
-            .get_subcommands()
-            .find(|s| s.get_name() == "slack")
-            .expect("slack subcommand present");
-        let subs: Vec<&str> = slack.get_subcommands().map(|s| s.get_name()).collect();
-        assert!(
-            subs.contains(&"notify"),
-            "slack group missing notify: {subs:?}"
-        );
-    }
-
-    /// The `new` command carries the Slack-origin flags the commander agent uses
-    /// when creating a session from Slack.
-    #[test]
-    fn new_command_exposes_slack_origin_flags() {
+    fn new_command_exposes_the_origin_flags() {
         let cmd = cli_command();
         let new = cmd
             .get_subcommands()
             .find(|s| s.get_name() == "new")
             .expect("new subcommand present");
         let args: Vec<&str> = new.get_arguments().filter_map(|a| a.get_long()).collect();
-        for expected in ["slack-channel", "slack-thread-ts", "slack-permalink"] {
+        for expected in [
+            "origin-backend",
+            "origin-channel",
+            "origin-thread",
+            "origin-permalink",
+        ] {
             assert!(
                 args.contains(&expected),
                 "new missing --{expected}; got {args:?}"
             );
         }
+    }
+
+    /// An origin is all-or-nothing: backend, channel and thread together.
+    #[test]
+    fn origin_flags_must_come_together() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["claude-commander", "new", "x"];
+            argv.extend_from_slice(extra);
+            cli_command().try_get_matches_from(argv)
+        };
+        assert!(
+            parse(&[
+                "--origin-backend",
+                "slack",
+                "--origin-channel",
+                "C1",
+                "--origin-thread",
+                "1.2"
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["--origin-backend", "slack", "--origin-channel", "C1"]).is_err());
+        assert!(parse(&["--origin-thread", "1.2"]).is_err());
+        assert!(parse(&["--origin-permalink", "https://x"]).is_err());
     }
 
     #[test]

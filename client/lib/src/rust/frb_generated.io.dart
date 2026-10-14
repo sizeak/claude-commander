@@ -75,6 +75,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw);
 
   @protected
+  ChatOrigin dco_decode_box_autoadd_chat_origin(dynamic raw);
+
+  @protected
   CloneJobDto dco_decode_box_autoadd_clone_job_dto(dynamic raw);
 
   @protected
@@ -129,6 +132,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BranchInfo dco_decode_branch_info(dynamic raw);
+
+  @protected
+  ChatOrigin dco_decode_chat_origin(dynamic raw);
 
   @protected
   CloneJobDto dco_decode_clone_job_dto(dynamic raw);
@@ -288,6 +294,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime? dco_decode_opt_box_autoadd_Chrono_Utc(dynamic raw);
+
+  @protected
+  ChatOrigin? dco_decode_opt_box_autoadd_chat_origin(dynamic raw);
 
   @protected
   CloneJobDto? dco_decode_opt_box_autoadd_clone_job_dto(dynamic raw);
@@ -490,6 +499,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
 
   @protected
+  ChatOrigin sse_decode_box_autoadd_chat_origin(SseDeserializer deserializer);
+
+  @protected
   CloneJobDto sse_decode_box_autoadd_clone_job_dto(
     SseDeserializer deserializer,
   );
@@ -566,6 +578,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BranchInfo sse_decode_branch_info(SseDeserializer deserializer);
+
+  @protected
+  ChatOrigin sse_decode_chat_origin(SseDeserializer deserializer);
 
   @protected
   CloneJobDto sse_decode_clone_job_dto(SseDeserializer deserializer);
@@ -757,6 +772,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime? sse_decode_opt_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
+
+  @protected
+  ChatOrigin? sse_decode_opt_box_autoadd_chat_origin(
+    SseDeserializer deserializer,
+  );
 
   @protected
   CloneJobDto? sse_decode_opt_box_autoadd_clone_job_dto(
@@ -1006,6 +1026,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_chat_origin(
+    ChatOrigin self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_clone_job_dto(
     CloneJobDto self,
     SseSerializer serializer,
@@ -1103,6 +1129,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_branch_info(BranchInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_chat_origin(ChatOrigin self, SseSerializer serializer);
 
   @protected
   void sse_encode_clone_job_dto(CloneJobDto self, SseSerializer serializer);
@@ -1362,6 +1391,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_Chrono_Utc(
     DateTime? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_chat_origin(
+    ChatOrigin? self,
     SseSerializer serializer,
   );
 

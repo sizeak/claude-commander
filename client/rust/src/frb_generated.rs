@@ -2603,6 +2603,13 @@ const _: fn() = || {
         let _: bool = BranchInfo.is_remote;
     }
     {
+        let ChatOrigin = None::<crate::api::mirrors::ChatOrigin>.unwrap();
+        let _: String = ChatOrigin.backend;
+        let _: String = ChatOrigin.channel;
+        let _: String = ChatOrigin.thread;
+        let _: Option<String> = ChatOrigin.permalink;
+    }
+    {
         let CloneJobId_ = None::<crate::api::mirrors::CloneJobId>.unwrap();
         let _: uuid::Uuid = CloneJobId_.0;
     }
@@ -2686,6 +2693,7 @@ const _: fn() = || {
         let _: String = SessionInfo.worktree_path;
         let _: String = SessionInfo.tmux_session_name;
         let _: bool = SessionInfo.keep_alive;
+        let _: Option<crate::api::mirrors::ChatOrigin> = SessionInfo.origin;
     }
     {
         let WorkspaceDef = None::<crate::api::mirrors::WorkspaceDef>.unwrap();
@@ -2862,6 +2870,22 @@ impl SseDecode for crate::api::mirrors::BranchInfo {
         return crate::api::mirrors::BranchInfo {
             name: var_name,
             is_remote: var_isRemote,
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::ChatOrigin {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_backend = <String>::sse_decode(deserializer);
+        let mut var_channel = <String>::sse_decode(deserializer);
+        let mut var_thread = <String>::sse_decode(deserializer);
+        let mut var_permalink = <Option<String>>::sse_decode(deserializer);
+        return crate::api::mirrors::ChatOrigin {
+            backend: var_backend,
+            channel: var_channel,
+            thread: var_thread,
+            permalink: var_permalink,
         };
     }
 }
@@ -3585,6 +3609,17 @@ impl SseDecode for Option<chrono::DateTime<chrono::Utc>> {
     }
 }
 
+impl SseDecode for Option<crate::api::mirrors::ChatOrigin> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::mirrors::ChatOrigin>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::mirrors::CloneJobDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4098,6 +4133,7 @@ impl SseDecode for crate::api::mirrors::SessionInfo {
         let mut var_worktreePath = <String>::sse_decode(deserializer);
         let mut var_tmuxSessionName = <String>::sse_decode(deserializer);
         let mut var_keepAlive = <bool>::sse_decode(deserializer);
+        let mut var_origin = <Option<crate::api::mirrors::ChatOrigin>>::sse_decode(deserializer);
         return crate::api::mirrors::SessionInfo {
             id: var_id,
             session_id: var_sessionId,
@@ -4126,6 +4162,7 @@ impl SseDecode for crate::api::mirrors::SessionInfo {
             worktree_path: var_worktreePath,
             tmux_session_name: var_tmuxSessionName,
             keep_alive: var_keepAlive,
+            origin: var_origin,
         };
     }
 }
@@ -4539,6 +4576,29 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::BranchInf
     for crate::api::mirrors::BranchInfo
 {
     fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::BranchInfo> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::ChatOrigin> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.backend.into_into_dart().into_dart(),
+            self.0.channel.into_into_dart().into_dart(),
+            self.0.thread.into_into_dart().into_dart(),
+            self.0.permalink.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::ChatOrigin>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::ChatOrigin>>
+    for crate::api::mirrors::ChatOrigin
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::ChatOrigin> {
         self.into()
     }
 }
@@ -5661,6 +5721,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::SessionIn
             self.0.worktree_path.into_into_dart().into_dart(),
             self.0.tmux_session_name.into_into_dart().into_dart(),
             self.0.keep_alive.into_into_dart().into_dart(),
+            self.0.origin.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5986,6 +6047,16 @@ impl SseEncode for crate::api::mirrors::BranchInfo {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.name, serializer);
         <bool>::sse_encode(self.is_remote, serializer);
+    }
+}
+
+impl SseEncode for crate::api::mirrors::ChatOrigin {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.backend, serializer);
+        <String>::sse_encode(self.channel, serializer);
+        <String>::sse_encode(self.thread, serializer);
+        <Option<String>>::sse_encode(self.permalink, serializer);
     }
 }
 
@@ -6571,6 +6642,16 @@ impl SseEncode for Option<chrono::DateTime<chrono::Utc>> {
     }
 }
 
+impl SseEncode for Option<crate::api::mirrors::ChatOrigin> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::mirrors::ChatOrigin>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::mirrors::CloneJobDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -7009,6 +7090,7 @@ impl SseEncode for crate::api::mirrors::SessionInfo {
         <String>::sse_encode(self.worktree_path, serializer);
         <String>::sse_encode(self.tmux_session_name, serializer);
         <bool>::sse_encode(self.keep_alive, serializer);
+        <Option<crate::api::mirrors::ChatOrigin>>::sse_encode(self.origin, serializer);
     }
 }
 

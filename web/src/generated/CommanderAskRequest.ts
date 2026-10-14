@@ -10,8 +10,8 @@ export type CommanderAskRequest = {
  */
 prompt: string, 
 /**
- * Opaque conversation key (the Slack bridge uses
- * `slack:<channel>:<thread_ts>`). Turns sharing a key continue one
+ * Opaque conversation key (the chat bridges use
+ * `<backend>:<channel>:<thread>`). Turns sharing a key continue one
  * conversation and are served in order.
  */
 conversation_key: string, };

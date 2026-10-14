@@ -174,6 +174,7 @@ pub fn create_session(
         base_branch,
         section: None,
         stack_parent: None,
+        origin: None,
     };
     let id = call(client.create_session(opts))?;
     Ok(id.as_uuid().to_string())

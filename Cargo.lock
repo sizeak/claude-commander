@@ -813,6 +813,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-commander-chat"
+version = "0.38.0"
+dependencies = [
+ "async-trait",
+ "claude-commander-core",
+ "claude-commander-protocol",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "claude-commander-chat-slack"
+version = "0.38.0"
+dependencies = [
+ "async-trait",
+ "claude-commander-chat",
+ "claude-commander-core",
+ "regex",
+ "rustls",
+ "slack-morphism",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "claude-commander-client"
 version = "0.38.0"
 dependencies = [
@@ -909,6 +935,8 @@ dependencies = [
  "axum",
  "axum-server",
  "clap",
+ "claude-commander-chat",
+ "claude-commander-chat-slack",
  "claude-commander-core",
  "claude-commander-protocol",
  "claude-commander-test-support",
@@ -920,7 +948,6 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
- "slack-morphism",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

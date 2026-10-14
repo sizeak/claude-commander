@@ -126,8 +126,8 @@ impl ConfigStore {
     }
 
     /// Path to the backing `config.toml`. Its parent is the commander config
-    /// directory (holds the Slack tokens), which the headless read-deny list
-    /// fences the Slack agent off from.
+    /// directory (holds the chat tokens), which the headless read-deny list
+    /// fences the chat agent off from.
     pub fn config_path(&self) -> &std::path::Path {
         &self.config_path
     }

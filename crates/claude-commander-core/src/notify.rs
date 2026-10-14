@@ -1,4 +1,4 @@
-//! `claude-commander slack notify` preparation logic.
+//! `claude-commander notify` preparation logic.
 //!
 //! The CLI half of the notify path: resolve *which* session a worker's message
 //! is about (an explicit `--session`, or the session whose worktree contains the
@@ -11,13 +11,13 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use claude_commander_protocol::api::SlackNotifyRequest;
+use claude_commander_protocol::api::NotifyRequest;
 
 use crate::config::AppState;
 use crate::server_info::ServerInfo;
 use crate::session::WorktreeSession;
 
-/// Why a `slack notify` could not be prepared. Every variant renders an
+/// Why a `notify` could not be prepared. Every variant renders an
 /// actionable message so the CLI can print it and exit non-zero.
 #[derive(Debug, Error)]
 pub enum NotifyPrepError {
@@ -27,7 +27,9 @@ pub enum NotifyPrepError {
     NoSessionForCwd,
     /// No server is advertising itself (no `server-info.json`), so there's
     /// nothing to POST to.
-    #[error("server not running — notify unavailable (start claude-commander-server)")]
+    #[error(
+        "no running server found — notify needs the TUI running with `[server] auto_start` (or `--serve`), or `claude-commander-server`"
+    )]
     ServerNotRunning,
     /// The info file exists but couldn't be read/parsed.
     #[error("could not read server info: {0}")]
@@ -70,7 +72,7 @@ pub fn prepare_notify(
     session: Option<String>,
     message: String,
     cwd: &Path,
-) -> Result<(ServerInfo, SlackNotifyRequest), NotifyPrepError> {
+) -> Result<(ServerInfo, NotifyRequest), NotifyPrepError> {
     let query = resolve_notify_query(state, session, cwd)?;
     let info = match ServerInfo::read_from(data_dir) {
         Ok(Some(info)) => info,
@@ -79,7 +81,7 @@ pub fn prepare_notify(
     };
     Ok((
         info,
-        SlackNotifyRequest {
+        NotifyRequest {
             session: query,
             message,
         },

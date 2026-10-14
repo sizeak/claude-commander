@@ -139,7 +139,10 @@ pub async fn start(
     let ServePlan {
         cfg, auth, token, ..
     } = plan;
-    match embed::start(service, &cfg, auth).await {
+    // The same bring-up as the standalone binary: chat backends (when built
+    // in and configured) and `server-info.json`, so a worker's `notify` finds
+    // this server.
+    match embed::start_with_integrations(service, &cfg, auth).await {
         Ok(server) => {
             let url = server.url();
             info!("serving the commander API on {url}");

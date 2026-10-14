@@ -76,6 +76,37 @@ class BranchInfo {
           isRemote == other.isRemote;
 }
 
+class ChatOrigin {
+  final String backend;
+  final String channel;
+  final String thread;
+  final String? permalink;
+
+  const ChatOrigin({
+    required this.backend,
+    required this.channel,
+    required this.thread,
+    this.permalink,
+  });
+
+  @override
+  int get hashCode =>
+      backend.hashCode ^
+      channel.hashCode ^
+      thread.hashCode ^
+      permalink.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ChatOrigin &&
+          runtimeType == other.runtimeType &&
+          backend == other.backend &&
+          channel == other.channel &&
+          thread == other.thread &&
+          permalink == other.permalink;
+}
+
 /// A clone in flight, as polled by a frontend. `dest` is flattened `PathBuf` →
 /// `String` (as `ProjectInfoDto::repo_path` is).
 ///
@@ -709,6 +740,7 @@ class SessionInfo {
   final String worktreePath;
   final String tmuxSessionName;
   final bool keepAlive;
+  final ChatOrigin? origin;
 
   const SessionInfo({
     required this.id,
@@ -738,6 +770,7 @@ class SessionInfo {
     required this.worktreePath,
     required this.tmuxSessionName,
     required this.keepAlive,
+    this.origin,
   });
 
   @override
@@ -768,7 +801,8 @@ class SessionInfo {
       lastAttachedAt.hashCode ^
       worktreePath.hashCode ^
       tmuxSessionName.hashCode ^
-      keepAlive.hashCode;
+      keepAlive.hashCode ^
+      origin.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -801,7 +835,8 @@ class SessionInfo {
           lastAttachedAt == other.lastAttachedAt &&
           worktreePath == other.worktreePath &&
           tmuxSessionName == other.tmuxSessionName &&
-          keepAlive == other.keepAlive;
+          keepAlive == other.keepAlive &&
+          origin == other.origin;
 }
 
 enum SessionStatus {

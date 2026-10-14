@@ -43,13 +43,14 @@ impl App {
                 // blank line between groups so the long list is easy to scan
                 // (mirrors the Keybindings tab).
                 //
-                // The `[slack]` table is deliberately absent here. Its two tokens
-                // are secrets (never shown or edited in the UI, consistent with
+                // The chat tables (`[chat]`, `[slack]`, `[headless_commander]`)
+                // are deliberately absent here. Backend tokens are secrets (never
+                // shown or edited in the UI, consistent with
                 // `Config::with_secrets_redacted` and the remote config-patch
-                // allow-list rejecting them), and the rest are tunables for the
-                // server-side Slack bridge — a feature the local TUI doesn't run,
-                // so editing them here would have no effect on a running server.
-                // Configure Slack by hand in `config.toml` (see docs/slack.md).
+                // allow-list rejecting them), and the rest is read once when the
+                // server starts its chat backends, so editing it live would have
+                // no effect. Configure chat by hand in `config.toml` (see
+                // docs/chat.md).
                 let c = &self.config;
                 with_section_spacers(vec![
                     SettingsRow::header("Sessions & Worktrees"),

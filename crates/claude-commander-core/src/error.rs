@@ -49,12 +49,12 @@ pub enum SessionError {
     InvalidProgram(String),
 
     #[error(
-        "Program '{0}' is not permitted for a Slack-created session: such sessions may only launch a program configured in config.toml (an entry in `programs`, or the default). An injected `--program` override is rejected."
+        "Program '{0}' is not permitted for a session created from chat: such sessions may only launch a program configured in config.toml (an entry in `programs`, or the default). An injected `--program` override is rejected."
     )]
     ProgramNotAllowed(String),
 
     #[error(
-        "Permission mode '{0}' is not permitted for a Slack-created session: such sessions run unattended, so they may not disable the interactive permission prompt (`bypassPermissions` or `acceptEdits`). Use the default mode or `plan`."
+        "Permission mode '{0}' is not permitted for a session created from chat: such sessions run unattended, so they may not disable the interactive permission prompt (`bypassPermissions` or `acceptEdits`). Use the default mode or `plan`."
     )]
     ModeNotAllowed(String),
 

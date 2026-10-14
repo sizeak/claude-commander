@@ -14,10 +14,10 @@ use std::time::Duration;
 
 use claude_commander_protocol::api::{
     AddProjectRequest, AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions,
-    CreateSessionOpts, CreatedId, DiffSide, MarkUnread, NewComment, OperationStatus, PatchSession,
-    PreviewData, ProgramInfo, RenameSession, ReviewSnapshot, ReviewedToggle, ScanResponse,
-    SessionDetail, SetProgramsRequest, SetSection, SetSessionBase, SetSessionBaseOutcome,
-    SlackNotifyRequest, Snapshot, ToggleReviewed,
+    CreateSessionOpts, CreatedId, DiffSide, MarkUnread, NewComment, NotifyRequest, OperationStatus,
+    PatchSession, PreviewData, ProgramInfo, RenameSession, ReviewSnapshot, ReviewedToggle,
+    ScanResponse, SessionDetail, SetProgramsRequest, SetSection, SetSessionBase,
+    SetSessionBaseOutcome, Snapshot, ToggleReviewed,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
@@ -884,12 +884,11 @@ impl RemoteClient {
         self.get_bytes(url).await
     }
 
-    /// Relay a worker's message to Slack via the server (`POST /api/slack/notify`).
-    /// The server owns the Slack client and resolves the session's thread/DM;
-    /// this is the one-shot call the CLI `slack notify` path makes.
-    pub async fn slack_notify(&self, req: &SlackNotifyRequest) -> ClientResult<()> {
-        self.post_json_ok(self.endpoint(&["slack", "notify"]), req)
-            .await
+    /// Relay a worker's message to chat via the server (`POST /api/notify`).
+    /// The server owns the chat clients and resolves the session's thread or
+    /// direct message; this is the one-shot call the CLI `notify` path makes.
+    pub async fn notify(&self, req: &NotifyRequest) -> ClientResult<()> {
+        self.post_json_ok(self.endpoint(&["notify"]), req).await
     }
 
     // -- Attach --

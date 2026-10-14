@@ -4,7 +4,7 @@
 //! --include-partial-messages --verbose` reads newline-delimited user-message
 //! JSON on stdin and emits NDJSON events on stdout. Two independent features
 //! drive that same subprocess — the TTS [`conversation`](crate::conversation)
-//! overlay and the headless Slack [`commander`](crate::commander) — so the pure,
+//! overlay and the headless chat [`commander`](crate::commander) — so the pure,
 //! side-effect-free parsing of those events lives here, unit-tested once, rather
 //! than being duplicated (or coupled to the TTS module's error type).
 

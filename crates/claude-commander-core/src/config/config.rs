@@ -415,10 +415,20 @@ pub struct Config {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 
-    /// Slack-integration settings (`[slack]` table). Disabled unless both tokens
-    /// are set and an allowlist is configured — see [`SlackConfig::is_enabled`].
+    /// Chat-bridge settings shared by every backend (`[chat]` table).
+    #[serde(default)]
+    pub chat: ChatConfig,
+
+    /// Slack backend credentials and allowlist (`[slack]` table). Only used by
+    /// builds with the `slack` feature, and disabled unless both tokens are set
+    /// and an allowlist is configured — see [`SlackConfig::is_enabled`].
     #[serde(default)]
     pub slack: SlackConfig,
+
+    /// Tuning for the headless commander that answers chat requests
+    /// (`[headless_commander]` table).
+    #[serde(default)]
+    pub headless_commander: HeadlessCommanderConfig,
 
     /// Remote `claude-commander-server` instances the TUI drives alongside the
     /// local backend. Each entry becomes a per-server node in the session tree,
@@ -610,14 +620,25 @@ impl Default for TelemetryConfig {
     }
 }
 
-/// Slack-integration settings (`[slack]` table).
+/// Settings shared by every chat backend (`[chat]` table).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatConfig {
+    /// Backend id (e.g. `slack`) that receives `notify` messages from sessions
+    /// with no chat origin, as a direct message to that backend's first
+    /// allowlisted user. Unset: the first enabled backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_notify: Option<String>,
+}
+
+/// Slack backend settings (`[slack]` table).
 ///
 /// Off unless [`SlackConfig::is_enabled`] — both tokens set and at least one
 /// allowlisted user. The two tokens are secrets: they are stripped by
 /// [`Config::with_secrets_redacted`] before the config is served over the wire,
 /// and the hand-written `Debug` impl redacts them so an accidental `{:?}` on the
 /// enclosing [`Config`] can't leak them.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SlackConfig {
     /// Socket Mode app-level token (`xapp-…`). Required to connect the bridge.
@@ -635,41 +656,6 @@ pub struct SlackConfig {
     /// everyone.
     #[serde(default)]
     pub allowed_user_ids: Vec<String>,
-
-    /// Hard cap in seconds on a single headless invocation before it is killed
-    /// (then retried once with a "be brief" nudge). Default 300 (5 min).
-    #[serde(default = "default_slack_invocation_timeout_secs")]
-    pub invocation_timeout_secs: u64,
-
-    /// How long in seconds a headless process lingers after replying, ready for
-    /// an instant follow-up in the same thread, before it is reaped. Default 300
-    /// (5 min).
-    #[serde(default = "default_slack_linger_secs")]
-    pub linger_secs: u64,
-
-    /// Keep one warm (non-resume) process ready so a brand-new thread doesn't
-    /// pay cold-start latency. Default true.
-    #[serde(default = "default_true")]
-    pub warm_pool: bool,
-
-    /// How often in seconds the warm process is respawned to avoid staleness.
-    /// Default 3600 (1 hour).
-    #[serde(default = "default_slack_warm_respawn_secs")]
-    pub warm_respawn_secs: u64,
-}
-
-impl Default for SlackConfig {
-    fn default() -> Self {
-        Self {
-            app_token: None,
-            bot_token: None,
-            allowed_user_ids: Vec::new(),
-            invocation_timeout_secs: default_slack_invocation_timeout_secs(),
-            linger_secs: default_slack_linger_secs(),
-            warm_pool: true,
-            warm_respawn_secs: default_slack_warm_respawn_secs(),
-        }
-    }
 }
 
 impl SlackConfig {
@@ -681,6 +667,46 @@ impl SlackConfig {
             && self.bot_token.as_ref().is_some_and(|t| !t.is_empty())
             && !self.allowed_user_ids.is_empty()
     }
+
+    /// Whether any Slack setting is present at all — used to warn when a build
+    /// without the `slack` feature is handed a `[slack]` table.
+    pub fn is_configured(&self) -> bool {
+        self.app_token.is_some() || self.bot_token.is_some() || !self.allowed_user_ids.is_empty()
+    }
+}
+
+/// Tuning for the headless commander that answers chat requests
+/// (`[headless_commander]` table). Backend-independent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeadlessCommanderConfig {
+    /// Hard cap in seconds on a single headless invocation before it is killed
+    /// (then retried once with a "be brief" nudge). Default 300 (5 min).
+    pub invocation_timeout_secs: u64,
+
+    /// How long in seconds a headless process lingers after replying, ready for
+    /// an instant follow-up in the same thread, before it is reaped. Default 300
+    /// (5 min).
+    pub linger_secs: u64,
+
+    /// Keep one warm (non-resume) process ready so a brand-new thread doesn't
+    /// pay cold-start latency. Default true.
+    pub warm_pool: bool,
+
+    /// How often in seconds the warm process is respawned to avoid staleness.
+    /// Default 3600 (1 hour).
+    pub warm_respawn_secs: u64,
+}
+
+impl Default for HeadlessCommanderConfig {
+    fn default() -> Self {
+        Self {
+            invocation_timeout_secs: 300,
+            linger_secs: 300,
+            warm_pool: true,
+            warm_respawn_secs: 3600,
+        }
+    }
 }
 
 impl std::fmt::Debug for SlackConfig {
@@ -691,10 +717,6 @@ impl std::fmt::Debug for SlackConfig {
             .field("app_token", &redact(&self.app_token))
             .field("bot_token", &redact(&self.bot_token))
             .field("allowed_user_ids", &self.allowed_user_ids)
-            .field("invocation_timeout_secs", &self.invocation_timeout_secs)
-            .field("linger_secs", &self.linger_secs)
-            .field("warm_pool", &self.warm_pool)
-            .field("warm_respawn_secs", &self.warm_respawn_secs)
             .finish()
     }
 }
@@ -760,7 +782,9 @@ impl Default for Config {
             conversation: ConversationConfig::default(),
             stt: SttConfig::default(),
             telemetry: TelemetryConfig::default(),
+            chat: ChatConfig::default(),
             slack: SlackConfig::default(),
+            headless_commander: HeadlessCommanderConfig::default(),
             remote_servers: Vec::new(),
             server: super::ServerConfig::default(),
         }
@@ -797,18 +821,6 @@ fn default_hibernate_idle_timeout_secs() -> u64 {
 
 fn default_hibernate_check_interval_secs() -> u64 {
     600
-}
-
-fn default_slack_invocation_timeout_secs() -> u64 {
-    300
-}
-
-fn default_slack_linger_secs() -> u64 {
-    300
-}
-
-fn default_slack_warm_respawn_secs() -> u64 {
-    3600
 }
 
 fn default_pr_review_labels() -> Vec<String> {
@@ -1055,10 +1067,10 @@ impl Config {
         }
     }
 
-    /// Gate what a Slack-originated `claude-commander new` may launch: both the
+    /// Gate what a chat-originated `claude-commander new` may launch: both the
     /// `--program` and the `--mode` (permission mode) flags.
     ///
-    /// The headless Slack commander is allowed to run `claude-commander new`, so
+    /// The headless chat commander is allowed to run `claude-commander new`, so
     /// prompt-injected thread text could otherwise steer it into an unattended
     /// worker that executes arbitrary code. Two flags are RCE-relevant:
     ///
@@ -1097,7 +1109,7 @@ impl Config {
     ///
     /// Pure over its inputs (no env access) so it is unit-testable; the env marker
     /// is read once at the CLI boundary and its result passed in as the gate.
-    pub fn ensure_slack_create_allowed(
+    pub fn ensure_headless_create_allowed(
         &self,
         program: Option<&str>,
         mode: Option<&str>,
@@ -1270,7 +1282,7 @@ impl Config {
 /// with no human gate. Claude Code's permission modes are `default`, `plan`,
 /// `acceptEdits`, and `bypassPermissions`: `default`/`plan` keep the prompt,
 /// while `bypassPermissions` skips every prompt and `acceptEdits` auto-approves
-/// file edits/writes — both let a freshly-created, unattended Slack worker act
+/// file edits/writes — both let a freshly-created, unattended chat-created worker act
 /// without anyone to approve, so both are forbidden.
 ///
 /// Matched case-insensitively after trimming so a case/whitespace variant of a
@@ -1350,7 +1362,6 @@ mod tests {
                 app_token: Some("slack-app-secret".into()),
                 bot_token: Some("slack-bot-secret".into()),
                 allowed_user_ids: vec!["U123".into()],
-                ..Default::default()
             },
             server: ServerConfig {
                 port: 9999,
@@ -1385,18 +1396,22 @@ mod tests {
     }
 
     #[test]
-    fn test_slack_defaults() {
+    fn test_chat_and_headless_defaults() {
         let c = SlackConfig::default();
         assert!(c.app_token.is_none());
         assert!(c.bot_token.is_none());
         assert!(c.allowed_user_ids.is_empty());
-        assert_eq!(c.invocation_timeout_secs, 300);
-        assert_eq!(c.linger_secs, 300);
-        assert!(c.warm_pool);
-        assert_eq!(c.warm_respawn_secs, 3600);
         // A default (empty) config never enables the bridge.
         assert!(!c.is_enabled());
-        assert!(!Config::default().slack.is_enabled());
+        assert!(!c.is_configured());
+        let config = Config::default();
+        assert!(!config.slack.is_enabled());
+        assert!(config.chat.default_notify.is_none());
+        let h = &config.headless_commander;
+        assert_eq!(h.invocation_timeout_secs, 300);
+        assert_eq!(h.linger_secs, 300);
+        assert!(h.warm_pool);
+        assert_eq!(h.warm_respawn_secs, 3600);
     }
 
     #[test]
@@ -1406,7 +1421,6 @@ mod tests {
             app_token: Some("xapp-1".into()),
             bot_token: Some("xoxb-1".into()),
             allowed_user_ids: Vec::new(),
-            ..Default::default()
         };
         assert!(!c.is_enabled());
 
@@ -1415,7 +1429,6 @@ mod tests {
             app_token: Some("xapp-1".into()),
             bot_token: None,
             allowed_user_ids: vec!["U1".into()],
-            ..Default::default()
         };
         assert!(!c.is_enabled());
 
@@ -1424,7 +1437,6 @@ mod tests {
             app_token: Some(String::new()),
             bot_token: Some("xoxb-1".into()),
             allowed_user_ids: vec!["U1".into()],
-            ..Default::default()
         };
         assert!(!c.is_enabled());
 
@@ -1433,38 +1445,44 @@ mod tests {
             app_token: Some("xapp-1".into()),
             bot_token: Some("xoxb-1".into()),
             allowed_user_ids: vec!["U1".into()],
-            ..Default::default()
         };
         assert!(c.is_enabled());
     }
 
     #[test]
-    fn test_slack_toml_roundtrip_and_tunable_defaults() {
+    fn test_chat_tables_toml_roundtrip_and_tunable_defaults() {
         let toml_src = r#"
+[chat]
+default_notify = "slack"
+
 [slack]
 app_token = "xapp-abc"
 bot_token = "xoxb-def"
 allowed_user_ids = ["U111", "U222"]
+
+[headless_commander]
 linger_secs = 120
 "#;
         let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert_eq!(config.chat.default_notify.as_deref(), Some("slack"));
         assert_eq!(config.slack.app_token.as_deref(), Some("xapp-abc"));
         assert_eq!(config.slack.bot_token.as_deref(), Some("xoxb-def"));
         assert_eq!(config.slack.allowed_user_ids, vec!["U111", "U222"]);
-        // Explicit override survives.
-        assert_eq!(config.slack.linger_secs, 120);
-        // Unspecified tunables keep their defaults.
-        assert_eq!(config.slack.invocation_timeout_secs, 300);
-        assert!(config.slack.warm_pool);
-        assert_eq!(config.slack.warm_respawn_secs, 3600);
         assert!(config.slack.is_enabled());
+        assert!(config.slack.is_configured());
+        // Explicit override survives; unspecified tunables keep their defaults.
+        let h = &config.headless_commander;
+        assert_eq!(h.linger_secs, 120);
+        assert_eq!(h.invocation_timeout_secs, 300);
+        assert!(h.warm_pool);
+        assert_eq!(h.warm_respawn_secs, 3600);
     }
 
     #[test]
-    fn test_empty_toml_yields_slack_defaults() {
+    fn test_empty_toml_yields_chat_defaults() {
         let config: Config = toml::from_str("").expect("empty toml");
         assert!(!config.slack.is_enabled());
-        assert_eq!(config.slack.invocation_timeout_secs, 300);
+        assert_eq!(config.headless_commander.invocation_timeout_secs, 300);
     }
 
     #[test]
@@ -1473,7 +1491,6 @@ linger_secs = 120
             app_token: Some("xapp-supersecret".into()),
             bot_token: Some("xoxb-supersecret".into()),
             allowed_user_ids: vec!["U1".into()],
-            ..Default::default()
         };
         let dbg = format!("{c:?}");
         assert!(
@@ -1751,7 +1768,7 @@ speed = 1.25
     }
 
     #[test]
-    fn slack_program_lock_allows_configured_and_default_rejects_arbitrary() {
+    fn headless_program_lock_allows_configured_and_default_rejects_arbitrary() {
         let config = Config {
             programs: vec![
                 ProgramEntry {
@@ -1767,59 +1784,59 @@ speed = 1.25
         };
 
         // No override → the server's configured default is used → always allowed.
-        assert!(config.ensure_slack_create_allowed(None, None).is_ok());
+        assert!(config.ensure_headless_create_allowed(None, None).is_ok());
 
         // The default session program (first entry) is allowed.
         assert_eq!(config.default_session_program(), "claude");
         assert!(
             config
-                .ensure_slack_create_allowed(Some("claude"), None)
+                .ensure_headless_create_allowed(Some("claude"), None)
                 .is_ok()
         );
 
         // Any other configured program is allowed, matched exactly (with flags).
         assert!(
             config
-                .ensure_slack_create_allowed(Some("codex --model o3"), None)
+                .ensure_headless_create_allowed(Some("codex --model o3"), None)
                 .is_ok()
         );
 
         // An arbitrary injected payload is rejected.
         let err = config
-            .ensure_slack_create_allowed(Some("bash -lc 'id'"), None)
+            .ensure_headless_create_allowed(Some("bash -lc 'id'"), None)
             .unwrap_err();
         assert!(matches!(err, SessionError::ProgramNotAllowed(p) if p == "bash -lc 'id'"));
 
         // A near-miss (extra flag on a configured command) is not an exact match.
         assert!(
             config
-                .ensure_slack_create_allowed(Some("claude --dangerously-skip-permissions"), None)
+                .ensure_headless_create_allowed(Some("claude --dangerously-skip-permissions"), None)
                 .is_err()
         );
     }
 
     #[test]
-    fn slack_program_lock_allows_builtin_default_when_no_programs_configured() {
+    fn headless_program_lock_allows_builtin_default_when_no_programs_configured() {
         // Empty `programs` → default_session_program() is the built-in `claude`.
         let config = Config {
             programs: Vec::new(),
             ..Config::default()
         };
-        assert!(config.ensure_slack_create_allowed(None, None).is_ok());
+        assert!(config.ensure_headless_create_allowed(None, None).is_ok());
         assert!(
             config
-                .ensure_slack_create_allowed(Some("claude"), None)
+                .ensure_headless_create_allowed(Some("claude"), None)
                 .is_ok()
         );
         assert!(
             config
-                .ensure_slack_create_allowed(Some("codex"), None)
+                .ensure_headless_create_allowed(Some("codex"), None)
                 .is_err()
         );
     }
 
     #[test]
-    fn slack_create_lock_rejects_permission_bypassing_modes() {
+    fn headless_create_lock_rejects_permission_bypassing_modes() {
         let config = Config {
             programs: vec![ProgramEntry {
                 label: "Claude".to_string(),
@@ -1832,28 +1849,28 @@ speed = 1.25
         // allowed program plus these is permitted.
         assert!(
             config
-                .ensure_slack_create_allowed(Some("claude"), None)
+                .ensure_headless_create_allowed(Some("claude"), None)
                 .is_ok()
         );
         assert!(
             config
-                .ensure_slack_create_allowed(Some("claude"), Some("default"))
+                .ensure_headless_create_allowed(Some("claude"), Some("default"))
                 .is_ok()
         );
         assert!(
             config
-                .ensure_slack_create_allowed(Some("claude"), Some("plan"))
+                .ensure_headless_create_allowed(Some("claude"), Some("plan"))
                 .is_ok()
         );
 
         // Permission-bypassing modes are rejected even with an allowed program.
         let err = config
-            .ensure_slack_create_allowed(Some("claude"), Some("bypassPermissions"))
+            .ensure_headless_create_allowed(Some("claude"), Some("bypassPermissions"))
             .unwrap_err();
         assert!(matches!(err, SessionError::ModeNotAllowed(m) if m == "bypassPermissions"));
         assert!(matches!(
             config
-                .ensure_slack_create_allowed(Some("claude"), Some("acceptEdits"))
+                .ensure_headless_create_allowed(Some("claude"), Some("acceptEdits"))
                 .unwrap_err(),
             SessionError::ModeNotAllowed(_)
         ));
@@ -1861,12 +1878,12 @@ speed = 1.25
         // Case/whitespace variants of a bypassing mode still fail closed.
         assert!(
             config
-                .ensure_slack_create_allowed(Some("claude"), Some(" BYPASSPERMISSIONS "))
+                .ensure_headless_create_allowed(Some("claude"), Some(" BYPASSPERMISSIONS "))
                 .is_err()
         );
         assert!(
             config
-                .ensure_slack_create_allowed(Some("claude"), Some("acceptedits"))
+                .ensure_headless_create_allowed(Some("claude"), Some("acceptedits"))
                 .is_err()
         );
 
@@ -1875,14 +1892,14 @@ speed = 1.25
         // prompt).
         assert!(
             config
-                .ensure_slack_create_allowed(None, Some("bypassPermissions"))
+                .ensure_headless_create_allowed(None, Some("bypassPermissions"))
                 .is_err()
         );
 
         // The program gate still fires first for an injected program.
         assert!(matches!(
             config
-                .ensure_slack_create_allowed(Some("bash -lc id"), Some("default"))
+                .ensure_headless_create_allowed(Some("bash -lc id"), Some("default"))
                 .unwrap_err(),
             SessionError::ProgramNotAllowed(_)
         ));

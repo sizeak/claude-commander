@@ -51,3 +51,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 # Hermetic temp dirs for the `serve` module tests (they write a config.toml).
 tempfile = "3.27"
+
+[features]
+default = []
+# Chat backends for the in-process server (opt-in): `--features slack` builds
+# the Slack bridge into the TUI's `--serve` / `[server] auto_start` server.
+slack = ["claude-commander-server/slack"]

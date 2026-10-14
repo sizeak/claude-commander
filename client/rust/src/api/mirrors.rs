@@ -22,7 +22,9 @@ pub use claude_commander_protocol::api::{
 };
 pub use claude_commander_protocol::github::{CloneJobId, GithubRepo};
 pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
-pub use claude_commander_protocol::session::{AgentState, ProjectId, SessionId, SessionStatus};
+pub use claude_commander_protocol::session::{
+    AgentState, ChatOrigin, ProjectId, SessionId, SessionStatus,
+};
 pub use claude_commander_protocol::workspace::WorkspaceDef;
 pub use claude_commander_protocol::ws::AttachKind;
 
@@ -92,6 +94,15 @@ pub struct _SessionInfo {
     pub worktree_path: String,
     pub tmux_session_name: String,
     pub keep_alive: bool,
+    pub origin: Option<ChatOrigin>,
+}
+
+#[frb(mirror(ChatOrigin))]
+pub struct _ChatOrigin {
+    pub backend: String,
+    pub channel: String,
+    pub thread: String,
+    pub permalink: Option<String>,
 }
 
 // Phase 2 needs the detail shape: the session's live agent sub-state plus the

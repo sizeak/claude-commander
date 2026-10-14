@@ -2,7 +2,7 @@
 //!
 //! A thin wrapper over [`CommanderService::commander_ask`]. The response is a
 //! streamed NDJSON body — one JSON [`CommanderEvent`] per line — so a client
-//! (the Slack bridge runs in-process; a CLI or the mobile app over HTTP) reads
+//! (the chat bridges run in-process; a CLI or the mobile app over HTTP) reads
 //! `started` → `delta`* → `turn_complete`, or a terminal `error`, as they
 //! happen rather than waiting for the whole reply.
 //!

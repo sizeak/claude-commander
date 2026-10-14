@@ -17,7 +17,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 - **Auto-pull project main** - Periodically fast-forwards each project's main branch from `origin` so it doesn't drift stale
-- **Slack integration** - Allowlisted users drive the commander from Slack by @mentioning the bot or DMing it; it answers questions, creates sessions, and reports back in-thread (see [Slack integration](docs/slack.md))
+- **Chat integration** - Allowlisted users drive the commander from chat (Slack today, as an opt-in build feature) by mentioning the bot or messaging it; it answers questions, creates sessions, and reports back in-thread (see [Chat integration](docs/chat.md))
 
 ![Session info modal](docs/images/info-modal.svg)
 
@@ -387,7 +387,7 @@ workspace whose Overview / Agent / Shell / Changes tabs switch in place.
 
 - **[Usage guide](docs/usage.md)** — CLI commands, the board, PR stacks (cascade merge / push stack), and AI summaries
 - **[Configuration](docs/configuration.md)** — all config options, theme presets (including `appearance = "light"` for light terminals), session-list sections (with optional advisory WIP limits), and data-storage paths
-- **[Slack integration](docs/slack.md)** — drive the commander from Slack (app setup + manifest, tokens, allowlist, `slack notify`)
+- **[Chat integration](docs/chat.md)** — drive the commander from chat: building with a backend, Slack app setup + manifest, tokens, allowlist, `notify`
 - **[Contributing](CONTRIBUTING.md)** — releasing, the local dev loop, and architecture overview
 - **[Flutter client](client/README.md)** — cross-platform GUI client (Linux desktop + Android) for `claude-commander-server`
 

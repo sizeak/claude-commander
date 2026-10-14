@@ -7,7 +7,6 @@
 //! bind — lives in the library; this file resolves flags and logs.
 
 use clap::Parser;
-use claude_commander_core::ServerInfo;
 use claude_commander_core::api::{BackgroundOpts, CommanderService};
 use claude_commander_core::config::ServerConfig;
 use claude_commander_core::telemetry::FrontendInfo;
@@ -128,34 +127,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let auth = resolve_auth(&cfg, cli.allow_no_auth);
-    // The bearer clients must present, or None when auth is disabled — recorded
-    // in the runtime info file below so a local CLI can reach this server.
-    let info_token = match &auth {
-        AuthConfig::Token(token) => Some(token.clone()),
-        AuthConfig::Disabled => None,
-    };
 
     if cli.tls {
         warn!("--tls requested; TLS support requires the `tls` build feature (not yet wired)");
     }
 
     let commander_enabled = config.commander_enabled;
-    // The headless commander (and its warm pool) is gated by `[slack]` config,
-    // independent of the interactive `commander_enabled` gate. The warm pool
-    // primes processes ahead of the streaming `/api/commander/ask` route, and
-    // the Socket Mode bridge turns `@commander` mentions/DMs into headless turns.
-    let slack_enabled = config.slack.is_enabled();
     let service = CommanderService::for_cli(config, frontend())?;
-    // The Slack bridge and the notify route share one Web API client (the server
-    // owns the only Slack credentials); `spawn_bridge` returns it so the route
-    // can post through it. `None` when Slack is disabled → notify replies 503.
-    let slack_api = if slack_enabled {
-        service.start_commander_warm_pool();
-        let slack_config = service.read_config();
-        claude_commander_server::slack::spawn_bridge(service.clone(), &slack_config)
-    } else {
-        None
-    };
     // Drive the same background loops the local TUI runs (agent-state polling,
     // PR-status checks, project auto-pull, state-sync) so remote clients see live
     // data via `/workspace` + `/agent-states` polls. Handles run for the process
@@ -168,32 +146,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sessions case hibernation targets — would never hibernate.
     service.start_hibernation_loop();
 
-    let server = embed::start_with_slack(service, &cfg, auth, slack_api).await?;
+    // Chat backends, the warm pool and `server-info.json` come up with the
+    // listener — the same path the TUI's in-process server takes.
+    let server = embed::start_with_integrations(service, &cfg, auth).await?;
     info!("claude-commander-server listening on {}", server.url());
 
-    // Advertise this server to local CLIs via a runtime info file in the data
-    // dir (best-effort: a write failure must not stop the server serving).
-    let data_dir = claude_commander_core::Config::data_dir()?;
-    let server_info = ServerInfo::new(server.url(), info_token);
-    if let Err(e) = server_info.write_to(&data_dir) {
-        warn!("could not write server runtime info file: {e}");
-    }
-
-    // Serve until SIGINT/SIGTERM, then fall through to the info-file cleanup.
+    // Serve until SIGINT/SIGTERM. Returning drops the server, which removes
+    // its `server-info.json` (a killed process leaves it behind; readers
+    // tolerate an unreachable server). A serve failure exits non-zero.
     tokio::select! {
-        () = server.join() => {}
+        result = server.join() => result?,
         () = shutdown_signal() => info!("shutting down"),
     }
-
-    // Clean-shutdown cleanup: remove the info file so a stale entry doesn't
-    // outlive the process. Best-effort — a killed process leaves it behind, and
-    // the reader tolerates an unreachable server.
-    ServerInfo::remove_from(&data_dir);
     Ok(())
 }
 
 /// Resolve once either SIGINT (Ctrl-C) or, on Unix, SIGTERM is received, so
-/// control returns to `main` for info-file cleanup.
+/// `main` returns and drops the server (removing its info file).
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;

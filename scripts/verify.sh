@@ -135,6 +135,14 @@ lane_build() {
   fi
 }
 lane_test() { cc_run_in_shell "" cargo "cargo test --workspace"; }
+# Chat backends are opt-in cargo features, so the default lanes above build and
+# test without them. This lane covers the feature-on wiring: the server and the
+# binary that embeds it, linted and the server's tests run, with Slack built in.
+lane_chat() {
+  cc_run_in_shell "" cargo \
+    "cargo clippy -p claude-commander-server -p claude-commander --all-targets --features slack -- -D warnings" &&
+    cc_run_in_shell "" cargo "cargo test -p claude-commander-server --features slack --lib"
+}
 
 lane_pub_get() {
   # CI's first client step, and it is load-bearing rather than mere setup.
@@ -406,6 +414,7 @@ run_lane() {
     clippy) cc_lane clippy lane_clippy ;;
     build) cc_lane build lane_build ;;
     test) cc_lane test lane_test ;;
+    chat) cc_lane chat lane_chat ;;
     pub-get) cc_lane pub-get lane_pub_get ;;
     dart-format) cc_lane dart-format lane_dart_format ;;
     analyze) cc_lane analyze lane_analyze ;;

@@ -17,7 +17,7 @@ use tracing::warn;
 
 use crate::auth::require_bearer;
 use crate::handlers::{
-    blobs, cascade, commander, config, github, health, paste, projects, review, sessions, slack,
+    blobs, cascade, commander, config, github, health, notify, paste, projects, review, sessions,
     snapshot,
 };
 use crate::state::AppState;
@@ -138,10 +138,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{id}/workspace", put(projects::set_workspace))
         .route("/projects/{id}/branches", get(projects::branches))
         .route("/projects/{id}/preview", get(projects::preview))
-        // -- headless commander (Slack bridge + streaming ask) --
+        // -- headless commander (chat bridges + streaming ask) --
         .route("/commander/ask", post(commander::ask))
-        // -- Slack notify (worker → Slack thread/DM relay) --
-        .route("/slack/notify", post(slack::notify))
+        // -- notify (worker → chat thread/DM relay) --
+        .route("/notify", post(notify::notify))
         // -- repo picker + clone --
         // `/projects/clone` sits alongside `/projects/{id}`, and it **does** rely
         // on the router preferring a static segment over a capture: without that,
