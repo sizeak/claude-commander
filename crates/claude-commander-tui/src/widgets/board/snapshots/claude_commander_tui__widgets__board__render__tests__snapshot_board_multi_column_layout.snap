@@ -1,0 +1,21 @@
+---
+source: crates/claude-commander-tui/src/widgets/board/render.rs
+assertion_line: 2114
+expression: buffer_snapshot(&buf)
+---
+"my-app                 3│In Progress (2)             │In Review (1)               │Merged (0)                 "
+"                        │┌ 1 add-auth ──────────────┐│┌ 3 refactor ──────────────┐│                           "
+"                        ││ ● idle [fea [>_] [±] [i] │││ ● idle [fea [>_] [±] [i] ││                           "
+"                        │└──────────────────────────┘│└──────────────────────────┘│                           "
+"                        │┌ 2 fix-login ─────────────┐│                            │                           "
+"                        ││ ● idle [fea [>_] [±] [i] ││                            │                           "
+"                        │└──────────────────────────┘│                            │                           "
+"                        │                            │                            │                           "
+"                        │                            │                            │                           "
+"                        │                            │                            │                           "
+"                        │                            │                            │                           "
+"                        │                            │                            │                           "
+"                        │                            │                            │                           "
+"                        │                            │                            │                           "
+"                        │                            │                            │                           "
+"                        │                            │                            │                           "

@@ -1,0 +1,19 @@
+---
+source: crates/claude-commander-tui/src/widgets/board/render.rs
+assertion_line: 2084
+expression: buffer_snapshot(&buf)
+---
+"my-app                 1│In Progress (1)                                        "
+"                        │┌ 1 add-auth ─────────────────────────────────────────┐"
+"                        ││ ● idle [feat]                          [>_] [±] [i] │"
+"                        │└─────────────────────────────────────────────────────┘"
+"                        │                                                       "
+"                        │                                                       "
+"                        │                                                       "
+"                        │                                                       "
+"                        │                                                       "
+"                        │                                                       "
+"                        │                                                       "
+"                        │                                                       "
+"                        │                                                       "
+"                        │                                                       "

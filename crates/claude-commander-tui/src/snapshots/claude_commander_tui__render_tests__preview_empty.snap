@@ -1,0 +1,15 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+assertion_line: 1097
+expression: terminal.backend()
+---
+"╭ Preview · Info · Shell ──────────────────────────────────╮"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"╰──────────────────────────────────────────────────────────╯"

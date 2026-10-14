@@ -1,23 +1,22 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
-import '../state/workspace_store.dart';
+import '../state/fleet_store.dart';
+import '../theme/tokens.dart';
 import 'connection_page.dart';
 
 /// Manage the configured servers: add, edit, or remove. Each row shows a live
 /// connection dot. Adding/editing pushes the [ConnectionPage] form, whose
-/// `onSubmit` persists + (re)connects through the [WorkspaceStore].
+/// `onSubmit` persists + (re)connects through the [FleetStore].
 class ServersPage extends StatelessWidget {
-  final WorkspaceStore workspace;
-  const ServersPage({super.key, required this.workspace});
+  final FleetStore fleet;
+  const ServersPage({super.key, required this.fleet});
 
   Future<void> _add(BuildContext context) => Navigator.of(context).push(
     MaterialPageRoute(
-      builder: (_) => ConnectionPage(
-        api: workspace.api,
-        onSubmit: workspace.addServer,
-      ),
+      builder: (_) => ConnectionPage(api: fleet.api, onSubmit: fleet.addServer),
     ),
   );
 
@@ -27,12 +26,15 @@ class ServersPage extends StatelessWidget {
           builder: (_) => ConnectionPage(
             api: store.api,
             existing: store.config,
-            onSubmit: workspace.updateServer,
+            onSubmit: fleet.updateServer,
           ),
         ),
       );
 
-  Future<void> _confirmRemove(BuildContext context, CommanderStore store) async {
+  Future<void> _confirmRemove(
+    BuildContext context,
+    CommanderStore store,
+  ) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -53,22 +55,24 @@ class ServersPage extends StatelessWidget {
         ],
       ),
     );
-    if (ok ?? false) await workspace.removeServer(store.config.id);
+    if (ok ?? false) await fleet.removeServer(store.config.id);
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Servers')),
-      floatingActionButton: FloatingActionButton(
+    final t = CommanderTokens.of(context);
+    return ChromePage(
+      title: 'Servers',
+      code: '47-S',
+      primaryAction: ChromeButtonAction(
+        icon: Icons.add,
+        label: 'Add server',
         onPressed: () => _add(context),
-        tooltip: 'Add server',
-        child: const Icon(Icons.add),
       ),
       body: ListenableBuilder(
-        listenable: workspace,
+        listenable: fleet,
         builder: (context, _) {
-          final servers = workspace.servers;
+          final servers = fleet.servers;
           return ListView(
             children: [
               for (final store in servers)
@@ -81,6 +85,7 @@ class ServersPage extends StatelessWidget {
                       store.config.baseUrl,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
+                      style: t.meta(size: 11, color: t.textMuted),
                     ),
                     onTap: () => _edit(context, store),
                     trailing: IconButton(
@@ -98,17 +103,23 @@ class ServersPage extends StatelessWidget {
   }
 
   Widget _dot(BuildContext context, ConnectionStateDto conn) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = CommanderTokens.of(context);
     final color = switch (conn.kind) {
-      ConnectionStateKind.connected => Colors.green,
-      ConnectionStateKind.connecting => scheme.tertiary,
-      ConnectionStateKind.degraded => scheme.error,
+      ConnectionStateKind.connected => t.working,
+      ConnectionStateKind.connecting => t.attention,
+      ConnectionStateKind.degraded => t.danger,
     };
     return Container(
       width: 12,
       height: 12,
       margin: const EdgeInsets.only(top: 4),
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        boxShadow: conn.kind == ConnectionStateKind.connected
+            ? [BoxShadow(color: color.withValues(alpha: 0.6), blurRadius: 8)]
+            : null,
+      ),
     );
   }
 }

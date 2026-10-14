@@ -25,9 +25,11 @@ use claude_commander_core::tmux::HeadlessAttach;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
-use super::protocol::{
-    AttachKind, ClientControl, DetachReason, ServerControl, WS_ERR_AUTH, WS_ERR_NO_SESSION,
+use claude_commander_protocol::ws::{
+    ATTACH_MISSED_PONG_LIMIT, ATTACH_PING_INTERVAL, AttachKind, ClientControl, DetachReason,
+    ServerControl, WS_ERR_AUTH, WS_ERR_NO_SESSION,
 };
+
 use crate::state::AppState;
 
 /// How long to wait for the mandatory `auth` then `attach` handshake frames
@@ -35,20 +37,18 @@ use crate::state::AppState;
 /// upgrade open indefinitely.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Heartbeat interval. A ping is sent this often, and on each tick we check
-/// that a pong arrived since the previous one. Detects half-open sockets that
-/// never send a close.
-const PING_INTERVAL: Duration = Duration::from_secs(20);
-
-/// How many consecutive ping ticks may pass with no intervening pong (or any
-/// inbound frame) before the peer is declared dead and the socket is torn down.
-/// At 2 (with `PING_INTERVAL` = 20s) a peer tolerates a single dropped pong /
-/// scheduling hiccup and is torn down on the tick after ~2 missed intervals.
-const MISSED_PONG_LIMIT: u32 = 2;
-
-/// Default PTY size used until the client sends its first `resize`. tmux clamps
-/// a shared session to its smallest attached client, so this is only a starting
-/// guess.
+/// Fallback PTY size, used only when the `attach` frame carries no geometry —
+/// i.e. for a client that predates the handshake's `cols`/`rows` fields.
+///
+/// A client that *does* send its size gets the PTY opened at it before
+/// `tmux attach-session` is spawned, which matters more than it looks: tmux
+/// paints a full screen into the socket as soon as the attach starts, and a
+/// client that could only announce its size afterwards (a round trip after
+/// `ready`) always received that first paint at this fallback geometry. Its
+/// emulator then wrapped those over-wide lines at its own width, and because
+/// tmux's post-resize repaint is incremental — no full-screen clear — the
+/// mis-wrapped content was never corrected. On a phone-width viewport that
+/// desynchronised the pane for the life of the attach.
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
@@ -137,8 +137,18 @@ async fn attach_session(
     socket: &mut WebSocket,
     state: &AppState,
 ) -> Option<(String, HeadlessAttach)> {
-    let (session_query, kind) = match next_control(socket).await {
-        Some(ClientControl::Attach { session_id, kind }) => (session_id, kind),
+    let (session_query, kind, cols, rows) = match next_control(socket).await {
+        Some(ClientControl::Attach {
+            session_id,
+            kind,
+            cols,
+            rows,
+        }) => (
+            session_id,
+            kind,
+            cols.unwrap_or(DEFAULT_COLS),
+            rows.unwrap_or(DEFAULT_ROWS),
+        ),
         Some(_) => {
             let _ = send_control(
                 socket,
@@ -192,12 +202,7 @@ async fn attach_session(
     // Honour the socket-dir isolation knob so a hermetic test attaches to the
     // same throwaway tmux server its session was created on, not the real one.
     let tmux_tmpdir = state.service.read_config().tmux_tmpdir;
-    match HeadlessAttach::spawn(
-        &tmux_name,
-        DEFAULT_COLS,
-        DEFAULT_ROWS,
-        tmux_tmpdir.as_deref(),
-    ) {
+    match HeadlessAttach::spawn(&tmux_name, cols, rows, tmux_tmpdir.as_deref()) {
         Ok(bridge) => Some((tmux_name, bridge)),
         Err(e) => {
             let _ = send_control(
@@ -215,19 +220,23 @@ async fn attach_session(
 /// Steady-state pump: WS binary → PTY, PTY → WS binary, `resize`/`detach`
 /// control frames, and a pong-tracked heartbeat. Each interval sends a ping and
 /// counts it as outstanding; any inbound frame (a pong, or real traffic) clears
-/// the count. After `MISSED_PONG_LIMIT` un-answered intervals the peer is
+/// the count. After [`ATTACH_MISSED_PONG_LIMIT`] un-answered intervals the peer is
 /// declared dead and the loop tears down — so a half-open socket whose sends
 /// still nominally succeed is still detected, not just one where `send` errors.
 /// Returns once any teardown condition fires; the bridge's `ChildGuard` reaps
 /// the attach child on the way out.
 async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
+    // Take the repaint handle before `split` consumes the bridge. It answers the
+    // client's `refresh` frame, which is how a client that drew over its own
+    // terminal (the TUI's in-session switcher) gets the covered region back.
+    let refresh = bridge.refresh_handle();
     let (mut pty_reader, mut pty_writer, resize, mut child) = bridge.split();
     let mut pty_buf = [0u8; 4096];
-    let mut ping = tokio::time::interval(PING_INTERVAL);
+    let mut ping = tokio::time::interval(ATTACH_PING_INTERVAL);
     // Skip the immediate first tick so we don't ping before any traffic.
     ping.tick().await;
     // Liveness: a pong (or any inbound frame) resets this; each ping tick
-    // increments it. Past `MISSED_PONG_LIMIT` consecutive un-ponged ticks the
+    // increments it. Past [`ATTACH_MISSED_PONG_LIMIT`] consecutive un-ponged ticks the
     // peer is declared dead even if the socket send still appears to succeed.
     let mut missed_pongs: u32 = 0;
 
@@ -270,6 +279,7 @@ async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
                     }
                     Some(Ok(Message::Text(text))) => match ClientControl::from_text(&text) {
                         Ok(ClientControl::Resize { cols, rows }) => resize.resize(cols, rows),
+                        Ok(ClientControl::Refresh) => refresh.refresh().await,
                         Ok(ClientControl::Detach) => break DetachReason::ClientRequest,
                         // `auth`/`attach` are handshake-only; ignore once attached.
                         Ok(_) => debug!("ignoring unexpected control frame in steady state"),
@@ -287,7 +297,7 @@ async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
             // send means the transport is gone; too many un-ponged ticks means a
             // half-open socket where sends still nominally succeed.
             _ = ping.tick() => {
-                if missed_pongs >= MISSED_PONG_LIMIT {
+                if missed_pongs >= ATTACH_MISSED_PONG_LIMIT {
                     warn!("WS peer missed {missed_pongs} heartbeat pongs; treating as dead");
                     break DetachReason::Transport;
                 }

@@ -1,0 +1,12 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+expression: terminal.backend()
+---
+" multi-agent [main] (2)                                                                                                 "
+"     1 ● Claude task (claude)                                                                                           "
+"     2 ● Aider task (aider)                                                                                             "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "

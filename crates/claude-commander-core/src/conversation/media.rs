@@ -54,6 +54,11 @@ pub enum PlayerStatus {
 }
 
 /// Parse a single `playerctl status` line.
+///
+/// Only the Linux backend shells out to `playerctl` (macOS drives players via
+/// AppleScript), so these three parsers are dead code on other targets; `test`
+/// keeps their unit tests running everywhere.
+#[cfg(any(target_os = "linux", test))]
 fn parse_status(stdout: &str) -> PlayerStatus {
     match stdout.trim() {
         "Playing" => PlayerStatus::Playing,
@@ -65,6 +70,7 @@ fn parse_status(stdout: &str) -> PlayerStatus {
 
 /// Parse `playerctl --list-all` output into player names, dropping the
 /// "No players found" sentinel and blank lines.
+#[cfg(any(target_os = "linux", test))]
 fn parse_player_list(stdout: &str) -> Vec<String> {
     stdout
         .lines()
@@ -77,6 +83,7 @@ fn parse_player_list(stdout: &str) -> Vec<String> {
 /// Of the players we paused, which should we resume now: those still `Paused`.
 /// Players the user manually resumed/stopped, or that have since disappeared, are
 /// left alone.
+#[cfg(any(target_os = "linux", test))]
 fn resume_targets(snapshot: &MediaSnapshot, current: &[(String, PlayerStatus)]) -> Vec<String> {
     snapshot
         .players

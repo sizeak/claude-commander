@@ -5,7 +5,7 @@ import 'package:uuid/uuid.dart';
 
 /// One server the client talks to: a stable [id], a display [name] (shown as the
 /// group header in the aggregated session list), the [baseUrl], and the bearer
-/// [token]. The app keeps N of these connected at once (see `WorkspaceStore`).
+/// [token]. The app keeps N of these connected at once (see `FleetStore`).
 class ServerConfig {
   /// Stable identity, minted once when the server is first added. Survives
   /// URL/token/name edits so the live connection can be reconciled in place.
@@ -107,7 +107,8 @@ abstract class ServerListStore {
 class KeyedServerListStore implements ServerListStore {
   final SecretKeyStore _secrets;
   final Uuid _uuid;
-  KeyedServerListStore(this._secrets, {Uuid uuid = const Uuid()}) : _uuid = uuid;
+  KeyedServerListStore(this._secrets, {Uuid uuid = const Uuid()})
+    : _uuid = uuid;
 
   /// The JSON metadata list: `[{id,name,baseUrl}]`.
   static const _kServers = 'servers_v1';
@@ -120,26 +121,32 @@ class KeyedServerListStore implements ServerListStore {
 
   @override
   Future<List<ServerConfig>> load() async {
-    final raw = await _secrets.read(_kServers);
-    if (raw != null && raw.isNotEmpty) {
-      try {
+    // Everything here is inside the guard, not just the parse: main() awaits
+    // loadAndConnectAll() before runApp(), so anything thrown out of load() is
+    // a blank window rather than a degraded first run. Both halves fail for
+    // real — a corrupt/unexpected blob, and the platform store refusing
+    // wholesale (a sandboxed macOS app missing its keychain-access-groups
+    // entitlement gets errSecMissingEntitlement from every SecItem call).
+    // Falling back to first-run (empty) leaves the user able to re-add a
+    // server; throwing leaves them with nothing.
+    try {
+      final raw = await _secrets.read(_kServers);
+      if (raw != null && raw.isNotEmpty) {
         return await _parse(raw);
-      } catch (_) {
-        // A corrupt/unexpected blob must not brick startup: fall back to
-        // first-run (empty) rather than throwing out of main().
-        return const [];
       }
+      // Migration: fold a legacy single-server config into a one-entry list,
+      // then delete the legacy keys so this runs exactly once (shape-consumed).
+      final migrated = await _migrateLegacy();
+      if (migrated != null) {
+        await save([migrated]);
+        await _secrets.delete(_kLegacyBaseUrl);
+        await _secrets.delete(_kLegacyToken);
+        return [migrated];
+      }
+      return const [];
+    } catch (_) {
+      return const [];
     }
-    // Migration: fold a legacy single-server config into a one-entry list, then
-    // delete the legacy keys so this runs exactly once (shape-consumed).
-    final migrated = await _migrateLegacy();
-    if (migrated != null) {
-      await save([migrated]);
-      await _secrets.delete(_kLegacyBaseUrl);
-      await _secrets.delete(_kLegacyToken);
-      return [migrated];
-    }
-    return const [];
   }
 
   Future<List<ServerConfig>> _parse(String raw) async {

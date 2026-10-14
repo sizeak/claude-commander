@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// Origin of a single diff line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum LineOrigin {
     Context,
@@ -21,6 +22,7 @@ pub enum LineOrigin {
 
 /// A single line within a hunk, with resolved old/new line numbers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DiffLine {
     pub origin: LineOrigin,
     /// Line number on the old side (`None` for additions).
@@ -33,6 +35,7 @@ pub struct DiffLine {
 
 /// A contiguous block of changes (one `@@ ... @@` section).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Hunk {
     pub old_start: usize,
     pub old_lines: usize,
@@ -45,6 +48,7 @@ pub struct Hunk {
 
 /// How a file changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum FileStatus {
     Added,
@@ -55,6 +59,7 @@ pub enum FileStatus {
 
 /// What kind of binary a file is, for consumers deciding how to render it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum BinaryKind {
     /// A raster image we can render, tagged with its MIME type (e.g.
@@ -69,6 +74,7 @@ pub enum BinaryKind {
 /// keyed by `(side, path)`. `old_*`/`new_*` are `None` on the side that does
 /// not exist (added files have no old side; deleted files have no new side).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct BinaryInfo {
     pub kind: BinaryKind,
     /// Base-side blob oid (from the diff `index` line), if present.
@@ -83,6 +89,7 @@ pub struct BinaryInfo {
 
 /// All changes to a single file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct FileDiff {
     pub old_path: String,
     pub new_path: String,
@@ -108,6 +115,7 @@ impl FileDiff {
 
 /// A parsed unified diff: an ordered list of changed files.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ParsedDiff {
     pub files: Vec<FileDiff>,
 }

@@ -44,11 +44,24 @@ void main() {
       expect(await store.load(), isEmpty);
     });
 
-    test('a corrupt metadata blob falls back to empty (never bricks startup)',
-        () async {
-      final store = KeyedServerListStore(
-        InMemorySecretKeyStore({'servers_v1': 'not json {['}),
-      );
+    test(
+      'a corrupt metadata blob falls back to empty (never bricks startup)',
+      () async {
+        final store = KeyedServerListStore(
+          InMemorySecretKeyStore({'servers_v1': 'not json {['}),
+        );
+        expect(await store.load(), isEmpty);
+      },
+    );
+
+    test('an unreadable secret store falls back to empty, not a throw', () async {
+      // main() awaits loadAndConnectAll() before runApp(), so anything thrown
+      // out of load() is a blank window rather than a degraded first run. The
+      // platform store failing wholesale is real: a sandboxed macOS app with no
+      // keychain-access-groups entitlement gets errSecMissingEntitlement
+      // (-34018) from every SecItem call, and the Android Keystore can refuse
+      // just as flatly.
+      final store = KeyedServerListStore(_ThrowingSecretKeyStore());
       expect(await store.load(), isEmpty);
     });
   });
@@ -91,17 +104,46 @@ void main() {
       final secrets = InMemorySecretKeyStore();
       final store = KeyedServerListStore(secrets);
       await store.save(const [
-        ServerConfig(id: 'id-a', name: 'a', baseUrl: 'http://a', token: 'tok-a'),
-        ServerConfig(id: 'id-b', name: 'b', baseUrl: 'http://b', token: 'tok-b'),
+        ServerConfig(
+          id: 'id-a',
+          name: 'a',
+          baseUrl: 'http://a',
+          token: 'tok-a',
+        ),
+        ServerConfig(
+          id: 'id-b',
+          name: 'b',
+          baseUrl: 'http://b',
+          token: 'tok-b',
+        ),
       ]);
 
       // Drop server b.
       await store.save(const [
-        ServerConfig(id: 'id-a', name: 'a', baseUrl: 'http://a', token: 'tok-a'),
+        ServerConfig(
+          id: 'id-a',
+          name: 'a',
+          baseUrl: 'http://a',
+          token: 'tok-a',
+        ),
       ]);
 
       expect(await secrets.read('token:id-a'), 'tok-a');
       expect(await secrets.read('token:id-b'), isNull);
     });
   });
+}
+
+/// A platform store that fails every operation, the way the Keychain does when
+/// the app is missing its entitlement.
+class _ThrowingSecretKeyStore implements SecretKeyStore {
+  @override
+  Future<String?> read(String key) async => throw Exception('-34018');
+  @override
+  Future<void> write(String key, String value) async =>
+      throw Exception('-34018');
+  @override
+  Future<void> delete(String key) async => throw Exception('-34018');
+  @override
+  Future<Map<String, String>> readAll() async => throw Exception('-34018');
 }

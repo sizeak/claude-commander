@@ -24,10 +24,10 @@ Future<bool> healthTmux({required String baseUrl, required String token}) =>
       token: token,
     );
 
-/// The whole workspace snapshot (projects, sessions, cascade/pending/pull state,
-/// operations ledger, server health) in one shot.
-Future<WorkspaceSnapshotDto> workspaceSnapshot({required String handle}) =>
-    RustLib.instance.api.crateApiSimpleWorkspaceSnapshot(handle: handle);
+/// The whole server snapshot (projects, sessions, cascade/pending/pull state,
+/// operations ledger, server health, workspace config) in one shot.
+Future<SnapshotDto> snapshot({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleSnapshot(handle: handle);
 
 /// Bulk agent-state snapshot (the commander sentinel entry is stripped by the
 /// DTO). `fresh` forces a re-detection rather than a cached read.
@@ -182,23 +182,216 @@ Future<void> markUnread({required String handle, required List<String> ids}) =>
 Future<bool> toggleKeepAlive({required String handle, required String id}) =>
     RustLib.instance.api.crateApiSimpleToggleKeepAlive(handle: handle, id: id);
 
+/// Upload an image to a session's agent pane (`POST /paste-image`).
+///
+/// The server writes the bytes to a temp file and types the path into the agent
+/// pane without pressing Enter, so the user can add prompt text around it — the
+/// form the Claude CLI accepts. The path shows up in the terminal view through
+/// the normal attach output stream, so a caller needs no success feedback.
+///
+/// `bytes` are whatever the platform picker or clipboard produced;
+/// [`RemoteClient::paste_image`] sniffs the content and refuses anything that
+/// isn't an allow-listed image (or is over
+/// [`claude_commander_protocol::paste::MAX_IMAGE_BYTES`]) *before* uploading, so
+/// a doomed transfer never leaves the device.
+Future<void> pasteImage({
+  required String handle,
+  required String id,
+  required List<int> bytes,
+}) => RustLib.instance.api.crateApiSimplePasteImage(
+  handle: handle,
+  id: id,
+  bytes: bytes,
+);
+
+/// The pasted-image size cap in bytes, so the UI can reject an oversized pick
+/// from its file length — without reading a 50 MB phone photo into memory just
+/// to discard it — using the shared wire contract rather than a hardcoded Dart
+/// mirror that could drift.
+///
+/// `u32` (not `usize`/`u64`) so this lands in Dart as a plain `int` rather than a
+/// `BigInt`; the cap is single-digit MiB and will never approach 4 GiB. The
+/// const assert below makes that an enforced precondition rather than a comment,
+/// so raising the cap past `u32::MAX` fails the build instead of silently
+/// truncating.
+Future<int> imageMaxBytes() =>
+    RustLib.instance.api.crateApiSimpleImageMaxBytes();
+
+/// How long a silent client can be away before the server is *guaranteed* to
+/// have torn its terminal attach down, in milliseconds.
+///
+/// The mobile UI needs this on resume: a frozen background process can't answer
+/// the server's heartbeat pings, so an absence longer than this means the attach
+/// is certainly gone and must be re-opened, while a shorter one proves nothing —
+/// leaving a live socket alone there is what keeps a scrolled tmux copy-mode view
+/// in place. Sourced from the shared wire contract rather than a hardcoded Dart
+/// threshold, which would drift silently the moment the heartbeat is retuned.
+///
+/// `u32` milliseconds (not a `Duration`) so this crosses the bridge as a plain
+/// Dart `int`; the const assert makes the range a build-time precondition rather
+/// than a comment.
+Future<int> attachDeadAfterMillis() =>
+    RustLib.instance.api.crateApiSimpleAttachDeadAfterMillis();
+
 /// Register a project (git repo) by server-side path; returns the new project's
-/// full-id string.
-Future<String> addProject({required String handle, required String path}) =>
-    RustLib.instance.api.crateApiSimpleAddProject(handle: handle, path: path);
+/// full-id string. `workspace` tags it (the app's active workspace); `None`
+/// registers it in Main.
+Future<String> addProject({
+  required String handle,
+  required String path,
+  String? workspace,
+}) => RustLib.instance.api.crateApiSimpleAddProject(
+  handle: handle,
+  path: path,
+  workspace: workspace,
+);
+
+/// Register a project by server-side path, or return the id of the project
+/// already registered for it; returns a full-id string either way.
+///
+/// The idempotent counterpart to [`add_project`], and what a "register this
+/// existing checkout" offer must call: the path it was handed is frequently
+/// already a project, and `add_project` would register a second entry for the
+/// same repository. The dedupe (including how a path is resolved to a repository)
+/// is the server's — no client restates the rule.
+///
+/// `workspace` tags the project only when this call newly registers it; an
+/// already-registered project keeps the workspace it has.
+Future<String> ensureProject({
+  required String handle,
+  required String path,
+  String? workspace,
+}) => RustLib.instance.api.crateApiSimpleEnsureProject(
+  handle: handle,
+  path: path,
+  workspace: workspace,
+);
+
+/// Move a project to another workspace (`None` = Main). The server defines the
+/// workspace on itself if it had no definition for it yet, which is how a
+/// workspace created on another server reaches this one.
+Future<void> setProjectWorkspace({
+  required String handle,
+  required String projectId,
+  String? workspace,
+}) => RustLib.instance.api.crateApiSimpleSetProjectWorkspace(
+  handle: handle,
+  projectId: projectId,
+  workspace: workspace,
+);
+
+/// Replace the server's workspace definitions wholesale (`PUT
+/// /config/workspaces`). Never re-tags a project — renaming and deleting have
+/// their own calls below because they must.
+Future<void> setWorkspaces({
+  required String handle,
+  required SetWorkspacesRequestDto request,
+}) => RustLib.instance.api.crateApiSimpleSetWorkspaces(
+  handle: handle,
+  request: request,
+);
+
+/// Rename a workspace and rewrite every project tagged with it. A no-op on a
+/// server that has no workspace called `from`.
+Future<void> renameWorkspace({
+  required String handle,
+  required String from,
+  required String to,
+}) => RustLib.instance.api.crateApiSimpleRenameWorkspace(
+  handle: handle,
+  from: from,
+  to: to,
+);
+
+/// Delete a workspace, moving its projects to Main. Idempotent.
+Future<void> deleteWorkspace({required String handle, required String name}) =>
+    RustLib.instance.api.crateApiSimpleDeleteWorkspace(
+      handle: handle,
+      name: name,
+    );
 
 /// Remove a project (its sessions must already be gone).
 Future<void> removeProject({required String handle, required String id}) =>
     RustLib.instance.api.crateApiSimpleRemoveProject(handle: handle, id: id);
 
-/// Scan a server-side directory for git repos, registering any new ones.
+/// Scan a server-side directory for git repos, registering any new ones —
+/// each tagged with `workspace` (the app's active workspace; `None` = Main), as
+/// [`add_project`] tags its one.
 Future<ScanResultDto> scanDirectory({
   required String handle,
   required String path,
+  String? workspace,
 }) => RustLib.instance.api.crateApiSimpleScanDirectory(
   handle: handle,
   path: path,
+  workspace: workspace,
 );
+
+/// Every repo the server-side `gh` user can clone, for the repo picker.
+///
+/// The list is the *server's* to produce: `gh` runs where the checkout will land,
+/// so a phone with no `gh` and no GitHub credentials still gets a picker. A server
+/// without `gh` answers 503, which arrives here as an error a UI can word as
+/// "install gh on the server" rather than as a generic failure.
+Future<List<GithubRepo>> githubRepos({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleGithubRepos(handle: handle);
+
+/// Start a clone, returning the created job (the route answers 202 with the whole
+/// job, so the id, the destination and the first status arrive together).
+///
+/// **The returned status is not a terminal status.** Every outcome — success,
+/// failure, and an already-occupied destination — is reported through
+/// [`clone_job`], so this reads `Running` essentially always. Poll from here; the
+/// cadence is the caller's (nothing in this crate loops).
+///
+/// An unusable source or destination name is refused with a 400, which surfaces
+/// as an error carrying the server's *already-redacted* reason. Nothing on this
+/// path builds a message out of the request's source: a hand-pasted URL can carry
+/// `user:token@` userinfo, and the rejection strings are redacted where they are
+/// constructed in `claude-commander-protocol` precisely so no hop has to remember
+/// to.
+Future<CloneJobDto> startClone({
+  required String handle,
+  required CloneRequestDto request,
+}) => RustLib.instance.api.crateApiSimpleStartClone(
+  handle: handle,
+  request: request,
+);
+
+/// One poll of a clone job.
+///
+/// **`None` is a normal answer, not an error.** The server prunes jobs a while
+/// after they finish, so a client that keeps polling (or resumes with an id it
+/// stored across a restart) must read "gone" rather than a failure it would
+/// surface as a broken connection.
+///
+/// Takes the typed [`CloneJobId`] straight off the job [`start_clone`] returned,
+/// unlike the session/project routes above which take a full-UUID `String`. Those
+/// ids reach Dart as strings already (`SessionInfo.id`, `create_session`); a clone
+/// job id only ever comes from a `CloneJobDto`, so a `String` parameter would add
+/// a stringify-and-reparse round trip that can only introduce failures.
+Future<CloneJobDto?> cloneJob({
+  required String handle,
+  required CloneJobId id,
+}) => RustLib.instance.api.crateApiSimpleCloneJob(handle: handle, id: id);
+
+/// Reduce a clone source to a stable `host/owner/name` identity, or `None` when it
+/// has none (a local path or a `file://` URL — a local checkout has no GitHub
+/// identity, so it never earns an "already added" badge).
+///
+/// Pure string work with no server involved, so it needs no handle. Exposed so
+/// the repo picker's badge compares canonical forms through
+/// [`claude_commander_protocol::github::canonical_repo_slug`] — the single
+/// definition the server and the Rust client already use — rather than through a
+/// second Dart implementation of the rule. Raw strings would miss most matches:
+/// `gh repo clone` honours the user's configured `git_protocol`, so a repo cloned
+/// by `gh` typically has an `ssh://` origin while the API reports `https://`.
+///
+/// Safe to feed a credentialed URL: the host is taken after the userinfo
+/// delimiter (`github.rs`'s `host_of` splits on the last `@`), so a
+/// `user:token@` component never reaches the returned slug.
+Future<String?> canonicalRepoSlug({required String url}) =>
+    RustLib.instance.api.crateApiSimpleCanonicalRepoSlug(url: url);
 
 /// Cascade-merge a session down its stack; returns the recorded operation.
 Future<OperationStatusDto> cascadeMerge({

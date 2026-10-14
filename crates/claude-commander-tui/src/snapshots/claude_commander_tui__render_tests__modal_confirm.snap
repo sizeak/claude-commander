@@ -1,0 +1,28 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+expression: terminal.backend()
+---
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                              ╭ Delete Session ──────────────────────────────────────────╮                              "
+"                              │Delete session 'fix-login'?                               │                              "
+"                              │                                                          │                              "
+"                              │[Enter] Confirm  [Esc] Cancel                             │                              "
+"                              ╰──────────────────────────────────────────────────────────╯                              "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "

@@ -13,7 +13,7 @@ use crate::slack::handler::SlackApi;
 pub struct AppState {
     pub service: CommanderService,
     pub auth: Arc<AuthConfig>,
-    /// CORS allowlist of permitted origins (from `ServerConfig`). Empty means
+    /// CORS allowlist of permitted origins (from core's `ServerConfig`). Empty means
     /// no cross-origin access (same-origin only). Consumed by `build_router`
     /// when assembling the `/api` CORS layer.
     pub cors_allowed_origins: Arc<Vec<String>>,

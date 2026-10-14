@@ -182,11 +182,7 @@ fn side_lines(file: &FileDiff, side: CommentSide) -> Vec<(usize, &str)> {
 /// both yield [`AnchorResult::Drifted`]. Trailing whitespace is ignored when
 /// comparing.
 pub fn reanchor(ann: &Comment, diff: &ParsedDiff) -> AnchorResult {
-    let Some(file) = diff
-        .files
-        .iter()
-        .find(|f| f.display_path() == ann.file || f.new_path == ann.file || f.old_path == ann.file)
-    else {
+    let Some(file) = file_for(ann, diff) else {
         return AnchorResult::Drifted;
     };
 
@@ -232,9 +228,63 @@ pub fn reanchor(ann: &Comment, diff: &ParsedDiff) -> AnchorResult {
     }
 }
 
+/// The [`FileDiff`] a comment is anchored to, if the file is still in `diff`.
+///
+/// Matches the display path or either side's raw path, so a rename (which moves
+/// the comment's recorded path to the diff's `old_path`) still resolves. Shared
+/// by [`reanchor`] and [`prune_orphaned`] so the two can never disagree about
+/// whether a comment's file is present.
+fn file_for<'a>(ann: &Comment, diff: &'a ParsedDiff) -> Option<&'a FileDiff> {
+    diff.files
+        .iter()
+        .find(|f| f.display_path() == ann.file || f.new_path == ann.file || f.old_path == ann.file)
+}
+
+/// Whether `ann`'s file has left `diff` entirely, so there is no longer any code
+/// under the comment (and no file row in the review tree to reach it through).
+///
+/// Only meaningful for a diff whose absences are authoritative — see
+/// [`ComposedDiff::absence_is_authoritative`](crate::git::ComposedDiff::absence_is_authoritative).
+pub fn is_orphaned(ann: &Comment, diff: &ParsedDiff) -> bool {
+    file_for(ann, diff).is_none()
+}
+
+/// Drop every non-applied comment whose file is no longer in `diff` at all,
+/// returning the dropped comments.
+///
+/// A comment can only be reviewed, re-anchored, or deleted through a file row in
+/// the review tree, and those rows come from the diff. So once the change a
+/// comment was written against is reverted — the file leaves the diff entirely —
+/// the comment is unreachable: it renders nowhere, `d` can't select it, yet it
+/// still counts toward ancestor directory badges and blocks Apply with an
+/// instruction ("review or delete them") the user has no way to follow. Dropping
+/// it is the resolution; there is no longer any code under it to discuss.
+///
+/// Applied comments are kept — they are delivered history, not pending work.
+///
+/// `diff` MUST be a full diff against the session's real review base. Never
+/// prune against a [`ComposedDiff::degraded_to_head`](crate::git::ComposedDiff)
+/// diff: it omits committed work, so live comments would look orphaned.
+pub fn prune_orphaned(anns: &mut Vec<Comment>, diff: &ParsedDiff) -> Vec<Comment> {
+    let mut dropped = Vec::new();
+    anns.retain(|ann| {
+        let keep = ann.status == CommentStatus::Applied || !is_orphaned(ann, diff);
+        if !keep {
+            dropped.push(ann.clone());
+        }
+        keep
+    });
+    dropped
+}
+
 /// Re-anchor every non-applied comment against `diff` in place: located ones
 /// become [`CommentStatus::Staged`] with an updated range; unlocatable ones
 /// become [`CommentStatus::Drifted`]. Applied comments are left untouched.
+///
+/// A comment whose file has left the diff also becomes `Drifted` here (there is
+/// nothing to locate it in). Callers that can prove the absence is real drop
+/// those first via [`prune_orphaned`]; when the diff can't prove it, they stay —
+/// `Drifted` is the safe holding state.
 pub fn reanchor_comments(anns: &mut [Comment], diff: &ParsedDiff) {
     for ann in anns.iter_mut() {
         if ann.status == CommentStatus::Applied {
@@ -247,6 +297,26 @@ pub fn reanchor_comments(anns: &mut [Comment], diff: &ParsedDiff) {
             }
             AnchorResult::Drifted => ann.status = CommentStatus::Drifted,
         }
+    }
+}
+
+/// Status-line notice for comments [`prune_orphaned`] discarded, or `None` when
+/// nothing was dropped.
+///
+/// Dropping is the right resolution but it destroys something the user typed, so
+/// it is always announced — naming the file for a single drop, since that is the
+/// one case where they can act on it (re-comment once the change comes back).
+pub fn dropped_notice(dropped: &[Comment]) -> Option<String> {
+    match dropped {
+        [] => None,
+        [one] => {
+            let name = one.file.rsplit('/').next().unwrap_or(&one.file);
+            Some(format!("Dropped 1 comment — {name} left the diff"))
+        }
+        many => Some(format!(
+            "Dropped {} comments — their files left the diff",
+            many.len()
+        )),
     }
 }
 
@@ -523,6 +593,101 @@ diff --git a/x.ts b/x.ts
         assert_eq!(gone.status, CommentStatus::Drifted);
         // Applied comments are not re-evaluated.
         assert_eq!(applied.status, CommentStatus::Applied);
+    }
+
+    // --- orphan pruning ---
+
+    /// The bug this fixes: the agent reverted the change a comment was written
+    /// against, so its file left the diff entirely. Nothing renders it (file rows
+    /// come from the diff), `d` can't reach it, yet it counted toward directory
+    /// badges and blocked Apply forever. It must be dropped instead.
+    #[test]
+    fn prune_orphaned_drops_comment_whose_file_left_the_diff() {
+        let diff = diff_with_inserted_line(); // touches a.rs only
+        let orphan = ann("gone.rs", CommentSide::New, (1, 1), "fn vanished() {");
+        let kept = ann("a.rs", CommentSide::New, (2, 2), "    let y = 3;");
+
+        let mut all = vec![orphan.clone(), kept.clone()];
+        let dropped = prune_orphaned(&mut all, &diff);
+
+        assert_eq!(all, vec![kept]);
+        assert_eq!(dropped, vec![orphan]);
+    }
+
+    /// Drift *within* a file that is still in the diff is not orphaning — those
+    /// comments stay so `reanchor_comments` can mark them `Drifted`, where the
+    /// review view can render the ⚠ on the file's row and the user can act.
+    #[test]
+    fn prune_orphaned_keeps_unlocatable_comment_while_its_file_remains() {
+        let diff = diff_with_inserted_line();
+        let unlocatable = ann("a.rs", CommentSide::New, (1, 1), "    let z = 9;");
+
+        let mut all = vec![unlocatable.clone()];
+        assert!(prune_orphaned(&mut all, &diff).is_empty());
+        assert_eq!(all, vec![unlocatable.clone()]);
+
+        reanchor_comments(&mut all, &diff);
+        assert_eq!(all[0].status, CommentStatus::Drifted);
+    }
+
+    /// Applied comments are delivered history, not pending work: they must
+    /// survive their file leaving the diff (which is the *normal* end state once
+    /// the agent acts on the feedback and the code moves on).
+    #[test]
+    fn prune_orphaned_keeps_applied_comments() {
+        let diff = diff_with_inserted_line();
+        let mut applied = ann("gone.rs", CommentSide::New, (1, 1), "whatever");
+        applied.status = CommentStatus::Applied;
+
+        let mut all = vec![applied.clone()];
+        assert!(prune_orphaned(&mut all, &diff).is_empty());
+        assert_eq!(all, vec![applied]);
+    }
+
+    /// A rename moves the comment's recorded path onto the diff's `old_path`;
+    /// the file is still under review, so the comment is not orphaned.
+    #[test]
+    fn prune_orphaned_keeps_comment_matched_by_rename_side() {
+        let diff = parse_unified_diff(
+            "\
+diff --git a/old.rs b/new.rs
+similarity index 90%
+rename from old.rs
+rename to new.rs
+--- a/old.rs
++++ b/new.rs
+@@ -1,1 +1,1 @@
+-let x = 1;
++let x = 2;
+",
+        );
+        let a = ann("old.rs", CommentSide::Old, (1, 1), "let x = 1;");
+
+        let mut all = vec![a.clone()];
+        assert!(prune_orphaned(&mut all, &diff).is_empty());
+        assert_eq!(all, vec![a]);
+    }
+
+    #[test]
+    fn dropped_notice_names_the_file_for_a_single_drop() {
+        assert_eq!(dropped_notice(&[]), None);
+
+        let one = ann(
+            "frontend/common/src/testing/utils.testHelper.ts",
+            CommentSide::New,
+            (1, 1),
+            "x",
+        );
+        assert_eq!(
+            dropped_notice(std::slice::from_ref(&one)).unwrap(),
+            "Dropped 1 comment — utils.testHelper.ts left the diff"
+        );
+
+        let two = vec![one.clone(), ann("b.rs", CommentSide::New, (1, 1), "y")];
+        assert_eq!(
+            dropped_notice(&two).unwrap(),
+            "Dropped 2 comments — their files left the diff"
+        );
     }
 
     #[test]

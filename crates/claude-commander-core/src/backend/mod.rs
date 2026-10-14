@@ -28,11 +28,18 @@
 
 pub mod error;
 pub mod local;
-#[cfg(test)]
+// Test scaffolding, not part of the supported API. Reachable under the
+// `test-support` feature as well as `cfg(test)` because the TUI crate's tests
+// need it and a `cfg(test)` item is invisible across a crate boundary. The
+// feature is off by default and enabled only by a dev-dependency, so the double
+// never reaches a release build.
+#[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 pub mod placeholder;
 pub mod run_local;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -43,10 +50,12 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, ServerStatus,
-    SessionDetail, WorkspaceSnapshot,
+    SessionDetail, SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 pub use error::{BResult, BackendError};
 pub use local::LocalBackend;
@@ -54,9 +63,11 @@ pub use placeholder::PlaceholderBackend;
 pub use run_local::{RunLocalError, run_local};
 
 /// Builds a remote [`CommanderBackend`] from its [`RemoteServerConfig`], injected
-/// into [`App`](crate::tui::App) at construction so **core never depends on the
-/// remote client crate** — the binary owns the dependency direction and passes a
-/// closure that calls `claude_commander_remote::RemoteBackend::new`.
+/// into `claude_commander_tui::App` at construction so **core never depends on
+/// the remote client crate** — the binary owns the dependency direction and
+/// passes a closure that calls `claude_commander_remote::RemoteBackend::new`.
+/// (Not an intra-doc link: the TUI is downstream of core, so core cannot name it
+/// as a resolvable path.)
 ///
 /// Returning `Err` means the backend couldn't be constructed at all (a malformed
 /// URL, say); the TUI substitutes a permanently-degraded
@@ -99,15 +110,16 @@ pub struct BackendDescriptor {
 }
 
 /// Which UI affordances a backend supports. A remote backend can't drive the
-/// operator's local editor or a `tmux display-popup` on the server host, so the
-/// TUI hides those actions when the capability is off. The local backend has
-/// them all.
+/// operator's local editor or create a tmux session on the server host from
+/// here, so the TUI hides those actions when the capability is off. The local
+/// backend has them all.
+///
+/// The in-session switcher is deliberately *not* one of these: the TUI draws it
+/// over the pane itself, so it works on every backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendCapabilities {
     /// Open the operator's `$EDITOR`/GUI editor on a session worktree.
     pub open_editor: bool,
-    /// The in-session `tmux display-popup` switcher (Ctrl+Space).
-    pub switcher_popup: bool,
     /// A dedicated commander tmux session.
     pub commander_session: bool,
     /// Ctrl+\ agent↔shell pane toggle.
@@ -125,7 +137,6 @@ impl BackendCapabilities {
     /// fresh selection assumes until it resolves the owning backend.
     pub const LOCAL: Self = Self {
         open_editor: true,
-        switcher_popup: true,
         commander_session: true,
         shell_toggle: true,
         // The local agent reads the operator's clipboard directly on Ctrl+V, so
@@ -208,7 +219,7 @@ pub use claude_commander_protocol::connection::ConnectionState;
 /// synchronously (no `.await` on the hot path).
 #[derive(Debug, Clone)]
 pub struct BackendView {
-    pub snapshot: WorkspaceSnapshot,
+    pub snapshot: Snapshot,
     pub agent_states: AgentStatesSnapshot,
     pub connection: ConnectionState,
 }
@@ -228,11 +239,13 @@ impl BackendView {
     }
 }
 
-/// An empty [`WorkspaceSnapshot`] placeholder (no projects/sessions). Used to
+/// An empty [`Snapshot`] placeholder (no projects/sessions). Used to
 /// seed a [`BackendView`] before its first real snapshot lands (and by tests to
-/// stand up a [`MockBackend`](mock::MockBackend)).
-pub(crate) fn empty_snapshot() -> WorkspaceSnapshot {
-    WorkspaceSnapshot {
+/// stand up a `mock::MockBackend` — plain text, since that module only exists
+/// under `cfg(test)` or the `test-support` feature, so a link to it would be
+/// unresolvable in a normal doc build).
+pub fn empty_snapshot() -> Snapshot {
+    Snapshot {
         projects: Vec::new(),
         sessions: Vec::new(),
         cascade_paused: None,
@@ -250,6 +263,9 @@ pub(crate) fn empty_snapshot() -> WorkspaceSnapshot {
             // during "connecting…".
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
+        workspaces: Vec::new(),
+        main_workspace: None,
+        startup_workspace: Default::default(),
     }
 }
 
@@ -379,6 +395,46 @@ impl AttachResizer {
     }
 }
 
+/// Forces the attached terminal to repaint its whole visible screen.
+///
+/// The in-session switcher draws the palette *over* the live pane, so when it
+/// closes something has to restore the region it covered. Rather than remember
+/// what was underneath, we ask the renderer that owns it — tmux — to paint it
+/// again. Verified against a real server: `refresh-client -t <client-tty>` emits
+/// the full visible screen, and in copy mode it repaints the scrolled content
+/// while leaving `scroll_position`/`copy_cursor_y` untouched. That last part is
+/// why this is its own operation and not a resize round-trip: a resize is
+/// exactly what loses a scrolled copy-mode anchor.
+///
+/// Transport-specific, like [`AttachResizer`]: locally a `tmux refresh-client`
+/// subprocess, remotely a `refresh` control frame the server turns into the same
+/// command. Async because both are I/O; cheaply cloneable so a paused attach can
+/// hold one.
+#[derive(Clone)]
+pub struct AttachRefresher(Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>);
+
+impl AttachRefresher {
+    pub fn new<F, Fut>(f: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        Self(Arc::new(move || Box::pin(f())))
+    }
+
+    /// Repaint the visible screen. Fire-and-forget: a failed refresh leaves a
+    /// stale rectangle, which the next pane output overwrites anyway.
+    pub async fn refresh(&self) {
+        (self.0)().await
+    }
+}
+
+impl std::fmt::Debug for AttachRefresher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AttachRefresher")
+    }
+}
+
 impl std::fmt::Debug for AttachResizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AttachResizer")
@@ -410,7 +466,22 @@ pub struct AttachStreams {
     pub reader: Box<dyn AsyncRead + Send + Unpin>,
     pub writer: Box<dyn AsyncWrite + Send + Unpin>,
     pub resizer: AttachResizer,
+    pub refresher: AttachRefresher,
     pub terminator: Box<dyn AttachTerminator>,
+    /// The tty of the **operator's own** tmux client backing this attach, when
+    /// there is one — i.e. only for a local PTY attach. `None` for a remote
+    /// attach, whose tmux client lives on the server.
+    ///
+    /// This is what tells the in-session switcher whether it may move the user
+    /// with `tmux switch-client` instead of re-attaching. Getting that wrong is
+    /// not a no-op: `switch-client` run without a live local client of our own
+    /// either fails, or — worse — succeeds against some *unrelated* client
+    /// (another terminal on the same server, or the outer client when commander
+    /// itself runs inside tmux) and yanks that one to a session the user never
+    /// asked for. Naming the client explicitly makes both mistakes
+    /// unrepresentable, so the capability travels with the transport rather than
+    /// being inferred at the call site.
+    pub local_client_tty: Option<String>,
 }
 
 /// A live attach to a session's pane. Transport-agnostic: [`LocalBackend`] backs
@@ -493,7 +564,7 @@ pub trait CommanderBackend: Send + Sync {
 
     // -- Queries --
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot>;
+    async fn snapshot(&self) -> BResult<Snapshot>;
 
     /// Bulk agent-state snapshot for active sessions. `fresh` bypasses any TTL
     /// cache and forces a re-capture.
@@ -533,13 +604,18 @@ pub trait CommanderBackend: Send + Sync {
     async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId>;
     async fn kill_session(&self, id: SessionId) -> BResult<()>;
     async fn restart_session(&self, id: SessionId) -> BResult<()>;
-    /// Restart a session with a *fresh* agent conversation (no `--resume`). The
-    /// attach loop calls this when the agent process exits mid-attach. The
-    /// default resumes (a remote backend has no separate fresh path yet);
-    /// [`LocalBackend`] overrides it with the no-resume restart.
-    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()> {
-        self.restart_session(id).await
-    }
+    /// Restart a session with a *fresh* agent conversation (no `--resume`),
+    /// discarding whatever the agent would otherwise have resumed. Two callers:
+    /// the attach loop, when the agent process exits mid-attach, and the
+    /// operator's Reset command.
+    ///
+    /// Deliberately **required**, not defaulted. It was defaulted to
+    /// `restart_session` while only [`LocalBackend`] implemented it, which meant
+    /// a remote session's "fresh" restart silently *resumed* — the one thing the
+    /// caller asked it not to do. Every backend now answers for itself, so a
+    /// backend that cannot restart fresh has to say so rather than quietly
+    /// doing the opposite.
+    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()>;
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
     /// Change a session's launch program (the agent harness that runs) and
@@ -549,6 +625,15 @@ pub trait CommanderBackend: Send + Sync {
     async fn change_program(&self, id: SessionId, program: String) -> BResult<()>;
     /// Move a session to `section`, or clear its manual override (`None`).
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()>;
+    /// Retarget a session's stack base onto `parent`, or unstack it onto the
+    /// project's main branch (`None`). Metadata and PR base only — git history
+    /// is not rewritten. Runs on the session's owning host, since the durable
+    /// half is a `gh pr edit` against that host's checkout.
+    async fn set_session_base(
+        &self,
+        id: SessionId,
+        parent: Option<SessionId>,
+    ) -> BResult<SetSessionBaseOutcome>;
     /// Clear a session's unread flag.
     async fn mark_read(&self, id: SessionId) -> BResult<()>;
     /// Flip a session's keep-alive (hibernation-exempt) flag; returns the new
@@ -589,9 +674,110 @@ pub trait CommanderBackend: Send + Sync {
 
     // -- Projects --
 
-    async fn add_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+    /// Register `path` as a project, tagged with `workspace` (`None` = Main) —
+    /// frontends pass their active workspace so a new project lands in it.
+    async fn add_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId>;
+
+    /// Register `path` as a project, or answer with the id of the project already
+    /// registered for it.
+    ///
+    /// The idempotent counterpart to [`Self::add_project`], and the one a
+    /// "register this existing checkout" offer must use — the path it was handed
+    /// is frequently already a project (that is *why* the destination was
+    /// occupied), and `add_project` would register a second entry for the same
+    /// repository.
+    ///
+    /// No default: the dedupe belongs where the projects live, so a backend has to
+    /// route it to its own host rather than inherit an answer composed from a
+    /// snapshot a frontend happens to hold.
+    ///
+    /// `workspace` tags the project only if this call registers it; an existing
+    /// project keeps its workspace.
+    async fn ensure_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId>;
+
     async fn remove_project(&self, id: ProjectId) -> BResult<()>;
-    async fn scan_directory(&self, dir: std::path::PathBuf) -> BResult<crate::session::ScanResult>;
+
+    // -- Workspaces --
+    //
+    // No defaults: a workspace edit is sent eagerly to every connected backend,
+    // and each must say for itself whether it landed (a frontend toasts the
+    // ones that failed). Rename and delete are idempotent on a backend that
+    // never had the workspace, so that propagation is safe to repeat.
+
+    /// Replace this backend's workspace definitions (and, when set, Main's
+    /// label/colour and the startup choice). Never re-tags projects.
+    async fn set_workspaces(&self, req: SetWorkspacesRequest) -> BResult<()>;
+
+    /// Rename a workspace, rewriting every project tagged with it. A no-op
+    /// success when this backend has no such workspace.
+    async fn rename_workspace(&self, from: String, to: String) -> BResult<()>;
+
+    /// Delete a workspace, moving its projects to Main. A no-op success when
+    /// this backend has no such workspace.
+    async fn delete_workspace(&self, name: String) -> BResult<()>;
+
+    /// Move a project into `workspace` (`None` = Main), defining the workspace
+    /// on this backend if it is new here.
+    async fn set_project_workspace(&self, id: ProjectId, workspace: Option<String>) -> BResult<()>;
+    /// Scan `dir` for git repositories and register them, each new one tagged
+    /// with `workspace` (`None` = Main).
+    async fn scan_directory(
+        &self,
+        dir: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<crate::session::ScanResult>;
+
+    // -- Repository clone --
+    //
+    // No capability flag gates these: both real backends genuinely support them.
+    // A clone runs where the *sessions* run (a project registered on the server
+    // host has to be checked out on the server host), so the local backend clones
+    // locally and a remote backend asks its server to clone — same feature, and
+    // nothing for a frontend to gate on. `list_github_repos` can still *fail* as
+    // `Unavailable` when the host has no `gh`; that is a runtime state a picker
+    // renders, not a static capability.
+
+    /// Every GitHub repo the backend's host can clone, for the repo picker.
+    /// Resolved by `gh` on that host, so its authenticated account decides the
+    /// list — a remote backend shows the *server's* repos, not the operator's.
+    ///
+    /// A host without `gh` fails with [`BackendError::Unavailable`] rather than
+    /// answering an empty list: "install the GitHub CLI" and "this account has no
+    /// repos" are different states and a picker renders them differently.
+    async fn list_github_repos(&self) -> BResult<Vec<GithubRepo>>;
+
+    /// Start cloning a repository into the host's projects directory, answering
+    /// with the created job.
+    ///
+    /// The whole [`CloneJob`] rather than just its id, matching the server's 202
+    /// body: a caller gets the id, the destination and the redacted source label
+    /// in one call and can start polling without a second round trip.
+    ///
+    /// **Its status is not a terminal status** — the clone has only been accepted.
+    /// Every outcome, including a destination that was already occupied, arrives
+    /// through [`Self::clone_job`]; a caller that reads this status as final will
+    /// miss every result.
+    ///
+    /// A refused source (empty, flag-shaped, unsupported scheme, escaping
+    /// destination name) is [`BackendError::InvalidRequest`] on every backend, and
+    /// its message is redacted where it is built, so a credentialed URL cannot
+    /// come back through it.
+    async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob>;
+
+    /// Poll a clone job. `Ok(None)` once it has been pruned (or was never issued)
+    /// — absence rather than an error, so a poll loop can tell "gone" from "the
+    /// backend is broken" and only stop retrying for one of them.
+    ///
+    /// No polling cadence is implied here: a frontend owns the interval.
+    async fn clone_job(&self, id: CloneJobId) -> BResult<Option<CloneJob>>;
 
     // -- Cascade / push-stack --
 
@@ -651,6 +837,7 @@ fn _assert_object_safe(b: Arc<dyn CommanderBackend>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use claude_commander_protocol::github::{CloneSource, CloneStatus};
 
     #[test]
     fn backend_id_local_is_zero() {
@@ -725,11 +912,108 @@ mod tests {
         );
     }
 
+    /// A [`GithubRepo`] with the fields a picker actually reads, for the
+    /// trait-surface round trip below.
+    fn repo(full_name: &str) -> GithubRepo {
+        let (owner, name) = full_name.split_once('/').unwrap();
+        GithubRepo {
+            full_name: full_name.to_string(),
+            owner: owner.to_string(),
+            name: name.to_string(),
+            description: None,
+            private: false,
+            fork: false,
+            archived: false,
+            default_branch: "main".to_string(),
+            clone_url: format!("https://github.com/{full_name}.git"),
+            ssh_url: format!("git@github.com:{full_name}.git"),
+            pushed_at: None,
+        }
+    }
+
+    /// The clone surface has to be reachable through the **trait object** the TUI
+    /// holds — a palette command drives `Arc<dyn CommanderBackend>`, never a
+    /// concrete backend — so this exercises all three methods there: the repo
+    /// list, the start (which answers with the whole job, matching the server's
+    /// 202 body), and the poll that resolves the id it handed back.
+    #[tokio::test]
+    async fn clone_surface_round_trips_through_a_trait_object() {
+        let mock = Arc::new(mock::MockBackend::new("buildbox", empty_snapshot()));
+        mock.set_github_repos(vec![repo("octo/widget")]);
+        let backend: Arc<dyn CommanderBackend> = mock.clone();
+
+        let repos = backend.list_github_repos().await.unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].full_name, "octo/widget");
+
+        let req = CloneRequest {
+            source: CloneSource::Github {
+                full_name: "octo/widget".to_string(),
+            },
+            dest_name: None,
+            workspace: None,
+        };
+        let job = backend.start_clone(req.clone()).await.unwrap();
+        assert!(
+            matches!(job.status, CloneStatus::Running),
+            "a freshly started clone is running, got {:?}",
+            job.status
+        );
+        assert_eq!(mock.clone_requests(), vec![req]);
+
+        // The id the start handed back resolves through the poll method…
+        assert_eq!(backend.clone_job(job.id).await.unwrap(), Some(job.clone()));
+        // …and an id that was never issued is absence, not a failure: a pruned or
+        // bogus job must not read as a transport error.
+        assert_eq!(backend.clone_job(CloneJobId::new()).await.unwrap(), None);
+
+        // The outcome arrives through the *poll*, never through the start's
+        // response — which is why the trait documents that status as non-terminal.
+        let project_id = ProjectId::new();
+        mock.set_clone_status(job.id, CloneStatus::Succeeded { project_id });
+        assert_eq!(
+            backend.clone_job(job.id).await.unwrap().unwrap().status,
+            CloneStatus::Succeeded { project_id }
+        );
+    }
+
+    /// A downed backend has to surface as `Unavailable` on the clone surface too,
+    /// not as an empty repo list — a picker that renders "no repos" for an
+    /// unreachable server is indistinguishable from an empty account.
+    #[tokio::test]
+    async fn clone_surface_reports_a_failing_backend() {
+        let mock = mock::MockBackend::new("buildbox", empty_snapshot());
+        mock.set_failing(true);
+        assert!(matches!(
+            mock.list_github_repos().await.unwrap_err(),
+            BackendError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            mock.start_clone(CloneRequest {
+                source: CloneSource::Github {
+                    full_name: "octo/widget".to_string()
+                },
+                dest_name: None,
+                workspace: None,
+            })
+            .await
+            .unwrap_err(),
+            BackendError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            mock.clone_job(CloneJobId::new()).await.unwrap_err(),
+            BackendError::Unavailable { .. }
+        ));
+    }
+
     #[test]
     fn backend_handle_new_seeds_connecting_view() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut config = crate::config::Config::default();
         config.telemetry.enabled = false;
+        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+        // repo-clone paths write into. Pin it under the temp dir.
+        config.projects_dir = Some(dir.path().join("projects"));
         let config_store = std::sync::Arc::new(crate::config::ConfigStore::with_path(
             config,
             dir.path().join("config.toml"),

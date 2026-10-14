@@ -18,7 +18,7 @@
 //!
 //! | Trait method | HTTP |
 //! |---|---|
-//! | `workspace_snapshot` | `GET /api/workspace` |
+//! | `snapshot` | `GET /api/workspace` |
 //! | `agent_states(fresh)` | `GET /api/agent-states?fresh=` |
 //! | `session_detail(q, lines)` | `GET /api/sessions/{q}/detail?lines=` (404 → `None`) |
 //! | `preview(Session)` / `preview(Project)` | `GET /api/sessions/{id}/preview?lines=` / `GET /api/projects/{id}/preview` |
@@ -28,13 +28,15 @@
 //! | `pending_comment_sessions` | `GET /api/comments/pending` |
 //! | `create_session` | `POST /api/sessions` → `{id}` |
 //! | `kill_session` / `restart_session` | `POST /api/sessions/{id}/kill` / `…/restart` |
+//! | `restart_session_fresh` | `POST /api/sessions/{id}/restart-fresh` (no resume) |
 //! | `delete_session` | `DELETE /api/sessions/{id}` |
 //! | `rename_session` / `set_section` | `PATCH /api/sessions/{id}` (tagged `op`) |
+//! | `set_session_base` | `POST /api/sessions/{id}/base` → outcome |
 //! | `mark_read` | `POST /api/sessions/{id}/read` |
 //! | `mark_unread` | `POST /api/sessions/unread` (batch) |
 //! | `add_project` | `POST /api/projects` → `{id}` |
 //! | `remove_project` | `DELETE /api/projects/{id}` |
-//! | `scan_directory` | `POST /api/projects/scan` → `{path}` |
+//! | `scan_directory` | `POST /api/projects/scan` → `{path, workspace?}` |
 //! | `cascade_merge` / `push_stack` | `POST /api/sessions/{id}/cascade` / `…/push-stack` |
 //! | `cascade_resume` / `cascade_abandon` | `POST /api/cascade/resume` / `…/abandon` |
 //! | `list_comments` / `open_review` | `GET /api/sessions/{id}/comments` / `…/review` |

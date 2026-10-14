@@ -21,11 +21,15 @@ Stream<TerminalEvent> attachTerminal({
   required String attachId,
   required String sessionId,
   required AttachKind kind,
+  required int cols,
+  required int rows,
 }) => RustLib.instance.api.crateApiTerminalAttachTerminal(
   handle: handle,
   attachId: attachId,
   sessionId: sessionId,
   kind: kind,
+  cols: cols,
+  rows: rows,
 );
 
 /// Send keystrokes / raw input bytes to the attach with `attach_id`. No-op if the

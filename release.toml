@@ -13,13 +13,11 @@
 # Single-tag requirement: `tag-name` below has no `{{crate_name}}-` prefix, so
 # all members resolve to the same `v{{version}}` tag. To guarantee that tag is
 # created exactly once (rather than one create attempt per releasable member),
-# the two non-representative members must opt out of the release flow with
-# `release = false` in their `[package.metadata.release]`, leaving the
-# `claude-commander` bin crate as the sole representative that drives the
-# commit/tag/replacements. claude-commander-server already carries
-# `publish = false` (never pushed to crates.io); the core lib likewise.
-# See the Stage D1 report — those `release = false` flags are a Cargo.toml
-# change outside this file's ownership and must be added there.
+# every other member opts out of the release flow with `release = false` in its
+# `[package.metadata.release]`, leaving the `claude-commander` bin crate as the
+# sole representative that drives the commit/tag/replacements. A new crate
+# under crates/ must carry that flag too (it lives in the crate's Cargo.toml,
+# not here).
 
 # Keep every member's version identical and consolidate into one commit.
 shared-version = true
@@ -53,4 +51,17 @@ allow-branch = ["main"]
 # root. The PKGBUILD lives at the workspace root, so we hop up two levels.
 pre-release-replacements = [
   { file = "../../packaging/aur/PKGBUILD", search = "^pkgver=.*$", replace = "pkgver={{version}}", exactly = 1 },
+]
+
+# The Flutter cdylib (client/rust) is its own workspace with its own lockfile,
+# and it path-depends on protocol, viewmodel, client and (dev) core/server/
+# test-support. cargo-release only refreshes the root Cargo.lock, so without
+# this the release commit leaves client/rust/Cargo.lock on the old version and
+# CI's `cargo test --locked` for the cdylib fails on the tagged commit (it did
+# for v0.38.0). Re-resolving offline touches only those path crates' version
+# lines; `git commit -am` then carries the file into the release commit. The
+# hook runs on dry runs too, which must not write.
+pre-release-hook = [
+  "sh", "-c",
+  '[ "$DRY_RUN" = true ] || cargo metadata --offline --format-version 1 --manifest-path "$WORKSPACE_ROOT/client/rust/Cargo.toml" >/dev/null',
 ]

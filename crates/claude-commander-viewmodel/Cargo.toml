@@ -1,0 +1,33 @@
+[package]
+name = "claude-commander-viewmodel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure client-side decisions over a workspace snapshot, shared by every Claude Commander frontend"
+
+# Only the `claude-commander` bin crate drives the release (single shared tag).
+[package.metadata.release]
+release = false
+
+[lib]
+name = "claude_commander_viewmodel"
+path = "src/lib.rs"
+
+# The defining constraint of this crate is what is NOT here. Every dependency
+# below is pure Rust and cross-compiles to mobile, because the Flutter client's
+# cdylib links this crate directly. Nothing that needs a terminal, a filesystem,
+# a subprocess or a socket may be added — that belongs in `claude-commander-core`
+# or in a frontend. A reviewer can check the rule by reading this block alone.
+[dependencies]
+# Skim-style subsequence scoring for the palette and session search.
+fuzzy-matcher = "0.3"
+# The wire DTOs the workspace helpers reason about (`Snapshot`, `ProjectInfo`,
+# `WorkspaceDef`). Serde-only and mobile-safe, so it keeps this crate's
+# no-host-deps rule; added now that a slice (workspaces) earns it.
+claude-commander-protocol = { path = "../claude-commander-protocol" }
+
+[dev-dependencies]
+# Fixture DTOs are built from JSON so they track the wire shape, not a field list.
+serde_json = { workspace = true }

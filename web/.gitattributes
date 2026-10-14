@@ -1,0 +1,5 @@
+# The root .gitattributes stores every *.svg in Git LFS. The favicon is page
+# source that the build copies byte-for-byte into the server's embedded webui/,
+# so it must be a real blob: a checkout without LFS smudging would otherwise
+# build (and CI's freshness check would compare) the pointer text.
+src/*.svg -filter -text

@@ -26,15 +26,9 @@ void main() {
     tester,
   ) async {
     await tester.pumpWidget(wrap());
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Server URL'),
-      '',
-    );
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Bearer token'),
-      'tok',
-    );
-    await tester.tap(find.widgetWithText(FilledButton, 'Add server'));
+    await tester.enterText(find.byKey(const Key('urlField')), '');
+    await tester.enterText(find.byKey(const Key('tokenField')), 'tok');
+    await tester.tap(find.widgetWithText(FilledButton, 'Connect'));
     await tester.pumpAndSettle();
 
     expect(find.text('Required'), findsOneWidget);
@@ -46,10 +40,7 @@ void main() {
   ) async {
     api.healthResponse = false;
     await tester.pumpWidget(wrap());
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Bearer token'),
-      'tok',
-    );
+    await tester.enterText(find.byKey(const Key('tokenField')), 'tok');
     await tester.tap(find.text('Test connection'));
     await tester.pumpAndSettle();
 
@@ -57,23 +48,19 @@ void main() {
     expect(submitted, isNull);
   });
 
-  testWidgets('a successful probe submits the assembled config', (tester) async {
+  testWidgets('a successful probe submits the assembled config', (
+    tester,
+  ) async {
     api.healthResponse = true;
     api.healthTmuxResponse = true;
     await tester.pumpWidget(wrap());
+    await tester.enterText(find.byKey(const Key('nameField')), 'laptop');
     await tester.enterText(
-      find.widgetWithText(TextFormField, 'Name'),
-      'laptop',
-    );
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Server URL'),
+      find.byKey(const Key('urlField')),
       'http://example.test:7878',
     );
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Bearer token'),
-      'secret',
-    );
-    await tester.tap(find.widgetWithText(FilledButton, 'Add server'));
+    await tester.enterText(find.byKey(const Key('tokenField')), 'secret');
+    await tester.tap(find.widgetWithText(FilledButton, 'Connect'));
     await tester.pumpAndSettle();
 
     expect(submitted, isNotNull);
@@ -89,18 +76,17 @@ void main() {
     api.healthResponse = false; // probe will fail
     await tester.pumpWidget(wrap());
     await tester.enterText(
-      find.widgetWithText(TextFormField, 'Server URL'),
+      find.byKey(const Key('urlField')),
       'http://down.test:7878',
     );
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Bearer token'),
-      'secret',
-    );
-    await tester.tap(find.widgetWithText(FilledButton, 'Add server'));
+    await tester.enterText(find.byKey(const Key('tokenField')), 'secret');
+    await tester.tap(find.widgetWithText(FilledButton, 'Connect'));
     // Explicit pumps (not pumpAndSettle): while the confirm dialog is open the
     // save button shows a spinner (_busy), an animation that never settles.
     await tester.pump(); // start _save → probe
-    await tester.pump(const Duration(milliseconds: 50)); // probe resolves, dialog opens
+    await tester.pump(
+      const Duration(milliseconds: 50),
+    ); // probe resolves, dialog opens
 
     // The confirm dialog appears; nothing submitted yet.
     expect(find.text('Connection test failed'), findsOneWidget);

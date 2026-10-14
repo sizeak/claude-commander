@@ -1,0 +1,14 @@
+---
+source: crates/claude-commander-tui/src/render_tests.rs
+expression: terminal.backend()
+---
+" my-project [main] (2)                                                "
+"     1 ● Existing session [feature-existing]                          "
+"     2 ⠋ New session [feature-new]                                    "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "

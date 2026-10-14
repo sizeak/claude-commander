@@ -10,9 +10,9 @@
 //!    index, and worktree advance together. Only attempted when the working
 //!    tree is clean; otherwise we skip and surface a "blocked" reason.
 
+use crate::git::git_command;
 use std::path::Path;
 
-use tokio::process::Command;
 use tracing::{debug, warn};
 
 /// Relationship between the local main ref and `origin/<main>`.
@@ -145,7 +145,7 @@ impl From<claude_commander_protocol::api::PullBlockReason> for BlockReason {
 
 impl PullOutcome {
     /// Project this pull outcome onto the protocol [`PullStatus`] DTO surfaced in
-    /// [`WorkspaceSnapshot::project_pull`](claude_commander_protocol::api::WorkspaceSnapshot).
+    /// [`Snapshot::project_pull`](claude_commander_protocol::api::Snapshot).
     pub fn to_status(self) -> claude_commander_protocol::api::PullStatus {
         use claude_commander_protocol::api::PullStatus as S;
         match self {
@@ -235,7 +235,7 @@ pub async fn run_project_pull(repo_path: &Path, main_branch: &str) -> PullOutcom
 }
 
 async fn fetch_main(repo_path: &Path, main_branch: &str) -> bool {
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(repo_path)
         .args(["fetch", "origin", main_branch])
         .stdin(std::process::Stdio::null())
@@ -261,7 +261,7 @@ async fn fetch_main(repo_path: &Path, main_branch: &str) -> bool {
 }
 
 async fn rev_parse(repo_path: &Path, refname: &str) -> Option<String> {
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(repo_path)
         .args(["rev-parse", "--verify", "--quiet", refname])
         .output()
@@ -286,7 +286,7 @@ async fn classify_relation(repo_path: &Path, local: &str, origin: &str) -> Branc
 }
 
 async fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> bool {
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(repo_path)
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .output()
@@ -295,7 +295,7 @@ async fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> bool
 }
 
 async fn head_is_branch(repo_path: &Path, main_branch: &str) -> bool {
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(repo_path)
         .args(["symbolic-ref", "--quiet", "HEAD"])
         .output()
@@ -315,7 +315,7 @@ async fn head_is_branch(repo_path: &Path, main_branch: &str) -> bool {
 /// On any git error we fail *closed* (assume a conflict) so we never move a
 /// ref we're unsure about.
 async fn branch_checked_out_in_worktree(repo_path: &Path, main_branch: &str) -> bool {
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(repo_path)
         .args(["worktree", "list", "--porcelain"])
         .output()
@@ -342,7 +342,7 @@ async fn branch_checked_out_in_worktree(repo_path: &Path, main_branch: &str) -> 
 }
 
 async fn worktree_is_dirty(repo_path: &Path) -> bool {
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(repo_path)
         .args(["status", "--porcelain"])
         .output()
@@ -362,7 +362,7 @@ async fn worktree_is_dirty(repo_path: &Path) -> bool {
 
 async fn update_ref(repo_path: &Path, main_branch: &str, new_sha: &str) -> bool {
     let refname = format!("refs/heads/{main_branch}");
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(repo_path)
         .args(["update-ref", &refname, new_sha])
         .output()
@@ -387,7 +387,7 @@ async fn update_ref(repo_path: &Path, main_branch: &str, new_sha: &str) -> bool 
 
 async fn merge_ff_only(repo_path: &Path, main_branch: &str) -> bool {
     let upstream = format!("origin/{main_branch}");
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(repo_path)
         .args(["merge", "--ff-only", &upstream])
         .output()
@@ -519,15 +519,15 @@ mod decision_tests {
 #[cfg(test)]
 mod executor_tests {
     use super::*;
+    use crate::git::fixture::fixture_git_std;
     use std::path::{Path, PathBuf};
-    use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
     /// Spawn a synchronous git command in `dir`, panicking on failure.
     /// The auto-pull executor uses async tokio commands; tests stay
     /// synchronous so we don't need a runtime for setup.
     fn git(dir: &Path, args: &[&str]) {
-        let out = StdCommand::new("git")
+        let out = fixture_git_std()
             .current_dir(dir)
             .args(args)
             .output()
@@ -543,7 +543,7 @@ mod executor_tests {
     }
 
     fn git_capture(dir: &Path, args: &[&str]) -> String {
-        let out = StdCommand::new("git")
+        let out = fixture_git_std()
             .current_dir(dir)
             .args(args)
             .output()
@@ -569,7 +569,6 @@ mod executor_tests {
         git(tmp.path(), &["init", "-b", "main", "seed"]);
         git(&seed, &["config", "user.email", "t@t"]);
         git(&seed, &["config", "user.name", "t"]);
-        git(&seed, &["config", "commit.gpgsign", "false"]);
         std::fs::write(seed.join("README"), "v1\n").unwrap();
         git(&seed, &["add", "README"]);
         git(&seed, &["commit", "-m", "initial"]);
@@ -586,7 +585,6 @@ mod executor_tests {
         );
         git(&local, &["config", "user.email", "t@t"]);
         git(&local, &["config", "user.name", "t"]);
-        git(&local, &["config", "commit.gpgsign", "false"]);
 
         (tmp, remote, local)
     }
@@ -603,7 +601,6 @@ mod executor_tests {
         );
         git(&work, &["config", "user.email", "t@t"]);
         git(&work, &["config", "user.name", "t"]);
-        git(&work, &["config", "commit.gpgsign", "false"]);
         std::fs::write(work.join("README"), "v2\n").unwrap();
         git(&work, &["add", "README"]);
         git(&work, &["commit", "-m", "second"]);
@@ -692,7 +689,6 @@ mod executor_tests {
         git(tmp.path(), &["init", "-b", "main", "solo"]);
         git(&local, &["config", "user.email", "t@t"]);
         git(&local, &["config", "user.name", "t"]);
-        git(&local, &["config", "commit.gpgsign", "false"]);
         std::fs::write(local.join("f"), "x\n").unwrap();
         git(&local, &["add", "f"]);
         git(&local, &["commit", "-m", "c"]);

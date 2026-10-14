@@ -1,14 +1,17 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
+import '../theme/tokens.dart';
+import '../util/error_text.dart';
 import 'projects_page.dart';
 
 /// Form for creating a session. The project is picked from the server's
 /// registered projects (a dropdown of [CommanderStore.projects]); its repo path
 /// is what the session branches from. The body rebuilds with the store, so if
-/// the workspace snapshot is still loading when the page opens, the picker fills
+/// the snapshot is still loading when the page opens, the picker fills
 /// in as soon as the projects arrive rather than stranding on an empty state. If
 /// the server genuinely has no projects, the page offers a jump to the projects
 /// manager to add one.
@@ -17,11 +20,20 @@ import 'projects_page.dart';
 /// dropdown replaces the old free-text field; section is optional). If
 /// create-options can't be loaded, the program falls back to a free-text field so
 /// creation still works. `section` isn't a create-session parameter, so a chosen
-/// section is applied with `setSection` right after the session is created. Pops
-/// with the new session id on success.
+/// section is applied with `setSection` right after the session is created. On
+/// success it refreshes the store (so the list behind it already holds the new
+/// session) and pops with the new session id.
+///
+/// The project list is scoped to [workspace] — the app's active one — as every
+/// other list in the app is, so a session is always started in the workspace
+/// the user is looking at.
 class CreateSessionPage extends StatefulWidget {
   final CommanderStore store;
-  const CreateSessionPage({super.key, required this.store});
+
+  /// The active workspace (null = Main); only its projects are offered.
+  final String? workspace;
+
+  const CreateSessionPage({super.key, required this.store, this.workspace});
 
   @override
   State<CreateSessionPage> createState() => _CreateSessionPageState();
@@ -113,9 +125,11 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _submitting = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to create: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to create: ${errorText(e, capitalize: false)}'),
+        ),
+      );
       return;
     }
 
@@ -130,25 +144,41 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Session created; setting section failed: $e')),
+            SnackBar(
+              content: Text(
+                'Session created; setting section failed: '
+                '${errorText(e, capitalize: false)}',
+              ),
+            ),
           );
         }
       }
     }
+    // Step 3: refetch the snapshot before popping, so the list the user lands
+    // back on already contains the session. It otherwise only re-reads state
+    // when the server's change feed ticks — up to a poll interval later — and a
+    // create that in fact succeeded looks lost. Refreshing here rather than
+    // after the pop keeps the spinner up for the refetch (honest: the work
+    // isn't done until the list can show it) and leaves no window where the
+    // page is gone but the list hasn't caught up. `refresh` never throws: a
+    // failure lands in the store's error state, and the change feed still
+    // converges.
+    await widget.store.refresh();
     if (!mounted) return;
     Navigator.of(context).pop(id);
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('New session')),
-      // Rebuild with the store so a still-loading workspace fills the picker in
+    return ChromePage(
+      title: 'New session',
+      code: '47-N',
+      // Rebuild with the store so a still-loading snapshot fills the picker in
       // as soon as its snapshot lands, rather than stranding on the empty state.
       body: ListenableBuilder(
         listenable: widget.store,
         builder: (context, _) {
-          final projects = widget.store.projects;
+          final projects = widget.store.projectsIn(widget.workspace);
           if (projects.isEmpty) return _noProjects();
           // Keep the selection valid: preselect the first project, and recover
           // if the chosen one vanished from the live list (a dropdown whose
@@ -166,10 +196,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
                 const SizedBox(height: 16),
                 TextFormField(
                   controller: _title,
-                  decoration: const InputDecoration(
-                    labelText: 'Title',
-                    border: OutlineInputBorder(),
-                  ),
+                  decoration: const InputDecoration(labelText: 'Title'),
                   validator: (v) =>
                       (v == null || v.trim().isEmpty) ? 'Required' : null,
                 ),
@@ -206,14 +233,21 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
         children: [
           const Icon(Icons.folder_off_outlined, size: 48),
           const SizedBox(height: 12),
-          const Text('No projects registered on the server'),
+          Text(
+            widget.workspace == null
+                ? 'No projects registered on the server'
+                : 'No projects in ${widget.workspace} on this server',
+          ),
           const SizedBox(height: 16),
           // The store is right here, so let the user jump straight to the
           // projects manager and add one; the picker fills in when they return.
           FilledButton.icon(
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (_) => ProjectsPage(store: widget.store),
+                builder: (_) => ProjectsPage(
+                  store: widget.store,
+                  workspace: widget.workspace,
+                ),
               ),
             ),
             icon: const Icon(Icons.folder_open),
@@ -225,6 +259,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
   }
 
   Widget _projectField(List<ProjectInfoDto> projects) {
+    final t = CommanderTokens.of(context);
     return DropdownButtonFormField<String>(
       // Re-key on the selection so the field adopts the reconciled value when a
       // project is picked or the selected one disappears from the live list.
@@ -232,10 +267,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
       initialValue: _selectedProject,
       isExpanded: true,
       itemHeight: null, // allow two-line items (name + path)
-      decoration: const InputDecoration(
-        labelText: 'Project',
-        border: OutlineInputBorder(),
-      ),
+      decoration: const InputDecoration(labelText: 'Project'),
       // The closed field shows just the project name (one line); the open menu
       // adds the repo path so same-named repos are distinguishable.
       selectedItemBuilder: (context) => [
@@ -258,7 +290,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
                   p.repoPath,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall,
+                  style: t.meta(size: 11, color: t.textMuted),
                 ),
               ],
             ),
@@ -272,10 +304,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
   Widget _programField() {
     if (_loadingOptions) {
       return const InputDecorator(
-        decoration: InputDecoration(
-          labelText: 'Program',
-          border: OutlineInputBorder(),
-        ),
+        decoration: InputDecoration(labelText: 'Program'),
         child: Row(
           children: [
             SizedBox(
@@ -292,21 +321,19 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
     final programs = _options?.programs ?? const <ProgramInfo>[];
     if (programs.isEmpty) {
       // Fallback: no options → free-text (keeps creation working offline).
+      final t = CommanderTokens.of(context);
       return TextFormField(
         controller: _program,
+        style: t.meta(size: 13, color: t.text),
         decoration: const InputDecoration(
           labelText: 'Program (optional)',
           hintText: 'claude',
-          border: OutlineInputBorder(),
         ),
       );
     }
     return DropdownButtonFormField<String>(
       initialValue: _selectedProgram,
-      decoration: const InputDecoration(
-        labelText: 'Program',
-        border: OutlineInputBorder(),
-      ),
+      decoration: const InputDecoration(labelText: 'Program'),
       items: [
         for (final p in programs)
           DropdownMenuItem(value: p.command, child: Text(p.label)),
@@ -320,10 +347,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
   Widget _sectionField() {
     return DropdownButtonFormField<String?>(
       initialValue: _selectedSection,
-      decoration: const InputDecoration(
-        labelText: 'Section (optional)',
-        border: OutlineInputBorder(),
-      ),
+      decoration: const InputDecoration(labelText: 'Section (optional)'),
       items: [
         const DropdownMenuItem(value: null, child: Text('None')),
         for (final s in _sectionOptions())

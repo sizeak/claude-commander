@@ -17,6 +17,7 @@
 //! the server's own `{"error":{"message"}}` body — never from request headers —
 //! so a token can't reach an error's `Display`/`Debug`.
 
+use claude_commander_protocol::api::ApiErrorBody;
 use reqwest::{Response, StatusCode};
 use thiserror::Error;
 
@@ -139,12 +140,9 @@ pub(crate) async fn error_message(resp: Response) -> String {
 
 /// Pull `error.message` out of the server's uniform error body, if present.
 fn parse_error_message(text: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    value
-        .get("error")?
-        .get("message")?
-        .as_str()
-        .map(str::to_string)
+    serde_json::from_str::<ApiErrorBody>(text)
+        .ok()
+        .map(|body| body.error.message)
 }
 
 #[cfg(test)]

@@ -17,12 +17,27 @@ use axum::{
 };
 
 /// Resolved authentication policy shared across handlers via `AppState`.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written: a derived one would print the token, which would
+/// quietly falsify this module's "the token is never logged" guarantee the first
+/// time anything `{:?}`-printed an `AuthConfig` (or a struct holding one).
+#[derive(Clone)]
 pub enum AuthConfig {
     /// A bearer token is required; requests must present `Authorization: Bearer <token>`.
     Token(String),
     /// Auth disabled (loopback dev). Every request is allowed.
     Disabled,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Redact the value, not its presence: which policy is in force is
+            // exactly what a reader of a log needs to know.
+            Self::Token(_) => f.write_str("Token(<redacted>)"),
+            Self::Disabled => f.write_str("Disabled"),
+        }
+    }
 }
 
 impl AuthConfig {

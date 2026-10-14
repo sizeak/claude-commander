@@ -1,145 +1,20 @@
-//! CLI helper utilities shared across subcommands.
+//! CLI-only presentation and gating helpers.
+//!
+//! Everything here serves the `claude-commander` binary's subcommand output and
+//! confirmation prompts: JSON/human formatting of sessions and status, and the
+//! `delete` command's `--force`/TTY guard. Shared session resolution lives in
+//! [`crate::session::lookup`], not here.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::config::AppState;
+use claude_commander_viewmodel::workspace::{
+    MergedWorkspace, WorkspaceSource, find_workspace, merge_workspace_sources, workspaces_visible,
+};
+
+use crate::config::{AppState, Config};
 use crate::git::{PrState, ReviewDecision, effective_pr_state};
 use crate::session::{AgentState, WorktreeSession};
-
-/// Whether `query` identifies `session`: a full-UUID match, an 8-char
-/// display-prefix match, or (handled by callers) a title match.
-///
-/// `SessionId`'s `Display` is an 8-char prefix of the UUID, but the HTTP API
-/// hands clients the full 36-char UUID. Matching on either keeps both the
-/// CLI/TUI (which show the prefix) and API clients (which echo the full id)
-/// working through the same resolution path.
-fn id_matches(session: &WorktreeSession, query: &str) -> bool {
-    // Full UUID is exact and unambiguous; the 8-char display is a prefix match.
-    session.id.as_uuid().to_string() == query || session.id.to_string().starts_with(query)
-}
-
-/// Find a session by title (case-insensitive), full ID, or ID prefix.
-///
-/// Title match takes priority: if a session's title matches exactly
-/// (case-insensitive), it is returned even if another session's ID
-/// happens to start with the query string. The ID fallback accepts either the
-/// full UUID (as returned by the HTTP API) or the 8-char display prefix (as
-/// shown in the CLI/TUI).
-pub fn find_session<'a>(state: &'a AppState, query: &str) -> Option<&'a WorktreeSession> {
-    let query_lower = query.to_lowercase();
-
-    // Prefer exact title match (case-insensitive)
-    let by_title = state
-        .sessions
-        .values()
-        .find(|s| s.title.to_lowercase() == query_lower);
-
-    if by_title.is_some() {
-        return by_title;
-    }
-
-    // Fall back to ID match (full UUID or display prefix)
-    state.sessions.values().find(|s| id_matches(s, query))
-}
-
-/// Outcome of resolving a session by an *exact* identifier.
-#[derive(Debug, PartialEq, Eq)]
-pub enum SessionLookup<T> {
-    /// Exactly one session matched.
-    Found(T),
-    /// No session matched the query.
-    NotFound,
-    /// More than one session matched (the count of matches).
-    Ambiguous(usize),
-}
-
-/// Resolve a session by an *exact* identifier: a case-insensitive exact title
-/// match or a full session-ID match.
-///
-/// Unlike [`find_session`], this performs no prefix matching, so a destructive
-/// command can never act on the wrong session merely because the query was a
-/// prefix shared by several IDs (or an empty string, which prefixes every ID).
-/// Returns [`SessionLookup::Ambiguous`] when more than one session matches
-/// (e.g. two sessions share a title) rather than picking one arbitrarily.
-pub fn find_session_exact<'a>(
-    state: &'a AppState,
-    query: &str,
-) -> SessionLookup<&'a WorktreeSession> {
-    let query_lower = query.to_lowercase();
-    let mut matches = state
-        .sessions
-        .values()
-        .filter(|s| s.title.to_lowercase() == query_lower || s.id.as_uuid().to_string() == query);
-
-    let Some(first) = matches.next() else {
-        return SessionLookup::NotFound;
-    };
-    match matches.count() {
-        0 => SessionLookup::Found(first),
-        extra => SessionLookup::Ambiguous(extra + 1),
-    }
-}
-
-/// Resolve a `--project <name>` flag to the project's on-disk repo path using a
-/// backend's [`WorkspaceSnapshot`](crate::api::WorkspaceSnapshot). Matches a
-/// project by name (case-insensitive) and returns its `repo_path` — the path
-/// the session's worktree will fork from. For a remote backend this is the
-/// server-side path, so the caller never has to know it.
-///
-/// Both failures return a [`ConfigError::InvalidValue`](crate::error::ConfigError):
-/// - **No match**: lists the available project names (an empty list reports
-///   "none found" — e.g. a fresh remote with no sessions yet; seed one with
-///   `--path`), so a typo is as actionable as an unknown `--remote` server.
-/// - **Ambiguous match**: project names are derived from repo directory names
-///   and are *not* unique, so two projects can share one. Rather than silently
-///   pick the first, report the collision and direct the caller to `--path`
-///   (which names an exact directory).
-pub fn resolve_project_path(
-    projects: &[crate::api::ProjectInfo],
-    name: &str,
-) -> crate::Result<std::path::PathBuf> {
-    let mut matches = projects
-        .iter()
-        .filter(|p| p.name.eq_ignore_ascii_case(name));
-
-    let Some(first) = matches.next() else {
-        let available = if projects.is_empty() {
-            "none found".to_string()
-        } else {
-            projects
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        return Err(crate::error::ConfigError::InvalidValue {
-            key: "project".to_string(),
-            reason: format!("no project named '{name}' (available: {available})"),
-        }
-        .into());
-    };
-
-    if matches.next().is_some() {
-        return Err(crate::error::ConfigError::InvalidValue {
-            key: "project".to_string(),
-            reason: format!(
-                "'{name}' matches more than one project — disambiguate with --path <repo path>"
-            ),
-        }
-        .into());
-    }
-
-    Ok(first.repo_path.clone())
-}
-
-/// Maximum lines allowed for the `log` command's `--lines` flag.
-pub const LOG_MAX_LINES: usize = 10_000;
-
-/// Clamp a requested line count to the allowed range [1, LOG_MAX_LINES].
-pub fn clamp_log_lines(requested: usize) -> usize {
-    requested.clamp(1, LOG_MAX_LINES)
-}
 
 /// What the `delete` command should do before mutating, given the `--force`
 /// flag and whether stdin is an interactive terminal.
@@ -187,9 +62,17 @@ pub struct SessionJsonEntry {
     pub pr_draft: bool,
     pub pr_labels: Vec<String>,
     pub created_at: DateTime<Utc>,
+    /// The session's workspace (its project's tag); `null` is Main.
+    pub workspace: Option<String>,
 }
 
 impl SessionJsonEntry {
+    /// Stamp the entry with its project's workspace tag.
+    pub fn with_workspace(mut self, workspace: Option<String>) -> Self {
+        self.workspace = workspace;
+        self
+    }
+
     pub fn from_info(info: &crate::api::SessionInfo) -> Self {
         Self {
             id: info.id.clone(),
@@ -204,6 +87,7 @@ impl SessionJsonEntry {
             pr_draft: info.pr_draft,
             pr_labels: info.pr_labels.clone(),
             created_at: info.created_at,
+            workspace: None,
         }
     }
 
@@ -221,7 +105,88 @@ impl SessionJsonEntry {
             pr_draft: session.pr_draft,
             pr_labels: session.pr_labels.clone(),
             created_at: session.created_at,
+            workspace: None,
         }
+    }
+}
+
+/// Workspace context for `list`: the merged workspace list for this host and
+/// what `--workspace` resolved to.
+#[derive(Debug, Clone)]
+pub struct CliWorkspaces {
+    pub workspaces: Vec<MergedWorkspace>,
+    /// `None` = no `--workspace` flag (list everything); `Some(tag)` = only
+    /// projects tagged `tag` (`Some(None)` = Main).
+    pub filter: Option<Option<String>>,
+}
+
+impl CliWorkspaces {
+    /// Build from this host's config and the tags its projects carry, and
+    /// resolve `flag` (a name, case-insensitively, or Main by its label or the
+    /// word `main`). An unknown name is an error listing what exists.
+    pub fn resolve<'a>(
+        config: &Config,
+        project_tags: impl IntoIterator<Item = &'a str>,
+        flag: Option<&str>,
+    ) -> crate::Result<Self> {
+        let source = WorkspaceSource {
+            defs: &config.workspaces,
+            main: config.main_workspace.as_ref(),
+            project_tags: project_tags.into_iter().collect(),
+        };
+        let workspaces = merge_workspace_sources(&[source]);
+        let filter = match flag {
+            None => None,
+            Some(typed) => match find_workspace(&workspaces, typed) {
+                Some(w) => Some(w.name.clone()),
+                None => {
+                    let available = workspaces
+                        .iter()
+                        .map(|w| w.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(crate::error::ConfigError::InvalidValue {
+                        key: "workspace".to_string(),
+                        reason: format!("no workspace named '{typed}' (available: {available})"),
+                    }
+                    .into());
+                }
+            },
+        };
+        Ok(Self { workspaces, filter })
+    }
+
+    /// Whether the human listing shows a WORKSPACE column: only once there is
+    /// more than one workspace, matching the TUI hiding its chip until then.
+    pub fn show_column(&self) -> bool {
+        workspaces_visible(&self.workspaces)
+    }
+
+    /// Whether a project tagged `tag` passes the `--workspace` filter.
+    pub fn includes(&self, tag: Option<&str>) -> bool {
+        self.filter.as_ref().is_none_or(|f| f.as_deref() == tag)
+    }
+
+    /// Display label for `tag` (Main's configured label for `None`).
+    pub fn label(&self, tag: Option<&str>) -> String {
+        self.workspaces
+            .iter()
+            .find(|w| w.name.as_deref() == tag)
+            .map_or_else(|| tag.unwrap_or_default().to_string(), |w| w.label.clone())
+    }
+}
+
+/// The tag `new --workspace <typed>` should give a project it registers: an
+/// existing workspace (matched like `list --workspace`) keeps its spelling;
+/// anything else is taken as a new name, which the host validates and defines.
+pub fn resolve_new_session_workspace(
+    snapshot: &crate::api::Snapshot,
+    typed: &str,
+) -> Option<String> {
+    let workspaces = claude_commander_viewmodel::workspace::merge_workspaces([snapshot]);
+    match find_workspace(&workspaces, typed) {
+        Some(w) => w.name.clone(),
+        None => Some(typed.trim().to_string()),
     }
 }
 
@@ -376,14 +341,6 @@ mod tests {
         state
     }
 
-    fn make_state(sessions: Vec<WorktreeSession>) -> AppState {
-        let mut state = AppState::new();
-        for s in sessions {
-            state.sessions.insert(s.id, s);
-        }
-        state
-    }
-
     fn make_session(title: &str) -> WorktreeSession {
         WorktreeSession::new(
             ProjectId::new(),
@@ -404,156 +361,71 @@ mod tests {
         )
     }
 
-    #[test]
-    fn finds_by_exact_title() {
-        let s = make_session("fix-auth");
-        let state = make_state(vec![s.clone()]);
-        let found = find_session(&state, "fix-auth").unwrap();
-        assert_eq!(found.id, s.id);
+    // -- Workspace tests --
+
+    fn config_with(defs: &[&str], main: Option<&str>) -> Config {
+        use claude_commander_protocol::workspace::WorkspaceDef;
+        Config {
+            workspaces: defs.iter().map(|d| WorkspaceDef::named(*d)).collect(),
+            main_workspace: main.map(WorkspaceDef::named),
+            ..Config::default()
+        }
     }
 
     #[test]
-    fn finds_by_title_case_insensitive() {
-        let s = make_session("Fix-Auth");
-        let state = make_state(vec![s.clone()]);
-        let found = find_session(&state, "fix-auth").unwrap();
-        assert_eq!(found.id, s.id);
+    fn cli_workspaces_hide_the_column_until_a_second_workspace() {
+        let one = CliWorkspaces::resolve(&config_with(&[], None), [], None).unwrap();
+        assert!(!one.show_column());
+        assert!(one.includes(Some("anything")), "no flag lists everything");
+        let two = CliWorkspaces::resolve(&config_with(&["Work"], None), [], None).unwrap();
+        assert!(two.show_column());
+        // An orphaned tag is a workspace too.
+        let orphan = CliWorkspaces::resolve(&config_with(&[], None), ["Lost"], None).unwrap();
+        assert!(orphan.show_column());
     }
 
     #[test]
-    fn finds_by_id_prefix() {
-        let s = make_session("my-session");
-        let id_prefix = &s.id.to_string()[..4];
-        let state = make_state(vec![s.clone()]);
-        let found = find_session(&state, id_prefix).unwrap();
-        assert_eq!(found.id, s.id);
+    fn cli_workspace_flag_resolves_names_and_main() {
+        let c = config_with(&["Work"], Some("Home"));
+        let work = CliWorkspaces::resolve(&c, [], Some("work")).unwrap();
+        assert_eq!(work.filter, Some(Some("Work".to_string())));
+        assert!(work.includes(Some("Work")));
+        assert!(!work.includes(None));
+        let home = CliWorkspaces::resolve(&c, [], Some("home")).unwrap();
+        assert_eq!(home.filter, Some(None));
+        assert!(home.includes(None));
+        assert_eq!(home.label(None), "Home");
+        assert_eq!(home.label(Some("Work")), "Work");
+        let err = CliWorkspaces::resolve(&c, [], Some("play")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("play") && msg.contains("Home, Work"), "{msg}");
     }
 
     #[test]
-    fn finds_by_full_uuid() {
-        // The HTTP API hands clients the full 36-char UUID, not the 8-char
-        // display. `find_session` must resolve it (B1 regression).
-        let s = make_session("my-session");
-        let full_uuid = s.id.as_uuid().to_string();
-        assert!(
-            full_uuid.len() > 8,
-            "full uuid should be longer than display"
+    fn new_session_workspace_keeps_an_existing_spelling_or_takes_a_new_name() {
+        let mut snap = crate::backend::empty_snapshot();
+        snap.workspaces = vec![claude_commander_protocol::workspace::WorkspaceDef::named(
+            "Work",
+        )];
+        assert_eq!(
+            resolve_new_session_workspace(&snap, "work").as_deref(),
+            Some("Work")
         );
-        let state = make_state(vec![s.clone()]);
-        let found = find_session(&state, &full_uuid).unwrap();
-        assert_eq!(found.id, s.id);
+        assert_eq!(resolve_new_session_workspace(&snap, "main"), None);
+        assert_eq!(
+            resolve_new_session_workspace(&snap, " Fresh ").as_deref(),
+            Some("Fresh")
+        );
     }
 
     #[test]
-    fn returns_none_when_no_match() {
-        let state = make_state(vec![make_session("something")]);
-        assert!(find_session(&state, "nonexistent").is_none());
-    }
-
-    #[test]
-    fn title_match_takes_priority_over_id_prefix() {
-        // Create two sessions where one's title could collide with the
-        // other's ID prefix in theory. The title match should always win.
-        let s1 = make_session("abc");
-        let s2 = make_session("other");
-        let state = make_state(vec![s1.clone(), s2]);
-        let found = find_session(&state, "abc").unwrap();
-        assert_eq!(found.id, s1.id);
-    }
-
-    #[test]
-    fn returns_none_on_empty_state() {
-        let state = AppState::new();
-        assert!(find_session(&state, "anything").is_none());
-    }
-
-    // -- find_session_exact tests --
-
-    #[test]
-    fn exact_matches_full_title_case_insensitive() {
-        let s = make_session("Fix-Auth");
-        let state = make_state(vec![s.clone()]);
-        match find_session_exact(&state, "fix-auth") {
-            SessionLookup::Found(found) => assert_eq!(found.id, s.id),
-            other => panic!("expected Found, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn exact_matches_full_id() {
-        let s = make_session("my-session");
-        // The full 36-char UUID, as the HTTP API returns it — not the 8-char
-        // `Display` prefix.
-        let full_id = s.id.as_uuid().to_string();
-        let state = make_state(vec![s.clone()]);
-        match find_session_exact(&state, &full_id) {
-            SessionLookup::Found(found) => assert_eq!(found.id, s.id),
-            other => panic!("expected Found, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn exact_does_not_match_id_prefix() {
-        // The dangerous case the loose `find_session` allowed: a prefix of an
-        // ID must NOT resolve for a destructive command.
-        let s = make_session("my-session");
-        let id_prefix = &s.id.to_string()[..4];
-        let state = make_state(vec![s]);
-        assert!(matches!(
-            find_session_exact(&state, id_prefix),
-            SessionLookup::NotFound
-        ));
-    }
-
-    #[test]
-    fn exact_empty_query_is_not_found() {
-        // An empty string is a prefix of every ID; it must never resolve.
-        let state = make_state(vec![make_session("a"), make_session("b")]);
-        assert!(matches!(
-            find_session_exact(&state, ""),
-            SessionLookup::NotFound
-        ));
-    }
-
-    #[test]
-    fn exact_reports_ambiguity_on_duplicate_titles() {
-        let state = make_state(vec![make_session("dup"), make_session("dup")]);
-        assert!(matches!(
-            find_session_exact(&state, "dup"),
-            SessionLookup::Ambiguous(2)
-        ));
-    }
-
-    #[test]
-    fn exact_returns_not_found_when_no_match() {
-        let state = make_state(vec![make_session("something")]);
-        assert!(matches!(
-            find_session_exact(&state, "nonexistent"),
-            SessionLookup::NotFound
-        ));
-    }
-
-    // -- clamp_log_lines tests --
-
-    #[test]
-    fn clamp_log_lines_default_passthrough() {
-        assert_eq!(clamp_log_lines(100), 100);
-    }
-
-    #[test]
-    fn clamp_log_lines_zero_becomes_one() {
-        assert_eq!(clamp_log_lines(0), 1);
-    }
-
-    #[test]
-    fn clamp_log_lines_max_boundary() {
-        assert_eq!(clamp_log_lines(LOG_MAX_LINES), LOG_MAX_LINES);
-    }
-
-    #[test]
-    fn clamp_log_lines_over_max() {
-        assert_eq!(clamp_log_lines(LOG_MAX_LINES + 1), LOG_MAX_LINES);
-        assert_eq!(clamp_log_lines(usize::MAX), LOG_MAX_LINES);
+    fn json_entry_carries_the_workspace_tag() {
+        let entry = SessionJsonEntry::from_session(&make_session("t"), "p")
+            .with_workspace(Some("Work".into()));
+        let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["workspace"], "Work");
+        let main = SessionJsonEntry::from_session(&make_session("t"), "p");
+        assert!(serde_json::to_value(&main).unwrap()["workspace"].is_null());
     }
 
     // -- SessionJsonEntry tests --
@@ -800,61 +672,5 @@ mod tests {
         for input in ["", "n", "no", "x", "yep", "\n"] {
             assert!(!parse_yes_no(input), "expected {input:?} to be no");
         }
-    }
-
-    fn make_project_info(name: &str, repo_path: &str) -> crate::api::ProjectInfo {
-        crate::api::ProjectInfo {
-            id: ProjectId::new(),
-            name: name.to_string(),
-            repo_path: PathBuf::from(repo_path),
-            main_branch: "main".to_string(),
-            session_ids: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn resolve_project_path_matches_case_insensitively() {
-        let projects = vec![
-            make_project_info("Genio", "/home/mark/genio"),
-            make_project_info("other", "/home/mark/other"),
-        ];
-        let path = resolve_project_path(&projects, "genio").unwrap();
-        assert_eq!(path, PathBuf::from("/home/mark/genio"));
-    }
-
-    #[test]
-    fn resolve_project_path_unknown_lists_available() {
-        let projects = vec![make_project_info("genio", "/home/mark/genio")];
-        let err = resolve_project_path(&projects, "nope").unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("no project named 'nope'") && msg.contains("genio"),
-            "unknown project must name the miss and list projects: {err}"
-        );
-    }
-
-    #[test]
-    fn resolve_project_path_empty_reports_none_found() {
-        let err = resolve_project_path(&[], "genio").unwrap_err();
-        assert!(
-            err.to_string().contains("none found"),
-            "with no projects the error must say none were found: {err}"
-        );
-    }
-
-    #[test]
-    fn resolve_project_path_ambiguous_errors_with_path_hint() {
-        // Project names aren't unique (they come from repo dir names), so two
-        // projects named "app" at different paths must not silently pick one.
-        let projects = vec![
-            make_project_info("app", "/home/mark/one/app"),
-            make_project_info("App", "/home/mark/two/app"),
-        ];
-        let err = resolve_project_path(&projects, "app").unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("more than one project") && msg.contains("--path"),
-            "ambiguous project must error and point at --path: {err}"
-        );
     }
 }

@@ -23,3 +23,21 @@ serde_json = { workspace = true }
 # so the workspace resolves a single copy. Both cross-compile to mobile.
 uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# TypeScript bindings for the browser page (`web/src/generated/`), written by the
+# `ts` feature's drift test. Optional and off by default: nothing in the normal
+# build graph — in particular not the Android cross-build that reaches this crate
+# through `client/rust` — compiles ts-rs.
+ts-rs = { version = "12", optional = true, default-features = false, features = [
+    "serde-compat",
+    "uuid-impl",
+    "chrono-impl",
+] }
+
+[features]
+# `cargo test -p claude-commander-protocol --features ts` checks the committed
+# bindings against a fresh export; see `src/ts_export.rs`.
+ts = ["dep:ts-rs"]
+
+[dev-dependencies]
+tempfile = "3.27"

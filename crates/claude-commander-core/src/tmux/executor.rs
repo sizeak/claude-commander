@@ -372,6 +372,10 @@ pub struct StatusBarInfo {
     pub is_shell: bool,
     /// Project name (shown as a prefix)
     pub project_name: String,
+    /// Label of the project's workspace, shown before the project name.
+    /// `None` hides it — the host has only Main, so there is nothing to tell
+    /// apart (workspace UI stays hidden until a second workspace exists).
+    pub workspace: Option<String>,
 }
 
 impl StatusBarInfo {
@@ -389,8 +393,13 @@ impl StatusBarInfo {
             None => String::new(),
         };
         let toggle_hint = if self.is_shell { "agent" } else { "shell" };
+        let workspace = self
+            .workspace
+            .as_deref()
+            .map(|w| format!(" {}{}", w.replace('#', "##"), Self::SEP.trim_end()))
+            .unwrap_or_default();
         format!(
-            " #[bold]{}#[nobold]{}{}{}{sep}#[bold]Ctrl-q#[nobold]: detach{sep}#[bold]Ctrl-\\#[nobold]: {}{sep}#[bold]Ctrl-Space#[nobold]: switch ",
+            "{workspace} #[bold]{}#[nobold]{}{}{}{sep}#[bold]Ctrl-q#[nobold]: detach{sep}#[bold]Ctrl-\\#[nobold]: {}{sep}#[bold]Ctrl-Space#[nobold]: switch ",
             self.project_name,
             Self::SEP,
             safe_branch,
@@ -564,7 +573,25 @@ mod tests {
             status_style: "bg=colour236,fg=colour252".to_string(),
             is_shell: false,
             project_name: "my-project".to_string(),
+            workspace: None,
         }
+    }
+
+    #[test]
+    fn test_status_bar_format_left_names_the_workspace() {
+        let mut info = test_info("feature", None, false);
+        info.workspace = Some("Work".to_string());
+        assert_eq!(
+            info.format_left(),
+            " Work \u{2502} #[bold]my-project#[nobold] \u{2502} feature \u{2502} #[bold]Ctrl-q#[nobold]: detach \u{2502} #[bold]Ctrl-\\#[nobold]: shell \u{2502} #[bold]Ctrl-Space#[nobold]: switch "
+        );
+    }
+
+    #[test]
+    fn test_status_bar_format_left_escapes_hash_in_workspace() {
+        let mut info = test_info("feature", None, false);
+        info.workspace = Some("#1".to_string());
+        assert!(info.format_left().starts_with(" ##1 \u{2502} "));
     }
 
     #[test]

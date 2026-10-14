@@ -77,15 +77,20 @@ pub struct FrontendInfo {
 impl FrontendInfo {
     /// Construct a frontend identity. **Panics** (like `expect`) if `name` or
     /// `version` is empty — the consuming application is required to identify
-    /// itself, e.g. `FrontendInfo::new("claude-commander", claude_commander_core::VERSION)`.
+    /// itself, e.g. `FrontendInfo::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))`.
+    ///
+    /// Pass the *frontend's* own package metadata, not
+    /// [`crate::VERSION`]: that constant is this library's
+    /// version, reported separately as `lib_version`, and a frontend that
+    /// forwards it here reports the wrong version for itself.
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
         let name = name.into();
         let version = version.into();
         assert!(
             !name.trim().is_empty(),
             "telemetry: FrontendInfo name must not be empty — the embedding \
-             application must identify itself, e.g. \
-             FrontendInfo::new(\"claude-commander\", claude_commander_core::VERSION)"
+             application must identify itself with its own package metadata, \
+             e.g. FrontendInfo::new(env!(\"CARGO_PKG_NAME\"), env!(\"CARGO_PKG_VERSION\"))"
         );
         assert!(
             !version.trim().is_empty(),
@@ -261,10 +266,19 @@ impl Disabled {
 /// its background persist) when telemetry is off. Logs the reason at `debug`
 /// when off so a silent build is diagnosable from the log alone.
 pub fn would_be_enabled(config: &TelemetryConfig) -> bool {
-    // Never emit during the crate's own test runs — the credential is committed,
-    // so without this the suite would ship events to the live stream and the
-    // sync service constructor would try to spawn without a runtime.
-    if cfg!(test) {
+    // Never emit during a test run — the credential is committed, so without
+    // this the suite would ship events to the live stream and the sync service
+    // constructor would try to spawn without a runtime.
+    //
+    // `cfg!(test)` covers only THIS crate's own test binary. A downstream crate
+    // testing against core compiles it as a normal dependency, where `cfg!(test)`
+    // is false — so extracting `claude-commander-tui` silently re-enabled
+    // telemetry for its whole suite (826 tests each firing `session_start` at the
+    // live stream, and the added latency made timing-sensitive async tests flaky).
+    // `test-support` is enabled only from a `[dev-dependencies]` entry, so it is
+    // exactly the signal for "a test binary is being built against core" and
+    // costs a release build nothing.
+    if cfg!(test) || cfg!(feature = "test-support") {
         return false;
     }
     let has_credential = config.token.is_some() || baked_credential().is_some();
@@ -424,7 +438,7 @@ mod tests {
             shell: Some("zsh".into()),
             color_mode: Some("truecolor".into()),
         };
-        let config = ConfigSnapshot::from_config(&crate::config::Config::default(), None);
+        let config = ConfigSnapshot::from_config(&crate::config::Config::default());
         t.session_start(&env, &config);
         t.flush().await;
 

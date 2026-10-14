@@ -1,5 +1,7 @@
 use super::*;
 use crate::config::{AppState, Config, ConfigStore, StateStore};
+use crate::git::fixture::fixture_git_std;
+use claude_commander_protocol::github::canonical_repo_slug;
 use tempfile::TempDir;
 
 fn test_store() -> (TempDir, Arc<StateStore>) {
@@ -9,8 +11,12 @@ fn test_store() -> (TempDir, Arc<StateStore>) {
     (dir, store)
 }
 
-fn test_config_store(config: Config) -> (TempDir, Arc<ConfigStore>) {
+fn test_config_store(mut config: Config) -> (TempDir, Arc<ConfigStore>) {
     let dir = TempDir::new().unwrap();
+    // `projects_dir` defaults to the user's REAL `~/Projects`, which the
+    // repo-clone paths write into. Pin it under `dir` — applied after the
+    // caller's config arrives, so an explicitly-passed `Config` can't lose it.
+    config.projects_dir = Some(dir.path().join("projects"));
     let path = dir.path().join("config.toml");
     let toml = toml::to_string_pretty(&config).unwrap();
     std::fs::write(&path, toml).unwrap();
@@ -381,4 +387,319 @@ async fn delete_session_mutates_state_once_removal_first() {
         "delete must mutate state once (removal), not transition through Stopped first"
     );
     assert!(store.read().await.get_session(&sid).is_none());
+}
+
+// -- `Project.origin_url` capture and backfill --
+
+/// Run a git command in `dir`, panicking with its output on failure.
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = fixture_git_std()
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("git invocation failed to spawn");
+    assert!(
+        out.status.success(),
+        "git {:?} failed in {}:\nstdout: {}\nstderr: {}",
+        args,
+        dir.display(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Give a fresh repo the local identity the test harness needs. (Signing is
+/// already off: [`git`] runs through [`fixture_git_std`].)
+fn git_identity(dir: &std::path::Path) {
+    git(dir, &["config", "user.email", "t@t"]);
+    git(dir, &["config", "user.name", "t"]);
+}
+
+/// A bare "remote" plus a clone of it, both inside one `TempDir`. Mirrors the
+/// fixture shape in `git/auto_pull.rs` — the clone source is a plain local
+/// path, so nothing here touches the network.
+///
+/// Returns `(tmp, remote_path, local_clone_path)`.
+fn repo_with_remote() -> (TempDir, PathBuf, PathBuf) {
+    let tmp = TempDir::new().expect("tempdir");
+    let remote = tmp.path().join("remote.git");
+    let seed = tmp.path().join("seed");
+    let local = tmp.path().join("local");
+
+    git(tmp.path(), &["init", "--bare", "-b", "main", "remote.git"]);
+
+    git(tmp.path(), &["init", "-b", "main", "seed"]);
+    git_identity(&seed);
+    std::fs::write(seed.join("README"), "v1\n").unwrap();
+    git(&seed, &["add", "README"]);
+    git(&seed, &["commit", "-m", "initial"]);
+    git(
+        &seed,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&seed, &["push", "origin", "main"]);
+
+    git(
+        tmp.path(),
+        &["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
+    );
+    git_identity(&local);
+
+    (tmp, remote, local)
+}
+
+/// A `SessionManager` whose worktrees dir and projects dir are both pinned
+/// inside `tmp`, so nothing it does can reach the developer's real trees.
+fn manager_for(tmp: &TempDir) -> (TempDir, TempDir, Arc<StateStore>, SessionManager) {
+    let mut config = Config::default();
+    config.telemetry.enabled = false;
+    config.worktrees_dir = Some(tmp.path().join("worktrees"));
+    let (cdir, config_store) = test_config_store(config);
+    let (sdir, store) = test_store();
+    let manager = SessionManager::new(config_store, store.clone(), "");
+    (cdir, sdir, store, manager)
+}
+
+#[tokio::test]
+async fn add_project_records_origin_url() {
+    let (tmp, remote, local) = repo_with_remote();
+    let (_cdir, _sdir, store, manager) = manager_for(&tmp);
+
+    let id = manager.add_project(local, None).await.unwrap();
+
+    let state = store.read().await;
+    let origin = state
+        .get_project(&id)
+        .unwrap()
+        .origin_url
+        .as_deref()
+        .expect("origin url recorded at add time");
+    // The fixture's remote is a local path, so this is the strong assertion:
+    // the recorded origin resolves to the very repo the clone came from.
+    assert_eq!(
+        std::fs::canonicalize(origin).unwrap(),
+        std::fs::canonicalize(&remote).unwrap()
+    );
+    // …and it agrees with the remote under the identity the repo picker will
+    // actually match on (both `None` here — a local path has no GitHub slug).
+    assert_eq!(
+        canonical_repo_slug(origin),
+        canonical_repo_slug(remote.to_str().unwrap())
+    );
+}
+
+#[tokio::test]
+async fn add_project_records_origin_url_matching_a_github_remote_by_slug() {
+    // The picker badges a row when a project's stored origin and the API's
+    // `clone_url` canonicalise to the same slug. Pin that end to end with a
+    // real GitHub-shaped remote (never contacted — nothing fetches).
+    let tmp = TempDir::new().unwrap();
+    let local = tmp.path().join("repo");
+    git(tmp.path(), &["init", "-b", "main", "repo"]);
+    git_identity(&local);
+    std::fs::write(local.join("f"), "x\n").unwrap();
+    git(&local, &["add", "f"]);
+    git(&local, &["commit", "-m", "c"]);
+    git(
+        &local,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:sizeak/claude-commander.git",
+        ],
+    );
+
+    let (_cdir, _sdir, store, manager) = manager_for(&tmp);
+    let id = manager.add_project(local, None).await.unwrap();
+
+    let state = store.read().await;
+    let origin = state.get_project(&id).unwrap().origin_url.clone().unwrap();
+    assert_eq!(
+        canonical_repo_slug(&origin),
+        canonical_repo_slug("https://github.com/SizeAk/Claude-Commander"),
+        "ssh origin must match the API's https clone_url"
+    );
+}
+
+#[tokio::test]
+async fn add_project_without_a_remote_records_no_origin_url() {
+    // A repo with no `origin` is a valid resting state, not a retry loop.
+    let tmp = TempDir::new().unwrap();
+    let local = tmp.path().join("solo");
+    git(tmp.path(), &["init", "-b", "main", "solo"]);
+    git_identity(&local);
+    std::fs::write(local.join("f"), "x\n").unwrap();
+    git(&local, &["add", "f"]);
+    git(&local, &["commit", "-m", "c"]);
+
+    let (_cdir, _sdir, store, manager) = manager_for(&tmp);
+    let id = manager.add_project(local, None).await.unwrap();
+
+    assert_eq!(
+        store.read().await.get_project(&id).unwrap().origin_url,
+        None
+    );
+    // Backfill must tolerate it too, and still leave `None` — *without*
+    // rewriting state on every pass. The store generation counter is the
+    // observable: a repo that genuinely has no `origin` must settle, not churn
+    // a `state.json` write (and a redraw) on every sync.
+    let gen_before = *store.subscribe().borrow();
+    manager.sync_worktrees(&id).await.unwrap();
+    manager.sync_worktrees(&id).await.unwrap();
+    assert_eq!(
+        store.read().await.get_project(&id).unwrap().origin_url,
+        None
+    );
+    assert_eq!(
+        *store.subscribe().borrow(),
+        gen_before,
+        "a repo with no origin must settle at None without writing state"
+    );
+}
+
+#[tokio::test]
+async fn backfill_updates_origin_url_when_the_remote_is_repointed() {
+    // Repos get renamed, transferred between owners, and switched between ssh
+    // and https. A stored origin that never refreshes would silently mis-badge
+    // the repo in the picker this field exists to serve, so the repair has to
+    // *correct* a stale value, not only fill an absent one.
+    let (tmp, _remote, local) = repo_with_remote();
+    let (_cdir, _sdir, store, manager) = manager_for(&tmp);
+    let id = manager.add_project(local.clone(), None).await.unwrap();
+    assert!(
+        store
+            .read()
+            .await
+            .get_project(&id)
+            .unwrap()
+            .origin_url
+            .is_some()
+    );
+
+    git(
+        &local,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:sizeak/renamed-repo.git",
+        ],
+    );
+    manager.sync_worktrees(&id).await.unwrap();
+
+    let stored = store
+        .read()
+        .await
+        .get_project(&id)
+        .unwrap()
+        .origin_url
+        .clone();
+    assert_eq!(
+        canonical_repo_slug(stored.as_deref().expect("origin still recorded")),
+        canonical_repo_slug("https://github.com/sizeak/renamed-repo"),
+        "stored origin must follow the repo's current remote"
+    );
+
+    // Still idempotent: with the value now current, a further pass writes nothing.
+    let gen_before = *store.subscribe().borrow();
+    manager.sync_worktrees(&id).await.unwrap();
+    assert_eq!(
+        store.read().await.get_project(&id).unwrap().origin_url,
+        stored
+    );
+    assert_eq!(
+        *store.subscribe().borrow(),
+        gen_before,
+        "an unchanged origin must not rewrite state"
+    );
+
+    // Dropping the remote entirely settles back to `None` rather than pinning
+    // an origin the repo no longer has.
+    git(&local, &["remote", "remove", "origin"]);
+    manager.sync_worktrees(&id).await.unwrap();
+    assert_eq!(
+        store.read().await.get_project(&id).unwrap().origin_url,
+        None
+    );
+}
+
+#[tokio::test]
+async fn backfill_refills_origin_url_after_an_older_binary_drops_the_field() {
+    let (tmp, _remote, local) = repo_with_remote();
+    let (_cdir, _sdir, store, manager) = manager_for(&tmp);
+    let id = manager.add_project(local, None).await.unwrap();
+
+    // Simulate an older binary (or a pre-`origin_url` state.json) writing the
+    // project back without the field. The fill must re-fire: it is never
+    // version-gated, because `state.json` is multi-writer.
+    store
+        .mutate(move |state| {
+            state.projects.get_mut(&id).unwrap().origin_url = None;
+        })
+        .await
+        .unwrap();
+
+    manager.sync_worktrees(&id).await.unwrap();
+    let first = store
+        .read()
+        .await
+        .get_project(&id)
+        .unwrap()
+        .origin_url
+        .clone();
+    assert!(first.is_some(), "backfill must refill the dropped field");
+
+    // Idempotent: a second pass changes nothing and does not error.
+    manager.sync_worktrees(&id).await.unwrap();
+    assert_eq!(
+        store.read().await.get_project(&id).unwrap().origin_url,
+        first
+    );
+}
+
+#[test]
+fn status_bar_workspace_is_hidden_while_the_host_has_only_main() {
+    let config = Config::default();
+    let state = AppState::new();
+    assert_eq!(super::status_bar_workspace(&config, &state, None), None);
+}
+
+#[test]
+fn status_bar_workspace_names_the_tag_or_mains_label() {
+    use claude_commander_protocol::workspace::WorkspaceDef;
+    let config = Config {
+        workspaces: vec![WorkspaceDef::named("Work")],
+        ..Config::default()
+    };
+    let state = AppState::new();
+    assert_eq!(
+        super::status_bar_workspace(&config, &state, Some("Work")).as_deref(),
+        Some("Work")
+    );
+    assert_eq!(
+        super::status_bar_workspace(&config, &state, None).as_deref(),
+        Some("Main")
+    );
+    let relabelled = Config {
+        main_workspace: Some(WorkspaceDef::named("Home")),
+        ..config
+    };
+    assert_eq!(
+        super::status_bar_workspace(&relabelled, &state, None).as_deref(),
+        Some("Home")
+    );
+}
+
+#[test]
+fn status_bar_workspace_shows_for_a_tag_with_no_definition() {
+    let config = Config::default();
+    let mut state = AppState::new();
+    let mut project = crate::session::Project::new("p", std::path::PathBuf::from("/tmp/p"), "main");
+    project.workspace = Some("Orphan".to_string());
+    state.add_project(project);
+    assert_eq!(
+        super::status_bar_workspace(&config, &state, None).as_deref(),
+        Some("Main")
+    );
 }

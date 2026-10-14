@@ -1,19 +1,22 @@
 //! `claude-commander-server` — exposes a local `CommanderService` over HTTP +
 //! WebSocket so clients on other machines can drive Commander sessions.
-
-use std::net::SocketAddr;
+//!
+//! This binary is one of two frontends over the same library: the TUI embeds the
+//! server in-process (see [`claude_commander_server::embed`]) when
+//! `[server] auto_start` is on. Everything worth testing — the token policy, the
+//! bind — lives in the library; this file resolves flags and logs.
 
 use clap::Parser;
 use claude_commander_core::ServerInfo;
 use claude_commander_core::api::{BackgroundOpts, CommanderService};
+use claude_commander_core::config::ServerConfig;
 use claude_commander_core::telemetry::FrontendInfo;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use claude_commander_server::auth::AuthConfig;
-use claude_commander_server::config::{ServerConfig, check_no_auth_bind};
-use claude_commander_server::router::build_router;
-use claude_commander_server::state::AppState;
+use claude_commander_server::config::{check_no_auth_bind, resolve};
+use claude_commander_server::embed::{self, TokenDecision};
 
 /// Identify this binary to the telemetry layer (required by `CommanderService`).
 fn frontend() -> FrontendInfo {
@@ -63,10 +66,13 @@ fn setup_logging(debug: bool) {
         .init();
 }
 
-/// Resolve the effective server config by layering CLI flags over the loaded
-/// `[server]` config.
-fn resolve_config(cli: &Cli) -> Result<ServerConfig, Box<dyn std::error::Error>> {
-    let mut cfg = ServerConfig::load()?;
+/// Layer this binary's CLI flags over the `[server]` table core loaded from
+/// `config.toml` (and the `CC_SERVER_*` environment overrides [`resolve`] adds).
+fn resolve_config(
+    base: ServerConfig,
+    cli: &Cli,
+) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+    let mut cfg = resolve(base)?;
     if let Some(bind) = cli.bind {
         cfg.bind = bind;
     }
@@ -86,15 +92,19 @@ fn resolve_config(cli: &Cli) -> Result<ServerConfig, Box<dyn std::error::Error>>
 /// once, and used (secure-by-default on a fresh install). The token value is
 /// only logged when it was auto-generated (so the operator can copy it); a
 /// configured token is never logged.
+///
+/// Unlike the TUI's embedded server, this binary does **not** persist a
+/// generated token: a `systemd`-style deployment's config file may well be
+/// read-only or managed, and an operator running the binary by hand can read the
+/// token off the terminal. Set `[server] token` to make it stable.
 fn resolve_auth(cfg: &ServerConfig, allow_no_auth: bool) -> AuthConfig {
     if allow_no_auth {
         warn!("authentication disabled (--allow-no-auth); only safe on a loopback bind");
         return AuthConfig::Disabled;
     }
-    match &cfg.token {
-        Some(token) => AuthConfig::Token(token.clone()),
-        None => {
-            let token = generate_token();
+    match embed::token_decision(cfg) {
+        TokenDecision::Existing(token) => AuthConfig::Token(token),
+        TokenDecision::Generated(token) => {
             info!("no token configured; generated a one-time bearer token for this run: {token}");
             info!("set `[server] token` in config.toml (or pass --token) to persist it");
             AuthConfig::Token(token)
@@ -102,24 +112,18 @@ fn resolve_auth(cfg: &ServerConfig, allow_no_auth: bool) -> AuthConfig {
     }
 }
 
-/// Generate a random bearer token: two v4 UUIDs (256 bits of OS-RNG entropy)
-/// rendered as hex without separators.
-fn generate_token() -> String {
-    let a = uuid::Uuid::new_v4().simple().to_string();
-    let b = uuid::Uuid::new_v4().simple().to_string();
-    format!("{a}{b}")
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     setup_logging(cli.debug);
 
-    let cfg = resolve_config(&cli)?;
+    let config = claude_commander_core::Config::load()?;
+    let cfg = resolve_config(config.server.clone(), &cli)?;
 
     // Hard error (not just a warning) if --allow-no-auth is used on a
     // non-loopback bind: that would expose an unauthenticated API to the
-    // network. Decision lives in a pure, unit-tested lib function.
+    // network. `embed::start` enforces this too; checking here as well means
+    // the operator gets the message on stderr before anything else runs.
     check_no_auth_bind(cfg.bind, cli.allow_no_auth)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
@@ -135,7 +139,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warn!("--tls requested; TLS support requires the `tls` build feature (not yet wired)");
     }
 
-    let config = claude_commander_core::Config::load()?;
     let commander_enabled = config.commander_enabled;
     // The headless commander (and its warm pool) is gated by `[slack]` config,
     // independent of the interactive `commander_enabled` gate. The warm pool
@@ -156,45 +159,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Drive the same background loops the local TUI runs (agent-state polling,
     // PR-status checks, project auto-pull, state-sync) so remote clients see live
     // data via `/workspace` + `/agent-states` polls. Handles run for the process
-    // lifetime; we don't need to hold them.
+    // lifetime; we don't need to hold them. `embed::start` deliberately starts
+    // none of this, because when the TUI embeds it these are already running.
     let _background = service.spawn_background_tasks(BackgroundOpts { commander_enabled });
     // The server is a long-lived frontend, so drive the idle-hibernation loop
     // (no-op unless hibernate_enabled and the check interval is non-zero), just
     // as the TUI does. Without this a server-only deployment — the many-idle-
     // sessions case hibernation targets — would never hibernate.
     service.start_hibernation_loop();
-    let state = AppState::new(service, auth)
-        .with_cors(cfg.cors_allowed_origins.clone())
-        .with_slack(slack_api);
-    let app = build_router(state);
 
-    let addr = SocketAddr::new(cfg.bind, cfg.port);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!("claude-commander-server listening on http://{addr}");
+    let server = embed::start_with_slack(service, &cfg, auth, slack_api).await?;
+    info!("claude-commander-server listening on {}", server.url());
 
     // Advertise this server to local CLIs via a runtime info file in the data
     // dir (best-effort: a write failure must not stop the server serving).
     let data_dir = claude_commander_core::Config::data_dir()?;
-    let server_info = ServerInfo::new(format!("http://{addr}"), info_token);
+    let server_info = ServerInfo::new(server.url(), info_token);
     if let Err(e) = server_info.write_to(&data_dir) {
         warn!("could not write server runtime info file: {e}");
     }
 
-    let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    // Serve until SIGINT/SIGTERM, then fall through to the info-file cleanup.
+    tokio::select! {
+        () = server.join() => {}
+        () = shutdown_signal() => info!("shutting down"),
+    }
 
     // Clean-shutdown cleanup: remove the info file so a stale entry doesn't
     // outlive the process. Best-effort — a killed process leaves it behind, and
     // the reader tolerates an unreachable server.
     ServerInfo::remove_from(&data_dir);
-    serve_result?;
     Ok(())
 }
 
 /// Resolve once either SIGINT (Ctrl-C) or, on Unix, SIGTERM is received, so
-/// `axum`'s graceful shutdown drains in-flight requests and control returns to
-/// `main` for info-file cleanup.
+/// control returns to `main` for info-file cleanup.
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
