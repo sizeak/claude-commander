@@ -12980,3 +12980,50 @@ async fn conversation_stream_and_external_recording_request_redraw() {
         .store(false, std::sync::atomic::Ordering::Release);
     assert!(app.process_event(AppEvent::Tick).await);
 }
+
+#[tokio::test]
+async fn selecting_a_mutated_session_does_not_start_lfs() {
+    let mut app = make_test_app();
+    let (mut snapshot, sid, _) = snapshot_with_one_session();
+    let dir = tempfile::TempDir::new().unwrap();
+    snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
+    app.config.skip_lfs_smudge = true;
+    app.ui_state.pending_selection = Some(SessionRef::local(sid));
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.lfs_pull_in_flight.is_empty());
+}
+
+#[tokio::test]
+async fn create_lfs_intent_survives_an_older_snapshot() {
+    let mut app = make_test_app();
+    let (mut snapshot, sid, _) = snapshot_with_one_session();
+    let dir = tempfile::TempDir::new().unwrap();
+    snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
+    app.config.skip_lfs_smudge = true;
+    app.ui_state.pending_created = Some(SessionRef::local(sid));
+    let mut old = snapshot.clone();
+    old.sessions.clear();
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(old),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(app.ui_state.pending_created, Some(SessionRef::local(sid)));
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 2,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.pending_created.is_none());
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&sid));
+}
