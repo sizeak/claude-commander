@@ -2603,16 +2603,20 @@ impl CommanderService {
             .await
             .ok()
             .and_then(|result| result.ok());
-            // Watcher-backed installations need only occasional reconciliation;
-            // unsupported filesystems retain the operator's polling cadence.
-            let cadence = if watcher.is_some() {
-                interval_ms.max(30_000)
-            } else {
-                interval_ms
-            };
-            let mut interval = tokio::time::interval(Duration::from_millis(cadence));
+            let mut retry_at = std::time::Instant::now() + Duration::from_secs(30);
+            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
+                if watcher.is_none() && std::time::Instant::now() >= retry_at {
+                    let data_dir = service.store.data_dir();
+                    watcher = tokio::task::spawn_blocking(move || {
+                        crate::file_events::FileEvents::state(&data_dir)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
+                }
                 let event = tokio::select! {
                     _ = interval.tick() => false,
                     _ = async {
@@ -2624,20 +2628,29 @@ impl CommanderService {
                 };
                 if event {
                     tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Drain the coalesced batch, including events during the delay.
+                    if let Some(watcher) = &mut watcher {
+                        watcher.take_changed();
+                    }
                 }
-                if event {
+                let review_changed = watcher.as_ref().is_some_and(|w| w.take_review_changed());
+                if review_changed {
                     service.comments.invalidate_pending().await;
                 }
-                if let Err(e) = service.store.reload_if_changed().await {
-                    debug!("State sync check failed: {e}");
-                }
+                let reloaded = match service.store.reload_if_changed().await {
+                    Ok(changed) => changed,
+                    Err(e) => {
+                        debug!("State sync check failed: {e}");
+                        false
+                    }
+                };
                 if watcher.as_ref().is_some_and(|w| !w.healthy()) {
                     watcher = None;
-                    interval = tokio::time::interval(Duration::from_millis(interval_ms));
-                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    interval.tick().await;
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
                 }
-                if event {
+                // reload_if_changed already notifies for external state writes.
+                // Our own state writes need no second wakeup from their file event.
+                if review_changed && !reloaded {
                     service.store.notify_change();
                 }
             }
@@ -3933,6 +3946,19 @@ mod tests {
                 "core test services must not clone into the real ~/Projects (got {projects_dir:?})"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn state_sync_does_not_notify_again_for_our_own_state_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let task = svc.spawn_state_sync_loop(20);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        seed_project_session(&svc).await;
+        let generation = svc.store().generation();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        task.abort();
+        assert_eq!(svc.store().generation(), generation);
     }
 
     /// Seed one project with one session and return their ids.

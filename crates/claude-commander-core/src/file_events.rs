@@ -11,6 +11,7 @@ pub struct FileEvents {
     _watcher: RecommendedWatcher,
     rx: watch::Receiver<u64>,
     failed: Arc<AtomicBool>,
+    review_changed: Arc<AtomicBool>,
 }
 
 impl FileEvents {
@@ -37,14 +38,26 @@ impl FileEvents {
         for path in &paths {
             std::fs::create_dir_all(path)?;
         }
-        Self::watch_paths(&paths, false, |path| {
+        let review_changed = Arc::new(AtomicBool::new(false));
+        let review_flag = review_changed.clone();
+        let mut events = Self::watch_paths(&paths, false, move |path| {
+            let review = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|name| name == "comments" || name == "reviewed")
+                && path.extension().is_some_and(|ext| ext == "json");
+            if review {
+                review_flag.store(true, Ordering::Relaxed);
+            }
             path.file_name().is_some_and(|name| name == "state.json")
                 || path
                     .parent()
                     .and_then(|p| p.file_name())
                     .is_some_and(|name| name == "comments" || name == "reviewed")
                     && path.extension().is_some_and(|ext| ext == "json")
-        })
+        })?;
+        events.review_changed = review_changed;
+        Ok(events)
     }
 
     fn watch_paths(
@@ -70,6 +83,7 @@ impl FileEvents {
             _watcher: watcher,
             rx,
             failed,
+            review_changed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -83,9 +97,10 @@ impl FileEvents {
         !self.failed.load(Ordering::Relaxed)
     }
 
-    /// Watch the worktree plus linked-worktree refs/index and shared refs.
+    /// Watch only the root and Git metadata. Nested worktree edits retain the
+    /// ordinary TTL: recursively registering build trees consumes inotify watches.
     pub fn git(path: &Path) -> notify::Result<Self> {
-        let mut events = Self::watch(path, true)?;
+        let mut events = Self::watch(path, false)?;
         let dotgit = path.join(".git");
         let gitdir: PathBuf = match std::fs::read_to_string(&dotgit) {
             Ok(text) => path.join(text.trim().strip_prefix("gitdir: ").unwrap_or(text.trim())),
@@ -108,6 +123,10 @@ impl FileEvents {
             }
         }
         Ok(events)
+    }
+
+    pub fn take_review_changed(&self) -> bool {
+        self.review_changed.swap(false, Ordering::Relaxed) || !self.healthy()
     }
 
     pub async fn changed(&mut self) -> bool {
@@ -138,15 +157,18 @@ fn invalidation_handler(
             Ok(event) => {
                 // A directory watch may no longer cover its replacement.
                 // Wake the consumer and restore reconciliation on that path.
+                // notify 8.2.0 src/inotify.rs:213 emits pathless Rescan on overflow.
+                let rescan = event.need_rescan() || event.paths.is_empty();
                 let replaced_root = matches!(
                     event.kind,
                     notify::EventKind::Remove(_)
                         | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
                 ) && event.paths.iter().any(|path| roots.contains(path));
-                if replaced_root {
+                if replaced_root || rescan {
                     failed.store(true, Ordering::Relaxed);
                 }
                 replaced_root
+                    || rescan
                     || !matches!(event.kind, notify::EventKind::Access(_))
                         && event.paths.iter().any(|path| accept(path))
             }
@@ -165,6 +187,21 @@ fn invalidation_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn queue_overflow_invalidates_even_without_paths() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (tx, rx) = watch::channel(0);
+        let failed = Arc::new(AtomicBool::new(false));
+        let (_, mut handler) =
+            invalidation_handler(&[dir.path().to_path_buf()], |_| false, tx, failed.clone())
+                .unwrap();
+        handler(Ok(
+            notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan)
+        ));
+        assert!(rx.has_changed().unwrap());
+        assert!(failed.load(Ordering::Relaxed));
+    }
+
     #[tokio::test]
     async fn state_watch_covers_new_comment_dirs_and_atomic_replacements() {
         for relative in [
