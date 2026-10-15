@@ -1134,7 +1134,7 @@ impl Config {
             return Err(SessionError::ProgramNotAllowed(program));
         }
         if let Some(mode) = mode
-            && !mode_keeps_permission_gate(mode)
+            && !mode_allowed_from_chat(mode)
         {
             return Err(SessionError::ModeNotAllowed(mode.to_string()));
         }
@@ -1357,15 +1357,18 @@ pub fn headless_target_allowed(target: &HeadlessTarget) -> std::result::Result<(
     }
 }
 
-/// Whether a `--mode` (Claude `--permission-mode`) value keeps the interactive
-/// permission prompt in front of every tool call: `default` and `plan` do.
-/// Everything else — `bypassPermissions`, `acceptEdits`, `auto`, `dontAsk`, and
-/// any mode Claude adds later — lets an unattended chat-created worker act with
-/// no one to approve it, so this is an allowlist and fails closed. Matched
-/// case-insensitively after trimming.
-fn mode_keeps_permission_gate(mode: &str) -> bool {
+/// Whether a `--mode` (Claude `--permission-mode`) value may be used for a
+/// chat-created worker. `auto` is what they start in: a worker started from
+/// chat is expected to act straight away, and auto mode still has Claude check
+/// each action before it runs. `plan` and `manual` (`default`) are stricter.
+/// Modes that approve actions with no check at all (`bypassPermissions`,
+/// `acceptEdits`), `dontAsk`, and any mode Claude adds later are refused — an
+/// allowlist, so it fails closed. Matched case-insensitively after trimming.
+fn mode_allowed_from_chat(mode: &str) -> bool {
     let m = mode.trim();
-    m.eq_ignore_ascii_case("default") || m.eq_ignore_ascii_case("plan")
+    ["auto", "plan", "manual", "default"]
+        .iter()
+        .any(|allowed| m.eq_ignore_ascii_case(allowed))
 }
 
 /// Parse a key string like `" "`, `"ctrl+k"`, `"f1"` into crossterm types.
@@ -2030,9 +2033,18 @@ speed = 1.25
                 .is_err()
         );
 
-        // An allowlist, not a denylist: any mode that isn't `default` or `plan`
-        // — `auto`, `dontAsk`, or a mode Claude adds later — is refused.
-        for mode in ["auto", "dontAsk", "someFutureMode"] {
+        // An allowlist, not a denylist: `auto` (what chat workers start in),
+        // `plan` and `manual`/`default` pass; modes that approve actions with
+        // no check at all, and any mode Claude adds later, are refused.
+        for mode in ["auto", " Manual "] {
+            assert!(
+                config
+                    .ensure_headless_create_allowed(Some("claude"), Some(mode))
+                    .is_ok(),
+                "{mode} must be allowed"
+            );
+        }
+        for mode in ["dontAsk", "someFutureMode"] {
             assert!(
                 matches!(
                     config.ensure_headless_create_allowed(Some("claude"), Some(mode)),
@@ -2118,18 +2130,12 @@ speed = 1.25
     }
 
     #[test]
-    fn mode_keeps_permission_gate_is_an_allowlist() {
-        assert!(mode_keeps_permission_gate("default"));
-        assert!(mode_keeps_permission_gate(" Plan "));
-        for mode in [
-            "bypassPermissions",
-            "acceptEdits",
-            "auto",
-            "dontAsk",
-            "",
-            "x",
-        ] {
-            assert!(!mode_keeps_permission_gate(mode), "{mode:?}");
+    fn mode_allowed_from_chat_is_an_allowlist() {
+        for mode in ["auto", "default", "manual", " Plan "] {
+            assert!(mode_allowed_from_chat(mode), "{mode:?}");
+        }
+        for mode in ["bypassPermissions", "acceptEdits", "dontAsk", "", "x"] {
+            assert!(!mode_allowed_from_chat(mode), "{mode:?}");
         }
     }
 

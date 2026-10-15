@@ -625,16 +625,16 @@ async fn main() -> Result<()> {
             // forge nor strip — see `commander::headless::PROGRAM_LOCK_ENV`)
             // acts on thread text anyone in the channel can write, so it is
             // pinned down before anything is created:
-            // - only a configured Claude program, in a mode that keeps the
-            //   permission prompt (`Config::ensure_headless_create_allowed`);
+            // - only a configured Claude program, in `auto`, `plan` or `manual`
+            //   (`Config::ensure_headless_create_allowed`);
             // - only an already-registered project by `--project`, from its
             //   default base — creating a worktree runs repository code such as
             //   a flake's `nix develop` shellHook, so the request must not pick
             //   the directory or branch (`config::headless_target_allowed`);
             // - only this machine: `--remote` would launch under a server whose
             //   programs and defaults this check can't see;
-            // - an explicit `--permission-mode` even for the default, so the
-            //   worker can't inherit the operator's `defaultMode` setting.
+            // - an explicit `--permission-mode` — `auto` unless asked otherwise —
+            //   so the worker can't inherit the operator's `defaultMode` setting.
             // The env is read once at the CLI boundary; the gates are pure
             // library functions.
             let mode = if program_locked {
@@ -659,7 +659,9 @@ async fn main() -> Result<()> {
                     eprintln!("{e}");
                     std::process::exit(1);
                 }
-                Some(mode.unwrap_or_else(|| "default".to_string()))
+                // Started from chat, a worker is expected to act straight away:
+                // `auto` unless the request asked for something stricter.
+                Some(mode.unwrap_or_else(|| "auto".to_string()))
             } else {
                 mode
             };

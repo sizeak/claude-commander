@@ -101,11 +101,12 @@ has links) so a `notify` reports back to that exact thread.
 
 From chat the commander can only start a session in a project you've already
 registered, on a new branch from that project's default base (see Security). The
-worker runs unattended in the default (or `plan`) permission mode, so it stops at
-its first permission prompt — and, in a new worktree, possibly Claude's
-folder-trust question — until someone answers it in the TUI. The worker may run
-`claude-commander notify` without asking, so it can say when it's blocked; the
-commander's reply also mentions it.
+worker starts in Claude's **`auto`** permission mode, so it gets to work straight
+away: Claude checks each action before it runs, without waiting for anyone to
+approve it. (The commander can start it in `plan` instead when the request asks
+for a plan first.) The worker may always run `claude-commander notify`, and is
+told to report back when it finishes or needs a decision; nothing is posted to
+the thread otherwise.
 
 ## Reporting back with `notify`
 
@@ -173,13 +174,17 @@ server machine — so it's locked down by design:
   - **What `new` may launch:** only a **Claude** program from `programs` or the
     configured default, carrying no permission-overriding flags
     (`--dangerously-skip-permissions`, `--permission-mode`, `--settings`,
-    `--allowedTools`). Other agents are refused because only Claude's
-    permission modes keep an unattended worker behind a prompt.
-  - **How it runs:** only no mode, `default` or `plan`, and the mode is always
-    passed explicitly, so the worker can't inherit your `defaultMode`. The
-    initial prompt follows `--`, so prompt text can't be parsed as a flag. The
-    worker gets one standing allowance — `claude-commander notify` — so it can
-    report back (or say it's blocked) without a prompt nobody would see.
+    `--allowedTools`). Other agents aren't supported from chat yet.
+  - **How it runs:** in `auto` mode by default (`plan` or `manual` if the
+    request asks), never `bypassPermissions`, `acceptEdits` or `dontAsk`. The
+    mode is always passed explicitly, so the worker can't inherit your
+    `defaultMode`. The initial prompt follows `--`, so prompt text can't be
+    parsed as a flag. The worker may run `claude-commander notify` without
+    asking.
+
+  A chat-started worker therefore **acts on the thread's request without anyone
+  approving each step** — Claude's auto mode checks each action, but the request
+  itself can come from anyone who can write in the thread.
 
   This does not make the agent untrusted-input-proof in general: allowlisted
   **users** are trusted, thread **history** is treated as untrusted and fenced

@@ -54,7 +54,7 @@ pub enum SessionError {
     ProgramNotAllowed(String),
 
     #[error(
-        "Permission mode '{0}' is not permitted for a session created from chat: such sessions run unattended, so they may only use a mode that keeps the interactive permission prompt: the default mode or `plan`."
+        "Permission mode '{0}' is not permitted for a session created from chat: such sessions run unattended, so they may only use `auto` (the default for chat), `plan` or `manual` — not a mode that approves actions with no check."
     )]
     ModeNotAllowed(String),
 

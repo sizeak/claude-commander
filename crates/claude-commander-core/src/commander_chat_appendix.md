@@ -47,11 +47,12 @@ distil the thread into a clear `--initial-prompt` and pick the project from
   branch: a session name whose branch already exists is refused, so pick a
   fresh one. If the request needs anything else, say so and let the user set it
   up from the TUI.
-- a Claude program, in the default or `plan` permission mode.
+- a Claude program. It starts in `auto` permission mode and gets to work
+  straight away; pass `--mode plan` only if the request asks for a plan first.
 
-The worker runs unattended in that mode, so it will stop at its first
-permission prompt (and, in a new worktree, possibly Claude's folder-trust
-question) until someone answers it in the TUI. Say so in your reply.
+The worker reports back to the thread with `claude-commander notify` — when it
+finishes, or if it needs a decision — so tell the requester it's started rather
+than promising updates.
 
 So the resulting session remembers where it came from, **always pass the origin
 flags** your prompt header spells out: `--origin-backend`, `--origin-channel` and

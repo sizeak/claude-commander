@@ -3406,10 +3406,10 @@ fn find_session_info(state: &AppState, query: &str) -> Option<SessionInfo> {
 }
 
 /// A chat-created Claude session's launch command, with a standing allowance
-/// for `claude-commander notify`. The worker runs in `default`/`plan` mode, and
-/// the requester is in a chat thread rather than at the terminal, so without
-/// this its report — "done", or "I'm blocked" — would wait on a permission
-/// prompt nobody sees. Inserted after the binary like the other agent flags;
+/// for `claude-commander notify`. The requester is in a chat thread rather than
+/// at the terminal, so its report — "done", or "I need a decision" — must never
+/// wait on a permission prompt nobody sees (even `auto` mode may ask, and a
+/// `plan`/`manual` worker always would). Inserted after the binary like the other agent flags;
 /// the positional prompt follows `--`, so the variadic flag can't swallow it.
 fn with_notify_allowance(program: String, origin: Option<&ChatOrigin>) -> String {
     if origin.is_none() || !AgentKind::from_program(&program).is_claude() {
@@ -3748,9 +3748,8 @@ mod tests {
         assert!(uuid::Uuid::parse_str(&info.id).is_ok());
     }
 
-    /// A chat-created worker runs in `default`/`plan` mode, so without a
-    /// standing allowance its `claude-commander notify` would sit on a
-    /// permission prompt nobody is watching — including the "I'm blocked" one.
+    /// A chat-created worker's `claude-commander notify` must never wait on a
+    /// permission prompt nobody is watching, whichever mode it runs in.
     #[test]
     fn a_chat_created_claude_session_may_always_notify() {
         let origin = ChatOrigin {
