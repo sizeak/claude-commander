@@ -1716,7 +1716,7 @@ impl App {
                     if keep_alive {
                         "Keep-alive on — session won't auto-hibernate".to_string()
                     } else {
-                        "Keep-alive off — idle session will auto-hibernate".to_string()
+                        "Keep-alive off — idle session may auto-hibernate".to_string()
                     }
                 })
                 .map_err(|e| format!("Failed to toggle keep-alive: {e}"));

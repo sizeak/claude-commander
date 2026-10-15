@@ -32,6 +32,17 @@ test.describe("session tree and terminal", () => {
     await expect(page.locator("#review-btn")).toBeDisabled();
   });
 
+  test("tree retains unchanged nodes and replaces changed selection", async ({ page }) => {
+    const group = page.locator("#tree .project-group").first();
+    const original = await group.elementHandle();
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await expect(group).toBeVisible();
+    expect(await group.evaluate((node, old) => node === old, original)).toBe(true);
+    await openSession(page, ECHO_SESSION);
+    await expect(sessionRow(page, ECHO_SESSION)).toHaveClass(/active/);
+    expect(await group.evaluate((node, old) => node === old, original)).toBe(false);
+  });
+
   test("selecting a session attaches its pane", async ({ page }) => {
     await openSession(page, ECHO_SESSION);
     await expect(sessionRow(page, ECHO_SESSION)).toHaveClass(/active/);

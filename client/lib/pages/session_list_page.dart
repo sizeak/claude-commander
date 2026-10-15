@@ -332,10 +332,6 @@ class _SessionListBodyState extends State<SessionListBody> {
             store: store,
             workspace: workspace,
             showHeader: multi,
-            selectedId: widget.selectedId,
-            onSelect: widget.onSelect,
-            query: _query,
-            quick: _quick,
           ),
         ));
         continue;
@@ -413,6 +409,8 @@ class _SessionListBodyState extends State<SessionListBody> {
     );
   }
 
+  /// Recent shows every active session in this workspace, ordered by last use
+  /// through sessionRecency; it has no arbitrary cap that could hide an active row.
   Widget _buildRecent(
     BuildContext context,
     List<CommanderStore> servers,
@@ -453,6 +451,8 @@ class _SessionListBodyState extends State<SessionListBody> {
     );
   }
 
+  /// Explain connection state before filtering, so loading is not mistaken for
+  /// an empty workspace or an unsuccessful search.
   Widget _recentEmptyState(BuildContext context, List<CommanderStore> servers) {
     // Loading/error take priority over the query notes, so typing while the
     // only server is still connecting shows the spinner (as All mode does),
@@ -548,24 +548,10 @@ class _ServerSection extends StatelessWidget {
   /// The active workspace (null = Main): only its projects are listed.
   final String? workspace;
   final bool showHeader;
-  final String? selectedId;
-  final void Function(CommanderStore store, SessionInfo session) onSelect;
-
-  /// The active search query. Empty shows the full grouped list; otherwise each
-  /// group is fuzzy-filtered and emptied groups drop out.
-  final String query;
-
-  /// The active quick filter (or null), applied on top of [query].
-  final _Quick? quick;
-
   const _ServerSection({
     required this.store,
     required this.workspace,
     required this.showHeader,
-    required this.selectedId,
-    required this.onSelect,
-    required this.query,
-    required this.quick,
   });
 
   @override
@@ -611,48 +597,7 @@ class _ServerSection extends StatelessWidget {
         ),
       ];
     }
-    final groups = <ProjectSessions>[];
-    for (final g in store.sessionsByProjectIn(workspace)) {
-      var sessions = matchingSessions(g.sessions, query);
-      if (quick != null) {
-        sessions = [
-          for (final s in sessions)
-            if (_matchesQuick(quick!, store, s)) s,
-        ];
-      }
-      if (sessions.isNotEmpty) {
-        groups.add(ProjectSessions(project: g.project, sessions: sessions));
-      }
-    }
-    final filtering = query.isNotEmpty || quick != null;
-    return [
-      if (store.cascadePaused != null) const CascadeBanner(),
-      if (groups.isEmpty)
-        _InlineNote(
-          icon: filtering ? Icons.search_off : Icons.inbox_outlined,
-          text: filtering ? 'No matches' : 'No sessions',
-        )
-      else
-        for (final group in groups) ...[
-          ChromeEyebrow(
-            '${group.project.name.toUpperCase()} · ${group.sessions.length}',
-          ),
-          // Each project group is its own run, so a row's position is its index
-          // within the group rather than within the whole server section.
-          for (final (i, session) in group.sessions.indexed)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
-              child: _groupedRow(
-                context,
-                store: store,
-                session: session,
-                selected: session.id == selectedId,
-                position: _rowPosition(i, group.sessions.length),
-                onTap: () => onSelect(store, session),
-              ),
-            ),
-        ],
-    ];
+    return const [];
   }
 }
 
