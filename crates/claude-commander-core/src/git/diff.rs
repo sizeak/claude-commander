@@ -89,6 +89,7 @@ impl DiffInfo {
 struct RootWatch {
     watcher: Option<crate::file_events::FileEvents>,
     attempted_at: Instant,
+    requested_at: Instant,
 }
 
 /// Cached diff computation, generic over key type
@@ -122,18 +123,25 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
     }
 
     /// Watch at most 32 recently requested roots. Failed/unavailable watches
-    /// retain the configured TTL; healthy ones reconcile every 30 seconds.
+    /// retain the configured TTL, including for nested working-tree edits.
     async fn freshness(&self, key: K, path: &Path) -> (bool, Duration) {
         let should_watch = {
-            let watchers = self.watchers.lock().expect("diff watchers poisoned");
-            match watchers.get(&key) {
+            let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
+            match watchers.get_mut(&key) {
                 Some(entry) => {
+                    entry.requested_at = Instant::now();
                     !entry.watcher.as_ref().is_some_and(|w| w.healthy())
                         && entry.attempted_at.elapsed() >= Duration::from_secs(30)
                 }
-                None => watchers.len() < 32,
+                None => true,
             }
         };
+        let replacing = should_watch
+            && self
+                .watchers
+                .lock()
+                .expect("diff watchers poisoned")
+                .contains_key(&key);
         if should_watch {
             let path = path.to_path_buf();
             let watcher =
@@ -142,12 +150,22 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
                     .ok()
                     .and_then(|result| result.ok());
             let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
-            if watchers.len() < 32 || watchers.contains_key(&key) {
+            if watchers.len() >= 32
+                && !watchers.contains_key(&key)
+                && let Some(oldest) = watchers
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.requested_at)
+                    .map(|(key, _)| *key)
+            {
+                watchers.remove(&oldest);
+            }
+            {
                 watchers.insert(
                     key,
                     RootWatch {
                         watcher,
                         attempted_at: Instant::now(),
+                        requested_at: Instant::now(),
                     },
                 );
             }
@@ -157,14 +175,7 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
             .get_mut(&key)
             .and_then(|entry| entry.watcher.as_mut())
         {
-            Some(watcher) if watcher.healthy() => (
-                watcher.take_changed(),
-                if self.ttl == DEFAULT_DIFF_CACHE_TTL {
-                    Duration::from_secs(30)
-                } else {
-                    self.ttl
-                },
-            ),
+            Some(watcher) => (watcher.take_changed() || replacing, self.ttl),
             _ => (false, self.ttl),
         }
     }
@@ -176,7 +187,7 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         let _guard = flight.lock().await;
         let (changed, ttl) = self.freshness(*key, worktree_path).await;
         if changed {
-            self.invalidate(key).await;
+            self.invalidate_values(key).await;
         }
         // Fast path: check cache
         {
@@ -200,7 +211,7 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         let _guard = flight.lock().await;
         let (changed, ttl) = self.freshness(*key, path).await;
         if changed {
-            self.invalidate(key).await;
+            self.invalidate_values(key).await;
         }
         if let Some(cached) = self.stats_cache.read().await.get(key)
             && !cached.is_stale(ttl)
@@ -231,6 +242,14 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
 
     /// Invalidate cache for a key
     pub async fn invalidate(&self, key: &K) {
+        self.watchers
+            .lock()
+            .expect("diff watchers poisoned")
+            .remove(key);
+        self.invalidate_values(key).await;
+    }
+
+    async fn invalidate_values(&self, key: &K) {
         let mut cache = self.cache.write().await;
         cache.remove(key);
         self.stats_cache.write().await.remove(key);
@@ -238,6 +257,10 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
 
     /// Clear all cached diffs
     pub async fn clear(&self) {
+        self.watchers
+            .lock()
+            .expect("diff watchers poisoned")
+            .clear();
         let mut cache = self.cache.write().await;
         cache.clear();
         self.stats_cache.write().await.clear();
@@ -608,6 +631,47 @@ mod tests {
     use crate::git::fixture::fixture_git;
 
     #[tokio::test]
+    async fn nested_worktree_edits_reconcile_without_recursive_watches() {
+        let dir = tracked_repo().await;
+        let nested = dir.path().join("target/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let cache = DiffCache::<u64>::with_ttl(Duration::from_millis(20));
+        cache.get_diff(&1, dir.path()).await.unwrap();
+        std::fs::write(nested.join("new.txt"), "nested change").unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            cache
+                .get_diff(&1, dir.path())
+                .await
+                .unwrap()
+                .diff
+                .contains("nested change")
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_slots_follow_recent_roots_and_are_released() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = DiffCache::<u64>::new();
+        for key in 0..32 {
+            cache.freshness(key, dir.path()).await;
+        }
+        cache.freshness(0, dir.path()).await;
+        cache.freshness(32, dir.path()).await;
+        {
+            let watchers = cache.watchers.lock().unwrap();
+            assert_eq!(watchers.len(), 32);
+            assert!(watchers.contains_key(&0));
+            assert!(!watchers.contains_key(&1));
+            assert!(watchers.contains_key(&32));
+        }
+        cache.invalidate(&0).await;
+        assert!(!cache.watchers.lock().unwrap().contains_key(&0));
+        cache.clear().await;
+        assert!(cache.watchers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn unavailable_watches_use_ttl_and_retry_after_a_cooldown() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("not-yet-created");
@@ -622,7 +686,7 @@ mod tests {
             .get_mut(&1)
             .unwrap()
             .attempted_at = Instant::now() - Duration::from_secs(31);
-        assert_eq!(cache.freshness(1, &path).await.1, Duration::from_secs(30));
+        assert_eq!(cache.freshness(1, &path).await.1, DEFAULT_DIFF_CACHE_TTL);
     }
 
     async fn tracked_repo() -> tempfile::TempDir {
@@ -700,7 +764,7 @@ mod tests {
     #[tokio::test]
     async fn cloned_diff_caches_observe_worktree_edits_before_reconciliation() {
         let dir = tracked_repo().await;
-        let cache = DiffCache::<u64>::new();
+        let cache = DiffCache::<u64>::with_ttl(Duration::from_secs(60));
         let initial = cache.get_diff(&1, dir.path()).await.unwrap();
         assert!(!initial.has_changes());
         let watcher_is_healthy = || {

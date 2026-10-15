@@ -58,6 +58,7 @@ use crate::spec::{RemoteServerSpec, SecretString};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Overall per-request ceiling (a slow branch-diff still fits comfortably).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const _: () = assert!(REQUEST_TIMEOUT.as_secs() > claude_commander_protocol::CHANGE_WAIT_SECS);
 /// Tighter per-request bound for interactive review reads/writes (list/create/
 /// delete comment, toggle-reviewed): these are quick store/file operations, so
 /// a user who fires one and waits shouldn't sit through the 30s
@@ -512,6 +513,12 @@ impl RemoteClient {
     }
 
     pub async fn snapshot(&self) -> ClientResult<Snapshot> {
+        self.get_json(self.endpoint(&["workspace"])).await
+    }
+
+    /// Consume the most recent poll payload, or fetch if absent/expired.
+    /// Automatic change-feed consumers may opt in; explicit refreshes use snapshot.
+    pub async fn polled_snapshot(&self) -> ClientResult<Snapshot> {
         let cached = {
             let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
             cache.expire();
@@ -524,6 +531,17 @@ impl RemoteClient {
     }
 
     pub async fn agent_states(&self, fresh: bool) -> ClientResult<AgentStatesSnapshot> {
+        if fresh {
+            self.invalidate_snapshots();
+        }
+        let mut url = self.endpoint(&["agent-states"]);
+        url.query_pairs_mut()
+            .append_pair("fresh", if fresh { "true" } else { "false" });
+        self.get_json(url).await
+    }
+
+    /// Opt-in counterpart to polled_snapshot for automatic change-feed consumers.
+    pub async fn polled_agent_states(&self, fresh: bool) -> ClientResult<AgentStatesSnapshot> {
         if !fresh {
             let cached = {
                 let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
@@ -1010,6 +1028,17 @@ fn diff_side_param(side: DiffSide) -> &'static str {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn explicit_reads_bypass_recent_poll_payloads() {
+        use std::sync::atomic::Ordering;
+        let server = crate::test_server::Server::start(true).await;
+        server.client.poll_hashes().await.unwrap();
+        server.client.snapshot().await.unwrap();
+        server.client.agent_states(false).await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
+        assert_eq!(server.data.agents.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn delayed_explicit_refresh_does_not_consume_an_old_poll() {
         use std::sync::atomic::Ordering;
         let server = crate::test_server::Server::start(true).await;
@@ -1025,18 +1054,18 @@ mod tests {
         use std::sync::atomic::Ordering;
         let server = crate::test_server::Server::start(true).await;
         server.client.poll_hashes().await.unwrap();
-        server.client.snapshot().await.unwrap();
-        server.client.agent_states(false).await.unwrap();
+        server.client.polled_snapshot().await.unwrap();
+        server.client.polled_agent_states(false).await.unwrap();
         assert_eq!(server.data.workspace.load(Ordering::SeqCst), 1);
         assert_eq!(server.data.agents.load(Ordering::SeqCst), 1);
-        server.client.snapshot().await.unwrap();
-        server.client.agent_states(false).await.unwrap();
+        server.client.polled_snapshot().await.unwrap();
+        server.client.polled_agent_states(false).await.unwrap();
         assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
         assert_eq!(server.data.agents.load(Ordering::SeqCst), 2);
         server.client.poll_hashes().await.unwrap();
         server.client.request_pr_refresh().await.unwrap();
-        server.client.snapshot().await.unwrap();
-        server.client.agent_states(false).await.unwrap();
+        server.client.polled_snapshot().await.unwrap();
+        server.client.polled_agent_states(false).await.unwrap();
         assert_eq!(server.data.workspace.load(Ordering::SeqCst), 4);
         assert_eq!(server.data.agents.load(Ordering::SeqCst), 4);
     }

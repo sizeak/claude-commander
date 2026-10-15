@@ -95,6 +95,11 @@ impl ContentCapture {
     /// Get content for a tmux session, using cache if fresh
     #[instrument(skip(self))]
     pub async fn get_content(&self, tmux_session_name: &str) -> Result<CapturedContent> {
+        if let Some(cached) = self.cache.read().await.get(tmux_session_name)
+            && !cached.is_stale(self.ttl)
+        {
+            return Ok(cached.clone());
+        }
         let flight = self.flights.for_key(tmux_session_name.to_string());
         let _guard = flight.lock().await;
         // Fast path: check cache with read lock
