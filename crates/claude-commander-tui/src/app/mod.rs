@@ -1680,6 +1680,8 @@ pub struct AppUiState {
     pub last_ui_maintenance: Instant,
     pub last_animation: Instant,
     pub pending_selection: Option<SessionRef>,
+    pub pending_created: Option<SessionRef>,
+    pub last_recording: bool,
     pub pending_project: Option<(BackendId, ProjectId)>,
     /// Right-pane rect from the last render frame, for wheel hit-testing.
     /// `None` in board view (no right pane) and before the first frame.
@@ -1884,6 +1886,8 @@ impl Default for AppUiState {
             last_ui_maintenance: Instant::now(),
             last_animation: Instant::now(),
             pending_selection: None,
+            pending_created: None,
+            last_recording: false,
             pending_project: None,
             right_pane_rect: None,
             last_pane_view: None,
@@ -2514,10 +2518,19 @@ impl App {
     /// its connection state) untouched, so a degraded remote keeps its last
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
+        let revision = self
+            .backends
+            .iter()
+            .find(|h| h.id == id)
+            .expect("known backend")
+            .refresh_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         let backend = self.backend_arc(id);
         let (snapshot, states) = tokio::join!(backend.snapshot(), backend.agent_states(false));
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
+                handle.view_revision = revision;
                 handle.view.snapshot = snapshot;
                 // Local: derive connection from the snapshot's tmux health;
                 // remote: leave it to the connection-watch task (returns None).
@@ -2528,6 +2541,7 @@ impl App {
                 }
             }
             if let Ok(states) = states {
+                handle.agent_states_revision = revision;
                 handle.view.agent_states = states;
             }
         }
@@ -2912,15 +2926,15 @@ impl App {
             // Clear unread for everything we actually saw — the
             // operator watched those turns finish.
             let backend = self.backend_arc(attached_backend);
-            for id in &viewed_ids {
-                let _ = backend.mark_read(*id).await;
-            }
             if let Some(handle) = self.backends.iter_mut().find(|h| h.id == attached_backend) {
                 let sequence = handle.refresh_sequence.clone();
                 let tx = self.event_loop.sender();
                 // Keep the fresh service read: it advances the shared unread
                 // baseline too. Only its wait moves off the first-frame path.
                 let task = tokio::spawn(async move {
+                    for id in &viewed_ids {
+                        let _ = backend.mark_read(*id).await;
+                    }
                     match backend.agent_states(true).await {
                         Ok(fresh) => {
                             let states = fresh

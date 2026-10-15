@@ -80,6 +80,12 @@ impl App {
                 // correct behavior when draining multiple events)
                 self.update_selection();
 
+                if self.ui_state.selected_session_id != old_session
+                    || self.ui_state.selected_project_id != old_project
+                {
+                    self.ui_state.pending_selection = None;
+                    self.ui_state.pending_project = None;
+                }
                 // Re-capture immediately when the selection changes, so the
                 // pane doesn't keep showing the previous session until the next
                 // tick.
@@ -118,7 +124,11 @@ impl App {
             }
             AppEvent::Tick => {
                 self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
-                let mut dirty = self.drain_dictations();
+                let recording = self.conversation.is_recording();
+                let mut dirty = self.drain_dictations()
+                    || matches!(self.ui_state.modal, Modal::Conversation { .. })
+                    || recording != self.ui_state.last_recording;
+                self.ui_state.last_recording = recording;
                 if self.ui_state.last_animation.elapsed() >= Duration::from_millis(100) {
                     self.ui_state.last_animation = Instant::now();
                     self.ui_state.throbber_state.calc_next();
