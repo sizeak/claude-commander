@@ -18,6 +18,7 @@ pub struct Data {
     pub waits: watch::Sender<usize>,
     pub workspace: Arc<AtomicUsize>,
     pub agents: Arc<AtomicUsize>,
+    pub fail_wait: Arc<AtomicBool>,
     pub fail_workspace: Arc<AtomicBool>,
     pub supported: bool,
 }
@@ -38,6 +39,7 @@ impl Server {
             waits: watch::channel(0).0,
             workspace: Arc::new(AtomicUsize::new(0)),
             agents: Arc::new(AtomicUsize::new(0)),
+            fail_wait: Arc::new(AtomicBool::new(false)),
             fail_workspace: Arc::new(AtomicBool::new(false)),
             supported,
         };
@@ -85,6 +87,9 @@ async fn changes(
     let current = *rx.borrow_and_update();
     if q.get("since").and_then(|s| s.parse().ok()) == Some(current) {
         rx.changed().await.unwrap();
+    }
+    if data.fail_wait.swap(false, Ordering::SeqCst) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let next = *rx.borrow();
     Ok(Json(next))
