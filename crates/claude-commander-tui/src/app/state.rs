@@ -15,7 +15,14 @@ impl App {
                         self.ui_state.status_message =
                             Some((text, Instant::now() + Duration::from_secs(3)))
                     }
-                    Err(message) => self.ui_state.modal = Modal::Error { message },
+                    Err(message) => {
+                        if matches!(self.ui_state.modal, Modal::None) {
+                            self.ui_state.modal = Modal::Error { message };
+                        } else {
+                            self.ui_state.status_message =
+                                Some((message, Instant::now() + Duration::from_secs(10)));
+                        }
+                    }
                 }
                 self.spawn_backend_view_refresh(BackendId(backend_id));
             }
@@ -114,21 +121,34 @@ impl App {
                 // this a remote's pending markers would never render and a
                 // cross-frontend marker change would never propagate.
                 self.refresh_comment_indicators();
+                if let Some(created) = self.ui_state.pending_created
+                    && created.backend.0 == backend_id
+                    && self
+                        .view_for(created.backend)
+                        .snapshot
+                        .sessions
+                        .iter()
+                        .any(|s| s.session_id == created.id)
+                {
+                    self.ui_state.pending_created = None;
+                    self.spawn_lfs_pull(created.id).await;
+                }
+                // Insert LFS badges before rebuilding the rows for the first paint.
                 self.refresh_list_items().await;
                 if let Some((backend, project)) = self.ui_state.pending_project
                     && backend.0 == backend_id
                 {
-                    self.select_project_in_sidebar(project);
                     self.ui_state.pending_project = None;
+                    self.select_project_in_sidebar(project);
                 }
                 if let Some(selection) = self.ui_state.pending_selection
                     && selection.backend.0 == backend_id
-                    && self.select_session_in_tree(selection.id)
                 {
                     self.ui_state.pending_selection = None;
-                    self.spawn_lfs_pull(selection.id).await;
-                    self.ui_state.preview_update_spawned_at = None;
-                    self.spawn_preview_update();
+                    if self.select_session_in_tree(selection.id) {
+                        self.ui_state.preview_update_spawned_at = None;
+                        self.spawn_preview_update();
+                    }
                 }
             }
             StateUpdate::BackendConnection { backend_id, state } => {
@@ -242,6 +262,7 @@ impl App {
                     Instant::now() + Duration::from_secs(3),
                 ));
                 self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+                self.ui_state.pending_created = Some(SessionRef::new(backend_id, session_id));
                 let backend = self.backend_arc(backend_id);
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {

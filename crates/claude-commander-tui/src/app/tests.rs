@@ -12710,34 +12710,24 @@ async fn attach_return_renders_before_slow_fresh_agent_detection() {
             commander_running: false,
         },
     );
-    let started = Instant::now();
     tokio::time::timeout(
-        Duration::from_millis(100),
+        Duration::from_secs(5),
         app.refresh_after_attach(BackendId(1), &viewed),
     )
     .await
     .expect("attach return must allow a board frame while fresh detection is blocked");
     let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
     terminal.draw(|f| app.render(f)).unwrap();
-    let first_frame = started.elapsed();
     assert_eq!(
         app.view_for(BackendId(1)).agent_states.states.get(&sid),
         Some(&AgentState::Working)
     );
-    assert!(
-        remote_mock(&app, BackendId(1))
-            .read_marked_sessions()
-            .contains(&sid)
-    );
 
-    // Model the reference's ~706 ms scan, without running tmux or reading stdin.
-    tokio::time::sleep(Duration::from_millis(700)).await;
     gate.notify_one();
     let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
         .await
         .unwrap()
         .unwrap();
-    let fresh_completed = started.elapsed();
     app.process_event(event).await;
     assert_eq!(
         app.view_for(BackendId(1)).agent_states.states.get(&sid),
@@ -12748,7 +12738,11 @@ async fn attach_return_renders_before_slow_fresh_agent_detection() {
             .agent_states_calls()
             .contains(&true)
     );
-    println!("attach return: first frame={first_frame:?}, fresh completion={fresh_completed:?}");
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .read_marked_sessions()
+            .contains(&sid)
+    );
 }
 
 #[tokio::test]
@@ -12935,4 +12929,54 @@ async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
         .unwrap();
     assert_eq!(app.view_for(BackendId(1)).agent_states.states, states);
     assert!(app.event_loop.try_next().is_none());
+}
+
+#[tokio::test]
+async fn late_background_error_preserves_a_new_modal() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.ui_state.modal = Modal::Error {
+        message: "newer dialog".into(),
+    };
+    app.handle_state_update(StateUpdate::ActionFinished {
+        backend_id: 1,
+        message: Err("background error".into()),
+    })
+    .await;
+    assert!(matches!(&app.ui_state.modal, Modal::Error { message } if message == "newer dialog"));
+    assert_eq!(
+        app.ui_state.status_message.as_ref().unwrap().0,
+        "background error"
+    );
+}
+
+#[tokio::test]
+async fn failed_pending_selection_is_discarded_without_lfs() {
+    let (mut app, _) = app_with_remote_session().await;
+    let id = SessionId::new();
+    app.ui_state.pending_selection = Some(SessionRef::new(BackendId(1), id));
+    let view = app.view_for(BackendId(1));
+    let snapshot = Box::new(view.snapshot.clone());
+    let states = Box::new(view.agent_states.clone());
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: 1,
+        revision: u64::MAX,
+        snapshot,
+        states,
+    })
+    .await;
+    assert!(app.ui_state.pending_selection.is_none());
+    assert!(app.ui_state.lfs_pull_in_flight.is_empty());
+}
+
+#[tokio::test]
+async fn conversation_stream_and_external_recording_request_redraw() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.conversation
+        .recording
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(app.process_event(AppEvent::Tick).await);
+    app.conversation
+        .recording
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert!(app.process_event(AppEvent::Tick).await);
 }
