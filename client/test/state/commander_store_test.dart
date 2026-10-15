@@ -42,6 +42,32 @@ void main() {
 
   CommanderStore build() => CommanderStore(api: api, config: testConfig);
 
+  test('snapshot indexes reuse reads and discard removed membership', () async {
+    final session = sessionInfo(
+      id: id,
+      projectId: 'aaaaaaaa-2222-3333-4444-555555555555',
+    );
+    api.listSessionsResponse = [session];
+    api.projectsResponse = [projectInfo(workspace: 'work')];
+    final store = build();
+    addTearDown(store.dispose);
+    await store.connect();
+    final grouped = store.sessionsByProject;
+    final members = store.sessionsIn('work');
+    expect(identical(grouped, store.sessionsByProject), isTrue);
+    expect(identical(members, store.sessionsIn('work')), isTrue);
+    expect(store.sessionById(id), session);
+    expect(members, [session]);
+    expect(store.sessionsIn(null), isEmpty);
+    api.listSessionsResponse = [];
+    api.projectsResponse = [projectInfo(workspace: null)];
+    await store.refresh();
+    expect(store.sessionById(id), isNull);
+    expect(store.sessionsIn('work'), isEmpty);
+    expect(store.sessionsByProject.single.sessions, isEmpty);
+    expect(identical(grouped, store.sessionsByProject), isFalse);
+  });
+
   test('timed-out clone waits release their subscriptions', () async {
     final store = build();
     addTearDown(store.dispose);

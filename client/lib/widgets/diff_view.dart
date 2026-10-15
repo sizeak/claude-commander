@@ -237,8 +237,7 @@ class _DiffViewState extends State<DiffView> {
     // `IntrinsicHeight` so the two halves — and each half's gutter — share
     // one height. Without it the shorter side's fill stops early and a
     // soft-wrapped line leaves a notch in the gutter band. It costs an extra
-    // layout pass per row; see the eager-build note in `review_page.dart`,
-    // which is the larger cost on a big file.
+    // layout pass per visible row; the sliver list limits that work to the viewport.
     DiffRowKind.line || DiffRowKind.expandedContext => IntrinsicHeight(
       child: widget.sideBySide && !row.fullWidth
           ? Row(

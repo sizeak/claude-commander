@@ -1004,8 +1004,4 @@ button.ghost {
   color: #04121f;
 }
 
-/* Offscreen files retain estimated space until the browser lays them out. */
-.rv-file {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 500px;
-}
+
