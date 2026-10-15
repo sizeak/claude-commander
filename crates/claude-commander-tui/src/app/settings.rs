@@ -1794,24 +1794,32 @@ impl App {
     /// Apply an edit and finish provider transitions through the service's
     /// serialized cache-invalidation path.
     async fn apply_settings_edit_live(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
-        let previous_provider = self.config.code_host_provider;
-        self.apply_settings_edit(tab, field_key, value);
-        if self.config.code_host_provider == previous_provider {
-            return;
-        }
-
-        if let Err(error) = self
-            .service
-            .update_code_host_config(self.config.clone())
-            .await
-        {
-            self.config = self.service.read_config();
-            self.ui_state.modal = Modal::Error {
-                message: format!("Failed to change code host: {error}"),
+        if tab == SettingsTab::General && field_key == "code_host_provider" {
+            use claude_commander_protocol::hosting::CodeHostProvider;
+            let provider = match value {
+                "GitHub" | "github" => CodeHostProvider::Github,
+                "GitLab" | "gitlab" => CodeHostProvider::Gitlab,
+                _ => return,
             };
+            let service = self.service.clone();
+            let tx = self.event_loop.sender();
+            tokio::spawn(async move {
+                let result = service
+                    .edit_code_host_config(move |config| {
+                        config.code_host_provider = provider;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = tx
+                    .send(AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated {
+                        result,
+                    }))
+                    .await;
+            });
             return;
         }
-        self.spawn_backend_view_refresh(claude_commander_core::backend::LOCAL_BACKEND_ID);
+        self.apply_settings_edit(tab, field_key, value);
     }
 
     /// Set a boolean General-tab setting to a typed value and persist.

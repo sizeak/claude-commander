@@ -74,6 +74,9 @@ impl RestartKind {
 /// State updates from background tasks
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
+    CodeHostConfigUpdated {
+        result: std::result::Result<(), String>,
+    },
     /// Periodic config reload completed without holding up input/rendering.
     ConfigReloaded { result: Result<bool, String> },
     /// Session content updated

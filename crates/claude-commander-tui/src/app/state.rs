@@ -6,6 +6,25 @@ use std::collections::BTreeMap;
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
         match update {
+            StateUpdate::CodeHostConfigUpdated { result } => {
+                self.config = self.service.read_config();
+                if let Modal::Settings(state) = &self.ui_state.modal {
+                    let rows = self.settings_rows(state);
+                    if let Modal::Settings(state) = &mut self.ui_state.modal {
+                        state.rows = rows;
+                    }
+                }
+                self.ui_state.enriched_pr = None;
+                self.ui_state.enriched_pr_unavailable = None;
+                self.ui_state.enriched_pr_fetch_spawned_at = None;
+                if let Err(message) = result {
+                    self.ui_state.status_message = Some((
+                        format!("Failed to change code host: {message}"),
+                        Instant::now() + Duration::from_secs(10),
+                    ));
+                }
+                self.spawn_backend_view_refresh(LOCAL_BACKEND_ID);
+            }
             StateUpdate::ActionFinished {
                 backend_id,
                 message,

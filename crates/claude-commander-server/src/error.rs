@@ -116,7 +116,7 @@ impl ApiError {
             CoreError::Tmux(TmuxError::NotInstalled)
             | CoreError::Tmux(TmuxError::ServerNotRunning)
             | CoreError::Git(
-                GitError::CodeHostCliUnavailable { .. } | GitError::RepoListTimedOut { .. },
+                GitError::CodeHostCliUnavailable { .. },
             ) => StatusCode::SERVICE_UNAVAILABLE,
 
             // Everything else (git failures, IO, persistence, cascade, other
@@ -287,7 +287,7 @@ mod tests {
         );
     }
 
-    /// A repo listing that overran is a 503 carrying its own precise reason.
+    /// A repo listing that overran is a 500 carrying its own precise reason.
     ///
     /// The client maps 503 to `Unavailable`, which frontends word as "install gh
     /// on the server" — actively wrong for a user whose working `gh` just had a
@@ -296,12 +296,12 @@ mod tests {
     /// budget longer than the server's `gh` budget, so the server wins the race
     /// and answers with this instead of the client reporting a transport timeout.
     #[test]
-    fn a_timed_out_repo_listing_is_a_503_with_its_own_reason() {
+    fn a_timed_out_repo_listing_is_a_500_with_its_own_reason() {
         let err = ApiError(CoreError::Git(GitError::RepoListTimedOut {
             provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
             secs: 90,
         }));
-        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(
             err.0.to_string().contains("timed out"),
             "the body must carry the real reason: {}",

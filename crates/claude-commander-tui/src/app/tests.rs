@@ -13189,3 +13189,57 @@ async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
     assert_eq!(app.view_for(BackendId(1)).agent_states.states, states);
     assert!(app.event_loop.try_next().is_none());
 }
+
+#[tokio::test]
+async fn provider_picker_runs_in_background_and_refreshes_its_display() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.handle_command(UserCommand::ShowSettings).await;
+    if let Modal::Settings(state) = &mut app.ui_state.modal {
+        state.selected_row = state
+            .rows
+            .iter()
+            .position(|r| r.field_key == "code_host_provider")
+            .unwrap();
+    }
+    feed(&mut app, KeyCode::Enter).await;
+    feed(&mut app, KeyCode::Down).await;
+    feed(&mut app, KeyCode::Enter).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = app.event_loop.next().await.unwrap();
+            let done = matches!(
+                &event,
+                AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated { .. })
+            );
+            app.process_event(event).await;
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.config.code_host_provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    let Modal::Settings(state) = &app.ui_state.modal else {
+        panic!("settings should stay open");
+    };
+    let row = state
+        .rows
+        .iter()
+        .find(|r| r.field_key == "code_host_provider")
+        .unwrap();
+    assert!(matches!(&row.kind, SettingsRowKind::Text(value) if value == "GitLab"));
+    app.ui_state.modal = Modal::Error {
+        message: "keep this dialog".into(),
+    };
+    app.handle_state_update(StateUpdate::CodeHostConfigUpdated {
+        result: Err("failed".into()),
+    })
+    .await;
+    assert!(
+        matches!(&app.ui_state.modal, Modal::Error { message } if message == "keep this dialog")
+    );
+}

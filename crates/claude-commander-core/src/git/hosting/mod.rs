@@ -107,3 +107,25 @@ mod tests {
         );
     }
 }
+
+/// Retargets are best-effort; bound both the CLI and any child processes.
+pub(crate) async fn review_output(
+    command: tokio::process::Command,
+    program: &str,
+) -> std::io::Result<std::process::Output> {
+    match super::bounded::run_bounded(command, program, Duration::from_secs(30)).await? {
+        super::bounded::Bounded::Finished {
+            status,
+            stdout,
+            stderr,
+        } => Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        super::bounded::Bounded::TimedOut => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "review retarget timed out",
+        )),
+    }
+}

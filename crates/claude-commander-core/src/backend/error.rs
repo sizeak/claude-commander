@@ -88,11 +88,11 @@ impl From<CoreError> for BackendError {
             // A missing backing tool, joining tmux: `gh` is installable, which is
             // why core carved this out of `OperationFailed`.
             CoreError::Tmux(TmuxError::NotInstalled | TmuxError::ServerNotRunning)
-            | CoreError::Git(
-                GitError::CodeHostCliUnavailable { .. } | GitError::RepoListTimedOut { .. },
-            ) => BackendError::Unavailable {
-                reason: err.to_string(),
-            },
+            | CoreError::Git(GitError::CodeHostCliUnavailable { .. }) => {
+                BackendError::Unavailable {
+                    reason: err.to_string(),
+                }
+            }
 
             _ => BackendError::Local(err),
         }
@@ -216,17 +216,17 @@ mod tests {
         ));
     }
 
-    /// Repository listing timeout uses the transport's unavailable category but
+    /// Repository listing timeout remains an operation failure and
     /// keeps its precise reason so frontends do not mistake it for a missing CLI.
     #[test]
-    fn a_timed_out_repo_listing_is_unavailable_with_its_reason() {
+    fn a_timed_out_repo_listing_is_local_with_its_reason() {
         let err = BackendError::from(CoreError::Git(GitError::RepoListTimedOut {
             provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
             secs: 90,
         }));
         assert!(
-            matches!(err, BackendError::Unavailable { .. }),
-            "a timeout uses the transport-unavailable category: {err:?}"
+            matches!(err, BackendError::Local(_)),
+            "a timeout retains the operation-failure category: {err:?}"
         );
         assert!(err.to_string().contains("timed out"), "{err}");
     }

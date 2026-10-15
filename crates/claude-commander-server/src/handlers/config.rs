@@ -158,15 +158,13 @@ pub async fn update(
     State(state): State<AppState>,
     SafeJson(patch): SafeJson<ConfigPatch>,
 ) -> Result<StatusCode, ApiError> {
-    let mut merged = state.service.read_config();
-    let old_provider = merged.code_host_provider;
-    apply_patch(patch, &mut merged);
-    validate(&merged)?;
-    if merged.code_host_provider != old_provider {
-        state.service.update_code_host_config(merged).await?;
-    } else {
-        state.service.update_config(merged)?;
-    }
+    state
+        .service
+        .edit_code_host_config(move |merged| {
+            apply_patch(patch.clone(), merged);
+            validate(merged).map_err(|error| error.0)
+        })
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

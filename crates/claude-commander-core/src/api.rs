@@ -74,7 +74,7 @@ pub struct CommanderService {
     /// and reused for every `snapshot`.
     gh_available: Arc<tokio::sync::OnceCell<bool>>,
     /// Cached `glab version` availability, independent of the compatibility gh probe.
-    glab_available: Arc<tokio::sync::OnceCell<bool>>,
+    glab_available: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     /// Shared agent-state detector with a short TTL cache, reused across
     /// non-`fresh` [`Self::agent_states`] calls so repeated polls don't
     /// re-capture every pane. A `fresh` call bypasses it with a zero-TTL
@@ -101,6 +101,7 @@ pub struct CommanderService {
     /// A poll that began under the old provider must either finish before its
     /// metadata is cleared or observe the new provider and be discarded.
     review_provider_lock: Arc<tokio::sync::Mutex<()>>,
+    review_provider_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Idempotency guard for [`Self::spawn_background_tasks`]: the loops spawn
     /// once per service, even if both a local TUI and an embedded caller ask.
     background_started: Arc<std::sync::atomic::AtomicBool>,
@@ -173,7 +174,7 @@ impl CommanderService {
             operations: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             next_op_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             gh_available: Arc::new(tokio::sync::OnceCell::new()),
-            glab_available: Arc::new(tokio::sync::OnceCell::new()),
+            glab_available: Arc::new(std::sync::Mutex::new(None)),
             agent_detector,
             agent_states_cache: Arc::new(tokio::sync::RwLock::new(AgentStatesSnapshot {
                 states: BTreeMap::new(),
@@ -184,6 +185,7 @@ impl CommanderService {
             last_pr_check: Arc::new(std::sync::Mutex::new(None)),
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
             review_provider_lock: Arc::new(tokio::sync::Mutex::new(())),
+            review_provider_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
             clone_jobs,
@@ -251,14 +253,38 @@ impl CommanderService {
     /// review metadata before the new provider can consume it. The shared lock
     /// also fences in-flight poll results from the previous provider.
     pub async fn update_code_host_config(&self, config: Config) -> Result<()> {
-        let _guard = self.review_provider_lock.lock().await;
-        let old_provider = self.config_store.read().code_host_provider;
-        if config.code_host_provider == old_provider {
-            return self.config_store.mutate(|current| *current = config);
-        }
+        self.edit_code_host_config(move |current| {
+            *current = config.clone();
+            Ok(())
+        })
+        .await
+    }
 
-        self.invalidate_review_metadata(&config).await?;
-        self.config_store.mutate(|current| *current = config)?;
+    /// Apply edits to the latest config under the provider fence. This avoids
+    /// losing concurrent fields when a partial PATCH waits for a provider switch.
+    pub async fn edit_code_host_config(
+        &self,
+        edit: impl Fn(&mut Config) -> Result<()> + Send,
+    ) -> Result<()> {
+        let _guard = self.review_provider_lock.lock().await;
+        let mut config = self.read_config();
+        let old_provider = config.code_host_provider;
+        edit(&mut config)?;
+        *self
+            .glab_available
+            .lock()
+            .expect("glab availability poisoned") = None;
+        if config.code_host_provider != old_provider {
+            self.invalidate_review_metadata(&config).await?;
+            self.review_provider_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.config_store.mutate(|current| {
+            let mut latest = current.clone();
+            edit(&mut latest)?;
+            *current = latest;
+            Ok::<(), crate::Error>(())
+        })??;
         self.pr_refresh.notify_one();
         Ok(())
     }
@@ -471,6 +497,12 @@ impl CommanderService {
         let reloaded = self.config_store.reload_if_changed()?;
         let new_config = self.config_store.read().clone();
         if reloaded && new_config.code_host_provider != old_provider {
+            self.review_provider_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *self
+                .glab_available
+                .lock()
+                .expect("glab availability poisoned") = None;
             self.invalidate_review_metadata(&new_config).await?;
             self.pr_refresh.notify_one();
         }
@@ -1377,21 +1409,50 @@ impl CommanderService {
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
-        let provider = self.config_store.read().code_host_provider;
-        self.apply_pr_results_for_provider(provider, results).await
+        let (provider, epoch) = self.review_provider_snapshot().await;
+        self.apply_pr_results_at_epoch(provider, epoch, results)
+            .await
     }
 
     /// Apply results only while their provider snapshot is still current. The
     /// provider-transition lock spans both the check and persisted mutation, so
     /// a switch cannot clear the cache and then be overwritten by an older
     /// in-flight sweep.
+    async fn review_provider_snapshot(&self) -> (CodeHostProvider, u64) {
+        let _guard = self.review_provider_lock.lock().await;
+        (
+            self.config_store.read().code_host_provider,
+            self.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
     async fn apply_pr_results_for_provider(
         &self,
         provider: CodeHostProvider,
         results: Vec<(SessionId, PrCheckResult)>,
     ) -> Result<()> {
+        let epoch = self
+            .review_provider_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.apply_pr_results_at_epoch(provider, epoch, results)
+            .await
+    }
+
+    async fn apply_pr_results_at_epoch(
+        &self,
+        provider: CodeHostProvider,
+        epoch: u64,
+        results: Vec<(SessionId, PrCheckResult)>,
+    ) -> Result<()> {
         let _guard = self.review_provider_lock.lock().await;
-        if self.config_store.read().code_host_provider != provider {
+        if self.config_store.read().code_host_provider != provider
+            || self
+                .review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != epoch
+        {
             return Ok(());
         }
         let sections =
@@ -1520,7 +1581,10 @@ impl CommanderService {
     pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.telemetry.feature("session.delete");
         let _guard = self.review_provider_lock.lock().await;
-        self.manager.delete_session(id).await
+        let plan = self.manager.prepare_delete_session(id).await?;
+        drop(_guard);
+        self.manager.finish_delete_session(plan).await;
+        Ok(())
     }
 
     /// Set a session's keep-alive flag (opt-out of auto-hibernation).
@@ -2246,6 +2310,7 @@ impl CommanderService {
             })
             .await?;
 
+        drop(_guard);
         // Durable half, best-effort. The local mirror already re-stacked the
         // tree, but only this makes it survive the next PR sync — so a failure
         // is reported rather than logged.
@@ -2661,7 +2726,7 @@ impl CommanderService {
                 }
                 // One provider snapshot governs this entire sweep, including
                 // every awaited branch query.
-                let provider = service.config_store.read().code_host_provider;
+                let (provider, epoch) = service.review_provider_snapshot().await;
                 // Adopt any branch renames before polling, so this same tick
                 // queries GitHub with the corrected `--head` name.
                 if let Err(e) = service.reconcile_session_branches().await {
@@ -2690,7 +2755,7 @@ impl CommanderService {
                     .collect()
                     .await;
                 if let Err(e) = service
-                    .apply_pr_results_for_provider(provider, results)
+                    .apply_pr_results_at_epoch(provider, epoch, results)
                     .await
                 {
                     debug!("apply_pr_results failed: {e}");
@@ -2848,10 +2913,22 @@ impl CommanderService {
         match provider {
             CodeHostProvider::Github => self.gh_available().await,
             CodeHostProvider::Gitlab => {
+                let cached = *self
+                    .glab_available
+                    .lock()
+                    .expect("glab availability poisoned");
+                if let Some((at, available)) = cached
+                    && at.elapsed() < Duration::from_secs(if available { 30 } else { 5 })
+                {
+                    return available;
+                }
+                let available = crate::git::hosting::gitlab::is_available().await;
                 *self
                     .glab_available
-                    .get_or_init(|| async { crate::git::hosting::gitlab::is_available().await })
-                    .await
+                    .lock()
+                    .expect("glab availability poisoned") =
+                    Some((std::time::Instant::now(), available));
+                available
             }
         }
     }
@@ -4052,6 +4129,62 @@ mod tests {
     /// `Config::data_dir()`. Writing a comment proves the on-disk path is the
     /// injected one (test-isolation regression).
     #[tokio::test]
+    async fn provider_transition_preserves_a_concurrent_synchronous_setting() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let state_guard = svc.store().read().await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let svc = svc.clone();
+            let entered = entered.clone();
+            async move {
+                svc.edit_code_host_config(move |config| {
+                    config.code_host_provider = CodeHostProvider::Gitlab;
+                    entered.notify_one();
+                    Ok(())
+                })
+                .await
+            }
+        });
+        entered.notified().await;
+        let mut config = svc.read_config();
+        config.ui_refresh_fps = 23;
+        svc.update_config(config).unwrap();
+        drop(state_guard);
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.read_config().ui_refresh_fps, 23);
+    }
+
+    #[tokio::test]
+    async fn partial_config_edit_reads_latest_provider_and_resets_cli_probe() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        *svc.glab_available.lock().unwrap() = Some((std::time::Instant::now(), false));
+        svc.edit_code_host_config(|config| {
+            config.ui_refresh_fps = 23;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.read_config().ui_refresh_fps, 23);
+        assert!(svc.glab_available.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn comment_writes_stay_under_injected_data_dir() {
         let dir = tempfile::TempDir::new().unwrap();
         // Built through the shared helper rather than by hand, so this test
@@ -4917,6 +5050,22 @@ mod tests {
         assert!(session.review_decision.is_none());
         assert!(session.pr_reviewers.is_empty());
         assert!(session.pr_base_branch.is_none());
+        drop(state);
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Github;
+        svc.update_code_host_config(config).await.unwrap();
+        svc.apply_pr_results_at_epoch(CodeHostProvider::Github, 0, vec![(sid, review(101))])
+            .await
+            .unwrap();
+        assert!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_number
+                .is_none()
+        );
     }
 
     /// Run `git` in `dir`, panicking on failure. Signing is forced off by
