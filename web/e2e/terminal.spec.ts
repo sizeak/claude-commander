@@ -33,9 +33,9 @@ test.describe("session tree and terminal", () => {
   });
 
   test("tree retains unchanged nodes and replaces changed selection", async ({ page }) => {
-    const group = page.locator('#tree .project-group').first();
+    const group = page.locator("#tree .project-group").first();
     const original = await group.elementHandle();
-    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
     await expect(group).toBeVisible();
     expect(await group.evaluate((node, old) => node === old, original)).toBe(true);
     await openSession(page, ECHO_SESSION);
