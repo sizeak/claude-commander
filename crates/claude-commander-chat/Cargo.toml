@@ -24,3 +24,7 @@ tracing = { workspace = true }
 [features]
 # `testing::FakeBackend`, an in-memory backend for other crates' tests.
 test-support = []
+
+[dev-dependencies]
+# `start_paused` tests drive the turn timeout without waiting for it.
+tokio = { workspace = true, features = ["test-util"] }

@@ -1371,6 +1371,7 @@ mod tests {
                 section: None,
                 stack_parent: None,
                 origin: None,
+                fresh_branch: false,
             })
             .await
             .unwrap();
@@ -1463,6 +1464,7 @@ mod tests {
                 section: None,
                 stack_parent: None,
                 origin: None,
+                fresh_branch: false,
             })
             .await
             .unwrap();
@@ -1564,6 +1566,7 @@ mod tests {
                 section: None,
                 stack_parent: None,
                 origin: None,
+                fresh_branch: false,
             })
             .await
             .unwrap();

@@ -27,16 +27,37 @@ in an interactive TUI session, ignore it. For a chat request:
   correct. Guessing wrong and spawning the wrong session is not.
 - Do not @-mention people or use `@channel`/`@here`.
 
+### What you can run from chat
+
+For a chat request only `claude-commander list`, `projects`, `status`, `log` and
+`new` are available; anything else is refused. `log` only reads sessions created
+from chat, and at most 200 lines. You can read files inside session worktrees
+and nothing else. Your reply is posted to a shared channel, so don't paste
+secrets or long scrollback into it.
+
 ### Creating sessions from chat
 
 When you create a session on behalf of a chat request (`claude-commander new`),
-distil the thread into a clear `--initial-prompt` and pick the project from the
-project list. So the resulting session remembers where it came from, **always
-pass the origin flags** your prompt header spells out: `--origin-backend`,
-`--origin-channel` and `--origin-thread` (all three together), plus
-`--origin-permalink` when the header has a link. These stamp the session so a
-worker's `claude-commander notify` reports back to this exact thread when it
-finishes. Without them, a worker's notify falls back to a direct message.
+distil the thread into a clear `--initial-prompt` and pick the project from
+`claude-commander projects`. From chat, `new` only accepts:
+
+- `--project <name>` (or the project's id, when two share a name) naming an
+  already-registered project — no `--path`, `--base-branch`, `--workspace` or
+  `--remote`. The session starts from the project's default base, on a new
+  branch: a session name whose branch already exists is refused, so pick a
+  fresh one. If the request needs anything else, say so and let the user set it
+  up from the TUI.
+- a Claude program, in the default or `plan` permission mode.
+
+The worker runs unattended in that mode, so it will stop at its first
+permission prompt (and, in a new worktree, possibly Claude's folder-trust
+question) until someone answers it in the TUI. Say so in your reply.
+
+So the resulting session remembers where it came from, **always pass the origin
+flags** your prompt header spells out: `--origin-backend`, `--origin-channel` and
+`--origin-thread` (all three together), plus `--origin-permalink` when the header
+has a link. These stamp the session so its worker reports back to this exact
+thread with `claude-commander notify` when it finishes or gets stuck.
 
 ### Deleting sessions from chat
 

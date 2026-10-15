@@ -102,7 +102,7 @@ pub fn find_session_exact<'a>(
 
 /// Resolve a `--project <name>` flag to the project's on-disk repo path using a
 /// backend's [`Snapshot`](crate::api::Snapshot). Matches a
-/// project by name (case-insensitive) and returns its `repo_path` — the path
+/// project by full id, or by name (case-insensitive), and returns its `repo_path` — the path
 /// the session's worktree will fork from. For a remote backend this is the
 /// server-side path, so the caller never has to know it.
 ///
@@ -118,6 +118,10 @@ pub fn resolve_project_path(
     projects: &[crate::api::ProjectInfo],
     name: &str,
 ) -> crate::Result<std::path::PathBuf> {
+    // A full project id (as `claude-commander projects` prints) is exact.
+    if let Some(project) = projects.iter().find(|p| p.id.as_uuid().to_string() == name) {
+        return Ok(project.repo_path.clone());
+    }
     let mut matches = projects
         .iter()
         .filter(|p| p.name.eq_ignore_ascii_case(name));
@@ -143,7 +147,8 @@ pub fn resolve_project_path(
         return Err(crate::error::ConfigError::InvalidValue {
             key: "project".to_string(),
             reason: format!(
-                "'{name}' matches more than one project — disambiguate with --path <repo path>"
+                "'{name}' matches more than one project — disambiguate with --path <repo path>, \
+                 or pass the project's id (see `claude-commander projects`) as --project"
             ),
         }
         .into());
@@ -399,6 +404,23 @@ mod tests {
         assert!(
             msg.contains("more than one project") && msg.contains("--path"),
             "ambiguous project must error and point at --path: {err}"
+        );
+        // …and at the project id, which works where `--path` isn't allowed
+        // (a chat request).
+        assert!(msg.contains("claude-commander projects"), "{err}");
+    }
+
+    /// The project id from `claude-commander projects` is always unambiguous.
+    #[test]
+    fn resolve_project_path_accepts_a_project_id() {
+        let projects = vec![
+            make_project_info("app", "/home/mark/one/app"),
+            make_project_info("app", "/home/mark/two/app"),
+        ];
+        let id = projects[1].id.as_uuid().to_string();
+        assert_eq!(
+            resolve_project_path(&projects, &id).unwrap(),
+            PathBuf::from("/home/mark/two/app")
         );
     }
 }

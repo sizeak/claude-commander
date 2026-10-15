@@ -31,18 +31,26 @@ A backend configured in `config.toml` but missing from the build logs a warning
 at startup (`[slack] is configured, but this build has no Slack support`), and
 `notify` answers that no chat backend is running.
 
+**Install the `claude-commander` CLI from the same build.** The chat commander
+drives Commander through the `claude-commander` CLI, and that CLI enforces every
+limit on what a chat request may do. The server puts its own directory first on
+the commander's `PATH`, and refuses to answer chat requests if the
+`claude-commander` it would run is a different version (for example a packaged
+release next to a source-built server).
+
 ## Where it runs
 
 Backends run inside the Commander **server**: either `claude-commander-server`,
 or the TUI's own in-process server (`[server] auto_start = true`, or
 `claude-commander --serve`). Both start every backend that is built in and
 configured, and both write the `server-info.json` that `notify` uses to find
-them. Run one or the other, not both — they share a port.
+them. **Never run both**: on different ports they would each connect the same
+Slack app and answer every message twice.
 
 Chat is gated by the backend tables alone, independent of `commander_enabled`.
-**Changes require a restart**: backend tables and `[headless_commander]` are read
-once when the server starts; `POST /api/config/reload` does not reconfigure a
-running bridge.
+**Backend changes require a restart**: `[slack]` and `[chat]` are read once when
+the server starts; `POST /api/config/reload` does not reconfigure a running
+bridge. The `[headless_commander]` tunables apply after a reload.
 
 ## Configuration
 
@@ -91,6 +99,14 @@ session created this way is stamped with its chat **origin** (`--origin-backend`
 `--origin-channel`, `--origin-thread`, and `--origin-permalink` when the platform
 has links) so a `notify` reports back to that exact thread.
 
+From chat the commander can only start a session in a project you've already
+registered, on a new branch from that project's default base (see Security). The
+worker runs unattended in the default (or `plan`) permission mode, so it stops at
+its first permission prompt — and, in a new worktree, possibly Claude's
+folder-trust question — until someone answers it in the TUI. The worker may run
+`claude-commander notify` without asking, so it can say when it's blocked; the
+commander's reply also mentions it.
+
 ## Reporting back with `notify`
 
 A worker session tells chat it's done — or asks a question — with:
@@ -132,49 +148,50 @@ server machine — so it's locked down by design:
   agent. Thread content is fenced and labelled as untrusted context, not
   commands, but treat it as attacker-controlled input and keep the allowlist
   tight and the channels trusted.
-- **Agent lockdown.** The headless commander runs with a restricted tool set (the
-  `claude-commander` CLI plus read-only Read/Grep/Glob) — no arbitrary shell, no
-  `Write`/`Edit` — and each invocation is capped by `invocation_timeout_secs`. It
-  loads only its own project settings (`--setting-sources project`) and no MCP
-  servers (`--strict-mcp-config`), so your user-level allow rules and MCP servers
-  never widen what it can do. It **can** create sessions (`claude-commander new`),
-  and a created session runs a program in its own tmux pane. Any CLI call that
-  descends from the headless commander (detected by an inherited environment
-  marker the agent cannot forge or strip) is restricted:
+- **Agent lockdown, deny-by-default.** The headless commander may run the
+  `claude-commander` CLI and read files **inside the worktrees directory** —
+  nothing else: no `Write`/`Edit`, no other shell, no reads elsewhere (its own
+  working directory aside). It loads only its own project settings
+  (`--setting-sources project`) and no MCP servers (`--strict-mcp-config`), so
+  your user-level allow rules and MCP servers never widen what it can do, and
+  each invocation is capped by `invocation_timeout_secs`. Every CLI call that
+  descends from it (detected by an inherited environment marker the agent cannot
+  forge or strip) is restricted further:
 
-  - **Program** (`--program`, or the default when omitted): only a **Claude**
-    program from the server's `programs` list or the configured default. Other
-    agents (Codex, OpenCode, omp) are refused, because only Claude's permission
-    modes can keep an unattended worker behind a prompt; an injected
-    `--program "bash -lc '…'"` is refused before anything is created.
-  - **Permission mode** (`--mode`): only no mode, `default` or `plan` — modes that
-    keep the interactive permission prompt. Everything else (`bypassPermissions`,
-    `acceptEdits`, `auto`, `dontAsk`, and any future mode) is refused, so an
-    attacker-supplied `-i` prompt can't run unattended. Other agent flags
-    (`--effort`, `--model`, `-i`) are shell-escaped where they're folded into the
-    launch command, so a value can't inject shell execution.
-  - **`delete`** is refused outright, `--force` or not: deleting is irreversible
-    and the commander can't check a worktree for unsaved work first.
+  - **Subcommands:** only `list`, `projects`, `status`, `log` and `new`.
+    `log` only reads sessions created from chat, at most 200 lines — your own
+    sessions' scrollback never reaches a channel. Everything else — `delete`,
+    `config`, `commander`, `listen-toggle`, `keep-alive`, `attach`, and any
+    command added later — is refused.
+  - **Where `new` may start:** only an already-registered project named with
+    `--project` (name or id), on a **new** branch from its default base.
+    `--path`, `--base-branch`, `--workspace` and `--remote` are refused, and so
+    is a session name whose branch already exists locally or on `origin`:
+    creating a worktree runs repository code (a flake's `nix develop`
+    shellHook, for one), so a chat request must not choose the directory or
+    branch, or a server this check can't see.
+  - **What `new` may launch:** only a **Claude** program from `programs` or the
+    configured default, carrying no permission-overriding flags
+    (`--dangerously-skip-permissions`, `--permission-mode`, `--settings`,
+    `--allowedTools`). Other agents are refused because only Claude's
+    permission modes keep an unattended worker behind a prompt.
+  - **How it runs:** only no mode, `default` or `plan`, and the mode is always
+    passed explicitly, so the worker can't inherit your `defaultMode`. The
+    initial prompt follows `--`, so prompt text can't be parsed as a flag. The
+    worker gets one standing allowance — `claude-commander notify` — so it can
+    report back (or say it's blocked) without a prompt nobody would see.
 
   This does not make the agent untrusted-input-proof in general: allowlisted
   **users** are trusted, thread **history** is treated as untrusted and fenced
   (see above), and the CLI's own guarded surface is the boundary — do not widen
-  `ALLOWED_TOOLS` or the configured programs to anything that shells out freely.
-- **Read fencing.** Read access is broad by necessity (the agent inspects
-  worktrees, which live outside its working directory), so a `permissions.deny`
-  rule set blocks reads of sensitive locations regardless: `~/.ssh`, `~/.aws`,
-  `~/.gnupg`, `~/.git-credentials`, `~/.netrc`, `~/.config/gh`, `~/.docker/config.json`,
-  `~/.kube`, Claude Code's login and transcripts (`~/.claude.json`,
-  `~/.claude/.credentials.json`, `~/.claude/projects`), `.env`/`.env.*` files
-  anywhere, the commander **config dir** (where `config.toml` holds the chat
-  tokens), and the JSON state files in the **data dir** (`server-info.json`'s
-  bearer token, `state.json`, `conversations.json`). This is enforced by Claude
-  Code's permission model, which applies `Read` deny rules to every built-in file
-  tool (`Read`/`Grep`/`Glob`) and to `cat`/`head`-style Bash commands. Everything
-  the deny list does not name (all ordinary repo and worktree files) the agent
-  **can** read. Do not rely on file secrecy for anything outside the denied paths
-  on a machine running a bridge. `claude-commander config` prints the config with
-  every credential redacted, since the agent may run it.
+  the configured programs to anything that shells out freely.
+- **Read fencing.** Reads are allowed only inside the worktrees directory; a
+  `permissions.deny` list additionally blocks `.env`/`.env.*` files and known
+  credential locations (`~/.ssh`, `~/.aws`, `~/.gnupg`, git/gh/docker/kube
+  credentials, Claude Code's login and transcripts, the commander **config
+  dir** holding the chat tokens, and the **data dir**'s JSON state files) even
+  there. Anything a session prints or commits inside its worktree is readable.
+  `claude-commander config` prints the config with every credential redacted.
 - **Secrets stay local.** Chat tokens never leave the server's `config.toml`
   (redacted from the API, not remotely patchable), and worker sessions relay
   through the server rather than holding platform credentials themselves.
@@ -275,6 +292,7 @@ allowed_user_ids = ["U0123456789"] # who may invoke the bot
 The backend is enabled only when **both tokens are set and `allowed_user_ids` is
 non-empty** — an empty allowlist keeps it off, so a token pair alone can't
 accidentally accept everyone. Restart the server after editing; on connect it
-logs `slack: connecting`.
+logs `slack: connecting` and then `connecting via Socket Mode` (the TUI writes
+its log to `/tmp/claude-commander.log` with `--debug`).
 
 Then invite the bot to any channel you want to use it in (`/invite @commander`).

@@ -72,6 +72,14 @@ pub enum Commands {
         workspace: Option<String>,
     },
 
+    /// List registered projects: name, path and id. `new --project` takes the
+    /// name, or the id where two projects share a name
+    Projects {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show detailed status of a session
     Status {
         /// Session name or ID prefix

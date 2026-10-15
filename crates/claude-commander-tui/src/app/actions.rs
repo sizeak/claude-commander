@@ -1307,6 +1307,7 @@ impl App {
                 section: None,
                 stack_parent: None,
                 origin: None,
+                fresh_branch: false,
             },
         );
     }
@@ -2805,6 +2806,7 @@ impl App {
                         section,
                         stack_parent: None,
                         origin: None,
+                        fresh_branch: false,
                     },
                 );
             }
@@ -2848,6 +2850,7 @@ impl App {
                         section: None,
                         stack_parent: Some(parent_session_id),
                         origin: None,
+                        fresh_branch: false,
                     },
                 );
             }

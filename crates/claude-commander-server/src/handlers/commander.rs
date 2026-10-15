@@ -139,6 +139,9 @@ mod tests {
                 .any(|l| l.contains("\"delta\"") && l.contains("Hello")),
             "expected a delta event carrying the text"
         );
+        // The first ask primes the commander directory — inside the test's
+        // temp tree, never the developer's real `<data dir>/commander`.
+        assert!(dir.path().join("commander/CLAUDE.md").is_file());
     }
 
     #[tokio::test]

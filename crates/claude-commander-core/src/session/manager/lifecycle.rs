@@ -99,12 +99,28 @@ impl SessionManager {
     /// is forked off that base branch rather than `origin/<main>`. This backs
     /// the CLI `--base-branch` flag. For stacked sessions the fork point is
     /// derived from the stack parent instead and takes precedence.
-    #[instrument(skip(self))]
     pub async fn finalize_session(
         &self,
         session_id: &SessionId,
         initial_prompt: Option<String>,
         base_branch: Option<String>,
+    ) -> Result<SessionId> {
+        self.finalize_session_with(session_id, initial_prompt, base_branch, false)
+            .await
+    }
+
+    /// [`Self::finalize_session`], optionally refusing to adopt an existing
+    /// branch: with `fresh_branch`, a session whose branch already exists
+    /// locally or on `origin` (after the pre-create fetch) fails instead of
+    /// checking it out. Chat-created sessions set it, since their title — and
+    /// so their branch name — comes from untrusted thread text.
+    #[instrument(skip(self))]
+    pub async fn finalize_session_with(
+        &self,
+        session_id: &SessionId,
+        initial_prompt: Option<String>,
+        base_branch: Option<String>,
+        fresh_branch: bool,
     ) -> Result<SessionId> {
         // Read session and project info, plus stack parent's branch if any so
         // we know to fork from it below.
@@ -241,6 +257,12 @@ impl SessionManager {
                     None
                 }
             };
+            if fresh_branch && preexisted {
+                return Err(SessionError::TargetNotAllowed(format!(
+                    "Reusing the existing branch `{branch_name}` (pick another session name)"
+                ))
+                .into());
+            }
             (exists, preexisted, sp)
         };
         let worktree_path = worktrees_dir.join(&worktree_name);
@@ -300,9 +322,7 @@ impl SessionManager {
                 if prompt_parts.is_empty() {
                     program.clone()
                 } else {
-                    let combined = prompt_parts.join("\n\n");
-                    let escaped = shell_escape_single_quote(&combined);
-                    format!("{program} '{escaped}'")
+                    program_with_prompt(&program, &prompt_parts.join("\n\n"))
                 }
             };
             let launch_cmd = program_with_session_name(&launch_cmd, &title);
@@ -927,9 +947,9 @@ impl SessionManager {
 /// flags like `-p`) because short flags can have different meanings across
 /// harnesses.
 ///
-/// `"default"` mode is treated as a no-op — the Claude CLI uses its own
-/// default when the flag is absent. Effort has no equivalent no-op value
-/// (its levels are `high`/`medium`/`low`), so all values are passed through.
+/// Every mode is passed through, `default` included: with the flag absent
+/// Claude falls back to the operator's `permissions.defaultMode` setting, which
+/// may not be `default` — so an explicit choice has to be explicit.
 ///
 /// Every folded value is single-quoted via [`shell_escape_single_quote`]
 /// because the result becomes the tmux `new-session` shell command (run by
@@ -947,9 +967,7 @@ pub fn program_with_agent_flags(
 
     let mut flags = Vec::new();
     if kind.is_claude() {
-        if let Some(m) = mode
-            && m != "default"
-        {
+        if let Some(m) = mode {
             flags.push(format!(
                 "--permission-mode '{}'",
                 shell_escape_single_quote(m)
@@ -974,6 +992,19 @@ pub fn program_with_agent_flags(
     match parts.next() {
         Some(r) => format!("{cmd} {} {r}", flags.join(" ")),
         None => format!("{cmd} {}", flags.join(" ")),
+    }
+}
+
+/// Append `prompt` as the launch command's positional prompt, shell-quoted.
+/// For Claude it follows `--`, ending option parsing: quoting alone doesn't
+/// stop a prompt that begins with `-` — e.g. `--settings=…` — being read as a
+/// flag. (Only Claude is known to honour `--` before its prompt.)
+pub(super) fn program_with_prompt(program: &str, prompt: &str) -> String {
+    let escaped = shell_escape_single_quote(prompt);
+    if AgentKind::from_program(program).is_claude() {
+        format!("{program} -- '{escaped}'")
+    } else {
+        format!("{program} '{escaped}'")
     }
 }
 
@@ -1092,11 +1123,30 @@ mod lifecycle_tests {
         );
     }
 
+    /// An explicit `default` is passed through: omitting it would let the
+    /// worker inherit the operator's `permissions.defaultMode` from settings,
+    /// which may well not be `default`.
     #[test]
-    fn claude_flags_default_mode_is_noop() {
+    fn claude_flags_pass_an_explicit_default_mode() {
         assert_eq!(
             program_with_agent_flags("claude", Some("default"), None, None),
-            "claude"
+            "claude --permission-mode 'default'"
+        );
+    }
+
+    /// The prompt follows `--`, so prompt text that looks like a flag (an
+    /// injected `--settings=…`) reaches Claude as a prompt, not an option.
+    #[test]
+    fn a_claude_prompt_is_never_parsed_as_a_flag() {
+        assert_eq!(
+            program_with_prompt("claude -n 'x'", "--version"),
+            "claude -n 'x' -- '--version'"
+        );
+        // Other harnesses keep the plain positional form.
+        assert_eq!(program_with_prompt("codex", "fix it"), "codex 'fix it'");
+        assert_eq!(
+            program_with_prompt("claude", "it's"),
+            "claude -- 'it'\\''s'"
         );
     }
 

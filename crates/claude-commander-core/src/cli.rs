@@ -48,6 +48,37 @@ pub fn delete_guard(force: bool, stdin_is_tty: bool, program_locked: bool) -> De
     }
 }
 
+/// Whether subcommand `name` may run when the caller descends from the headless
+/// chat commander ([`crate::commander::headless::program_lock_active`]).
+///
+/// Deny-by-default, because that agent acts on thread text anyone in the
+/// channel can write: it may look around (`list`, `projects`, `status`, a capped `log`)
+/// and start a session (`new`, further gated by
+/// [`Config::ensure_headless_create_allowed`] and
+/// [`crate::config::headless_target_allowed`]). Everything else — destructive
+/// (`delete`), config-rewriting (`config --init`), device-touching
+/// (`listen-toggle`), interactive, or added later — is refused.
+pub fn locked_command_allowed(name: &str) -> bool {
+    matches!(name, "list" | "projects" | "status" | "log" | "new")
+}
+
+/// The most scrollback a locked `log` returns. Scrollback can hold whatever a
+/// session printed, and the chat commander's reply is posted to a channel, so
+/// it gets enough to judge progress and no more.
+pub const LOCKED_LOG_MAX_LINES: usize = 200;
+
+/// Whether a locked `log` may read `session`'s scrollback: only sessions
+/// created from chat. The chat commander's reply goes to a shared channel, and
+/// the operator's own sessions can have printed anything.
+pub fn locked_log_allowed(session: &crate::api::SessionInfo) -> bool {
+    session.origin.is_some()
+}
+
+/// `--lines` for `log` under the program lock.
+pub fn locked_log_lines(requested: usize) -> usize {
+    requested.min(LOCKED_LOG_MAX_LINES)
+}
+
 /// Parse a yes/no confirmation answer. Only `y`/`yes` (case-insensitive,
 /// surrounding whitespace ignored) count as yes; everything else is no.
 pub fn parse_yes_no(input: &str) -> bool {
@@ -121,6 +152,48 @@ impl SessionJsonEntry {
             worktree_path: session.worktree_path.display().to_string(),
         }
     }
+}
+
+/// JSON-serializable project entry for `claude-commander projects`.
+#[derive(Debug, Serialize)]
+pub struct ProjectJsonEntry {
+    /// The project's full id — accepted by `new --project`, and unambiguous
+    /// where two projects share a name.
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    /// The project's workspace tag; `null` is Main.
+    pub workspace: Option<String>,
+}
+
+impl ProjectJsonEntry {
+    pub fn from_info(info: &crate::api::ProjectInfo) -> Self {
+        Self {
+            id: info.id.as_uuid().to_string(),
+            name: info.name.clone(),
+            path: info.repo_path.display().to_string(),
+            workspace: info.workspace.clone(),
+        }
+    }
+}
+
+/// Human-readable `claude-commander projects` output: one line per project.
+pub fn format_projects_human(projects: &[ProjectJsonEntry]) -> String {
+    if projects.is_empty() {
+        return "No projects registered.".to_string();
+    }
+    projects
+        .iter()
+        .map(|p| {
+            let workspace = p
+                .workspace
+                .as_deref()
+                .map(|w| format!("  [{w}]"))
+                .unwrap_or_default();
+            format!("{}  {}  ({}){workspace}", p.name, p.path, p.id)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Workspace context for `list`: the merged workspace list for this host and
@@ -681,6 +754,80 @@ mod tests {
             "/wt/t"
         );
         assert!(format_status_human(&status).contains("Worktree: /wt/t"));
+    }
+
+    /// Deny-by-default: under the program lock only the read-and-create
+    /// commands the chat commander needs run; everything else — `delete`,
+    /// `config`, `commander`, `listen-toggle`, `keep-alive`, `attach`, the TUI,
+    /// and any subcommand added later — is refused.
+    #[test]
+    fn the_locked_cli_allows_only_what_the_chat_commander_needs() {
+        for allowed in ["list", "projects", "status", "log", "new"] {
+            assert!(locked_command_allowed(allowed), "{allowed}");
+        }
+        for refused in [
+            "delete",
+            "config",
+            "commander",
+            "listen-toggle",
+            "keep-alive",
+            "attach",
+            "tui",
+            "notify",
+            "some-future-command",
+        ] {
+            assert!(!locked_command_allowed(refused), "{refused}");
+        }
+        assert_eq!(locked_log_lines(10_000), LOCKED_LOG_MAX_LINES);
+        let mut session = WorktreeSession::new(
+            crate::session::ProjectId::new(),
+            "t",
+            "b",
+            std::path::PathBuf::from("/wt"),
+            "claude",
+        );
+        let info = |s: &WorktreeSession| crate::api::session_info_from_session(s, "p");
+        assert!(
+            !locked_log_allowed(&info(&session)),
+            "the operator's own session"
+        );
+        session.origin = Some(crate::session::ChatOrigin {
+            backend: "slack".into(),
+            channel: "C".into(),
+            thread: "T".into(),
+            permalink: None,
+        });
+        assert!(
+            locked_log_allowed(&info(&session)),
+            "a chat-created session"
+        );
+        assert_eq!(locked_log_lines(50), 50);
+    }
+
+    #[test]
+    fn projects_output_names_each_project_by_id_name_and_path() {
+        let project = crate::api::ProjectInfo {
+            id: crate::session::ProjectId::new(),
+            name: "app".into(),
+            repo_path: std::path::PathBuf::from("/repos/app"),
+            main_branch: "main".into(),
+            session_ids: Vec::new(),
+            origin_url: None,
+            workspace: Some("work".into()),
+        };
+        let entry = ProjectJsonEntry::from_info(&project);
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["id"], project.id.as_uuid().to_string());
+        assert_eq!(json["name"], "app");
+        assert_eq!(json["path"], "/repos/app");
+        assert_eq!(json["workspace"], "work");
+        let human = format_projects_human(&[entry]);
+        assert!(
+            human.contains("app") && human.contains("/repos/app"),
+            "{human}"
+        );
+        assert!(human.contains(&project.id.as_uuid().to_string()), "{human}");
+        assert_eq!(format_projects_human(&[]), "No projects registered.");
     }
 
     #[test]

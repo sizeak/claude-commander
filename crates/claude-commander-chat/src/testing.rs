@@ -167,6 +167,8 @@ impl ChatBackend for FakeBackend {
 /// An [`Asker`] with a fixed answer that remembers what it was asked.
 pub struct FakeAsker {
     answer: Result<String, String>,
+    /// Never answer the first ask (simulates a turn that hangs).
+    hang_first: bool,
     seen: Mutex<Vec<(String, String)>>,
 }
 
@@ -174,8 +176,15 @@ impl FakeAsker {
     pub fn answering(answer: Result<String, String>) -> Self {
         Self {
             answer,
+            hang_first: false,
             seen: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Hang forever on the first ask, then answer normally.
+    pub fn hanging_first(mut self) -> Self {
+        self.hang_first = true;
+        self
     }
 
     /// The last `(conversation key, prompt)` asked.
@@ -196,7 +205,14 @@ impl FakeAsker {
 #[async_trait]
 impl Asker for FakeAsker {
     async fn ask(&self, key: &str, prompt: &str) -> Result<String, String> {
-        self.seen.lock().unwrap().push((key.into(), prompt.into()));
+        let first = {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push((key.into(), prompt.into()));
+            seen.len() == 1
+        };
+        if first && self.hang_first {
+            std::future::pending::<()>().await;
+        }
         self.answer.clone()
     }
 }

@@ -9,7 +9,7 @@ arguments:
 
 The commander's toolkit for tracking delegated work. Use these three read-only `claude-commander` commands to follow up on sessions you've spun up: `list` to see what exists, `status` to check a specific session's progress and diff, and `log` to read what it has actually been doing.
 
-All three are read-only and safe to run at any time — they never modify a session. Their full flag lists are in the `claude-commander-cli-reference` skill (generated from the CLI itself, so it always matches the installed version).
+All three are read-only and safe to run at any time — they never modify a session. From a chat request, `log` only reads sessions created from chat and returns at most 200 lines. Their full flag lists are in the `claude-commander-cli-reference` skill (generated from the CLI itself, so it always matches the installed version).
 
 ## Picking a session
 

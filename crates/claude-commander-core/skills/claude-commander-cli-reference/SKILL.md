@@ -19,6 +19,7 @@ Usage: claude-commander [OPTIONS] [COMMAND]
 Commands:
   tui            Start the interactive TUI (default)
   list           List all sessions
+  projects       List registered projects: name, path and id. `new --project` takes the name, or the id where two projects share a name
   status         Show detailed status of a session
   delete         Delete a session: kill its tmux session and remove the git worktree [aliases: rm]
   keep-alive     Toggle (or explicitly set) keep-alive on a session, exempting it from automatic idle-hibernation. With no flag, toggles the current value
@@ -79,6 +80,21 @@ Options:
 
   -w, --workspace <WORKSPACE>
           Only list sessions in this workspace (by name, case-insensitive; `main` or Main's label for the built-in workspace)
+
+  -h, --help
+          Print help
+```
+
+### `claude-commander projects`
+
+```
+List registered projects: name, path and id. `new --project` takes the name, or the id where two projects share a name
+
+Usage: claude-commander projects [OPTIONS]
+
+Options:
+      --json
+          Output as JSON
 
   -h, --help
           Print help

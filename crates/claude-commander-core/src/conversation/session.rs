@@ -3,7 +3,7 @@
 //! `claude -p --input-format stream-json --output-format stream-json
 //! --include-partial-messages --verbose` keeps a session alive reading
 //! newline-delimited user-message JSON from stdin and emitting NDJSON events on
-//! stdout. We parse those events into [`ConversationEvent`]s — crucially the
+//! stdout. We parse those events into [`StreamEvent`]s — crucially the
 //! incremental `text_delta`s, which arrive as the assistant generates (the
 //! supported way to get clean token-level text without scraping a TUI).
 
@@ -20,7 +20,7 @@ use crate::error::TtsError;
 // The NDJSON event model and its parsing are shared with the headless chat
 // commander, so they live in [`crate::stream_json`]. Re-exported under the
 // historical names so this module's API (and the TTS callers) are unchanged.
-pub use crate::stream_json::{StreamEvent as ConversationEvent, parse_event, user_message_line};
+use crate::stream_json::{StreamEvent, parse_event, user_message_line};
 
 /// A running headless conversation session. Dropping it kills the child
 /// (`kill_on_drop`), so the session lives exactly as long as this handle.
@@ -47,7 +47,7 @@ impl ConversationSession {
         permission_mode: &str,
         cwd: &Path,
         resume: Option<&str>,
-        events: mpsc::UnboundedSender<ConversationEvent>,
+        events: mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<Self, TtsError> {
         let mut cmd = Command::new(command);
         cmd.current_dir(cwd)
@@ -107,7 +107,7 @@ impl ConversationSession {
     }
 }
 
-async fn read_events(stdout: ChildStdout, events: mpsc::UnboundedSender<ConversationEvent>) {
+async fn read_events(stdout: ChildStdout, events: mpsc::UnboundedSender<StreamEvent>) {
     let mut lines = BufReader::new(stdout).lines();
     loop {
         match lines.next_line().await {
@@ -125,7 +125,7 @@ async fn read_events(stdout: ChildStdout, events: mpsc::UnboundedSender<Conversa
             }
         }
     }
-    let _ = events.send(ConversationEvent::Exited);
+    let _ = events.send(StreamEvent::Exited);
 }
 
 /// Drain the child's stderr, logging each non-empty line under the

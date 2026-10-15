@@ -163,6 +163,7 @@ async fn create_session_persists_chat_origin() {
                 thread: "1717000000.001".to_string(),
                 permalink: Some("https://slack.example/archives/C0AR48X88L9/p1".to_string()),
             }),
+            fresh_branch: false,
         })
         .await
         .unwrap();
@@ -222,6 +223,7 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         })
         .await
         .unwrap();
@@ -345,6 +347,7 @@ async fn ws_attach_with_empty_session_id_is_rejected() {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         })
         .await
         .unwrap();
@@ -416,6 +419,7 @@ async fn ws_agent_attach_revives_dead_tmux_session() {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         })
         .await
         .unwrap();
@@ -526,6 +530,7 @@ async fn ws_attach_handshake_size_reaches_tmux_without_any_resize() {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         })
         .await
         .unwrap();
@@ -637,6 +642,7 @@ async fn ws_attach_stamps_last_attached_at() {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         })
         .await
         .unwrap();

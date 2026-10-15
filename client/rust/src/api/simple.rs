@@ -175,6 +175,7 @@ pub fn create_session(
         section: None,
         stack_parent: None,
         origin: None,
+        fresh_branch: false,
     };
     let id = call(client.create_session(opts))?;
     Ok(id.as_uuid().to_string())

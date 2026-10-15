@@ -228,6 +228,13 @@ pub struct CreateSessionOpts {
         skip_serializing_if = "Option::is_none"
     )]
     pub origin: Option<ChatOrigin>,
+    /// Refuse to adopt an existing branch: fail if the session's branch already
+    /// exists locally or on `origin` (after the pre-create fetch), rather than
+    /// checking it out. Set for chat-created sessions, whose title — and so
+    /// branch name — comes from untrusted thread text, so it can't select a
+    /// branch someone else pushed. Additive; older clients omit it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_branch: bool,
 }
 
 /// A project (git repository) as returned by the workspace/list endpoints.
@@ -814,6 +821,7 @@ mod tests {
             section: None,
             stack_parent: Some(parent),
             origin: None,
+            fresh_branch: false,
         };
         let json = serde_json::to_string(&opts).unwrap();
         let back: CreateSessionOpts = serde_json::from_str(&json).unwrap();
@@ -848,6 +856,7 @@ mod tests {
                 thread: "100.1".to_string(),
                 permalink: Some("https://slack/x".to_string()),
             }),
+            fresh_branch: false,
         };
         let back: CreateSessionOpts =
             serde_json::from_str(&serde_json::to_string(&opts).unwrap()).unwrap();

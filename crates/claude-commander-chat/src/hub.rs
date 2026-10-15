@@ -310,7 +310,7 @@ mod tests {
             if let Some(value) = probe() {
                 return value;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!("condition never held");
     }

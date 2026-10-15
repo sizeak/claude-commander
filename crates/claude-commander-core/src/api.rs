@@ -946,11 +946,14 @@ impl CommanderService {
 
         validate_program_flags(&opts, &base_program)?;
 
-        let program = program_with_agent_flags(
-            &base_program,
-            opts.mode.as_deref(),
-            opts.effort.as_deref(),
-            opts.model.as_deref(),
+        let program = with_notify_allowance(
+            program_with_agent_flags(
+                &base_program,
+                opts.mode.as_deref(),
+                opts.effort.as_deref(),
+                opts.model.as_deref(),
+            ),
+            opts.origin.as_ref(),
         );
 
         let path = {
@@ -968,54 +971,63 @@ impl CommanderService {
             .prepare_session(&project_id, opts.title, Some(program), None)
             .await?;
 
-        if let Some(section) = &opts.section {
-            let section = section.clone();
-            let sections =
-                crate::session::effective_sections(&self.config_store.read().sections).into_owned();
-            let now = chrono::Utc::now();
-            self.store
-                .mutate(move |state| {
-                    if let Some(session) = state.sessions.get_mut(&session_id) {
-                        crate::session::place_created_session(session, &section, &sections, now);
-                    }
-                })
-                .await?;
-        }
-
-        // Local stack-parent hint (set by the "new stacked session" flow):
-        // `finalize_session` reads it to fork the branch from the parent's
-        // branch and inject the PR-base launch context.
-        if let Some(parent) = opts.stack_parent {
-            self.store
-                .mutate(move |state| {
-                    if let Some(session) = state.sessions.get_mut(&session_id) {
-                        session.stack_parent_session_id = Some(parent);
-                    }
-                })
-                .await?;
-        }
-
-        // Chat origin (set when the commander agent creates a session from a
-        // chat request via `new --origin-*`): stamp it on the record so
-        // `notify` can route a worker's message back to the originating
-        // thread.
         let initial_prompt = with_report_back(opts.initial_prompt, opts.origin.as_ref());
-        if let Some(origin) = opts.origin {
-            self.store
-                .mutate(move |state| {
-                    if let Some(session) = state.sessions.get_mut(&session_id) {
-                        session.origin = Some(origin);
-                    }
-                })
-                .await?;
-        }
-
+        // Everything after `prepare_session` shares one cleanup: a failure at any
+        // step removes the half-created session.
         let result = async {
+            if let Some(section) = &opts.section {
+                let section = section.clone();
+                let sections =
+                    crate::session::effective_sections(&self.config_store.read().sections)
+                        .into_owned();
+                let now = chrono::Utc::now();
+                self.store
+                    .mutate(move |state| {
+                        if let Some(session) = state.sessions.get_mut(&session_id) {
+                            crate::session::place_created_session(
+                                session, &section, &sections, now,
+                            );
+                        }
+                    })
+                    .await?;
+            }
+
+            // Local stack-parent hint (set by the "new stacked session" flow):
+            // `finalize_session` reads it to fork the branch from the parent's
+            // branch and inject the PR-base launch context.
+            if let Some(parent) = opts.stack_parent {
+                self.store
+                    .mutate(move |state| {
+                        if let Some(session) = state.sessions.get_mut(&session_id) {
+                            session.stack_parent_session_id = Some(parent);
+                        }
+                    })
+                    .await?;
+            }
+
+            // Chat origin (set when the commander agent creates a session from a
+            // chat request via `new --origin-*`): stamp it on the record so
+            // `notify` can route a worker's message back to the originating
+            // thread.
+            if let Some(origin) = opts.origin {
+                self.store
+                    .mutate(move |state| {
+                        if let Some(session) = state.sessions.get_mut(&session_id) {
+                            session.origin = Some(origin);
+                        }
+                    })
+                    .await?;
+            }
             self.manager
                 .link_stack_parent_by_branch(&session_id, opts.base_branch.as_deref())
                 .await?;
             self.manager
-                .finalize_session(&session_id, initial_prompt, opts.base_branch)
+                .finalize_session_with(
+                    &session_id,
+                    initial_prompt,
+                    opts.base_branch,
+                    opts.fresh_branch,
+                )
                 .await?;
             Ok::<(), crate::Error>(())
         }
@@ -3393,6 +3405,23 @@ fn find_session_info(state: &AppState, query: &str) -> Option<SessionInfo> {
     Some(session_info_from_session(session, project_name))
 }
 
+/// A chat-created Claude session's launch command, with a standing allowance
+/// for `claude-commander notify`. The worker runs in `default`/`plan` mode, and
+/// the requester is in a chat thread rather than at the terminal, so without
+/// this its report — "done", or "I'm blocked" — would wait on a permission
+/// prompt nobody sees. Inserted after the binary like the other agent flags;
+/// the positional prompt follows `--`, so the variadic flag can't swallow it.
+fn with_notify_allowance(program: String, origin: Option<&ChatOrigin>) -> String {
+    if origin.is_none() || !AgentKind::from_program(&program).is_claude() {
+        return program;
+    }
+    let allowance = "--allowedTools 'Bash(claude-commander notify:*)'";
+    match program.split_once(char::is_whitespace) {
+        Some((binary, rest)) => format!("{binary} {allowance} {rest}"),
+        None => format!("{program} {allowance}"),
+    }
+}
+
 /// The initial prompt for a session, with — when it was requested from chat —
 /// an instruction to report back there. Appended here rather than left to the
 /// commander that wrote the prompt, so a chat-created worker always knows the
@@ -3719,6 +3748,29 @@ mod tests {
         assert!(uuid::Uuid::parse_str(&info.id).is_ok());
     }
 
+    /// A chat-created worker runs in `default`/`plan` mode, so without a
+    /// standing allowance its `claude-commander notify` would sit on a
+    /// permission prompt nobody is watching — including the "I'm blocked" one.
+    #[test]
+    fn a_chat_created_claude_session_may_always_notify() {
+        let origin = ChatOrigin {
+            backend: "slack".into(),
+            channel: "C1".into(),
+            thread: "1.2".into(),
+            permalink: None,
+        };
+        assert_eq!(
+            with_notify_allowance("claude --permission-mode 'default'".into(), Some(&origin)),
+            "claude --allowedTools 'Bash(claude-commander notify:*)' --permission-mode 'default'"
+        );
+        // Not from chat, or not Claude: unchanged.
+        assert_eq!(with_notify_allowance("claude".into(), None), "claude");
+        assert_eq!(
+            with_notify_allowance("codex".into(), Some(&origin)),
+            "codex"
+        );
+    }
+
     #[test]
     fn a_chat_created_session_is_told_to_report_back() {
         let origin = ChatOrigin {
@@ -3860,6 +3912,7 @@ mod tests {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         };
         let err = validate_program_flags(&opts, "bash").unwrap_err();
         assert!(err.to_string().contains("--effort"));
@@ -3879,6 +3932,7 @@ mod tests {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         };
         let err = validate_program_flags(&opts, "vim").unwrap_err();
         assert!(err.to_string().contains("--mode"));
@@ -3898,6 +3952,7 @@ mod tests {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         };
         validate_program_flags(&opts, "claude").unwrap();
     }
@@ -3916,6 +3971,7 @@ mod tests {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         };
         let err = validate_program_flags(&opts, "bash").unwrap_err();
         assert!(err.to_string().contains("--model"));
@@ -3935,6 +3991,7 @@ mod tests {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         };
         validate_program_flags(&opts, "codex").unwrap();
     }
@@ -3953,6 +4010,7 @@ mod tests {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         };
         validate_program_flags(&opts, "opencode").unwrap();
     }
@@ -4000,6 +4058,7 @@ mod tests {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         };
         validate_program_flags(&opts, "bash").unwrap();
     }

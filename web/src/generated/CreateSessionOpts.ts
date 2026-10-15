@@ -20,4 +20,12 @@ stack_parent: SessionId | null,
  * `notify` can route a worker's message back to the originating thread.
  * Additive; older clients omit it.
  */
-origin?: ChatOrigin | null, };
+origin?: ChatOrigin | null, 
+/**
+ * Refuse to adopt an existing branch: fail if the session's branch already
+ * exists locally or on `origin` (after the pre-create fetch), rather than
+ * checking it out. Set for chat-created sessions, whose title — and so
+ * branch name — comes from untrusted thread text, so it can't select a
+ * branch someone else pushed. Additive; older clients omit it.
+ */
+fresh_branch?: boolean, };

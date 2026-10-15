@@ -124,6 +124,10 @@ pub fn test_state(data_dir: &TempDir, worktrees_dir: &TempDir) -> AppState {
         // REAL `~/Projects`: a suite exercising the clone routes would check
         // repositories out into the developer's own projects directory.
         projects_dir: Some(data_dir.path().join("projects")),
+        // And the commander directory, which otherwise defaults to the user's
+        // REAL `<data dir>/commander` — priming it writes CLAUDE.md, NOTES.md
+        // and the bundled skills.
+        commander_dir: Some(data_dir.path().join("commander")),
         ..Config::default()
     };
     // Telemetry is opt-out by default with a baked ingest token, so a plain

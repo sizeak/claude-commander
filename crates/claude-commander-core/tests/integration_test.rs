@@ -436,10 +436,68 @@ async fn test_session_manager_create_session() {
     drop(worktrees_dir);
 }
 
+/// A chat-created session (`fresh_branch`) must not adopt an existing branch:
+/// its title comes from untrusted thread text, and the branch it names could
+/// carry anyone's code (a flake shellHook, Claude hooks). Without the flag the
+/// same create adopts the branch, as the checkout flow relies on.
+#[tokio::test]
+async fn test_fresh_branch_refuses_to_adopt_an_existing_branch() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let out = fixture_git()
+        .args(["branch", "pushed-by-someone"])
+        .current_dir(&repo_path)
+        .output()
+        .await
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
+
+    let prepare = |title: &str| {
+        manager.prepare_session(
+            &project_id,
+            title.to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+    };
+    let refused = prepare("pushed-by-someone").await.unwrap();
+    let err = manager
+        .finalize_session_with(&refused, None, None, true)
+        .await
+        .expect_err("a fresh-branch create must not adopt an existing branch");
+    assert!(err.to_string().contains("pushed-by-someone"), "{err}");
+
+    let adopted = prepare("pushed-by-someone").await.unwrap();
+    let adopted = manager
+        .finalize_session(&adopted, None, None)
+        .await
+        .unwrap();
+    let _ = manager.kill_session(&adopted, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
 /// Every launch path writes the bundled agent skills into the session's
 /// worktree — create, restart, fresh restart and the hibernation wake — so an
 /// upgraded binary's skills reach existing sessions on their next launch. A
-/// `bash` session is a non-Claude agent, so they land in `.agents/skills/`.
+/// `bash` session is an unrecognised program, so it gets both roots; this
+/// checks `.agents/skills/`.
 #[tokio::test]
 async fn test_every_launch_path_installs_agent_skills() {
     if !tmux_available().await {

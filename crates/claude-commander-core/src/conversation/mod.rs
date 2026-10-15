@@ -53,7 +53,7 @@ pub use listener::{
     spawn_listener,
 };
 pub use media::{MediaSignal, signal as media_signal, spawn_media_gate};
-pub use session::{ConversationEvent, ConversationSession, parse_event, user_message_line};
+pub use session::ConversationSession;
 pub use speaker::{
     SentenceAccumulator, SpeakerCommand, SpeakerHandle, spawn_speaker, speaker_command_for,
 };

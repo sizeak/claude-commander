@@ -58,6 +58,10 @@ pub fn test_state(dir: &TempDir) -> AppState {
     // repository out into the developer's own projects directory. Pin it under
     // `dir` so the fixture can only ever write inside the temp tree.
     config.projects_dir = Some(dir.path().join("projects"));
+    // And the commander directory, which otherwise defaults to the user's REAL
+    // `<data dir>/commander`: an `/api/commander/ask` test primes it (writes
+    // CLAUDE.md, NOTES.md and the bundled skills) before the first turn.
+    config.commander_dir = Some(dir.path().join("commander"));
     let config_store = Arc::new(ConfigStore::with_path(
         config,
         dir.path().join("config.toml"),

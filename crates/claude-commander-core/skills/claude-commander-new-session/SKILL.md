@@ -17,6 +17,13 @@ claude-commander new <session-name> [options]
 
 ## Options
 
+**From a chat request** (your prompt starts "You are answering a … mention"),
+`new` is restricted: name the project with `--project` (see
+`claude-commander projects`), and don't use `--path`, `--base-branch`,
+`--workspace` or `--remote`; pass the `--origin-*` flags from your prompt
+header. The worker reports back with `claude-commander notify`, so skip the tmux
+report-back block below.
+
 The complete flag list for `new` is in the `claude-commander-cli-reference` skill (generated from the CLI itself, so it always matches the installed version). The ones you'll use most are `--initial-prompt`, `--path`, `--base-branch`, `--mode` and `--effort`.
 
 ## Output

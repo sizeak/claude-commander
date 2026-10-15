@@ -16,11 +16,11 @@ use std::time::Instant;
 use super::*;
 use claude_commander_core::agent::AgentKind;
 use claude_commander_core::conversation::{
-    ConversationEvent, ConversationSession, DictationSubmit, ListenAction, ListenerHandle,
-    MediaSignal, SpeakerCommand, SpeakerHandle, SubmitPlan, Transcript, VoiceMode,
-    apply_listen_action, media_signal, plan_dictation, spawn_listener, spawn_media_gate,
-    spawn_speaker,
+    ConversationSession, DictationSubmit, ListenAction, ListenerHandle, MediaSignal,
+    SpeakerCommand, SpeakerHandle, SubmitPlan, Transcript, VoiceMode, apply_listen_action,
+    media_signal, plan_dictation, spawn_listener, spawn_media_gate, spawn_speaker,
 };
+use claude_commander_core::stream_json::StreamEvent;
 use claude_commander_core::tmux::{PaneInfo, PaneInjector};
 
 /// Where dictation works, for when it was asked for somewhere it doesn't.
@@ -145,15 +145,15 @@ pub struct ConversationView {
 impl ConversationView {
     /// Apply a session event to the display model (audio is handled separately
     /// by the bridge). Pure + unit-tested.
-    pub fn apply(&mut self, ev: &ConversationEvent) {
+    pub fn apply(&mut self, ev: &StreamEvent) {
         match ev {
-            ConversationEvent::Started { session_id } => {
+            StreamEvent::Started { session_id } => {
                 self.session_id = Some(session_id.clone());
                 if self.status != ConvStatus::Thinking {
                     self.status = ConvStatus::Idle;
                 }
             }
-            ConversationEvent::Delta(text) => {
+            StreamEvent::Delta(text) => {
                 self.last_delta_at = Some(Instant::now());
                 // Stage 2a: time-to-first-token — how long the agent spent
                 // thinking / running tools before it started speaking.
@@ -169,14 +169,14 @@ impl ConversationView {
                 }
                 self.streaming.push_str(text);
             }
-            ConversationEvent::Break => {
+            StreamEvent::Break => {
                 // A new text segment: separate it from the previous one, which
                 // streamed with no trailing separator.
                 if !self.streaming.is_empty() && !self.streaming.ends_with(char::is_whitespace) {
                     self.streaming.push_str("\n\n");
                 }
             }
-            ConversationEvent::TurnComplete => {
+            StreamEvent::TurnComplete => {
                 // Stage 2b: total agent turn — submission to last token.
                 if let Some(t0) = self.turn_started_at.take() {
                     tracing::debug!(
@@ -201,12 +201,12 @@ impl ConversationView {
                     self.status = ConvStatus::Idle;
                 }
             }
-            ConversationEvent::Error(e) => {
+            StreamEvent::Error(e) => {
                 self.turn_started_at = None;
                 self.finalize_streaming();
                 self.status = ConvStatus::Error(e.clone());
             }
-            ConversationEvent::Exited => {
+            StreamEvent::Exited => {
                 self.turn_started_at = None;
                 self.finalize_streaming();
                 self.status = ConvStatus::Error("session ended".to_string());
@@ -453,7 +453,7 @@ async fn spawn_session_runtime(
     // reach this session's speaker; overwrites any prior speaker on respawn.
     speaker_handle.set(speaker.clone());
 
-    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
+    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
     // Resume the previous conversation if we have a stored session id, so the
     // agent keeps its history (and memory of the user) across restarts.
     let resume = read_resume_id(&dir).await;
@@ -482,10 +482,10 @@ async fn spawn_session_runtime(
         while let Some(ev) = ev_rx.recv().await {
             // Let the media gate know the text turn finished, so it can resume
             // media once the spoken reply (if any) has drained.
-            if matches!(ev, ConversationEvent::TurnComplete) {
+            if matches!(ev, StreamEvent::TurnComplete) {
                 media_signal(&bridge_gate, MediaSignal::TurnComplete);
             }
-            if matches!(ev, ConversationEvent::Delta(_)) {
+            if matches!(ev, StreamEvent::Delta(_)) {
                 tracing::trace!(target: "conversation", "bridge delta");
             } else {
                 tracing::debug!(target: "conversation", "bridge event: {ev:?}");
@@ -493,7 +493,7 @@ async fn spawn_session_runtime(
             // Persist the session id so the next launch resumes this
             // conversation. Claude may fork a fresh id on resume, so record
             // whatever the latest init reports.
-            if let ConversationEvent::Started { session_id } = &ev {
+            if let StreamEvent::Started { session_id } = &ev {
                 write_resume_id(&bridge_dir, session_id).await;
             }
             if let Some(sp) = &speaker
@@ -1485,13 +1485,13 @@ mod tests {
         v.push_user("hi".into());
         assert_eq!(v.status, ConvStatus::Thinking);
         assert_eq!(v.messages.len(), 1); // the user message
-        v.apply(&ConversationEvent::Started {
+        v.apply(&StreamEvent::Started {
             session_id: "s".into(),
         });
-        v.apply(&ConversationEvent::Delta("Hello ".into()));
-        v.apply(&ConversationEvent::Delta("there.".into()));
+        v.apply(&StreamEvent::Delta("Hello ".into()));
+        v.apply(&StreamEvent::Delta("there.".into()));
         assert_eq!(v.streaming, "Hello there.");
-        v.apply(&ConversationEvent::TurnComplete);
+        v.apply(&StreamEvent::TurnComplete);
         assert_eq!(v.status, ConvStatus::Idle);
         assert_eq!(v.streaming, "");
         assert_eq!(v.messages.last().unwrap().role, ConvRole::Assistant);
@@ -1510,21 +1510,21 @@ mod tests {
         assert!(!v.first_token_logged);
 
         // First delta marks time-to-first-token (logged once).
-        v.apply(&ConversationEvent::Delta("Hel".into()));
+        v.apply(&StreamEvent::Delta("Hel".into()));
         assert!(v.first_token_logged);
         assert!(v.turn_started_at.is_some()); // still timing the total turn
-        v.apply(&ConversationEvent::Delta("lo.".into()));
+        v.apply(&StreamEvent::Delta("lo.".into()));
         assert!(v.first_token_logged); // not re-armed by later deltas
 
         // Completing the turn (nothing queued) stops the clock.
-        v.apply(&ConversationEvent::TurnComplete);
+        v.apply(&StreamEvent::TurnComplete);
         assert!(v.turn_started_at.is_none());
 
         // A queued message promoted at TurnComplete restarts the clock.
         v.push_user("one".into());
-        v.apply(&ConversationEvent::Delta("a".into()));
+        v.apply(&StreamEvent::Delta("a".into()));
         v.push_user("two".into()); // queued while Thinking
-        v.apply(&ConversationEvent::TurnComplete);
+        v.apply(&StreamEvent::TurnComplete);
         assert!(v.turn_started_at.is_some()); // re-armed for the queued turn
         assert!(!v.first_token_logged);
     }
@@ -1533,7 +1533,7 @@ mod tests {
     fn agent_turn_timer_cleared_on_error() {
         let mut v = ConversationView::default();
         v.push_user("hi".into());
-        v.apply(&ConversationEvent::Error("boom".into()));
+        v.apply(&StreamEvent::Error("boom".into()));
         assert!(v.turn_started_at.is_none());
     }
 
@@ -1541,7 +1541,7 @@ mod tests {
     fn view_queues_a_message_sent_mid_reply() {
         let mut v = ConversationView::default();
         v.push_user("first".into()); // Thinking
-        v.apply(&ConversationEvent::Delta("answering".into()));
+        v.apply(&StreamEvent::Delta("answering".into()));
         // A second message while Thinking is queued, not shown.
         v.push_user("second".into());
         assert_eq!(v.pending_user.len(), 1);
@@ -1552,7 +1552,7 @@ mod tests {
             .count();
         assert_eq!(user_msgs, 1, "second message is deferred");
         // When the reply completes, the queued message is shown and we stay Thinking.
-        v.apply(&ConversationEvent::TurnComplete);
+        v.apply(&StreamEvent::TurnComplete);
         assert!(v.pending_user.is_empty());
         assert_eq!(v.status, ConvStatus::Thinking);
         assert_eq!(v.messages.last().unwrap().text, "second");
@@ -1561,9 +1561,9 @@ mod tests {
     #[test]
     fn view_break_inserts_separator() {
         let mut v = ConversationView::default();
-        v.apply(&ConversationEvent::Delta("First part.".into()));
-        v.apply(&ConversationEvent::Break);
-        v.apply(&ConversationEvent::Delta("Second part.".into()));
+        v.apply(&StreamEvent::Delta("First part.".into()));
+        v.apply(&StreamEvent::Break);
+        v.apply(&StreamEvent::Delta("Second part.".into()));
         assert_eq!(v.streaming, "First part.\n\nSecond part.");
     }
 }

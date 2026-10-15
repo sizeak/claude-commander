@@ -450,10 +450,11 @@ remote config-patch route, so a remote client can neither read nor set them —
 set them only by editing this file. They're likewise redacted from any debug log
 of the config. See [Chat integration](chat.md) for the end-to-end setup.
 
-The backend tables and `[headless_commander]` are read once when the server
-starts its chat backends; `POST /api/config/reload` does not reconfigure a
-running bridge, so **chat changes require restarting whichever process serves**
-(`claude-commander-server`, or the TUI with `auto_start`).
+The backend tables (`[slack]`) and `[chat]` are read once when the server starts
+its chat backends; `POST /api/config/reload` does not reconfigure a running
+bridge, so **backend changes require restarting whichever process serves**
+(`claude-commander-server`, or the TUI with `auto_start`). The
+`[headless_commander]` tunables are read on every use and apply after a reload.
 
 ## Idle-session hibernation
 

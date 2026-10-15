@@ -4,7 +4,6 @@
 
 use std::io::{IsTerminal, Write};
 
-use clap::Parser;
 use color_eyre::eyre::Result;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -254,7 +253,25 @@ async fn main() -> Result<()> {
     // toward the hard cap before anything else runs.
     raise_fd_limit();
 
-    let cli = Cli::parse();
+    // Parse via the matches so the subcommand's own name is at hand for the
+    // chat commander's deny-by-default gate below.
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    let mut cli =
+        <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    // A call descending from the headless chat commander acts on thread text
+    // anyone in the channel can write: it may only run the few subcommands
+    // that commander needs (see `cli::locked_command_allowed`).
+    let program_locked = claude_commander_core::commander::headless::program_lock_active();
+    let subcommand = matches.subcommand_name().unwrap_or("tui");
+    if program_locked && !claude_commander_core::cli::locked_command_allowed(subcommand) {
+        eprintln!("`{subcommand}` is not available from a chat request.");
+        std::process::exit(1);
+    }
+    // No debug log file from a chat request.
+    if program_locked {
+        cli.debug = false;
+    }
 
     // Load configuration
     let config = Config::load().unwrap_or_else(|e| {
@@ -471,7 +488,7 @@ async fn main() -> Result<()> {
             match claude_commander_core::cli::delete_guard(
                 force,
                 std::io::stdin().is_terminal(),
-                claude_commander_core::commander::headless::program_lock_active(),
+                program_locked,
             ) {
                 claude_commander_core::cli::DeleteGuard::RefuseFromChat => {
                     eprintln!(
@@ -550,6 +567,23 @@ async fn main() -> Result<()> {
 
             let service =
                 claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+            let lines = if program_locked {
+                // From chat, only chat-created sessions' scrollback, capped:
+                // the reply goes to a shared channel.
+                let allowed = service
+                    .find_session(&session)
+                    .await?
+                    .is_some_and(|info| claude_commander_core::cli::locked_log_allowed(&info));
+                if !allowed {
+                    eprintln!(
+                        "`log` from a chat request only reads sessions created from chat; use `status` for others."
+                    );
+                    std::process::exit(1);
+                }
+                claude_commander_core::cli::locked_log_lines(lines)
+            } else {
+                lines
+            };
             match service.get_pane_content(&session, Some(lines)).await? {
                 Some(content) => {
                     if content.ends_with('\n') {
@@ -588,28 +622,47 @@ async fn main() -> Result<()> {
 
             // A `claude-commander new` that descends from the headless chat
             // commander (marked by an inherited env var the agent can neither
-            // forge nor strip — see `commander::headless::PROGRAM_LOCK_ENV`) may
-            // only launch a program the server has configured AND may not disable
-            // the interactive permission prompt via `--mode`. This rejects an
-            // injected `--program "bash -lc '<payload>'"` or a
-            // `--mode bypassPermissions`/`acceptEdits` before any session is
-            // created, closing the RCE path. Read the marker once here at the CLI
-            // boundary (env is process-global; keeping it out of the library fn
-            // keeps that fn pure and testable) and enforce via the library.
-            //
-            // Note: with `--remote`, this validates against the LOCAL config's
-            // program list, which may differ from the remote server's. That only
-            // ever over-rejects (fails closed) — a program the remote allows but
-            // the local config doesn't is refused — so it's a safety edge, never
-            // a bypass. The headless agent's create path is local anyway.
-            let program_locked = claude_commander_core::commander::headless::program_lock_active();
-            if program_locked
-                && let Err(e) =
-                    config.ensure_headless_create_allowed(program.as_deref(), mode.as_deref())
-            {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
+            // forge nor strip — see `commander::headless::PROGRAM_LOCK_ENV`)
+            // acts on thread text anyone in the channel can write, so it is
+            // pinned down before anything is created:
+            // - only a configured Claude program, in a mode that keeps the
+            //   permission prompt (`Config::ensure_headless_create_allowed`);
+            // - only an already-registered project by `--project`, from its
+            //   default base — creating a worktree runs repository code such as
+            //   a flake's `nix develop` shellHook, so the request must not pick
+            //   the directory or branch (`config::headless_target_allowed`);
+            // - only this machine: `--remote` would launch under a server whose
+            //   programs and defaults this check can't see;
+            // - an explicit `--permission-mode` even for the default, so the
+            //   worker can't inherit the operator's `defaultMode` setting.
+            // The env is read once at the CLI boundary; the gates are pure
+            // library functions.
+            let mode = if program_locked {
+                let target = claude_commander_core::config::HeadlessTarget {
+                    by_project_name: project.is_some(),
+                    path: path.is_some(),
+                    base_branch: base_branch.is_some(),
+                    workspace: workspace.is_some(),
+                };
+                let checks = config
+                    .ensure_headless_create_allowed(program.as_deref(), mode.as_deref())
+                    .and_then(|()| claude_commander_core::config::headless_target_allowed(&target))
+                    .and_then(|()| match remote {
+                        Some(_) => Err(
+                            claude_commander_core::error::SessionError::TargetNotAllowed(
+                                "--remote".to_string(),
+                            ),
+                        ),
+                        None => Ok(()),
+                    });
+                if let Err(e) = checks {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                Some(mode.unwrap_or_else(|| "default".to_string()))
+            } else {
+                mode
+            };
 
             // clap's `requires` makes backend + channel + thread all-or-none
             // (permalink optional), so a present backend means a full origin.
@@ -696,6 +749,7 @@ async fn main() -> Result<()> {
                     section,
                     stack_parent: None,
                     origin,
+                    fresh_branch: program_locked,
                 })
                 .await
             {
@@ -807,6 +861,26 @@ async fn main() -> Result<()> {
                     eprintln!("notify failed: {e}");
                     std::process::exit(1);
                 }
+            }
+        }
+
+        Some(Commands::Projects { json }) => {
+            setup_logging(cli.debug, false)?;
+            let service =
+                claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+            let entries: Vec<_> = service
+                .list_projects()
+                .await
+                .iter()
+                .map(claude_commander_core::cli::ProjectJsonEntry::from_info)
+                .collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else {
+                println!(
+                    "{}",
+                    claude_commander_core::cli::format_projects_human(&entries)
+                );
             }
         }
 

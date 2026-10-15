@@ -83,8 +83,13 @@ pub async fn prime_commander_dir(config: &Config) -> Result<PathBuf> {
     tokio::fs::create_dir_all(&dir).await?;
     write_claude_md(&dir).await?;
     seed_notes_md(&dir).await?;
-    crate::skills::install_for_launch(&dir, AgentKind::from_program(&config.commander_program()))
-        .await;
+    // The headless chat commander shares this directory and is always Claude,
+    // so a non-Claude interactive commander gets both skills roots.
+    let kind = match AgentKind::from_program(&config.commander_program()) {
+        AgentKind::Claude => AgentKind::Claude,
+        _ => AgentKind::Unknown,
+    };
+    crate::skills::install_for_launch(&dir, kind).await;
     Ok(dir)
 }
 

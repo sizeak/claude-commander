@@ -52,7 +52,11 @@ claude-commander log feature-auth --lines 200
 # docs/chat.md). Defaults to the session for the current directory.
 claude-commander notify --message "Tests pass, PR is up"
 
-# Show configuration
+# List registered projects (name, path, id; `new --project` takes either)
+claude-commander projects
+
+# Show configuration (credentials — tokens, API keys — are redacted; read
+# config.toml itself for those)
 claude-commander config
 
 # Initialize config file

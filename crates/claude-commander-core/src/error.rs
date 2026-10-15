@@ -58,6 +58,11 @@ pub enum SessionError {
     )]
     ModeNotAllowed(String),
 
+    #[error(
+        "{0} is not permitted for a session created from chat. A chat request may only start a session in an already-registered project, named with `--project`, from that project's own default base."
+    )]
+    TargetNotAllowed(String),
+
     #[error("Failed to create session: {0}")]
     CreationFailed(String),
 
@@ -367,6 +372,7 @@ mod tests {
             SessionError::FileNotInDiff("src/main.rs".to_string()),
             SessionError::ProgramNotAllowed("bash -lc id".to_string()),
             SessionError::ModeNotAllowed("bypassPermissions".to_string()),
+            SessionError::TargetNotAllowed("--path".to_string()),
         ];
         for err in variants {
             assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);

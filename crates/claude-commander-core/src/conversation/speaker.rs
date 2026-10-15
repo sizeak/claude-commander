@@ -148,8 +148,8 @@ impl SpeakerHandle {
 /// Map a session event to the speaker command it drives (if any). Pure, so the
 /// bridge's audio routing is unit-testable. Lets speech be driven straight off
 /// the session stream, independent of the UI loop.
-pub fn speaker_command_for(ev: &crate::conversation::ConversationEvent) -> Option<SpeakerCommand> {
-    use crate::conversation::ConversationEvent as E;
+pub fn speaker_command_for(ev: &crate::stream_json::StreamEvent) -> Option<SpeakerCommand> {
+    use crate::stream_json::StreamEvent as E;
     match ev {
         E::Delta(text) => Some(SpeakerCommand::Chunk(text.clone())),
         // A block boundary, turn end, or error all flush the buffered sentence.
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn speaker_command_routing() {
-        use crate::conversation::ConversationEvent as E;
+        use crate::stream_json::StreamEvent as E;
         assert_eq!(
             speaker_command_for(&E::Delta("hi".into())),
             Some(SpeakerCommand::Chunk("hi".into()))

@@ -6613,6 +6613,7 @@ async fn remote_session_created_selects_row_and_reconciles_owning_backend() {
             section: None,
             stack_parent: None,
             origin: None,
+            fresh_branch: false,
         })
         .await
         .unwrap();

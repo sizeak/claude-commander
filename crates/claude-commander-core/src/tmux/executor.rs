@@ -523,14 +523,44 @@ mod tests {
     }
 
     #[test]
-    fn command_leaves_env_untouched_without_socket_dir() {
+    fn command_only_strips_the_program_lock_without_socket_dir() {
+        use std::ffi::OsStr;
+
         let executor = TmuxExecutor::new();
         let cmd = executor.command();
+        let envs: Vec<(&OsStr, Option<&OsStr>)> = cmd.as_std().get_envs().collect();
         assert_eq!(
-            cmd.as_std().get_envs().count(),
-            0,
-            "normal (TUI/CLI) mode must not tamper with the tmux environment"
+            envs,
+            [(
+                OsStr::new(crate::commander::headless::PROGRAM_LOCK_ENV),
+                None
+            )],
+            "normal (TUI/CLI) mode touches nothing but the chat lock marker"
         );
+    }
+
+    /// The chat commander's lock marker must never reach tmux: a tmux server
+    /// started by a locked `new` copies its client's environment into the
+    /// global environment, locking every later session on it — the operator's
+    /// own included, and the chat worker's `notify` with them.
+    #[test]
+    fn tmux_commands_never_carry_the_chat_lock() {
+        use std::ffi::OsStr;
+
+        for executor in [
+            TmuxExecutor::new(),
+            TmuxExecutor::new().with_tmux_tmpdir(Some(PathBuf::from("/socket/dir"))),
+        ] {
+            let cmd = executor.command();
+            let envs: Vec<(&OsStr, Option<&OsStr>)> = cmd.as_std().get_envs().collect();
+            assert!(
+                envs.contains(&(
+                    OsStr::new(crate::commander::headless::PROGRAM_LOCK_ENV),
+                    None
+                )),
+                "{envs:?}"
+            );
+        }
     }
 
     #[test]

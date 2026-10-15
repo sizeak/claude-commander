@@ -51,26 +51,62 @@ use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::sync::{Mutex, Notify, OnceCell, mpsc};
 use tracing::warn;
 
+use crate::agent::AgentKind;
 use crate::config::ConfigStore;
 use crate::error::{Result, SessionError};
 use crate::stream_json::{StreamEvent, parse_event, user_message_line};
 
-/// Tools the headless commander is permitted to use. Deliberately locked down:
-/// the `claude-commander` CLI (to inspect/create sessions) plus read-only
-/// filesystem tools. No arbitrary `Bash`, no `Write`/`Edit` — a chat-driven
-/// agent must never mutate the host beyond the CLI's own guarded surface.
+/// Tools the headless commander is permitted to use — an allowlist, because
+/// it acts on chat thread text anyone in the channel can write. The
+/// `claude-commander` CLI (itself deny-by-default under the program lock), and
+/// reading inside the worktrees directory, where every session's checkout
+/// lives. No `Write`/`Edit`, no other `Bash`.
 ///
-/// The `Read`/`Grep`/`Glob` entries are **not** redundant: within the commander
-/// working directory those tools need no permission, but the worktrees the agent
-/// must inspect live *outside* it, and only a standing allow rule lets a headless
-/// (unpromptable) process read them. That allowance is broad, so read
-/// *exfiltration* is fenced separately by the [`sensitive_read_denies`] deny
-/// list — deny rules beat allow rules — not by omitting these entries (omitting
-/// them would only break legitimate worktree reads, not stop secret reads).
-const ALLOWED_TOOLS: &[&str] = &["Bash(claude-commander:*)", "Read", "Grep", "Glob"];
+/// Reads are scoped by path rather than allowed broadly and fenced with denies:
+/// a bare `Read`/`Grep`/`Glob` allowance reaches anything a deny rule forgot
+/// (`/proc/*/environ`, other tools' credentials, shell histories), and a bare
+/// `Grep`/`Glob` isn't scoped by `Read(<path>)` allow rules at all — so they
+/// are not granted. Read-only shell commands (`grep`, `ls`) still work within
+/// the allowed paths, and the commander's own working directory is readable
+/// without a rule. [`sensitive_read_denies`] stays as defence in depth (e.g.
+/// `.env` files inside a worktree).
+pub(crate) fn allowed_tools(worktrees_dir: Option<&Path>) -> Vec<String> {
+    let mut tools = vec!["Bash(claude-commander:*)".to_string()];
+    // A path that isn't UTF-8 can't be written as a rule; leaving it out only
+    // under-allows.
+    // Claude matches the rule against the path as written, so a dir reached
+    // through a symlink also needs its resolved form.
+    let resolved = worktrees_dir.and_then(|d| d.canonicalize().ok());
+    for dir in worktrees_dir.into_iter().chain(resolved.as_deref()) {
+        if let Some(dir) = dir.to_str() {
+            let rule = format!("Read(/{}/**)", escape_glob_meta(dir));
+            if !tools.contains(&rule) {
+                tools.push(rule);
+            }
+        }
+    }
+    tools
+}
+
+/// The program the headless commander runs. It drives Claude Code's
+/// stream-json protocol, so a `commander_program` that is a known *other*
+/// agent (it falls back to the first configured program — perhaps `omp` or
+/// `codex`) can't serve it; use plain `claude` rather than failing every chat
+/// request. An unrecognised program is kept: it may be a wrapper around Claude.
+pub(crate) fn headless_program(configured: String) -> String {
+    if matches!(
+        AgentKind::from_program(&configured),
+        AgentKind::Claude | AgentKind::Unknown
+    ) {
+        configured
+    } else {
+        warn!(target: "commander", "commander program {configured:?} is not Claude; the headless commander uses `claude`");
+        "claude".to_string()
+    }
+}
 
 /// Permission mode for the headless process. `default` (NOT `bypassPermissions`)
-/// combined with the [`ALLOWED_TOOLS`] allow-list is the safe posture: anything
+/// combined with the [`allowed_tools`] allow-list is the safe posture: anything
 /// outside the allow-list would prompt, and a headless process has no one to
 /// answer the prompt, so it simply cannot act outside the list.
 const PERMISSION_MODE: &str = "default";
@@ -180,7 +216,7 @@ impl SpawnSpec {
 
 /// Build the `permissions.deny` Read rules that fence the headless chat agent
 /// off from credential and secret locations. These are *deny* rules, which take
-/// precedence over the broad `Read`/`Grep`/`Glob` allowance ([`ALLOWED_TOOLS`]),
+/// precedence over the read allowance ([`allowed_tools`]),
 /// so an agent acting on prompt-injected thread text still cannot read them.
 ///
 /// A `Read(...)` deny rule covers every built-in file-reading tool (`Read`,
@@ -207,6 +243,20 @@ pub(crate) fn sensitive_read_denies(config_dir: Option<&Path>, data_dir: &Path) 
         // `.env` / `.env.*` files anywhere on the filesystem.
         "Read(//**/.env)".to_string(),
         "Read(//**/.env.*)".to_string(),
+        // Other secret files commonly found in a checkout — and so readable
+        // inside a worktree, where reads are otherwise allowed.
+        "Read(//**/.envrc)".to_string(),
+        "Read(//**/.dev.vars)".to_string(),
+        "Read(//**/*.pem)".to_string(),
+        "Read(//**/*.key)".to_string(),
+        "Read(//**/*.p12)".to_string(),
+        "Read(//**/.npmrc)".to_string(),
+        "Read(//**/.pypirc)".to_string(),
+        "Read(//**/*.tfstate)".to_string(),
+        "Read(//**/*.tfstate.*)".to_string(),
+        "Read(//**/*.tfvars)".to_string(),
+        "Read(//**/credentials*.json)".to_string(),
+        "Read(//**/settings.local.json)".to_string(),
     ];
     // The commander config dir holds `config.toml` (chat + other tokens) and is
     // never something the agent legitimately reads, so deny it wholesale.
@@ -293,6 +343,72 @@ impl CommanderSpawn for RealSpawn {
     }
 }
 
+/// The directory holding this build's `claude-commander`, when the running
+/// executable ships one beside it (the TUI *is* it; a standalone server
+/// installed from the same build has it as a sibling).
+fn cli_dir_for(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    dir.join("claude-commander")
+        .is_file()
+        .then(|| dir.to_path_buf())
+}
+
+/// Whether `claude-commander --version` output names this build. Every gate
+/// on what the chat agent may do is enforced by the `claude-commander` it
+/// runs, so an older or foreign one on `PATH` (e.g. a packaged release next
+/// to a source-built server) could have no lock at all.
+fn cli_version_check(version_output: &str) -> std::result::Result<(), String> {
+    let expected = format!("claude-commander {}", env!("CARGO_PKG_VERSION"));
+    let found = version_output.trim();
+    if found == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "the chat commander would run `{}`, but this server is `{expected}`; \
+             install claude-commander from the same build as the server",
+            if found.is_empty() {
+                "no claude-commander"
+            } else {
+                found
+            }
+        ))
+    }
+}
+
+/// `PATH` for the headless child: this build's CLI directory first, so
+/// `claude-commander` resolves to this build. `None` when there's no sibling
+/// CLI to prefer (the version check then decides).
+fn headless_path() -> Option<std::ffi::OsString> {
+    let dir = cli_dir_for(&std::env::current_exe().ok()?)?;
+    let mut paths = vec![dir];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(paths).ok()
+}
+
+/// The `PATH` to spawn the headless child with, checked once per process: the
+/// `claude-commander` it resolves must be this build, or no chat request runs.
+fn checked_headless_path() -> std::result::Result<Option<std::ffi::OsString>, String> {
+    static CHECKED: std::sync::OnceLock<std::result::Result<Option<std::ffi::OsString>, String>> =
+        std::sync::OnceLock::new();
+    CHECKED
+        .get_or_init(|| {
+            let path = headless_path();
+            let mut probe = std::process::Command::new("claude-commander");
+            probe.arg("--version").env_remove(PROGRAM_LOCK_ENV);
+            if let Some(path) = &path {
+                probe.env("PATH", path);
+            }
+            let output = probe
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            cli_version_check(&output).map(|()| path)
+        })
+        .clone()
+}
+
 /// A real `claude` subprocess driven over stream-json. Dropping it kills the
 /// child (`kill_on_drop`).
 pub struct RealChild {
@@ -310,7 +426,11 @@ impl RealChild {
             .split_first()
             .ok_or_else(|| SessionError::InvalidProgram("commander program is empty".into()))?;
 
+        let path = checked_headless_path().map_err(SessionError::InvalidProgram)?;
         let mut cmd = Command::new(program);
+        if let Some(path) = path {
+            cmd.env("PATH", path);
+        }
         cmd.current_dir(&spec.cwd)
             // Marks this process — and every `claude-commander` the agent spawns
             // through its `Bash(claude-commander:*)` allowance, which inherits the
@@ -988,12 +1108,10 @@ impl HeadlessCommander {
                 tokio::fs::create_dir_all(&self.inner.commander_dir).await?;
                 self.write_claude_md().await?;
                 crate::commander::seed_notes_md(&self.inner.commander_dir).await?;
-                let program = self.inner.config_store.read().commander_program();
-                crate::skills::install_for_launch(
-                    &self.inner.commander_dir,
-                    crate::agent::AgentKind::from_program(&program),
-                )
-                .await;
+                // The headless commander is always Claude (see
+                // `headless_program`), whatever the interactive one runs.
+                crate::skills::install_for_launch(&self.inner.commander_dir, AgentKind::Claude)
+                    .await;
                 Ok::<(), crate::Error>(())
             })
             .await?;
@@ -1024,12 +1142,15 @@ impl HeadlessCommander {
     }
 
     async fn spawn_child(&self, resume: Option<&str>) -> Result<Box<dyn CommanderChild>> {
-        let program = self.inner.config_store.read().commander_program();
+        let (program, worktrees_dir) = {
+            let config = self.inner.config_store.read();
+            (config.commander_program(), config.worktrees_dir().ok())
+        };
         let spec = SpawnSpec {
-            program,
+            program: headless_program(program),
             cwd: self.inner.commander_dir.clone(),
             resume: resume.map(|s| s.to_string()),
-            allowed_tools: ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect(),
+            allowed_tools: allowed_tools(worktrees_dir.as_deref()),
             deny_read: self.inner.deny_read.clone(),
             permission_mode: PERMISSION_MODE.to_string(),
         };
@@ -1480,7 +1601,7 @@ mod tests {
             program: "claude".into(),
             cwd: PathBuf::from("/c"),
             resume: resume.map(String::from),
-            allowed_tools: ALLOWED_TOOLS.iter().map(|t| t.to_string()).collect(),
+            allowed_tools: allowed_tools(Some(Path::new("/w"))),
             deny_read: vec!["Read(~/.ssh/**)".into()],
             permission_mode: "default".into(),
         }
@@ -1497,10 +1618,104 @@ mod tests {
     }
 
     #[test]
+    fn reads_are_allowed_only_inside_the_worktrees_dir() {
+        let tools = allowed_tools(Some(Path::new("/home/u/.local/share/cc/worktrees")));
+        assert_eq!(
+            tools,
+            [
+                "Bash(claude-commander:*)",
+                "Read(//home/u/.local/share/cc/worktrees/**)"
+            ]
+        );
+        // Never a bare file tool: those reach anything a deny rule misses, and
+        // bare Grep/Glob ignore `Read(<path>)` scoping entirely.
+        for bare in ["Read", "Grep", "Glob", "Bash"] {
+            assert!(!tools.iter().any(|t| t == bare), "{bare}");
+        }
+        assert_eq!(allowed_tools(None), ["Bash(claude-commander:*)"]);
+    }
+
+    /// Claude matches `Read(<path>)` against the path as written, so a
+    /// worktrees dir reached through a symlink (a symlinked home, `/tmp` on
+    /// macOS) needs a rule for its resolved path too.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_worktrees_dir_is_allowed_by_both_paths() {
+        let root = TempDir::new().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let tools = allowed_tools(Some(&link));
+        let rule = |p: &Path| format!("Read(/{}/**)", p.display());
+        assert!(tools.contains(&rule(&link)), "{tools:?}");
+        assert!(
+            tools.contains(&rule(&real.canonicalize().unwrap())),
+            "{tools:?}"
+        );
+    }
+
+    #[test]
+    fn common_secret_files_are_denied_even_inside_worktrees() {
+        let denies = sensitive_read_denies(None, Path::new("/d"));
+        for name in [
+            ".envrc",
+            "*.pem",
+            "*.key",
+            ".npmrc",
+            "*.tfstate",
+            ".dev.vars",
+            "settings.local.json",
+        ] {
+            assert!(
+                denies.iter().any(|d| d == &format!("Read(//**/{name})")),
+                "{name}: {denies:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cli_dir_is_this_builds_when_it_ships_a_claude_commander() {
+        let dir = TempDir::new().unwrap();
+        let exe = dir.path().join("claude-commander-server");
+        assert_eq!(cli_dir_for(&exe), None, "no sibling CLI");
+        std::fs::write(dir.path().join("claude-commander"), "").unwrap();
+        assert_eq!(cli_dir_for(&exe).as_deref(), Some(dir.path()));
+    }
+
+    #[test]
+    fn only_this_builds_cli_version_passes() {
+        let ours = format!("claude-commander {}\n", env!("CARGO_PKG_VERSION"));
+        assert!(cli_version_check(&ours).is_ok());
+        let err = cli_version_check("claude-commander 0.0.1\n").unwrap_err();
+        assert!(
+            err.contains("0.0.1") && err.contains(env!("CARGO_PKG_VERSION")),
+            "{err}"
+        );
+        assert!(cli_version_check("").is_err());
+    }
+
+    #[test]
+    fn the_headless_commander_always_runs_claude() {
+        assert_eq!(
+            headless_program("claude --model opus".into()),
+            "claude --model opus"
+        );
+        assert_eq!(headless_program("omp".into()), "claude");
+        assert_eq!(headless_program("codex --model o3".into()), "claude");
+        // A wrapper Commander doesn't recognise may well be Claude (`env X=1
+        // claude`, a site-specific launcher): keep it rather than lose its setup.
+        assert_eq!(
+            headless_program("env FOO=1 claude".into()),
+            "env FOO=1 claude"
+        );
+    }
+
+    #[test]
     fn claude_args_end_with_the_variadic_allowed_tools() {
         let args = spec(Some("sess-1")).claude_args();
         let tools_at = args.iter().position(|a| a == "--allowedTools").unwrap();
-        assert_eq!(args[tools_at + 1..], *ALLOWED_TOOLS);
+        assert_eq!(args[tools_at + 1..], allowed_tools(Some(Path::new("/w"))));
         for flag in ["--resume", "--settings", "--strict-mcp-config"] {
             let at = args.iter().position(|a| a == flag).unwrap();
             assert!(at < tools_at, "{flag} must precede --allowedTools");

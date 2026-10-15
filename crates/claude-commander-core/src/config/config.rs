@@ -1127,7 +1127,10 @@ impl Config {
         let program = program.map_or_else(|| self.default_session_program(), str::to_string);
         let configured = program == self.default_session_program()
             || self.programs.iter().any(|p| p.command == program);
-        if !configured || !AgentKind::from_program(&program).is_claude() {
+        if !configured
+            || !AgentKind::from_program(&program).is_claude()
+            || overrides_permissions(&program)
+        {
             return Err(SessionError::ProgramNotAllowed(program));
         }
         if let Some(mode) = mode
@@ -1283,6 +1286,74 @@ impl Config {
                 "Could not determine home directory".to_string(),
             ))
         })
+    }
+}
+
+/// Whether a launch command carries a flag that disables or replaces Claude's
+/// permission prompt (or the rules behind it), which would defeat the mode
+/// gate however the session is created.
+fn overrides_permissions(program: &str) -> bool {
+    const FLAGS: [&str; 13] = [
+        "--dangerously-skip-permissions",
+        "--allow-dangerously-skip-permissions",
+        "--permission-mode",
+        "--permission-prompt-tool",
+        "--settings",
+        "--setting-sources",
+        "--allowedTools",
+        "--allowed-tools",
+        "--add-dir",
+        "--mcp-config",
+        "--plugin-dir",
+        "--system-prompt",
+        "--append-system-prompt",
+    ];
+    program.split_whitespace().any(|token| {
+        let flag = token.split('=').next().unwrap_or(token);
+        FLAGS.contains(&flag)
+    })
+}
+
+/// How a `claude-commander new` names where its session starts — what
+/// [`headless_target_allowed`] gates when the call descends from the headless
+/// chat commander.
+#[derive(Debug, Clone, Copy)]
+pub struct HeadlessTarget {
+    /// `--project <name>`: an already-registered project.
+    pub by_project_name: bool,
+    /// `--path <dir>`: any directory, registered on the fly if new.
+    pub path: bool,
+    /// `--base-branch <branch>`: fork from a chosen branch.
+    pub base_branch: bool,
+    /// `--workspace <name>`: registers the project in a workspace.
+    pub workspace: bool,
+}
+
+/// Gate where a chat-originated `claude-commander new` may start a session.
+///
+/// Creating a worktree runs repository-controlled code before any agent
+/// starts — with `nix_develop` on, a flake's `nix develop` shellHook, both when
+/// the shell is pre-warmed and when the pane launches. The program/mode lock
+/// can't see that, so a prompt-injected chat request must not pick *which*
+/// code: no arbitrary directory (`--path`, or the commander's cwd), no newly
+/// registered project (`--workspace`), and no chosen branch (`--base-branch`,
+/// which can be anything anyone pushed). It may only name an already-registered
+/// project — one the operator added — and start from its default base.
+pub fn headless_target_allowed(target: &HeadlessTarget) -> std::result::Result<(), SessionError> {
+    let refused = if target.path {
+        Some("--path")
+    } else if !target.by_project_name {
+        Some("Creating a session in the current directory (no --project)")
+    } else if target.base_branch {
+        Some("--base-branch")
+    } else if target.workspace {
+        Some("--workspace")
+    } else {
+        None
+    };
+    match refused {
+        Some(what) => Err(SessionError::TargetNotAllowed(what.to_string())),
+        None => Ok(()),
     }
 }
 
@@ -1854,6 +1925,42 @@ speed = 1.25
         );
     }
 
+    /// A configured Claude command can itself carry flags that disable or
+    /// override the permission prompt; those don't qualify for chat either.
+    #[test]
+    fn headless_lock_refuses_programs_that_carry_permission_flags() {
+        for command in [
+            "claude --dangerously-skip-permissions",
+            "claude --allow-dangerously-skip-permissions",
+            "claude --permission-mode bypassPermissions",
+            "claude --permission-mode=acceptEdits",
+            "claude --settings /tmp/x.json",
+            "claude --allowedTools Bash",
+            "claude --add-dir /",
+            "claude --mcp-config m.json",
+            "claude --plugin-dir p",
+            "claude --permission-prompt-tool t",
+            "claude --append-system-prompt x",
+            "claude --system-prompt x",
+            "claude --setting-sources user",
+        ] {
+            let config = Config {
+                programs: vec![ProgramEntry {
+                    label: "c".to_string(),
+                    command: command.to_string(),
+                }],
+                ..Config::default()
+            };
+            assert!(
+                matches!(
+                    config.ensure_headless_create_allowed(None, None),
+                    Err(SessionError::ProgramNotAllowed(_))
+                ),
+                "{command}"
+            );
+        }
+    }
+
     /// With no `--program`, the server default launches — so it must pass the
     /// same Claude-only gate, or a non-Claude default would run unattended.
     #[test]
@@ -1956,6 +2063,58 @@ speed = 1.25
                 .unwrap_err(),
             SessionError::ProgramNotAllowed(_)
         ));
+    }
+
+    /// Where a chat-created session may start. Creating a worktree runs
+    /// repository-controlled code (`nix develop`'s shellHook when the project
+    /// is a flake), so a chat request must not choose an arbitrary directory or
+    /// branch: only an already-registered project, by name, from its default
+    /// base.
+    #[test]
+    fn headless_target_lock_allows_only_a_registered_project_by_name() {
+        let ok = HeadlessTarget {
+            by_project_name: true,
+            path: false,
+            base_branch: false,
+            workspace: false,
+        };
+        assert!(headless_target_allowed(&ok).is_ok());
+        for (bad, flag) in [
+            (
+                HeadlessTarget {
+                    by_project_name: false,
+                    path: true,
+                    ..ok
+                },
+                "--path",
+            ),
+            (
+                HeadlessTarget {
+                    by_project_name: false,
+                    ..ok
+                },
+                "the current directory",
+            ),
+            (
+                HeadlessTarget {
+                    base_branch: true,
+                    ..ok
+                },
+                "--base-branch",
+            ),
+            (
+                HeadlessTarget {
+                    workspace: true,
+                    ..ok
+                },
+                "--workspace",
+            ),
+        ] {
+            assert!(
+                matches!(headless_target_allowed(&bad), Err(SessionError::TargetNotAllowed(f)) if f.contains(flag)),
+                "{flag}"
+            );
+        }
     }
 
     #[test]

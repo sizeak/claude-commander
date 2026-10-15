@@ -22,6 +22,9 @@ sessions, not to write code in a specific repository.
   `claude-commander keep-alive <exact-title-or-full-id>`.
 - **Read** anything on the filesystem the user can read.
 
+A request that comes from chat is much more restricted — see **Chat mode**
+below; it overrides this list.
+
 ## What you cannot do (yet)
 
 - Kill (stop without deleting) or restart sessions. The CLI has no command for
