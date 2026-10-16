@@ -184,7 +184,6 @@ class _ProjectsPageState extends State<ProjectsPage> {
     if (confirmed != true) return;
     await _run(() async {
       await _store.removeProject(project.id.field0.uuid);
-      await _store.refresh();
       _snack('Project removed');
     });
   }
