@@ -7,6 +7,7 @@ for (const supported of [true, false]) {
   }) => {
     const session = await sessionByTitle(request, ECHO_SESSION);
     let waiting = false;
+    let baselineCaptured = false;
     let release: () => void = () => {};
     const parked = new Promise<void>(() => {});
     const changed = new Promise<void>((resolve) => {
@@ -32,10 +33,16 @@ for (const supported of [true, false]) {
       await route.fulfill({ contentType: "application/json", body: "0" });
     });
     await page.route("**/api/agent-states*", async (route) => {
+      if (!route.request().headers().authorization) {
+        await route.continue();
+        return;
+      }
       const response = await route.fetch();
+      expect(response.ok()).toBeTruthy();
       const body = await response.json();
       body.states[session.id] = waiting ? "waiting_for_input" : "idle";
       await route.fulfill({ response, json: body });
+      if (!waiting) baselineCaptured = true;
     });
     await page.addInitScript(() => {
       const received: string[] = [];
@@ -49,6 +56,7 @@ for (const supported of [true, false]) {
       } as unknown as typeof Notification;
     });
     await connect(page);
+    await expect.poll(() => baselineCaptured).toBe(true);
     await page.evaluate(() => {
       Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
       Object.defineProperty(document, "visibilityState", {
