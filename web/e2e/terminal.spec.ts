@@ -7,6 +7,7 @@ import {
   openSession,
   PROJECT,
   paneText,
+  projectGroup,
   projectHeader,
   REVIEW_SESSION,
   sessionByTitle,
@@ -33,7 +34,7 @@ test.describe("session tree and terminal", () => {
   });
 
   test("tree retains unchanged nodes and replaces changed selection", async ({ page }) => {
-    const group = page.locator("#tree .project-group").first();
+    const group = projectGroup(page, PROJECT);
     const original = await group.elementHandle();
     await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
     await expect(group).toBeVisible();
