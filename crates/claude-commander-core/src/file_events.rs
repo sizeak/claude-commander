@@ -90,8 +90,7 @@ impl FileEvents {
     /// Consume invalidations synchronously when checking a cached resource.
     pub fn take_changed(&mut self) -> bool {
         let changed = self.rx.has_changed().unwrap_or(true);
-        self.rx.borrow_and_update();
-        changed
+        acknowledge_change(&mut self.rx, changed)
     }
     pub fn healthy(&self) -> bool {
         !self.failed.load(Ordering::Relaxed)
@@ -132,6 +131,15 @@ impl FileEvents {
     pub async fn changed(&mut self) -> bool {
         self.rx.changed().await.is_ok()
     }
+}
+
+fn acknowledge_change(rx: &mut watch::Receiver<u64>, changed: bool) -> bool {
+    // A callback can arrive after an empty check. Leave it pending rather
+    // than acknowledge an event the caller is not about to invalidate for.
+    if changed {
+        rx.borrow_and_update();
+    }
+    changed
 }
 
 /// Build the callback and return the paths to register with the watcher.
@@ -187,6 +195,30 @@ fn invalidation_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_event_after_an_empty_check_remains_pending() {
+        let (tx, mut rx) = watch::channel(0_u64);
+        let changed = rx.has_changed().unwrap();
+        assert!(!changed);
+        // The callback runs after the consumer checked but before it acks.
+        tx.send_modify(|generation| *generation += 1);
+        assert!(!acknowledge_change(&mut rx, changed));
+        assert!(
+            rx.has_changed().unwrap(),
+            "the late event must survive for the next check"
+        );
+    }
+
+    #[test]
+    fn an_observed_change_acknowledges_the_coalesced_batch() {
+        let (tx, mut rx) = watch::channel(0_u64);
+        tx.send_modify(|generation| *generation += 1);
+        let changed = rx.has_changed().unwrap();
+        tx.send_modify(|generation| *generation += 1);
+        assert!(acknowledge_change(&mut rx, changed));
+        assert!(!rx.has_changed().unwrap());
+    }
+
     #[test]
     fn queue_overflow_invalidates_even_without_paths() {
         let dir = tempfile::TempDir::new().unwrap();
