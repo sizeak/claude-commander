@@ -2591,20 +2591,75 @@ impl CommanderService {
     /// Reload the state file on a fixed cadence, waking the change-feed when
     /// another instance mutated it. No-op loop when `interval_ms` is 0.
     fn spawn_state_sync_loop(&self, interval_ms: u64) -> tokio::task::JoinHandle<()> {
-        let store = self.store.clone();
+        let service = self.clone();
         tokio::spawn(async move {
             if interval_ms == 0 {
                 return;
             }
+            let data_dir = service.store.data_dir();
+            let mut watcher = tokio::task::spawn_blocking(move || {
+                crate::file_events::FileEvents::state(&data_dir)
+            })
+            .await
+            .ok()
+            .and_then(|result| result.ok());
+            let mut retry_at = std::time::Instant::now() + Duration::from_secs(30);
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
-                match store.reload_if_changed().await {
-                    Ok(_) => {}
-                    Err(e) => debug!("State sync check failed: {e}"),
+                if watcher.is_none() && std::time::Instant::now() >= retry_at {
+                    let data_dir = service.store.data_dir();
+                    watcher = tokio::task::spawn_blocking(move || {
+                        crate::file_events::FileEvents::state(&data_dir)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
+                }
+                let event = tokio::select! {
+                    _ = interval.tick() => false,
+                    _ = async {
+                        match &mut watcher {
+                            Some(watcher) => { watcher.changed().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => true,
+                };
+                if event {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Drain the coalesced batch, including events during the delay.
+                    if let Some(watcher) = &mut watcher {
+                        watcher.take_changed();
+                    }
+                }
+                let review_changed = watcher.as_ref().is_some_and(|w| w.take_review_changed());
+                service.reconcile_state_files(review_changed).await;
+                if watcher.as_ref().is_some_and(|w| !w.healthy()) {
+                    watcher = None;
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
                 }
             }
         })
+    }
+
+    async fn reconcile_state_files(&self, review_changed: bool) {
+        if review_changed {
+            self.comments.invalidate_pending().await;
+        }
+        let reloaded = match self.store.reload_if_changed().await {
+            Ok(changed) => changed,
+            Err(e) => {
+                debug!("State sync check failed: {e}");
+                false
+            }
+        };
+        // reload_if_changed notifies for external state writes. Healthy events
+        // for our own state writes need no second wakeup; uncertain/rescan
+        // events still conservatively invalidate review consumers.
+        if review_changed && !reloaded {
+            self.store.notify_change();
+        }
     }
 
     // -- Internal helpers for the workspace surface --
@@ -3896,6 +3951,18 @@ mod tests {
                 "core test services must not clone into the real ~/Projects (got {projects_dir:?})"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn state_sync_does_not_notify_again_for_our_own_state_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_project_session(&svc).await;
+        let generation = svc.store().generation();
+        // Exercise a classified state-only event directly. Native watcher
+        // startup may also emit a conservative rescan on macOS.
+        svc.reconcile_state_files(false).await;
+        assert_eq!(svc.store().generation(), generation);
     }
 
     /// Seed one project with one session and return their ids.
