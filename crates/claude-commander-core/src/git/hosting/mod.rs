@@ -91,23 +91,6 @@ pub fn stack_instruction(provider: CodeHostProvider, parent_branch: &str) -> Str
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stack_instructions_use_each_clis_exact_create_flag() {
-        assert!(
-            stack_instruction(CodeHostProvider::Github, "parent")
-                .ends_with("gh pr create --base parent")
-        );
-        assert!(
-            stack_instruction(CodeHostProvider::Gitlab, "parent")
-                .ends_with("glab mr create --target-branch parent")
-        );
-    }
-}
-
 /// Retargets are best-effort; bound both the CLI and any child processes.
 pub(crate) async fn review_output(
     command: tokio::process::Command,
@@ -127,5 +110,22 @@ pub(crate) async fn review_output(
             std::io::ErrorKind::TimedOut,
             "review retarget timed out",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stack_instructions_use_each_clis_exact_create_flag() {
+        assert!(
+            stack_instruction(CodeHostProvider::Github, "parent")
+                .ends_with("gh pr create --base parent")
+        );
+        assert!(
+            stack_instruction(CodeHostProvider::Gitlab, "parent")
+                .ends_with("glab mr create --target-branch parent")
+        );
     }
 }
