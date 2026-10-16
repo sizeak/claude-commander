@@ -5,4 +5,8 @@ import type { SetSessionBase } from "./SetSessionBase";
  * All editable session settings. Omit `base` to preserve the current stack base.
  * Program changes can be saved for the next restart, or launched fresh now.
  */
-export type EditSession = { title: string, program: string, section: string | null, keep_alive: boolean, base: SetSessionBase | null, restart: boolean, };
+export type EditSession = { title?: string | null, program?: string | null, 
+/**
+ * Missing preserves the assignment; null clears the manual override.
+ */
+section?: string | null, keep_alive?: boolean | null, base?: SetSessionBase | null, restart: boolean, };

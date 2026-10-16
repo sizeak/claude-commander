@@ -885,6 +885,7 @@ dependencies = [
  "claude-commander-core",
  "claude-commander-protocol",
  "claude-commander-test-support",
+ "claude-commander-viewmodel",
  "figment",
  "futures",
  "http-body-util",

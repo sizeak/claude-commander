@@ -979,7 +979,7 @@ Config order is the pipeline. A session's section is re-evaluated on every PR re
 
 ### Moving sessions manually
 
-Select a session and press `m` (or open the palette with `Space`, or `Shift+Space` for commands-only, and run **Edit session** and change **Section**), then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
+Select a session and press `m` to pick a section, or open **Edit session** with `Shift+E` (also available in the `Space` command palette) and change **Section**. Choose **Automatic** in the editor, or **Auto** in the section picker, to clear an existing pin. The override is persisted in `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
 
 ### Creating sessions inside a section
 

@@ -622,24 +622,17 @@ pub trait CommanderBackend: Send + Sync {
     async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId>;
     async fn kill_session(&self, id: SessionId) -> BResult<()>;
     async fn restart_session(&self, id: SessionId) -> BResult<()>;
-    /// Restart a session with a *fresh* agent conversation (no `--resume`),
-    /// discarding whatever the agent would otherwise have resumed. Two callers:
-    /// the attach loop, when the agent process exits mid-attach, and the
-    /// operator's Reset command.
-    ///
-    /// Deliberately **required**, not defaulted. It was defaulted to
-    /// `restart_session` while only [`LocalBackend`] implemented it, which meant
-    /// a remote session's "fresh" restart silently *resumed* — the one thing the
-    /// caller asked it not to do. Every backend now answers for itself, so a
-    /// backend that cannot restart fresh has to say so rather than quietly
-    /// doing the opposite.
+    /// Explicitly reset a session, starting a fresh conversation and applying
+    /// any pending program. Automatic recovery uses `recover_session_fresh`.
     async fn restart_session_fresh(&self, id: SessionId) -> BResult<()>;
+    /// Automatically recover an exited agent, retaining its live and pending programs.
+    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()>;
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
     async fn edit_session(
         &self,
         id: SessionId,
         edit: claude_commander_protocol::api::EditSession,
-    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>>;
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome>;
 
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
     /// Change a session's launch program (the agent harness that runs) and

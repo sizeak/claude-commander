@@ -198,26 +198,12 @@ pub fn delete_session(handle: String, id: String) -> Result<()> {
     call(client.delete_session(parse_session_id(&id)?))
 }
 
-/// Save all session settings; program changes may wait until the next restart.
-#[allow(clippy::too_many_arguments)]
-pub fn edit_session(
-    handle: String, id: String, title: String, program: String,
-    section: Option<String>, keep_alive: bool, change_base: bool,
-    parent_id: Option<String>, restart: bool,
-) -> Result<Option<String>> {
+/// Save only the changed fields produced by the shared editor planner.
+pub fn edit_session(handle: String, id: String, patch_json: String) -> Result<Option<String>> {
     let client = with_client(&handle)?;
-    let base = if change_base {
-        Some(claude_commander_protocol::api::SetSessionBase {
-            parent_session_id: parent_id.as_deref().map(parse_session_id).transpose()?,
-        })
-    } else { None };
-    let outcome = call(client.edit_session(parse_session_id(&id)?, claude_commander_protocol::api::EditSession {
-        title, program, section, keep_alive, base, restart,
-    }))?;
-    Ok(outcome.and_then(|outcome| match outcome.pr {
-        claude_commander_protocol::api::PrRetarget::Failed { message, .. } => Some(format!("Session saved, but PR target update failed: {message}")),
-        _ => None,
-    }))
+    let edit = serde_json::from_str(&patch_json)?;
+    let outcome = call(client.edit_session(parse_session_id(&id)?, edit))?;
+    Ok((!outcome.warnings.is_empty()).then(|| outcome.warnings.join("\n")))
 }
 
 /// Rename a session's title.

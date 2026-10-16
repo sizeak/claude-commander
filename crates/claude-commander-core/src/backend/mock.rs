@@ -69,6 +69,7 @@ pub struct MockBackend {
     /// Kept separate from `restarted` so a test can tell a fresh (no-resume)
     /// restart from a resuming one — the whole point of the Reset command.
     reset: Mutex<Vec<SessionId>>,
+    recovered: Mutex<Vec<SessionId>>,
     /// `(session, program)` pairs passed to [`Self::change_program`], for
     /// call-recording asserts.
     program_changes: Mutex<Vec<(SessionId, String)>>,
@@ -159,6 +160,7 @@ impl MockBackend {
             reconciled: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
             reset: Mutex::new(Vec::new()),
+            recovered: Mutex::new(Vec::new()),
             program_changes: Mutex::new(Vec::new()),
             session_edits: Mutex::new(Vec::new()),
             base_changes: Mutex::new(Vec::new()),
@@ -240,11 +242,12 @@ impl MockBackend {
         self.base_changes.lock().unwrap().clone()
     }
 
-    /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
+    /// Settings patches passed to [`Self::edit_session`], in call order.
     pub fn session_edits(&self) -> Vec<(SessionId, claude_commander_protocol::api::EditSession)> {
         self.session_edits.lock().unwrap().clone()
     }
 
+    /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
     pub fn program_changes(&self) -> Vec<(SessionId, String)> {
         self.program_changes.lock().unwrap().clone()
     }
@@ -257,6 +260,11 @@ impl MockBackend {
     /// Sessions passed to [`Self::restart_session_fresh`], in call order.
     pub fn reset_sessions(&self) -> Vec<SessionId> {
         self.reset.lock().unwrap().clone()
+    }
+
+    /// Sessions automatically recovered without applying pending settings.
+    pub fn recovered_sessions(&self) -> Vec<SessionId> {
+        self.recovered.lock().unwrap().clone()
     }
 
     /// How many times [`Self::request_pr_refresh`] has been called.
@@ -527,6 +535,12 @@ impl CommanderBackend for MockBackend {
         Ok(())
     }
 
+    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()> {
+        self.guard()?;
+        self.recovered.lock().unwrap().push(id);
+        Ok(())
+    }
+
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
         self.guard()?;
         self.deleted.lock().unwrap().push(id);
@@ -537,10 +551,10 @@ impl CommanderBackend for MockBackend {
         &self,
         id: SessionId,
         edit: claude_commander_protocol::api::EditSession,
-    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome> {
         self.guard()?;
         self.session_edits.lock().unwrap().push((id, edit));
-        Ok(None)
+        Ok(Default::default())
     }
 
     async fn rename_session(&self, _id: SessionId, _title: String) -> BResult<()> {

@@ -429,8 +429,9 @@ pub enum UserCommand {
     DeleteSession,
     /// Delete every session whose PR has merged on GitHub (palette-only)
     DeleteMergedPrSessions,
-    /// Rename the currently selected session (UI title only)
+    /// Edit the selected session settings.
     EditSession,
+    /// Rename the currently selected session (UI title only).
     RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,

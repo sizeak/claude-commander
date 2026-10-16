@@ -16,13 +16,17 @@ import type {
   CreateOptions,
   CreateSessionOpts,
   EditSession,
+  EditSessionOutcome,
   NewComment,
+  PlanSessionEdit,
   ProjectId,
   ReviewedToggle,
   ReviewSnapshot,
   ScanResponse,
+  SessionEditorInput,
+  SessionEditorModel,
+  SessionEditorPlan,
   SessionId,
-  SetSessionBaseOutcome,
   Snapshot,
   ToggleReviewed,
 } from "./generated/index.ts";
@@ -240,8 +244,12 @@ export class Api {
 
   createSession = (opts: CreateSessionOpts) =>
     this.request<CreatedId<SessionId>>("POST", "/sessions", opts);
+  sessionEditorModel = (input: SessionEditorInput) =>
+    this.request<SessionEditorModel>("POST", "/session-editor/model", input);
+  planSessionEdit = (input: PlanSessionEdit) =>
+    this.request<SessionEditorPlan>("POST", "/session-editor/plan", input);
   editSession = (id: SessionId, edit: EditSession) =>
-    this.request<SetSessionBaseOutcome | null>("PATCH", `/sessions/${id}`, { op: "edit", ...edit });
+    this.request<EditSessionOutcome>("PATCH", `/sessions/${id}`, { op: "edit", ...edit });
   restartSession = (id: SessionId) => this.request<unknown>("POST", `/sessions/${id}/restart`);
   killSession = (id: SessionId) => this.request<unknown>("POST", `/sessions/${id}/kill`);
   deleteSession = (id: SessionId) => this.request<unknown>("DELETE", `/sessions/${id}`);

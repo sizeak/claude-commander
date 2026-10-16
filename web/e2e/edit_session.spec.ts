@@ -106,13 +106,48 @@ test("edit session: cancel pending change to an unconfigured live program", asyn
     await expect(page.locator("#edit-program option[value='cat']")).toHaveText("cat");
     await page.locator("#edit-program").selectOption("cat");
     await page.locator("#edit-modal").getByRole("button", { name: "Save", exact: true }).click();
-    await expect(page.locator("#edit-heading")).toHaveText("Restart session?");
-    await page.locator("#edit-later").click();
     await expect(page.locator("#edit-modal")).toBeHidden();
     const edited = await sessionByTitle(request, title);
     expect(edited.program).toBe("cat");
     expect(edited.pending_program).toBeNull();
     expect(edited.status).toBe("running");
+  } finally {
+    await api(request, "DELETE", `/sessions/${created.id}`);
+  }
+});
+
+test("cancelling during a delayed editor plan does not save", async ({ page, request }) => {
+  const project = (await workspace(request)).projects.find((p) => p.name === PROJECT);
+  if (!project) throw new Error("fixture project missing");
+  const title = `edit-cancel-plan-${Date.now()}`;
+  const created = await api<CreatedId<SessionId>>(request, "POST", "/sessions", {
+    project_path: project.repo_path,
+    title,
+    program: "cat",
+  });
+  try {
+    await connect(page);
+    await openSession(page, title);
+    await page.locator("#edit-session-btn").click();
+    await page.locator("#edit-title").fill(`${title}-cancelled`);
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route("**/api/session-editor/plan", async (route) => {
+      await gate;
+      await route.continue();
+    });
+    const planning = page.waitForRequest("**/api/session-editor/plan");
+    await page.locator("#edit-modal").getByRole("button", { name: "Save", exact: true }).click();
+    await planning;
+    await page.locator("#edit-modal").getByRole("button", { name: "Cancel", exact: true }).click();
+    const planned = page.waitForResponse("**/api/session-editor/plan");
+    release();
+    await (await planned).finished();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+    await expect(page.locator("#edit-modal")).toBeHidden();
+    expect((await sessionByTitle(request, title)).title).toBe(title);
   } finally {
     await api(request, "DELETE", `/sessions/${created.id}`);
   }

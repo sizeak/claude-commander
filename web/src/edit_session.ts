@@ -1,54 +1,7 @@
 import { type Api, act } from "./api.ts";
 import { byId, closeModal, openModal } from "./dom.ts";
-import type { EditSession, ProgramInfo, SessionInfo } from "./generated/index.ts";
+import type { EditSession, SessionEditorModel, SessionInfo } from "./generated/index.ts";
 import { state } from "./state.ts";
-
-let api: Api;
-let refresh: () => Promise<void>;
-let onRestart: (id: string) => void;
-let session: SessionInfo | null = null;
-let pending: EditSession | null = null;
-let busy = false;
-let originalParent = "";
-const modal = () => byId("edit-modal");
-const field = (id: string) => byId<HTMLInputElement>(`edit-${id}`);
-const select = (id: string) => byId<HTMLSelectElement>(`edit-${id}`);
-
-/** Show aliases and retain both live and pending commands. */
-export function programChoices(
-  programs: ProgramInfo[],
-  current: string,
-  live = current,
-): ProgramInfo[] {
-  const choices = new Map<string, ProgramInfo>();
-  for (const program of programs) {
-    if (!choices.has(program.command)) choices.set(program.command, program);
-  }
-  for (const command of [current, live]) {
-    if (!choices.has(command)) choices.set(command, { label: command, command });
-  }
-  return [...choices.values()];
-}
-
-/** Build one request from the form. Only an explicitly changed base is retargeted. */
-export function sessionEdit(
-  info: SessionInfo,
-  title: string,
-  program: string,
-  section: string,
-  keepAlive: boolean,
-  parent: string,
-  originalBase = info.stack_parent_session_id ?? "",
-): EditSession {
-  return {
-    title: title.trim(),
-    program: program.trim(),
-    section: section || null,
-    keep_alive: keepAlive,
-    restart: false,
-    base: parent === originalBase ? null : { parent_session_id: parent || null },
-  };
-}
 
 export function initSessionEditor(
   a: Api,
@@ -60,27 +13,42 @@ export function initSessionEditor(
   onRestart = restarted;
   byId<HTMLFormElement>("edit-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    if (!session || busy) return;
-    pending = sessionEdit(
-      session,
-      field("title").value,
-      select("program").value,
-      select("section").value,
-      field("keep-alive").checked,
-      select("base").value,
-      originalParent,
-    );
-    if (!pending.title || !pending.program) return;
-    if (pending.program !== (session.pending_program ?? session.program)) {
-      byId("edit-fields").classList.add("hidden");
-      byId("edit-warning").classList.remove("hidden");
-      byId("edit-heading").textContent = "Restart session?";
-      byId("edit-later").focus();
-    } else void save(false);
+    void submit();
   });
   byId("edit-now").addEventListener("click", () => void save(true));
   byId("edit-later").addEventListener("click", () => void save(false));
   byId("edit-back").addEventListener("click", showFields);
+}
+async function submit(): Promise<void> {
+  if (!session || !model || busy) return;
+  busy = true;
+  const baseline = model;
+  try {
+    const result = await act(
+      api.planSessionEdit({
+        model,
+        draft: {
+          title: field("title").value,
+          program: select("program").value,
+          section: select("section").value || null,
+          keep_alive: field("keep-alive").checked,
+          base: select("base").value,
+        },
+      }),
+    );
+    if (!result || model !== baseline || modal().classList.contains("hidden")) return;
+    pending = result.value.edit;
+    if (result.value.requires_restart) {
+      byId("edit-fields").classList.add("hidden");
+      byId("edit-warning").classList.remove("hidden");
+      byId("edit-heading").textContent = "Restart session?";
+      byId("edit-later").focus();
+      return;
+    }
+  } finally {
+    busy = false;
+  }
+  await save(false);
 }
 function showFields(): void {
   byId("edit-fields").classList.remove("hidden");
@@ -96,10 +64,9 @@ async function save(restart: boolean): Promise<void> {
   try {
     const result = await act(api.editSession(id, { ...pending, restart }));
     if (!result) return;
-    if (result.value?.pr.kind === "failed")
-      alert(`Session saved, but PR target update failed: ${result.value.pr.message}`);
+    if (result.value.warnings.length) alert(result.value.warnings.join("\n"));
     closeModal(modal());
-    if (restart) onRestart(id);
+    if (result.value.restarted) onRestart(id);
     await refresh();
   } finally {
     busy = false;
@@ -110,61 +77,48 @@ export async function openSessionEditor(info: SessionInfo): Promise<void> {
   if (busy) return;
   session = info;
   pending = null;
-  showFields();
-  field("title").value = info.title;
-  const program = select("program");
-  const currentProgram = info.pending_program ?? info.program;
-  program.replaceChildren(
-    ...programChoices([], currentProgram, info.program).map((p) => new Option(p.label, p.command)),
+  let options = null;
+  let optionsError = "";
+  try {
+    options = await api.createOptions();
+  } catch {
+    optionsError =
+      "Could not load program and section choices. Existing settings can still be saved.";
+  }
+  const result = await act(
+    api.sessionEditorModel({
+      session: info,
+      peers: state.sessions,
+      main_branch: state.projects.find((p) => p.id === info.project_id)?.main_branch ?? null,
+      options,
+    }),
   );
-  program.value = currentProgram;
-  field("keep-alive").checked = info.keep_alive;
-  const sections = select("section");
-  sections.replaceChildren(new Option("Automatic", ""));
-  if (info.section_override) sections.add(new Option(info.section_override, info.section_override));
-  sections.value = info.section_override ?? "";
-  const base = select("base");
-  base.replaceChildren(new Option("Project base", ""));
-  for (const s of state.sessions) {
-    if (s.project_id === info.project_id && s.id !== info.id)
-      base.add(new Option(`${s.title} (${s.branch})`, s.id));
-  }
-  originalParent = info.pr_base_branch
-    ? (state.sessions.find(
-        (s) =>
-          s.project_id === info.project_id && s.id !== info.id && s.branch === info.pr_base_branch,
-      )?.id ?? "__current__")
-    : (info.stack_parent_session_id ?? "");
-  if (
-    originalParent === "__current__" ||
-    (originalParent && ![...base.options].some((o) => o.value === originalParent))
-  ) {
-    base.add(
-      new Option(`Current base (${info.pr_base_branch ?? "session unavailable"})`, originalParent),
-    );
-  }
-  base.value = originalParent;
-  byId("edit-options-error").textContent = "";
+  if (!result || session !== info) return;
+  model = result.value;
+  showFields();
+  field("title").value = model.original.title;
+  field("keep-alive").checked = model.original.keep_alive;
+  select("program").replaceChildren(...model.programs.map((p) => new Option(p.label, p.command)));
+  select("program").value = model.original.program;
+  select("section").replaceChildren(
+    new Option("Automatic", ""),
+    ...model.sections.map((s) => new Option(s, s)),
+  );
+  select("section").value = model.original.section ?? "";
+  select("base").replaceChildren(...model.bases.map((b) => new Option(b.label, b.id)));
+  select("base").value = model.original.base;
+  byId("edit-options-error").textContent = optionsError;
   openModal(modal());
   field("title").focus();
-  try {
-    const options = await api.createOptions();
-    if (session !== info) return;
-    const current = sections.value;
-    for (const s of options.sections) {
-      if (![...sections.options].some((o) => o.value === s)) sections.add(new Option(s, s));
-    }
-    sections.value = current;
-    const selectedProgram = program.value;
-    program.replaceChildren(
-      ...programChoices(options.programs, currentProgram, info.program).map(
-        (p) => new Option(p.label, p.command),
-      ),
-    );
-    program.value = selectedProgram;
-  } catch {
-    if (session === info)
-      byId("edit-options-error").textContent =
-        "Could not load program and section choices. Existing settings can still be saved.";
-  }
 }
+
+let api: Api;
+let refresh: () => Promise<void>;
+let onRestart: (id: string) => void;
+let session: SessionInfo | null = null;
+let model: SessionEditorModel | null = null;
+let pending: EditSession | null = null;
+let busy = false;
+const modal = () => byId("edit-modal");
+const field = (id: string) => byId<HTMLInputElement>(`edit-${id}`);
+const select = (id: string) => byId<HTMLSelectElement>(`edit-${id}`);

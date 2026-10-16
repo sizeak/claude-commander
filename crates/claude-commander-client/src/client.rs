@@ -661,6 +661,25 @@ impl RemoteClient {
             .await
     }
 
+    pub async fn recover_session_fresh(&self, id: SessionId) -> ClientResult<()> {
+        match self
+            .post_empty_ok(self.session_url(id, &["recover-fresh"]))
+            .await
+        {
+            Err(crate::ClientError::NotFound) => {
+                let detail = self
+                    .session_detail(&id.as_uuid().to_string(), None)
+                    .await?
+                    .ok_or(crate::ClientError::NotFound)?;
+                if detail.info.pending_program.is_some() {
+                    return Err(crate::ClientError::InvalidRequest("Upgrade this server to recover an exited agent without applying its pending program.".into()));
+                }
+                self.restart_session_fresh(id).await
+            }
+            result => result,
+        }
+    }
+
     pub async fn delete_session(&self, id: SessionId) -> ClientResult<()> {
         self.delete_ok(self.session_url(id, &[])).await
     }
@@ -669,9 +688,78 @@ impl RemoteClient {
         &self,
         id: SessionId,
         edit: claude_commander_protocol::api::EditSession,
-    ) -> ClientResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
-        self.patch_json(self.session_url(id, &[]), &PatchSession::Edit(edit))
-            .await
+    ) -> ClientResult<claude_commander_protocol::api::EditSessionOutcome> {
+        let result = self
+            .patch_json(self.session_url(id, &[]), &PatchSession::Edit(edit.clone()))
+            .await;
+        match result {
+            Err(crate::ClientError::InvalidRequest(ref message))
+                if message.contains("unknown variant `edit`") =>
+            {
+                self.edit_session_legacy(id, edit).await
+            }
+            result => result,
+        }
+    }
+
+    async fn edit_session_legacy(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> ClientResult<claude_commander_protocol::api::EditSessionOutcome> {
+        // Old servers cannot retain a deferred program. Reject before any writes.
+        if edit.program.is_some() || edit.restart {
+            return Err(crate::ClientError::InvalidRequest("This server needs an upgrade to save program changes through Edit session. No settings were changed.".into()));
+        }
+        let keep_alive = if edit.keep_alive.is_some() {
+            Some(
+                self.session_detail(&id.as_uuid().to_string(), None)
+                    .await?
+                    .ok_or(crate::ClientError::NotFound)?
+                    .info
+                    .keep_alive,
+            )
+        } else {
+            None
+        };
+        let mut outcome = claude_commander_protocol::api::EditSessionOutcome::default();
+        let mut saved = false;
+        let result: ClientResult<()> = async {
+            if let Some(title) = edit.title {
+                self.rename_session(id, title).await?;
+                saved = true;
+            }
+            if let Some(section) = edit.section {
+                self.set_section(id, section).await?;
+                saved = true;
+            }
+            if let Some(base) = edit.base {
+                let base = self.set_session_base(id, base.parent_session_id).await?;
+                if let claude_commander_protocol::api::PrRetarget::Failed { message, .. } = &base.pr
+                {
+                    outcome.warnings.push(format!(
+                        "Session saved, but PR target update failed: {message}"
+                    ));
+                }
+                outcome.base = Some(base);
+                saved = true;
+            }
+            if let Some(value) = edit.keep_alive
+                && Some(value) != keep_alive
+            {
+                self.toggle_keep_alive(id).await?;
+                saved = true;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if !saved {
+                return Err(error);
+            }
+            outcome.warnings.push(format!("Some settings were saved, but this older server could not complete the edit: {error}. Refresh and check the remaining settings."));
+        }
+        Ok(outcome)
     }
 
     pub async fn rename_session(&self, id: SessionId, title: String) -> ClientResult<()> {
@@ -1425,5 +1513,158 @@ mod tests {
             matches!(err, ClientError::Unavailable { .. }),
             "a valid image must reach the transport, got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod session_edit_tests {
+    use super::*;
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::patch};
+    use serde::Deserialize;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Deserialize)]
+    #[serde(tag = "op", rename_all = "snake_case")]
+    enum LegacyPatch {
+        Rename { title: String },
+        SetSection { section: Option<String> },
+    }
+
+    #[tokio::test]
+    async fn legacy_edit_fallback_is_narrow_and_reports_partial_saves() {
+        for (unsupported, program, section_failure) in [
+            (true, false, false),
+            (true, true, false),
+            (false, false, false),
+            (true, false, true),
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let counter = attempts.clone();
+            let app = if unsupported {
+                Router::new().route("/api/sessions/{id}", patch(move |State(calls): State<Arc<Mutex<Vec<String>>>>, Json(body): Json<LegacyPatch>| async move {
+                    let op = match body {
+                        LegacyPatch::Rename { title } => { assert_eq!(title, "renamed"); "rename" },
+                        LegacyPatch::SetSection { section } => { assert_eq!(section.as_deref(), Some("Review")); "set_section" },
+                    };
+                    calls.lock().unwrap().push(op.into());
+                    if section_failure && op == "set_section" {
+                        (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error":{"kind":"bad_request","message":"validation failed"}})))
+                    } else { (StatusCode::NO_CONTENT, Json(serde_json::Value::Null)) }
+                }))
+            } else {
+                Router::new().route("/api/sessions/{id}", patch(|| async {
+                    (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error":{"kind":"bad_request","message":"validation failed"}})))
+                }))
+            }.with_state(calls.clone()).layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async move { next.run(request).await }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = RemoteClient::new(RemoteServerSpec {
+                name: "legacy".into(),
+                base_url: format!("http://{addr}"),
+                token: None,
+            })
+            .unwrap();
+            let edit = claude_commander_protocol::api::EditSession {
+                title: Some("renamed".into()),
+                program: program.then(|| "codex".into()),
+                section: section_failure.then(|| Some("Review".into())),
+                ..Default::default()
+            };
+            if unsupported {
+                let raw = reqwest::Client::new()
+                    .patch(format!("http://{addr}/api/sessions/test"))
+                    .json(&serde_json::json!({"op":"edit"}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                assert!(raw.starts_with("Failed to deserialize the JSON body into the target type: op: unknown variant `edit`"), "legacy extractor response: {raw}");
+                attempts.store(0, Ordering::SeqCst);
+            }
+            let result = client.edit_session(SessionId::new(), edit).await;
+            if !unsupported || program {
+                assert!(result.is_err());
+                assert_eq!(attempts.load(Ordering::SeqCst), 1);
+                assert!(calls.lock().unwrap().is_empty());
+            } else {
+                let outcome = result.unwrap();
+                assert_eq!(outcome.warnings.is_empty(), !section_failure);
+                assert_eq!(calls.lock().unwrap()[0], "rename");
+                assert_eq!(
+                    attempts.load(Ordering::SeqCst),
+                    if section_failure { 3 } else { 2 }
+                );
+                if section_failure {
+                    assert_eq!(calls.lock().unwrap()[1], "set_section");
+                }
+            }
+            server.abort();
+        }
+    }
+    #[tokio::test]
+    async fn old_server_recovery_falls_back_only_without_a_pending_program() {
+        use axum::{
+            extract::Path,
+            routing::{get, post},
+        };
+        for pending in [None, Some("codex")] {
+            let sid = SessionId::new();
+            let expected_id = sid.as_uuid().to_string();
+            let resets = Arc::new(AtomicUsize::new(0));
+            let recorded = resets.clone();
+            let detail = serde_json::json!({
+                "id":expected_id, "session_id":sid, "title":"task", "branch":"task", "status":"running",
+                "program":"claude", "pending_program":pending, "project_id":claude_commander_protocol::session::ProjectId::new(),
+                "project_name":"repo", "pr_number":null, "pr_url":null, "pr_state":"open", "pr_draft":false,
+                "pr_labels":[], "review_decision":null, "pr_reviewers":[], "created_at":"2026-01-01T00:00:00Z",
+                "agent_state":"idle", "diff_stat":null, "pane_content":null
+            });
+            let app = Router::new()
+                .route(
+                    "/api/sessions/{id}/detail",
+                    get(move |Path(id): Path<String>| {
+                        assert_eq!(id, expected_id);
+                        let detail = detail.clone();
+                        async move { Json(detail) }
+                    }),
+                )
+                .route(
+                    "/api/sessions/{id}/restart-fresh",
+                    post(move || {
+                        recorded.fetch_add(1, Ordering::SeqCst);
+                        async { StatusCode::NO_CONTENT }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = RemoteClient::new(RemoteServerSpec {
+                name: "legacy".into(),
+                base_url: format!("http://{addr}"),
+                token: None,
+            })
+            .unwrap();
+            let result = client.recover_session_fresh(sid).await;
+            assert_eq!(result.is_ok(), pending.is_none());
+            assert_eq!(
+                resets.load(Ordering::SeqCst),
+                usize::from(pending.is_none())
+            );
+            server.abort();
+        }
     }
 }

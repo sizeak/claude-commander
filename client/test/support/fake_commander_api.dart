@@ -490,24 +490,9 @@ class FakeCommanderApi implements CommanderApi {
   Future<String?> editSession({
     required String handle,
     required String id,
-    required String title,
-    required String program,
-    String? section,
-    required bool keepAlive,
-    required bool changeBase,
-    String? parentId,
-    required bool restart,
+    required String patchJson,
   }) async {
-    _record('editSession', {
-      'id': id,
-      'title': title,
-      'program': program,
-      'section': section,
-      'keepAlive': keepAlive,
-      'changeBase': changeBase,
-      'parentId': parentId,
-      'restart': restart,
-    });
+    _record('editSession', {'id': id, 'patchJson': patchJson});
     return null;
   }
 

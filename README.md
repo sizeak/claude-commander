@@ -392,6 +392,13 @@ detail, then the live agent terminal. It ships two themes, **Mission Control**
 Above it, the same page bodies become a desktop layout: the fleet list beside a
 workspace whose Overview / Agent / Shell / Changes tabs switch in place.
 
+The **Edit session** dialog lets you change the name, configured program, section, stack base, and keep-alive setting. Program changes can restart immediately or wait for an explicit restart.
+
+<p align="center">
+  <img src="docs/images/client-edit-session.png" alt="Edit session dialog with configured program aliases and session settings" width="45%">
+  <img src="docs/images/client-edit-session-warning.png" alt="Restart warning offering to restart and clear or save for the next restart" width="45%">
+</p>
+
 ![The client on the desktop: fleet list on the left, the selected session's live agent terminal on the right](docs/images/client-desktop.png)
 
 ## Documentation

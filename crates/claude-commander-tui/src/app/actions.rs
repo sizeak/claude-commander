@@ -224,7 +224,7 @@ pub(super) fn set_session_base_confirm_message(
     )
 }
 
-/// The Restart-confirmation body. A local session's resume behaviour is
+/// Pending programs always require a fresh start. Otherwise, a local session's resume behaviour is
 /// governed by this client's `resume_session` config, so the message can
 /// promise `/resume` semantics. A remote session's resume behaviour lives in
 /// the server's config, which this client can't read — so it gets neutral
@@ -233,7 +233,14 @@ pub(super) fn restart_confirm_message(
     is_local: bool,
     resume_session: bool,
     title: Option<&str>,
+    pending_program: Option<&str>,
 ) -> String {
+    if let Some(program) = pending_program {
+        let subject = title.map_or_else(|| "this session".into(), |title| format!("\"{title}\""));
+        return format!(
+            "Restart session {subject} with {program}?\nThis stops the current agent and clears the conversation. The pending program starts fresh."
+        );
+    }
     if !is_local {
         let subject = match title {
             Some(title) => format!("\"{title}\""),
@@ -1673,6 +1680,8 @@ impl App {
                 sref.backend == LOCAL_BACKEND_ID,
                 self.config.resume_session,
                 title.as_deref(),
+                self.session(sref)
+                    .and_then(|s| s.pending_program.as_deref()),
             );
             self.ui_state.modal = Modal::Confirm {
                 title: "Restart Session".to_string(),

@@ -1,5 +1,5 @@
 use super::*;
-use claude_commander_protocol::api::{CreateOptions, EditSession, ProgramInfo, SetSessionBase};
+use claude_commander_protocol::api::{CreateOptions, EditSession, ProgramInfo};
 use crossterm::event::{KeyCode, KeyEvent};
 
 #[derive(Debug, Clone)]
@@ -7,13 +7,11 @@ pub struct SessionEditor {
     pub session: SessionRef,
     pub name: Input,
     pub program: Input,
-    pub original_program: String,
-    pub live_program: String,
+    pub model: claude_commander_protocol::session_editor::SessionEditorModel,
     pub sections: Vec<Option<String>>,
     pub section: usize,
     pub bases: Vec<(Option<SessionId>, String)>,
     pub base: usize,
-    pub original_base_index: usize,
     pub keep_alive: bool,
     pub focus: usize,
     pub programs: Vec<ProgramInfo>,
@@ -27,105 +25,62 @@ impl SessionEditor {
         peers: &[claude_commander_protocol::api::SessionInfo],
         main_branch: &str,
     ) -> Self {
-        let mut sections = vec![None];
-        if let Some(section) = &info.section_override {
-            sections.push(Some(section.clone()));
-        }
-        let section = usize::from(info.section_override.is_some());
-        let mut bases = vec![(None, format!("Project base ({main_branch})"))];
-        bases.extend(
-            peers
-                .iter()
-                .filter(|s| s.project_id == info.project_id && s.session_id != info.session_id)
-                .map(|s| (Some(s.session_id), format!("{} ({})", s.title, s.branch))),
-        );
-        let original_base = if let Some(branch) = &info.pr_base_branch {
-            peers
-                .iter()
-                .find(|s| {
-                    s.project_id == info.project_id
-                        && s.branch == *branch
-                        && s.session_id != info.session_id
-                })
-                .map(|s| s.session_id)
-        } else {
-            info.stack_parent_session_id
-        };
-        if let Some(id) = original_base
-            && !bases.iter().any(|(base, _)| *base == Some(id))
-        {
-            bases.push((Some(id), "Current base (session unavailable)".into()));
-        }
-        if original_base.is_none()
-            && let Some(branch) = &info.pr_base_branch
-            && branch != main_branch
-        {
-            bases.push((None, format!("Current base ({branch})")));
-        }
-        let base = bases
+        let model =
+            claude_commander_viewmodel::session_editor::model(info, peers, Some(main_branch), None);
+        let section = usize::from(model.original.section.is_some());
+        let base = model
+            .bases
             .iter()
-            .position(|(id, _)| *id == original_base)
+            .position(|b| b.id == model.original.base)
             .unwrap_or(0);
-        let base = if original_base.is_none()
-            && bases.len() > 1
-            && bases.last().is_some_and(|(id, _)| id.is_none())
-        {
-            bases.len() - 1
-        } else {
-            base
-        };
-        let program = info.pending_program.as_ref().unwrap_or(&info.program);
-        let mut programs = vec![ProgramInfo {
-            label: program.clone(),
-            command: program.clone(),
-        }];
-        if program != &info.program {
-            programs.push(ProgramInfo {
-                label: info.program.clone(),
-                command: info.program.clone(),
-            });
-        }
+        let mut sections = vec![None];
+        sections.extend(model.sections.iter().cloned().map(Some));
         Self {
             session,
-            name: info.title.clone().into(),
-            program: program.clone().into(),
-            original_program: program.clone(),
-            live_program: info.program.clone(),
+            name: model.original.title.clone().into(),
+            program: model.original.program.clone().into(),
             sections,
             section,
-            bases,
+            bases: model
+                .bases
+                .iter()
+                .map(|b| (b.parent_session_id, b.label.clone()))
+                .collect(),
             base,
-            original_base_index: base,
-            keep_alive: info.keep_alive,
+            keep_alive: model.original.keep_alive,
             focus: 0,
-            programs,
+            programs: model.programs.clone(),
+            model,
             restart_now: false,
         }
     }
     pub fn load_options(&mut self, opts: CreateOptions) {
-        for section in opts.sections {
-            if !self.sections.contains(&Some(section.clone())) {
-                self.sections.push(Some(section));
-            }
-        }
-        self.programs.clear();
-        for program in opts.programs {
-            if !self.programs.iter().any(|p| p.command == program.command) {
-                self.programs.push(program);
-            }
-        }
-        for command in [
-            self.live_program.as_str(),
-            self.original_program.as_str(),
-            self.program.value(),
-        ] {
-            if !self.programs.iter().any(|p| p.command == command) {
-                self.programs.push(ProgramInfo {
-                    label: command.into(),
-                    command: command.into(),
-                });
-            }
-        }
+        let section = self.sections[self.section].clone();
+        claude_commander_viewmodel::session_editor::load_options(&mut self.model, &opts);
+        self.sections = vec![None];
+        self.sections
+            .extend(self.model.sections.iter().cloned().map(Some));
+        self.section = self
+            .sections
+            .iter()
+            .position(|s| *s == section)
+            .unwrap_or(0);
+        self.programs = self.model.programs.clone();
+    }
+    fn plan(
+        &self,
+    ) -> std::result::Result<claude_commander_protocol::session_editor::SessionEditorPlan, String>
+    {
+        claude_commander_viewmodel::session_editor::plan(
+            &self.model,
+            claude_commander_protocol::session_editor::SessionEditorDraft {
+                title: self.name.value().into(),
+                program: self.program.value().into(),
+                section: self.sections[self.section].clone(),
+                keep_alive: self.keep_alive,
+                base: self.model.bases[self.base].id.clone(),
+            },
+        )
     }
     fn program_label(&self) -> &str {
         self.programs
@@ -133,18 +88,10 @@ impl SessionEditor {
             .find(|p| p.command == self.program.value())
             .map_or(self.program.value(), |p| p.label.as_str())
     }
-    pub fn edit(&self, restart: bool) -> EditSession {
-        let base = self.bases[self.base].0;
-        EditSession {
-            title: self.name.value().trim().into(),
-            program: self.program.value().trim().into(),
-            section: self.sections[self.section].clone(),
-            keep_alive: self.keep_alive,
-            base: (self.base != self.original_base_index).then_some(SetSessionBase {
-                parent_session_id: base,
-            }),
-            restart,
-        }
+    pub fn edit(&self, restart: bool) -> std::result::Result<EditSession, String> {
+        let mut edit = self.plan()?.edit;
+        edit.restart = restart;
+        Ok(edit)
     }
     fn cycle(&mut self, forward: bool) {
         fn step(index: usize, len: usize, forward: bool) -> usize {
@@ -244,7 +191,7 @@ impl App {
                         "Name and program cannot be empty".into(),
                         Instant::now() + Duration::from_secs(4),
                     ));
-                } else if editor.program.value().trim() != editor.original_program {
+                } else if editor.plan().is_ok_and(|p| p.requires_restart) {
                     self.ui_state.modal = Modal::EditSessionRestart(editor);
                     return;
                 } else {
@@ -264,26 +211,27 @@ impl App {
         self.ui_state.modal = Modal::EditSession(editor);
     }
     fn save_session_edit(&mut self, editor: SessionEditor, restart: bool) {
-        let edit = editor.edit(restart);
+        let edit = match editor.edit(restart) {
+            Ok(edit) => edit,
+            Err(message) => {
+                self.ui_state.status_message =
+                    Some((message, Instant::now() + Duration::from_secs(5)));
+                self.ui_state.modal = Modal::EditSession(editor);
+                return;
+            }
+        };
         let backend = self.backend_arc(editor.session.backend);
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             match backend.edit_session(editor.session.id, edit).await {
                 Ok(outcome) => {
-                    if let Some(outcome) = outcome
-                        && let claude_commander_protocol::api::PrRetarget::Failed {
-                            message, ..
-                        } = outcome.pr
-                    {
+                    if !outcome.warnings.is_empty() {
                         let _ = tx
                             .send(AppEvent::StateUpdate(StateUpdate::Error {
-                                message: format!(
-                                    "Session saved, but PR target update failed: {message}"
-                                ),
+                                message: outcome.warnings.join("\n"),
                             }))
                             .await;
                     }
-
                     let _ = tx
                         .send(AppEvent::StateUpdate(StateUpdate::SessionMutationApplied {
                             backend_id: editor.session.backend.0,
