@@ -254,6 +254,10 @@ abstract class CommanderApi {
   /// screen.
   Future<List<GithubRepo>> githubRepos({required String handle});
 
+  /// Repositories from the server's selected code host. The envelope retains
+  /// provider and hostname even when the list is empty.
+  Future<RepositoryListing> repositories({required String handle});
+
   /// Start a clone. The returned job's status is **not** terminal — every
   /// outcome arrives through [cloneJob], so the caller polls from here.
   Future<CloneJobDto> startClone({
@@ -688,6 +692,10 @@ class RustCommanderApi implements CommanderApi {
   @override
   Future<List<GithubRepo>> githubRepos({required String handle}) =>
       simple.githubRepos(handle: handle);
+
+  @override
+  Future<RepositoryListing> repositories({required String handle}) =>
+      simple.repositories(handle: handle);
 
   @override
   Future<CloneJobDto> startClone({

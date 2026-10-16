@@ -715,6 +715,7 @@ fn test_info_view_renders_stack_chain() {
         pr_number: None,
         pr_url: None,
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -768,6 +769,7 @@ fn test_info_view_stack_section_renders_above_pr_section() {
         pr_number: Some(7),
         pr_url: Some("https://example.com/pr/7".into()),
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -808,6 +810,7 @@ fn test_info_view_no_stack_section_for_unstacked() {
         pr_number: None,
         pr_url: None,
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -834,6 +837,85 @@ use claude_commander_core::config::{AppState, ConfigStore, StateStore};
 
 fn make_test_app() -> App {
     make_test_app_with_path().0
+}
+
+#[tokio::test]
+async fn config_reload_does_not_wait_for_review_poll_on_ui_task() {
+    let mut app = make_test_app();
+    let service = app.service.clone();
+    let state = service.store().read().await;
+    let poll = service.apply_pr_results(Vec::new());
+    tokio::pin!(poll);
+    // Poll once to acquire the provider mutex. The retained state reader
+    // prevents the review update from finishing and releasing that mutex.
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(poll.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+
+    app.ui_state.last_ui_maintenance = Instant::now() - Duration::from_secs(2);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        app.process_event(AppEvent::Tick),
+    )
+    .await;
+    if result.is_ok() {
+        assert!(app.ui_state.config_reload_in_flight);
+        // More polling opportunities while the provider mutex is busy must
+        // leave a single reload queued, rather than one task per second.
+        for _ in 0..3 {
+            app.check_config_reload();
+        }
+    }
+    drop(state);
+    poll.await.unwrap();
+    assert!(result.is_ok(), "config polling blocked the UI task");
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result: Ok(false) })
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), app.event_loop.next(),)
+            .await
+            .is_err(),
+        "busy ticks queued duplicate reloads"
+    );
+    app.process_event(event).await;
+    assert!(!app.ui_state.config_reload_in_flight);
+}
+
+#[tokio::test]
+async fn config_reload_recovers_from_error_and_applies_external_edits() {
+    let (mut app, path) = make_test_app_with_path();
+    let original_prefix = app.config.branch_prefix.clone();
+    for (contents, expected_prefix) in [
+        ("invalid = [", original_prefix.as_str()),
+        ("branch_prefix = 'reloaded/'", "reloaded/"),
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        app.check_config_reload();
+        assert!(app.ui_state.config_reload_in_flight);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result }) = &event else {
+            panic!("expected config reload completion, got {event:?}");
+        };
+        if contents == "invalid = [" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result, &Ok(true));
+        }
+        app.process_event(event).await;
+        assert!(!app.ui_state.config_reload_in_flight);
+        assert_eq!(app.config.branch_prefix, expected_prefix);
+    }
 }
 
 /// Stand-in for the CLI reference the binary injects into `App::new`. The real
@@ -1282,6 +1364,25 @@ fn test_apply_repo_list_timeout_rejects_implausibly_short_values() {
             app.config.repo_list_timeout_secs, 600,
             "{rejected} should not have been accepted"
         );
+    }
+}
+
+#[test]
+fn gitlab_hostname_editor_rejects_url_and_credentials_without_persisting_them() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(
+        SettingsTab::General,
+        "gitlab_hostname",
+        "https://user:secret@gitlab.example.com/group",
+    );
+
+    assert!(app.config.gitlab_hostname.is_none());
+    match &app.ui_state.modal {
+        Modal::Error { message } => {
+            assert!(message.contains("Invalid GitLab hostname"));
+            assert!(!message.contains("secret"));
+        }
+        other => panic!("expected validation error, got {other:?}"),
     }
 }
 
@@ -3925,6 +4026,80 @@ fn agent_states_box() -> Box<claude_commander_core::api::AgentStatesSnapshot> {
 }
 
 #[tokio::test]
+async fn backend_change_invalidates_review_fetch_when_provider_changes() {
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", empty_snapshot())]);
+    let backend = BackendId(1);
+    let session = SessionId::new();
+    app.ui_state.enriched_pr_unavailable = Some(session);
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(Instant::now());
+    let mut snapshot = empty_snapshot();
+    snapshot.server.code_host.provider =
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 1,
+        backend_id: backend.0,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_unavailable, None);
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+#[tokio::test]
+async fn provider_change_preserves_repository_fetch_generation() {
+    let mut snapshot = empty_snapshot();
+    snapshot.server.code_host.provider =
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    snapshot.server.code_host.hostname = Some("gitlab.example.com".into());
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", snapshot)]);
+    let backend = BackendId(1);
+    app.ui_state.repo_picker.backend = backend;
+    app.ui_state.repo_picker.generation = 41;
+    app.refresh_backend_view(backend).await;
+    assert!(app.ui_state.repo_picker.generation > 41);
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert_eq!(
+        app.ui_state.repo_picker.host.hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
+#[tokio::test]
+async fn provider_change_restarts_an_open_repository_picker() {
+    let mut snapshot = empty_snapshot();
+    snapshot.server.code_host.provider =
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", snapshot)]);
+    app.ui_state.repo_picker.backend = BackendId(1);
+    app.ui_state.repo_picker.generation = 41;
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: PaletteMode::RepositoryPicker,
+        query: Input::default(),
+        matches: Vec::new(),
+        selected_idx: 0,
+        scroll: 0,
+        review: None,
+    };
+    app.refresh_backend_view(BackendId(1)).await;
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .expect("provider switch must start a new listing, not leave the picker loading")
+        .unwrap();
+    assert!(matches!(
+        event,
+        AppEvent::StateUpdate(StateUpdate::RepositoriesLoaded {
+            backend_id: 1,
+            generation: 43,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn older_server_snapshot_annotates_heading_but_placeholder_does_not() {
     // A remote whose server build is behind this client (major.minor) flags a
     // warning on its sidebar heading. Before its first real snapshot lands the
@@ -3943,6 +4118,7 @@ async fn older_server_snapshot_annotates_heading_but_placeholder_does_not() {
 
     // Land the older snapshot (first real snapshot arrives via BackendChanged).
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -3967,6 +4143,7 @@ async fn stale_server_toast_fires_once_and_never_for_local() {
 
     // First fold of the older snapshot: the one-time toast fires.
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap.clone()),
         states: agent_states_box(),
@@ -3984,6 +4161,7 @@ async fn stale_server_toast_fires_once_and_never_for_local() {
     // A second fold must NOT re-fire the toast.
     app.ui_state.status_message = None;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4014,6 +4192,7 @@ async fn version_toast_does_not_clobber_a_live_status_message() {
         std::time::Instant::now() + std::time::Duration::from_secs(30),
     ));
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4057,6 +4236,7 @@ async fn two_stale_servers_each_get_their_own_toast() {
 
     // Fold buildbox (id 1): its toast fires; ci is still on its placeholder.
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap.clone()),
         states: agent_states_box(),
@@ -4076,6 +4256,7 @@ async fn two_stale_servers_each_get_their_own_toast() {
     // Free the slot, then fold ci (id 2): it gets its own toast.
     app.ui_state.status_message = None;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(2).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4204,6 +4385,7 @@ async fn pull_blocked_badges_union_remote_backend_snapshot() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -4240,6 +4422,7 @@ async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
     };
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(0).0,
         snapshot: Box::new(degraded_snap),
         states: states(),
@@ -4255,6 +4438,7 @@ async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(0).0,
         snapshot: Box::new(empty_snapshot()),
         states: states(),
@@ -4293,6 +4477,7 @@ async fn remote_connection_stays_watch_owned_across_snapshot_fold() {
     .await;
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -6138,7 +6323,13 @@ async fn fold_backend_states(
 ) {
     app.backend_mut_for_test(id).view.agent_states.states = old_states;
     let snapshot = app.view_for(id).snapshot.clone();
+    let revision = app
+        .backend_mut_for_test(id)
+        .refresh_sequence
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision,
         backend_id: id.0,
         snapshot: Box::new(snapshot),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -6440,7 +6631,11 @@ fn set_session_base_is_reachable_from_the_command_palette() {
 /// user has to be told the PR and review diff will be wrong until they do.
 #[test]
 fn set_session_base_confirm_message_warns_that_rebasing_is_manual() {
-    let msg = super::actions::set_session_base_confirm_message("my-task", "other-br");
+    let msg = super::actions::set_session_base_confirm_message(
+        claude_commander_protocol::hosting::CodeHostProvider::Github,
+        "my-task",
+        "other-br",
+    );
     assert!(msg.contains("my-task"));
     assert!(msg.contains("other-br"));
     assert!(
@@ -6632,6 +6827,14 @@ async fn remote_session_created_selects_row_and_reconciles_owning_backend() {
     })
     .await;
 
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("creation refresh should complete");
     assert_eq!(
         remote_mock(&app, BackendId(1)).reconciled_sessions(),
         vec![new_id],
@@ -6775,6 +6978,7 @@ async fn pending_comment_markers_union_every_backend_view() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -7284,7 +7488,6 @@ async fn spawn_info_fetch_is_noop_while_enriched_fetch_in_flight() {
     // Arrange the conditions under which the fetch would fire: Info modal open,
     // this session selected, `gh` available, and no cached enriched PR yet.
     app.ui_state.selected_session_id = Some(claude_commander_core::backend::SessionRef::local(sid));
-    app.ui_state.gh_available = true;
     app.ui_state.modal = Modal::Info { scroll: 0 };
     app.ui_state.enriched_pr = None;
 
@@ -7743,6 +7946,14 @@ async fn apply_section_move_keeps_moved_session_selected() {
     })
     .await;
 
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("section move refresh should finish");
     let pos = app
         .ui_state
         .board_state
@@ -8430,8 +8641,10 @@ async fn preview_ready_applies_only_to_the_still_selected_session() {
         selected,
     ));
 
+    let token = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(token);
     app.handle_state_update(StateUpdate::PreviewReady {
-        spawned_at: Instant::now(),
+        spawned_at: token,
         session_id: Some(selected),
         project_id: None,
         preview_content: "live output".to_string(),
@@ -8679,8 +8892,10 @@ async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     let mut app = make_test_app();
     app.ui_state.selected_session_id = Some(SessionRef::local(sid));
 
+    let spawned_at = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
     app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: Instant::now(),
+        spawned_at,
         session_id: sid,
         info: None,
     })
@@ -8778,6 +8993,10 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
         Some(guard),
         "a superseded enriched result must leave the live fetch's guard intact"
     );
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "a superseded provider-bound result must not update negative caches"
+    );
 
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at: guard,
@@ -8792,9 +9011,8 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
 // Clone repository: palette command, repo picker, and clone-job progress
 // ---------------------------------------------------------------------------
 
-use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneSource, CloneStatus, GithubRepo,
-};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneStatus, GithubRepo};
+use claude_commander_protocol::hosting::CloneSource;
 
 /// A `GithubRepo` with just the fields the picker reads; the rest are plausible
 /// constants so a test can build a list without restating the whole DTO.
@@ -8817,10 +9035,10 @@ fn github_repo(full_name: &str) -> GithubRepo {
 
 /// The labels of the repo-picker rows the palette would show for `query`.
 fn repo_picker_labels(app: &App, query: &str) -> Vec<String> {
-    app.gather_github_repo_picker_items(query)
+    app.gather_repository_picker_items(query)
         .into_iter()
         .map(|item| match item {
-            QuickSwitchItem::GithubRepo { label, .. } => label,
+            QuickSwitchItem::HostedRepository { label, .. } => label,
             other => panic!("expected a GithubRepo row, got {other:?}"),
         })
         .collect()
@@ -8858,7 +9076,7 @@ async fn repo_picker_filter_narrows_to_matching_repos() {
         matches!(
             app.ui_state.modal,
             Modal::QuickSwitch {
-                mode: PaletteMode::GithubRepoPicker,
+                mode: PaletteMode::RepositoryPicker,
                 ..
             }
         ),
@@ -8866,9 +9084,9 @@ async fn repo_picker_filter_narrows_to_matching_repos() {
     );
 
     app.ui_state.repo_picker.repos = vec![
-        github_repo("sizeak/claude-commander"),
-        github_repo("sizeak/diffgrid"),
-        github_repo("other/commander-docs"),
+        github_repo("sizeak/claude-commander").into(),
+        github_repo("sizeak/diffgrid").into(),
+        github_repo("other/commander-docs").into(),
     ];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
 
@@ -8913,8 +9131,8 @@ async fn repo_picker_marks_repos_already_registered_as_projects() {
 
     app.handle_command(UserCommand::CloneRepository).await;
     app.ui_state.repo_picker.repos = vec![
-        github_repo("sizeak/claude-commander"),
-        github_repo("sizeak/diffgrid"),
+        github_repo("sizeak/claude-commander").into(),
+        github_repo("sizeak/diffgrid").into(),
     ];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
 
@@ -8939,7 +9157,7 @@ async fn a_failed_repo_list_is_shown_as_a_state_and_keeps_the_url_path_usable() 
     app.handle_command(UserCommand::CloneRepository).await;
     let generation = app.ui_state.repo_picker.generation;
 
-    app.handle_state_update(StateUpdate::GithubReposLoaded {
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
         backend_id: claude_commander_core::backend::LOCAL_BACKEND_ID.0,
         generation,
         result: Err("gh: command not found".to_string()),
@@ -8950,7 +9168,7 @@ async fn a_failed_repo_list_is_shown_as_a_state_and_keeps_the_url_path_usable() 
         matches!(
             app.ui_state.modal,
             Modal::QuickSwitch {
-                mode: PaletteMode::GithubRepoPicker,
+                mode: PaletteMode::RepositoryPicker,
                 ..
             }
         ),
@@ -8975,13 +9193,19 @@ async fn a_stale_repo_listing_is_dropped() {
     let mut app = make_test_app();
     app.handle_command(UserCommand::CloneRepository).await;
     let stale = app.ui_state.repo_picker.generation;
-    app.refetch_github_repos();
+    app.refetch_repositories();
     assert_ne!(app.ui_state.repo_picker.generation, stale);
 
-    app.handle_state_update(StateUpdate::GithubReposLoaded {
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
         backend_id: claude_commander_core::backend::LOCAL_BACKEND_ID.0,
         generation: stale,
-        result: Ok(vec![github_repo("stale/repo")]),
+        result: Ok(claude_commander_protocol::hosting::RepositoryListing {
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+                hostname: None,
+            },
+            repositories: vec![github_repo("stale/repo").into()],
+        }),
     })
     .await;
     assert!(
@@ -8992,10 +9216,32 @@ async fn a_stale_repo_listing_is_dropped() {
 }
 
 #[tokio::test]
+async fn gitlab_picker_knows_its_provider_before_an_empty_listing_arrives() {
+    let mut app = make_test_app();
+    app.backends[0].view.snapshot.server.code_host =
+        claude_commander_protocol::api::CodeHostStatus {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+            hostname: Some("gitlab.example.com".into()),
+            cli_available: true,
+        };
+
+    app.handle_command(UserCommand::CloneRepository).await;
+
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert_eq!(
+        app.ui_state.repo_picker.host.hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
+#[tokio::test]
 async fn enter_on_a_repo_opens_an_editable_destination_name_prefilled_with_the_repo_name() {
     let mut app = make_test_app();
     app.handle_command(UserCommand::CloneRepository).await;
-    app.ui_state.repo_picker.repos = vec![github_repo("sizeak/claude-commander")];
+    app.ui_state.repo_picker.repos = vec![github_repo("sizeak/claude-commander").into()];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
     app.refilter_quick_switch();
 
@@ -9022,6 +9268,40 @@ async fn enter_on_a_repo_opens_an_editable_destination_name_prefilled_with_the_r
         }
         other => panic!("expected the destination-name input, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn gitlab_repo_selection_freezes_provider_and_hostname_into_clone_source() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    app.ui_state.repo_picker.host = claude_commander_protocol::hosting::CodeHost {
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+        hostname: Some("gitlab.example.com".into()),
+    };
+    let mut repo: claude_commander_protocol::hosting::HostedRepository =
+        github_repo("group/subgroup/project").into();
+    repo.namespace = "group/subgroup".into();
+    repo.name = "project".into();
+    app.ui_state.repo_picker.repos = vec![repo];
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+    app.refilter_quick_switch();
+
+    app.activate_quick_switch_selection().await;
+
+    let Modal::Input {
+        on_submit: InputAction::CloneDestName { source, .. },
+        ..
+    } = &app.ui_state.modal
+    else {
+        panic!("expected clone destination prompt")
+    };
+    assert_eq!(
+        source,
+        &CloneSource::Gitlab {
+            full_name: "group/subgroup/project".into(),
+            hostname: Some("gitlab.example.com".into()),
+        }
+    );
 }
 
 #[tokio::test]
@@ -9086,7 +9366,7 @@ async fn a_refused_url_is_reported_and_leaves_the_picker_open() {
             matches!(
                 app.ui_state.modal,
                 Modal::QuickSwitch {
-                    mode: PaletteMode::GithubRepoPicker,
+                    mode: PaletteMode::RepositoryPicker,
                     ..
                 }
             ),
@@ -9436,7 +9716,7 @@ fn the_help_modal_documents_the_clone_picker() {
         .join("\n");
     // Listed as a (palette-only) bindable action…
     assert!(
-        text.contains("Clone a GitHub repository"),
+        text.contains("Clone a hosted repository"),
         "help must list the command: {text}"
     );
     // …and the picker's own keys, which are not bindable actions.
@@ -11477,6 +11757,20 @@ mod workspaces {
             None,
         )
         .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !app
+                .local_view()
+                .snapshot
+                .projects
+                .iter()
+                .any(|p| p.name == "scanned")
+            {
+                let event = app.event_loop.next().await.unwrap();
+                app.process_event(event).await;
+            }
+        })
+        .await
+        .expect("scan completion should refresh the project list");
         let scanned = app
             .local_view()
             .snapshot
@@ -11631,6 +11925,14 @@ mod workspaces {
             .set_modified(later)
             .unwrap();
         app.check_config_reload();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while app.ui_state.config_reload_in_flight {
+                let event = app.event_loop.next().await.unwrap();
+                app.process_event(event).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(app.theme.status_bar_bg, Theme::lcars().status_bar_bg);
     }
 
@@ -12585,4 +12887,493 @@ mod workspaces {
             "help must say workspaces have themes and where to edit them: {text}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_dictation_tick_invalidates_the_frame() {
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::Board;
+    app.conversation
+        .dictations
+        .sender()
+        .send(DictationOutcome::NothingHeard)
+        .expect("mailbox open");
+
+    assert!(app.process_event(AppEvent::Tick).await);
+    assert_eq!(toast(&app), "✗ Nothing heard");
+}
+
+#[tokio::test]
+async fn an_idle_tick_does_not_invalidate_the_frame() {
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::Board;
+    assert!(!app.process_event(AppEvent::Tick).await);
+}
+
+#[tokio::test]
+async fn superseded_preview_for_the_same_selection_cannot_overwrite_a_newer_resource() {
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.right_pane_view = RightPaneView::Shell;
+    app.ui_state.preview_content = "current pane".into();
+    app.ui_state.shell_content = "current shell".into();
+    let new_token = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(new_token);
+    app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: new_token - Duration::from_millis(1),
+        session_id: Some(sid),
+        project_id: None,
+        preview_content: "obsolete pane".into(),
+        shell_content: "obsolete shell".into(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(app.ui_state.preview_content, "current pane");
+    assert_eq!(app.ui_state.shell_content, "current shell");
+    assert_eq!(app.ui_state.preview_update_spawned_at, Some(new_token));
+}
+
+#[tokio::test]
+async fn a_removed_backends_create_completion_is_ignored() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Error {
+        message: "current modal".into(),
+    };
+    app.handle_state_update(StateUpdate::SessionCreated {
+        session_id: SessionId::new(),
+        backend_id: 999,
+    })
+    .await;
+    assert!(matches!(&app.ui_state.modal, Modal::Error { message } if message == "current modal"));
+    assert!(app.ui_state.pending_selection.is_none());
+}
+
+#[tokio::test]
+async fn attach_return_renders_before_slow_fresh_agent_detection() {
+    let (mut app, sid) = app_with_remote_session().await;
+    let name = app.view_for(BackendId(1)).snapshot.sessions[0]
+        .tmux_session_name
+        .clone();
+    let viewed = HashSet::from([name]);
+    let gate = remote_mock(&app, BackendId(1)).block_fresh_agent_states();
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states
+        .insert(sid, AgentState::Working);
+    remote_mock(&app, BackendId(1)).set_agent_states(
+        claude_commander_core::api::AgentStatesSnapshot {
+            states: BTreeMap::from([(sid, AgentState::Idle)]),
+            commander_running: false,
+        },
+    );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        app.refresh_after_attach(BackendId(1), &viewed),
+    )
+    .await
+    .expect("attach return must allow a board frame while fresh detection is blocked");
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states.get(&sid),
+        Some(&AgentState::Working)
+    );
+
+    gate.notify_one();
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    app.process_event(event).await;
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states.get(&sid),
+        Some(&AgentState::Idle)
+    );
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .agent_states_calls()
+            .contains(&true)
+    );
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .read_marked_sessions()
+            .contains(&sid)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_marks_switcher_visits_and_preserves_other_backends() {
+    let (mut snapshot, first, _) = snapshot_with_one_session();
+    let mut second = snapshot.sessions[0].clone();
+    second.session_id = SessionId::new();
+    second.tmux_session_name = "cc-second".into();
+    let second_id = second.session_id;
+    snapshot.sessions.push(second);
+    let mut untouched = snapshot.sessions[0].clone();
+    untouched.session_id = SessionId::new();
+    untouched.tmux_session_name = "cc-unviewed".into();
+    let untouched_id = untouched.session_id;
+    snapshot.sessions.push(untouched);
+    let first_name = snapshot.sessions[0].tmux_session_name.clone();
+    let (other_snapshot, other_sid, _) = snapshot_with_one_session();
+    let mut app =
+        build_app_with_mock_remotes(vec![("buildbox", snapshot), ("other", other_snapshot)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.refresh_backend_view(BackendId(2)).await;
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states = BTreeMap::from([
+        (first, AgentState::Working),
+        (second_id, AgentState::Working),
+        (untouched_id, AgentState::Working),
+    ]);
+    app.backend_mut_for_test(BackendId(2))
+        .view
+        .agent_states
+        .states = BTreeMap::from([(other_sid, AgentState::Working)]);
+    app.ui_state
+        .agent_states
+        .insert(other_sid, AgentState::Idle);
+    remote_mock(&app, BackendId(1)).set_agent_states(
+        claude_commander_core::api::AgentStatesSnapshot {
+            states: BTreeMap::from([
+                (first, AgentState::Idle),
+                (second_id, AgentState::Idle),
+                (untouched_id, AgentState::Idle),
+            ]),
+            commander_running: false,
+        },
+    );
+    app.refresh_after_attach(
+        BackendId(1),
+        &HashSet::from([first_name, "cc-second-sh".into(), "commander".into()]),
+    )
+    .await;
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    app.process_event(event).await;
+    let marked = remote_mock(&app, BackendId(1)).read_marked_sessions();
+    assert_eq!(marked.len(), 2);
+    assert!(marked.contains(&first) && marked.contains(&second_id));
+    assert!(
+        remote_mock(&app, BackendId(2))
+            .read_marked_sessions()
+            .is_empty()
+    );
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states,
+        BTreeMap::from([
+            (first, AgentState::Idle),
+            (second_id, AgentState::Idle),
+            (untouched_id, AgentState::Working),
+        ])
+    );
+    assert_eq!(
+        app.view_for(BackendId(2))
+            .agent_states
+            .states
+            .get(&other_sid),
+        Some(&AgentState::Working)
+    );
+    assert_eq!(
+        app.ui_state.agent_states.get(&other_sid),
+        Some(&AgentState::Idle)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_local_merge_and_stale_events() {
+    let mut app = make_test_app();
+    let (mut snapshot, viewed, _) = snapshot_with_one_session();
+    snapshot.sessions[0].unread = true;
+    app.backend_mut_for_test(LOCAL_BACKEND_ID).view.snapshot = snapshot.clone();
+    let unviewed = SessionId::new();
+    let old = BTreeMap::from([
+        (viewed, AgentState::Working),
+        (unviewed, AgentState::Working),
+    ]);
+    app.ui_state.agent_states = old.clone();
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .agent_states
+        .states = old;
+    app.process_event(AppEvent::StateUpdate(
+        StateUpdate::ViewedAgentStatesUpdated {
+            backend_id: LOCAL_BACKEND_ID.0,
+            revision: 2,
+            states: BTreeMap::from([(viewed, AgentState::Idle)]),
+        },
+    ))
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states,
+        app.view_for(LOCAL_BACKEND_ID).agent_states.states
+    );
+    assert_eq!(
+        app.ui_state.agent_states.get(&unviewed),
+        Some(&AgentState::Working)
+    );
+    // The mark-read snapshot request started before the fresh read finished.
+    // Its workspace fields are still valid, even though its agent states are old.
+    snapshot.sessions[0].unread = false;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(!app.view_for(LOCAL_BACKEND_ID).snapshot.sessions[0].unread);
+    assert_eq!(app.backend(LOCAL_BACKEND_ID).unwrap().view_revision, 1);
+    assert_eq!(
+        app.backend(LOCAL_BACKEND_ID).unwrap().agent_states_revision,
+        2
+    );
+    app.handle_state_update(StateUpdate::ViewedAgentStatesUpdated {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        states: BTreeMap::from([(viewed, AgentState::Working)]),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states.get(&viewed),
+        Some(&AgentState::Idle)
+    );
+    app.handle_state_update(StateUpdate::ViewedAgentStatesUpdated {
+        backend_id: 999,
+        revision: 3,
+        states: BTreeMap::new(),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states.get(&viewed),
+        Some(&AgentState::Idle)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
+    let (mut app, sid) = app_with_remote_session().await;
+    let name = app.view_for(BackendId(1)).snapshot.sessions[0]
+        .tmux_session_name
+        .clone();
+    let states = BTreeMap::from([(sid, AgentState::Working)]);
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states = states.clone();
+    let calls = remote_mock(&app, BackendId(1)).agent_states_calls().len();
+    app.refresh_after_attach(BackendId(1), &HashSet::from(["commander".into()]))
+        .await;
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).agent_states_calls().len(),
+        calls
+    );
+    remote_mock(&app, BackendId(1)).set_failing(true);
+    app.refresh_after_attach(BackendId(1), &HashSet::from([name]))
+        .await;
+    // Await the owned refresh task instead of sleeping to guess completion.
+    app.backend_mut_for_test(BackendId(1))
+        .feed_tasks
+        .pop()
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(app.view_for(BackendId(1)).agent_states.states, states);
+    assert!(app.event_loop.try_next().is_none());
+}
+
+#[tokio::test]
+async fn provider_picker_runs_in_background_and_refreshes_its_display() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.handle_command(UserCommand::ShowSettings).await;
+    if let Modal::Settings(state) = &mut app.ui_state.modal {
+        state.selected_row = state
+            .rows
+            .iter()
+            .position(|r| r.field_key == "code_host_provider")
+            .unwrap();
+    }
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    for code in [KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
+        app.process_event(AppEvent::Input(crate::event::InputEvent::Key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+        )))
+        .await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = app.event_loop.next().await.unwrap();
+            let done = matches!(
+                &event,
+                AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated { .. })
+            );
+            app.process_event(event).await;
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.config.code_host_provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    let Modal::Settings(state) = &app.ui_state.modal else {
+        panic!("settings should stay open");
+    };
+    let row = state
+        .rows
+        .iter()
+        .find(|r| r.field_key == "code_host_provider")
+        .unwrap();
+    assert!(matches!(&row.kind, SettingsRowKind::Text(value) if value == "GitLab"));
+    app.ui_state.modal = Modal::Error {
+        message: "keep this dialog".into(),
+    };
+    app.handle_state_update(StateUpdate::CodeHostConfigUpdated {
+        result: Err("failed".into()),
+    })
+    .await;
+    assert!(
+        matches!(&app.ui_state.modal, Modal::Error { message } if message == "keep this dialog")
+    );
+}
+
+#[tokio::test]
+async fn late_background_error_preserves_a_new_modal() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.ui_state.modal = Modal::Error {
+        message: "newer dialog".into(),
+    };
+    app.handle_state_update(StateUpdate::ActionFinished {
+        backend_id: 1,
+        message: Err("background error".into()),
+    })
+    .await;
+    assert!(matches!(&app.ui_state.modal, Modal::Error { message } if message == "newer dialog"));
+    assert_eq!(
+        app.ui_state.status_message.as_ref().unwrap().0,
+        "background error"
+    );
+}
+
+#[tokio::test]
+async fn failed_pending_selection_is_discarded_without_lfs() {
+    let (mut app, _) = app_with_remote_session().await;
+    let id = SessionId::new();
+    app.ui_state.pending_selection = Some(SessionRef::new(BackendId(1), id));
+    let view = app.view_for(BackendId(1));
+    let snapshot = Box::new(view.snapshot.clone());
+    let states = Box::new(view.agent_states.clone());
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: 1,
+        revision: u64::MAX,
+        snapshot,
+        states,
+    })
+    .await;
+    assert!(app.ui_state.pending_selection.is_none());
+    assert!(app.ui_state.lfs_pull_in_flight.is_empty());
+}
+
+#[tokio::test]
+async fn conversation_stream_and_external_recording_request_redraw() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.conversation
+        .recording
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(app.process_event(AppEvent::Tick).await);
+    app.conversation
+        .recording
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert!(app.process_event(AppEvent::Tick).await);
+}
+
+#[tokio::test]
+async fn selecting_a_mutated_session_does_not_start_lfs() {
+    let mut app = make_test_app();
+    let (mut snapshot, sid, _) = snapshot_with_one_session();
+    let dir = tempfile::TempDir::new().unwrap();
+    snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
+    app.config.skip_lfs_smudge = true;
+    app.ui_state.pending_selection = Some(SessionRef::local(sid));
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.lfs_pull_in_flight.is_empty());
+}
+
+#[tokio::test]
+async fn create_lfs_intent_survives_an_older_snapshot() {
+    let mut app = make_test_app();
+    let (mut snapshot, sid, _) = snapshot_with_one_session();
+    let dir = tempfile::TempDir::new().unwrap();
+    snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
+    app.config.skip_lfs_smudge = true;
+    app.ui_state.pending_created = Some(SessionRef::local(sid));
+    let mut old = snapshot.clone();
+    old.sessions.clear();
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(old),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(app.ui_state.pending_created, Some(SessionRef::local(sid)));
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 2,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.pending_created.is_none());
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&sid));
+}
+
+#[tokio::test]
+async fn reopening_repository_picker_rejects_previous_provider_results() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    let old_generation = app.ui_state.repo_picker.generation;
+    app.ui_state.modal = Modal::None;
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .snapshot
+        .server
+        .code_host
+        .provider = claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    app.handle_command(UserCommand::CloneRepository).await;
+    assert_ne!(app.ui_state.repo_picker.generation, old_generation);
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
+        backend_id: LOCAL_BACKEND_ID.0,
+        generation: old_generation,
+        result: Ok(claude_commander_protocol::hosting::RepositoryListing {
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+                hostname: None,
+            },
+            repositories: vec![github_repo("stale/repo").into()],
+        }),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert!(app.ui_state.repo_picker.repos.is_empty());
+    assert!(matches!(app.ui_state.repo_picker.fetch, RepoFetch::Loading));
 }

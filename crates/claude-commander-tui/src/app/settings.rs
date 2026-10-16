@@ -133,6 +133,18 @@ impl App {
                     ),
                     SettingsRow::header("Pull Requests & Sync"),
                     SettingsRow::text(
+                        "Code Host",
+                        c.code_host_provider.display_name(),
+                        "code_host_provider",
+                    ),
+                    SettingsRow::text(
+                        "GitLab Hostname",
+                        c.gitlab_hostname
+                            .clone()
+                            .unwrap_or_else(|| "(default)".into()),
+                        "gitlab_hostname",
+                    ),
+                    SettingsRow::text(
                         "PR Check Interval (s)",
                         c.pr_check_interval_secs.to_string(),
                         "pr_check_interval_secs",
@@ -1347,8 +1359,39 @@ impl App {
 
     /// Apply an edited value from the settings modal to the config.
     pub(super) fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
+        let previous_provider = self.config.code_host_provider;
         match tab {
             SettingsTab::General => match field_key {
+                "code_host_provider" => {
+                    use claude_commander_protocol::hosting::CodeHostProvider;
+                    let next = match value {
+                        "GitHub" | "github" => Some(CodeHostProvider::Github),
+                        "GitLab" | "gitlab" => Some(CodeHostProvider::Gitlab),
+                        _ => None,
+                    };
+                    if let Some(next) = next
+                        && next != self.config.code_host_provider
+                    {
+                        self.config.code_host_provider = next;
+                        self.ui_state.enriched_pr = None;
+                        self.ui_state.enriched_pr_unavailable = None;
+                        self.ui_state.enriched_pr_fetch_spawned_at = None;
+                    }
+                }
+                "gitlab_hostname" => {
+                    let hostname =
+                        (!value.is_empty() && value != "(default)").then(|| value.to_string());
+                    if let Some(hostname) = hostname.as_deref()
+                        && let Err(reason) =
+                            claude_commander_protocol::hosting::validate_gitlab_hostname(hostname)
+                    {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Invalid GitLab hostname: {reason}"),
+                        };
+                        return;
+                    }
+                    self.config.gitlab_hostname = hostname;
+                }
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
                 "shell_program" => self.config.shell_program = value.to_string(),
                 "worktrees_dir" => {
@@ -1735,7 +1778,48 @@ impl App {
             }
         }
 
+        // Provider transitions also mutate persisted session review metadata and
+        // therefore complete through the async service operation used by the
+        // real key handler. Keep this function synchronous for the many other
+        // settings and for its pure edit tests.
+        if self.config.code_host_provider != previous_provider {
+            return;
+        }
         self.persist_config();
+        if field_key == "gitlab_hostname" {
+            self.spawn_backend_view_refresh(claude_commander_core::backend::LOCAL_BACKEND_ID);
+        }
+    }
+
+    /// Apply an edit and finish provider transitions through the service's
+    /// serialized cache-invalidation path.
+    async fn apply_settings_edit_live(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
+        if tab == SettingsTab::General && field_key == "code_host_provider" {
+            use claude_commander_protocol::hosting::CodeHostProvider;
+            let provider = match value {
+                "GitHub" | "github" => CodeHostProvider::Github,
+                "GitLab" | "gitlab" => CodeHostProvider::Gitlab,
+                _ => return,
+            };
+            let service = self.service.clone();
+            let tx = self.event_loop.sender();
+            tokio::spawn(async move {
+                let result = service
+                    .edit_code_host_config(move |config| {
+                        config.code_host_provider = provider;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = tx
+                    .send(AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated {
+                        result,
+                    }))
+                    .await;
+            });
+            return;
+        }
+        self.apply_settings_edit(tab, field_key, value);
     }
 
     /// Set a boolean General-tab setting to a typed value and persist.
@@ -1848,7 +1932,8 @@ impl App {
                         let val = value.value().to_string();
                         let field_key = state.rows[state.selected_row].field_key.clone();
                         state.editing = None;
-                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        self.apply_settings_edit_live(state.tab, &field_key, &val)
+                            .await;
                         // Refresh rows after applying
                         state.rows = self.settings_rows(&state);
                         self.ui_state.modal = Modal::Settings(state);
@@ -1920,7 +2005,8 @@ impl App {
                             return;
                         }
                         let prev_input_device = self.config.stt.input_device.clone();
-                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        self.apply_settings_edit_live(state.tab, &field_key, &val)
+                            .await;
                         // Selecting a *different* microphone rebuilds the running
                         // listener so the new device is used on the next recording,
                         // live. Skip the respawn when the id is unchanged (e.g.
@@ -2012,7 +2098,15 @@ impl App {
                     KeyCode::Enter => {
                         if !state.rows.is_empty() {
                             let field_key = &state.rows[state.selected_row].field_key;
-                            if field_key == "conversation_speak_scope" {
+                            if field_key == "code_host_provider" {
+                                let options = code_host_options();
+                                let selected = usize::from(
+                                    self.config.code_host_provider
+                                        == claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+                                );
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "conversation_speak_scope" {
                                 // Inline option picker for the speak-scope enum.
                                 use claude_commander_core::conversation::SpeakScope;
                                 let options: Vec<PickerOption> = SpeakScope::ALL
@@ -3712,6 +3806,19 @@ fn format_color(color: ratatui::style::Color) -> String {
     }
 }
 
+fn code_host_options() -> Vec<PickerOption> {
+    vec![
+        PickerOption {
+            label: "GitHub".into(),
+            value: "github".into(),
+        },
+        PickerOption {
+            label: "GitLab".into(),
+            value: "gitlab".into(),
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3733,6 +3840,16 @@ mod tests {
             w, 33,
             "label column should fit the longest label plus a space"
         );
+    }
+
+    #[test]
+    fn code_host_is_an_exact_two_value_option_picker() {
+        let options = code_host_options();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].label, "GitHub");
+        assert_eq!(options[0].value, "github");
+        assert_eq!(options[1].label, "GitLab");
+        assert_eq!(options[1].value, "gitlab");
     }
 
     #[test]

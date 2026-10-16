@@ -55,6 +55,7 @@ use crate::api::{
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 pub use error::{BResult, BackendError};
@@ -254,6 +255,7 @@ pub fn empty_snapshot() -> Snapshot {
         operations: Vec::new(),
         server: ServerStatus {
             gh_available: false,
+            code_host: Default::default(),
             tmux_ok: false,
             // The client's own version. The version-mismatch warning
             // (`server_version_mismatch`) depends on this: seeding the
@@ -327,6 +329,12 @@ pub fn server_version_mismatch(server: &str, client: &str) -> Option<VersionMism
 /// rather than leaking a task that would poll a server forever (the task holds
 /// its own `Arc` to the backend, so dropping the handle alone wouldn't stop it).
 pub struct BackendHandle {
+    /// Refresh request order, shared by change feeds and explicit refreshes.
+    pub refresh_sequence: Arc<std::sync::atomic::AtomicU64>,
+    /// Latest refresh folded into the cached view.
+    pub view_revision: u64,
+    /// Latest agent-state refresh; state-only reads must not discard snapshots.
+    pub agent_states_revision: u64,
     pub id: BackendId,
     pub backend: Arc<dyn CommanderBackend>,
     pub view: BackendView,
@@ -342,6 +350,9 @@ impl BackendHandle {
             id,
             backend,
             view: BackendView::connecting(),
+            refresh_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            view_revision: 0,
+            agent_states_revision: 0,
             feed_tasks: Vec::new(),
         }
     }
@@ -580,6 +591,13 @@ pub trait CommanderBackend: Send + Sync {
 
     /// Preview payload for a session or project (agent pane, diff, shell pane).
     async fn preview(&self, target: PreviewTarget) -> BResult<PreviewData>;
+    async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        _part: claude_commander_protocol::preview::PreviewPart,
+    ) -> BResult<PreviewData> {
+        self.preview(target).await
+    }
 
     /// The full branch diff (committed vs origin/main plus uncommitted changes)
     /// used for the AI summary.
@@ -741,10 +759,16 @@ pub trait CommanderBackend: Send + Sync {
     // A clone runs where the *sessions* run (a project registered on the server
     // host has to be checked out on the server host), so the local backend clones
     // locally and a remote backend asks its server to clone — same feature, and
-    // nothing for a frontend to gate on. `list_github_repos` can still *fail* as
+    // nothing for a frontend to gate on. `list_repositories` can still *fail* as
     // `Unavailable` when the host has no `gh`; that is a runtime state a picker
     // renders, not a static capability.
 
+    /// Repositories available from the provider selected on this backend's
+    /// host. The provider-bearing envelope keeps an empty result unambiguous.
+    async fn list_repositories(&self) -> BResult<RepositoryListing>;
+
+    /// Legacy GitHub-only listing retained for old clients and the compatibility
+    /// HTTP endpoint.
     /// Every GitHub repo the backend's host can clone, for the repo picker.
     /// Resolved by `gh` on that host, so its authenticated account decides the
     /// list — a remote backend shows the *server's* repos, not the operator's.
@@ -837,7 +861,8 @@ fn _assert_object_safe(b: Arc<dyn CommanderBackend>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use claude_commander_protocol::github::{CloneSource, CloneStatus};
+    use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::hosting::CloneSource;
 
     #[test]
     fn backend_id_local_is_zero() {

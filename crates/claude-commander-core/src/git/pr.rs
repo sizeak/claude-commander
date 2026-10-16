@@ -175,12 +175,11 @@ pub async fn try_retarget_pr_base(
     pr_number: u32,
     new_base: &str,
 ) -> std::result::Result<(), String> {
-    let output = match gh_command()
+    let mut command = gh_command();
+    command
         .args(["pr", "edit", &pr_number.to_string(), "--base", new_base])
-        .current_dir(repo_path)
-        .output()
-        .await
-    {
+        .current_dir(repo_path);
+    let output = match crate::git::hosting::review_output(command, "gh").await {
         Ok(output) => output,
         Err(e) => {
             debug!("gh pr edit #{} spawn failed: {}", pr_number, e);

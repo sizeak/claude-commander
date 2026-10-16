@@ -11,10 +11,13 @@ import 'api/review.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
 import 'api/workspace.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
+
 import 'frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_io.dart';
 import 'package:uuid/uuid.dart';
 
@@ -152,6 +155,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CloneStatusKind dco_decode_clone_status_kind(dynamic raw);
 
   @protected
+  CodeHost dco_decode_code_host(dynamic raw);
+
+  @protected
+  CodeHostProvider dco_decode_code_host_provider(dynamic raw);
+
+  @protected
+  CodeHostStatus dco_decode_code_host_status(dynamic raw);
+
+  @protected
   CommentDto dco_decode_comment_dto(dynamic raw);
 
   @protected
@@ -197,6 +209,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GithubRepo dco_decode_github_repo(dynamic raw);
 
   @protected
+  HostedRepository dco_decode_hosted_repository(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
@@ -225,6 +240,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<GithubRepo> dco_decode_list_github_repo(dynamic raw);
+
+  @protected
+  List<HostedRepository> dco_decode_list_hosted_repository(dynamic raw);
 
   @protected
   List<MergedWorkspace> dco_decode_list_merged_workspace(dynamic raw);
@@ -356,6 +374,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PullStatusKind dco_decode_pull_status_kind(dynamic raw);
+
+  @protected
+  RepositoryListing dco_decode_repository_listing(dynamic raw);
+
+  @protected
+  RepositoryVisibility dco_decode_repository_visibility(dynamic raw);
 
   @protected
   ReviewCommentSide dco_decode_review_comment_side(dynamic raw);
@@ -589,6 +613,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CloneStatusKind sse_decode_clone_status_kind(SseDeserializer deserializer);
 
   @protected
+  CodeHost sse_decode_code_host(SseDeserializer deserializer);
+
+  @protected
+  CodeHostProvider sse_decode_code_host_provider(SseDeserializer deserializer);
+
+  @protected
+  CodeHostStatus sse_decode_code_host_status(SseDeserializer deserializer);
+
+  @protected
   CommentDto sse_decode_comment_dto(SseDeserializer deserializer);
 
   @protected
@@ -638,6 +671,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GithubRepo sse_decode_github_repo(SseDeserializer deserializer);
 
   @protected
+  HostedRepository sse_decode_hosted_repository(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
@@ -670,6 +706,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<GithubRepo> sse_decode_list_github_repo(SseDeserializer deserializer);
+
+  @protected
+  List<HostedRepository> sse_decode_list_hosted_repository(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<MergedWorkspace> sse_decode_list_merged_workspace(
@@ -845,6 +886,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PullStatusKind sse_decode_pull_status_kind(SseDeserializer deserializer);
+
+  @protected
+  RepositoryListing sse_decode_repository_listing(SseDeserializer deserializer);
+
+  @protected
+  RepositoryVisibility sse_decode_repository_visibility(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ReviewCommentSide sse_decode_review_comment_side(
@@ -1141,6 +1190,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_code_host(CodeHost self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_code_host_provider(
+    CodeHostProvider self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_code_host_status(
+    CodeHostStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_comment_dto(CommentDto self, SseSerializer serializer);
 
   @protected
@@ -1198,6 +1262,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_github_repo(GithubRepo self, SseSerializer serializer);
 
   @protected
+  void sse_encode_hosted_repository(
+    HostedRepository self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
@@ -1245,6 +1315,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_github_repo(
     List<GithubRepo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_hosted_repository(
+    List<HostedRepository> self,
     SseSerializer serializer,
   );
 
@@ -1476,6 +1552,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_pull_status_kind(
     PullStatusKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_repository_listing(
+    RepositoryListing self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_repository_visibility(
+    RepositoryVisibility self,
     SseSerializer serializer,
   );
 

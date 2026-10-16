@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::comment::{Comment, CommentSide};
 use crate::diff::ParsedDiff;
+use crate::hosting::CodeHostProvider;
 use crate::pr::{PrState, ReviewDecision};
 use crate::session::{AgentState, ProjectId, SessionId, SessionStatus};
 use crate::workspace::{StartupWorkspace, WorkspaceDef};
@@ -335,10 +336,43 @@ pub struct OperationStatus {
 pub struct ServerStatus {
     /// Whether the `gh` CLI is installed and runnable.
     pub gh_available: bool,
+    /// Selected provider and its CLI health. Defaults support older servers.
+    #[serde(default)]
+    pub code_host: CodeHostStatus,
     /// Whether tmux is available.
     pub tmux_ok: bool,
     /// Server crate version (`CARGO_PKG_VERSION`).
     pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CodeHostStatus {
+    pub provider: CodeHostProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    pub cli_available: bool,
+}
+
+impl Default for CodeHostStatus {
+    fn default() -> Self {
+        Self {
+            provider: CodeHostProvider::Github,
+            hostname: None,
+            cli_available: false,
+        }
+    }
+}
+
+impl ServerStatus {
+    /// Compatibility view for responses from servers predating `code_host`.
+    pub fn effective_code_host(&self) -> CodeHostStatus {
+        let mut status = self.code_host.clone();
+        if status.provider == CodeHostProvider::Github && !status.cli_available {
+            status.cli_available = self.gh_available;
+        }
+        status
+    }
 }
 
 /// A single snapshot of everything the session tree needs to render: projects,
@@ -888,6 +922,11 @@ mod tests {
             operations: vec![],
             server: ServerStatus {
                 gh_available: true,
+                code_host: CodeHostStatus {
+                    provider: CodeHostProvider::Github,
+                    hostname: None,
+                    cli_available: true,
+                },
                 tmux_ok: true,
                 version: "0.0.0".to_string(),
             },
@@ -926,6 +965,10 @@ mod tests {
         assert!(snap.project_pull.is_empty());
         assert!(snap.operations.is_empty());
         // An older server has no workspaces: only Main, default label, `last`.
+        assert_eq!(
+            snap.server.effective_code_host().provider,
+            CodeHostProvider::Github
+        );
         assert!(snap.workspaces.is_empty());
         assert!(snap.main_workspace.is_none());
         assert_eq!(snap.startup_workspace, StartupWorkspace::Last);

@@ -118,8 +118,22 @@ ui_refresh_fps = 30
 # Default 1800 (30 min).
 # clone_timeout_secs = 1800
 
-# Timeout (seconds) for listing your GitHub repos in the clone picker, which
-# runs `gh api --paginate`. Default 90. Raise it if a very large account times
+# Claude Commander integrates with one selected code-host provider at a time.
+# Selecting GitLab disables GitHub PR polling for registered GitHub projects,
+# and selecting GitHub disables GitLab MR polling for registered GitLab projects.
+# Per-project provider detection is not yet supported.
+code_host_provider = "github" # "github" or "gitlab"
+
+# Optional GitLab Self-Managed/Dedicated host. Use only a hostname with an
+# optional port—no scheme, path, or credentials. Omit for gitlab.com or glab's
+# configured default. Discovery passes it to `glab api --hostname`; a hosted
+# clone freezes it into the request and supplies it as `GITLAB_HOST`. MR commands
+# run inside each checkout so glab resolves that repository's authenticated host.
+# gitlab_hostname = "gitlab.example.com"
+
+# Timeout (seconds) for listing repositories in the clone picker. GitHub runs
+# `gh api --paginate`; GitLab runs `glab api ... --paginate`. Default 90. Raise
+# it if a very large account times
 # out — the repo list is never truncated to fit, so a timeout means an empty
 # picker rather than a short one.
 #
@@ -156,8 +170,8 @@ ui_refresh_fps = 30
 # Auto-detected from a known list if not set (code, zed, subl, JetBrains IDEs, etc.)
 # editor_gui = true
 
-# Interval in seconds between GitHub PR checks (0 = disabled)
-# Run "Refresh PR status" from the command palette to force an immediate
+# Interval in seconds between GitHub PR or GitLab MR checks (0 = disabled)
+# Run "Refresh review status" from the command palette to force an immediate
 # re-check without waiting for this interval to elapse.
 pr_check_interval_secs = 120
 
@@ -877,8 +891,9 @@ Sections are the **columns** of the [board](../README.md#board). Each configured
 Sections drive both the **board** columns and the section-grouped **list** views
 (`v` cycles project list → Sections → Section Stacks → board). When `[[sections]]`
 is empty, the board shows three baked-in default columns assigned automatically
-from GitHub PR state — **In Progress** (the catch-all), **In Review** (open PR),
-and **Merged** (merged PR) — and the list stays project-grouped. Declaring any
+from the selected provider's review state — **In Progress** (the catch-all),
+**In Review** (open PR/MR), and **Merged** (merged PR/MR) — and the list stays
+project-grouped. Declaring any
 `[[sections]]` **replaces** the board defaults with your own columns and makes the
 section list views meaningful; nothing is written back to `config.toml`.
 
@@ -946,7 +961,7 @@ All fields are optional; a section matches when **every declared field** matches
 | `is_draft` | `bool` | |
 | `has_pr` | `bool` | |
 | `has_label` | string (literal) or array (any-of) | |
-| `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision` field |
+| `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision`; GitLab leaves it unset in this release |
 | `has_reviewer` | `true` / `false`, a specific login, or an array of logins (any-of) | `true` excludes Copilot via case-insensitive `"copilot"` substring match; specific/array forms match literally |
 | `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit`, warning-coloured at the limit and error-coloured over it. Never blocks creation. |
 

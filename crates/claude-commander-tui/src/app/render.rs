@@ -542,12 +542,14 @@ impl App {
         };
         state.set_content(content, inner_height);
         let scroll = state.scroll_offset;
+        let parsed = state.paragraph(dim_opacity);
 
         frame.render_widget(
             Preview::new(content)
+                .with_paragraph(parsed)
                 .block(block)
                 .scroll(scroll)
-                .dim_opacity(dim_opacity),
+                .dim_opacity(None),
             area,
         );
     }
@@ -599,6 +601,18 @@ impl App {
             .enriched_pr
             .as_ref()
             .and_then(|(sid, pr)| if *sid == session_id { Some(pr) } else { None });
+        let review_label = if self
+            .view_for(sref.backend)
+            .snapshot
+            .server
+            .effective_code_host()
+            .provider
+            == claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+        {
+            "MR"
+        } else {
+            "PR"
+        };
 
         let ai_summary = if self.config.ai_summary_enabled {
             self.ui_state.ai_summaries.get(&session_id)
@@ -617,6 +631,7 @@ impl App {
             pr_number,
             pr_url,
             pr_merged,
+            review_label,
             enriched_pr,
             ai_summary,
             summary_key_hint,

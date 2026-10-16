@@ -9,8 +9,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneRequest, CloneSource, GithubRepo, validate_clone_url,
-    validate_dest_name, validate_repo_slug,
+    CloneJob, CloneJobId, CloneRequest, GithubRepo, validate_clone_url, validate_dest_name,
+    validate_repo_slug,
+};
+use claude_commander_protocol::hosting::{
+    CloneSource, CodeHost, CodeHostProvider, RepositoryListing, validate_gitlab_hostname,
+    validate_hosted_repo_slug,
 };
 use claude_commander_protocol::workspace::{
     SetWorkspacesRequest, WorkspaceRejection, validate_set_workspaces, validate_workspace_label,
@@ -26,7 +30,7 @@ use crate::comment::{
     decide_send, reanchor_comments,
 };
 use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
-use crate::error::{GitError, Result, SessionError};
+use crate::error::{ConfigError, GitError, Result, SessionError};
 use crate::git::{
     CloneJobs, CloneOutcome, ComposedDiff, FileDiff, GitBackend, PrCheckResult,
     clone_source_rejected, compose_review_diff, compute_branch_diff, diff_stat_summary,
@@ -69,6 +73,8 @@ pub struct CommanderService {
     /// Cached `gh --version` availability. Computed once (fork/exec is not free)
     /// and reused for every `snapshot`.
     gh_available: Arc<tokio::sync::OnceCell<bool>>,
+    /// Cached `glab version` availability, independent of the compatibility gh probe.
+    glab_available: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     /// Shared agent-state detector with a short TTL cache, reused across
     /// non-`fresh` [`Self::agent_states`] calls so repeated polls don't
     /// re-capture every pane. A `fresh` call bypasses it with a zero-TTL
@@ -91,6 +97,11 @@ pub struct CommanderService {
     last_pr_check: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     /// Signals the PR-status loop to run an immediate check (manual refresh).
     pr_refresh: Arc<tokio::sync::Notify>,
+    /// Serializes provider transitions with application of review-poll results.
+    /// A poll that began under the old provider must either finish before its
+    /// metadata is cleared or observe the new provider and be discarded.
+    review_provider_lock: Arc<tokio::sync::Mutex<()>>,
+    review_provider_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Idempotency guard for [`Self::spawn_background_tasks`]: the loops spawn
     /// once per service, even if both a local TUI and an embedded caller ask.
     background_started: Arc<std::sync::atomic::AtomicBool>,
@@ -150,6 +161,9 @@ impl CommanderService {
             manager.tmux.clone(),
             AGENT_STATE_CACHE_TTL,
         )));
+        let notification_store = store.clone();
+        let clone_jobs =
+            CloneJobs::with_notifier(Arc::new(move || notification_store.notify_change()));
         Self {
             manager,
             store,
@@ -160,6 +174,7 @@ impl CommanderService {
             operations: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             next_op_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             gh_available: Arc::new(tokio::sync::OnceCell::new()),
+            glab_available: Arc::new(std::sync::Mutex::new(None)),
             agent_detector,
             agent_states_cache: Arc::new(tokio::sync::RwLock::new(AgentStatesSnapshot {
                 states: BTreeMap::new(),
@@ -169,9 +184,11 @@ impl CommanderService {
             pull_status: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             last_pr_check: Arc::new(std::sync::Mutex::new(None)),
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
+            review_provider_lock: Arc::new(tokio::sync::Mutex::new(())),
+            review_provider_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
-            clone_jobs: CloneJobs::new(),
+            clone_jobs,
         }
     }
 
@@ -222,7 +239,54 @@ impl CommanderService {
     /// Overwrite the persisted config (updates mtime so the hot-reload watcher
     /// won't re-read our own write).
     pub fn update_config(&self, config: Config) -> Result<()> {
+        if config.code_host_provider != self.config_store.read().code_host_provider {
+            return Err(ConfigError::InvalidValue {
+                key: "code_host_provider".into(),
+                reason: "provider changes must use update_code_host_config".into(),
+            }
+            .into());
+        }
         self.config_store.mutate(|c| *c = config)
+    }
+
+    /// Persist a config whose code-host provider changed and invalidate all
+    /// review metadata before the new provider can consume it. The shared lock
+    /// also fences in-flight poll results from the previous provider.
+    pub async fn update_code_host_config(&self, config: Config) -> Result<()> {
+        self.edit_code_host_config(move |current| {
+            *current = config.clone();
+            Ok(())
+        })
+        .await
+    }
+
+    /// Apply edits to the latest config under the provider fence. This avoids
+    /// losing concurrent fields when a partial PATCH waits for a provider switch.
+    pub async fn edit_code_host_config(
+        &self,
+        edit: impl Fn(&mut Config) -> Result<()> + Send,
+    ) -> Result<()> {
+        let _guard = self.review_provider_lock.lock().await;
+        let mut config = self.read_config();
+        let old_provider = config.code_host_provider;
+        edit(&mut config)?;
+        *self
+            .glab_available
+            .lock()
+            .expect("glab availability poisoned") = None;
+        if config.code_host_provider != old_provider {
+            self.invalidate_review_metadata(&config).await?;
+            self.review_provider_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.config_store.mutate(|current| {
+            let mut latest = current.clone();
+            edit(&mut latest)?;
+            *current = latest;
+            Ok::<(), crate::Error>(())
+        })??;
+        self.pr_refresh.notify_one();
+        Ok(())
     }
 
     /// Rename a configured section, migrating every session that refers to it
@@ -427,8 +491,35 @@ impl CommanderService {
     }
 
     /// Reload config from disk if the file changed since the last read.
-    pub fn reload_config(&self) -> Result<bool> {
-        self.config_store.reload_if_changed()
+    pub async fn reload_config(&self) -> Result<bool> {
+        let _guard = self.review_provider_lock.lock().await;
+        let old_provider = self.config_store.read().code_host_provider;
+        let reloaded = self.config_store.reload_if_changed()?;
+        let new_config = self.config_store.read().clone();
+        if reloaded && new_config.code_host_provider != old_provider {
+            self.review_provider_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *self
+                .glab_available
+                .lock()
+                .expect("glab availability poisoned") = None;
+            self.invalidate_review_metadata(&new_config).await?;
+            self.pr_refresh.notify_one();
+        }
+        Ok(reloaded)
+    }
+
+    async fn invalidate_review_metadata(&self, config: &Config) -> Result<()> {
+        let sections = crate::session::effective_sections(&config.sections).into_owned();
+        let now = Utc::now();
+        self.store
+            .mutate(move |state| {
+                for session in state.sessions.values_mut() {
+                    session.clear_review_metadata();
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await
     }
 
     /// Whether a pending config change requires an app restart to take effect.
@@ -483,6 +574,24 @@ impl CommanderService {
         self.telemetry.feature("github.list_repos");
         let timeout = Duration::from_secs(self.config_store.read().repo_list_timeout_secs);
         list_repos(timeout).await
+    }
+
+    /// List repositories using one provider/hostname snapshot from live config.
+    pub async fn list_repositories(&self) -> Result<RepositoryListing> {
+        self.telemetry.feature("repository.list");
+        let (host, timeout) = {
+            let config = self.config_store.read();
+            (
+                CodeHost {
+                    provider: config.code_host_provider,
+                    hostname: (config.code_host_provider == CodeHostProvider::Gitlab)
+                        .then(|| config.gitlab_hostname.clone())
+                        .flatten(),
+                },
+                Duration::from_secs(config.repo_list_timeout_secs),
+            )
+        };
+        crate::git::hosting::list_repositories(host, timeout).await
     }
 
     /// Start cloning a repository into the projects directory, returning the
@@ -868,6 +977,9 @@ impl CommanderService {
 
     pub async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId> {
         self.telemetry.feature("session.create");
+        // One provider governs this entire create, including a stacked
+        // session's eventual launch prompt after the awaited setup steps.
+        let code_host_provider = self.config_store.read().code_host_provider;
         self.manager.check_tmux().await?;
 
         let base_program = opts
@@ -932,7 +1044,12 @@ impl CommanderService {
                 .link_stack_parent_by_branch(&session_id, opts.base_branch.as_deref())
                 .await?;
             self.manager
-                .finalize_session(&session_id, opts.initial_prompt, opts.base_branch)
+                .finalize_session_for_provider(
+                    &session_id,
+                    opts.initial_prompt,
+                    opts.base_branch,
+                    code_host_provider,
+                )
                 .await?;
             Ok::<(), crate::Error>(())
         }
@@ -1292,6 +1409,52 @@ impl CommanderService {
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
+        let (provider, epoch) = self.review_provider_snapshot().await;
+        self.apply_pr_results_at_epoch(provider, epoch, results)
+            .await
+    }
+
+    /// Apply results only while their provider snapshot is still current. The
+    /// provider-transition lock spans both the check and persisted mutation, so
+    /// a switch cannot clear the cache and then be overwritten by an older
+    /// in-flight sweep.
+    async fn review_provider_snapshot(&self) -> (CodeHostProvider, u64) {
+        let _guard = self.review_provider_lock.lock().await;
+        (
+            self.config_store.read().code_host_provider,
+            self.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    async fn apply_pr_results_for_provider(
+        &self,
+        provider: CodeHostProvider,
+        results: Vec<(SessionId, PrCheckResult)>,
+    ) -> Result<()> {
+        let epoch = self
+            .review_provider_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.apply_pr_results_at_epoch(provider, epoch, results)
+            .await
+    }
+
+    async fn apply_pr_results_at_epoch(
+        &self,
+        provider: CodeHostProvider,
+        epoch: u64,
+        results: Vec<(SessionId, PrCheckResult)>,
+    ) -> Result<()> {
+        let _guard = self.review_provider_lock.lock().await;
+        if self.config_store.read().code_host_provider != provider
+            || self
+                .review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != epoch
+        {
+            return Ok(());
+        }
         let sections =
             crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
@@ -1314,15 +1477,7 @@ impl CommanderService {
                             session.pr_base_branch = info.base_ref_name.clone();
                         }
                         PrCheckResult::NotFound => {
-                            session.pr_number = None;
-                            session.pr_url = None;
-                            session.pr_state = None;
-                            session.pr_draft = false;
-                            session.pr_labels.clear();
-                            session.pr_merged = false;
-                            session.review_decision = None;
-                            session.pr_reviewers.clear();
-                            session.pr_base_branch = None;
+                            session.clear_review_metadata();
                         }
                         PrCheckResult::FetchFailed => {}
                     }
@@ -1425,7 +1580,11 @@ impl CommanderService {
 
     pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.telemetry.feature("session.delete");
-        self.manager.delete_session(id).await
+        let _guard = self.review_provider_lock.lock().await;
+        let plan = self.manager.prepare_delete_session(id).await?;
+        drop(_guard);
+        self.manager.finish_delete_session(plan).await;
+        Ok(())
     }
 
     /// Set a session's keep-alive flag (opt-out of auto-hibernation).
@@ -1786,6 +1945,7 @@ impl CommanderService {
     /// run (or when project auto-pull is disabled).
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let gh_available = self.gh_available().await;
+        let code_host = self.code_host_status().await;
         let tmux_ok = self.cached_tmux_ok().await;
         let pending = self.sessions_with_pending_comments().await?;
 
@@ -1822,6 +1982,7 @@ impl CommanderService {
             operations: self.operations_snapshot(),
             server: ServerStatus {
                 gh_available,
+                code_host,
                 tmux_ok,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
@@ -1883,13 +2044,27 @@ impl CommanderService {
     /// or a project. Lifts the TUI's `fetch_preview_data`; the TUI keeps its own
     /// copy until Phase C deletes it.
     pub async fn preview(&self, target: PreviewTarget) -> Result<PreviewData> {
+        self.preview_part(target, claude_commander_protocol::preview::PreviewPart::All)
+            .await
+    }
+
+    pub async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
         match target {
-            PreviewTarget::Session { id, lines } => self.session_preview(&id, lines).await,
-            PreviewTarget::Project(id) => self.project_preview(&id).await,
+            PreviewTarget::Session { id, lines } => self.session_preview(&id, lines, part).await,
+            PreviewTarget::Project(id) => self.project_preview(&id, part).await,
         }
     }
 
-    async fn session_preview(&self, sid: &SessionId, lines: Option<usize>) -> Result<PreviewData> {
+    async fn session_preview(
+        &self,
+        sid: &SessionId,
+        lines: Option<usize>,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
         let (is_creating, tmux_name) = {
             let state = self.store.read().await;
             match state.get_session(sid) {
@@ -1911,41 +2086,89 @@ impl CommanderService {
             });
         }
 
-        // An explicit line count captures the pane directly; otherwise use the
-        // manager's cached content (matches the TUI preview).
-        let pane = match lines {
-            Some(n) => capture_pane(&self.manager.tmux, &tmux_name, Some(n)).await?,
-            None => self.manager.get_content(sid).await.ok().map(|c| c.content),
-        };
-        let diff = self.manager.get_diff(sid).await.ok();
-        let shell = self
-            .manager
-            .get_shell_content(sid)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.content);
+        use claude_commander_protocol::preview::PreviewPart;
+        let (pane, diff, shell) = tokio::join!(
+            async {
+                if !matches!(part, PreviewPart::All | PreviewPart::Pane) {
+                    return Ok(None);
+                }
+                match lines {
+                    Some(n) => capture_pane(&self.manager.tmux, &tmux_name, Some(n)).await,
+                    None => Ok(self.manager.get_content(sid).await.ok().map(|c| c.content)),
+                }
+            },
+            async {
+                if part == PreviewPart::Stats {
+                    self.manager.get_diff_stats(sid).await.ok()
+                } else if matches!(part, PreviewPart::All | PreviewPart::Diff) {
+                    self.manager.get_diff(sid).await.ok()
+                } else {
+                    None
+                }
+            },
+            async {
+                if matches!(part, PreviewPart::All | PreviewPart::Shell) {
+                    self.manager
+                        .get_shell_content(sid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.content)
+                } else {
+                    None
+                }
+            },
+        );
+        let pane = pane?;
         Ok(PreviewData {
             pane,
-            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_text: if part == PreviewPart::Stats {
+                String::new()
+            } else {
+                diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default()
+            },
             diff_stat: diff.as_ref().map(|d| d.summary()),
             stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
         })
     }
 
-    async fn project_preview(&self, pid: &ProjectId) -> Result<PreviewData> {
-        let diff = self.manager.get_project_diff(pid).await.ok();
-        let shell = self
-            .manager
-            .get_project_shell_content(pid)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.content);
+    async fn project_preview(
+        &self,
+        pid: &ProjectId,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
+        use claude_commander_protocol::preview::PreviewPart;
+        let (diff, shell) = tokio::join!(
+            async {
+                if part == PreviewPart::Stats {
+                    self.manager.get_project_diff_stats(pid).await.ok()
+                } else if matches!(part, PreviewPart::All | PreviewPart::Diff) {
+                    self.manager.get_project_diff(pid).await.ok()
+                } else {
+                    None
+                }
+            },
+            async {
+                if matches!(part, PreviewPart::All | PreviewPart::Shell) {
+                    self.manager
+                        .get_project_shell_content(pid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.content)
+                } else {
+                    None
+                }
+            },
+        );
         Ok(PreviewData {
             pane: None,
-            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_text: if part == PreviewPart::Stats {
+                String::new()
+            } else {
+                diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default()
+            },
             diff_stat: diff.as_ref().map(|d| d.summary()),
             stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
@@ -2066,6 +2289,10 @@ impl CommanderService {
         parent: Option<SessionId>,
     ) -> Result<SetSessionBaseOutcome> {
         self.telemetry.feature("session.set_base");
+        let _guard = self.review_provider_lock.lock().await;
+        // Keep one provider for the whole operation even if config hot-reloads
+        // while the state mutation is in flight.
+        let provider = self.config_store.read().code_host_provider;
         let session_id = *id;
         let (plan, pr_retarget) = self
             .store
@@ -2083,12 +2310,14 @@ impl CommanderService {
             })
             .await?;
 
+        drop(_guard);
         // Durable half, best-effort. The local mirror already re-stacked the
         // tree, but only this makes it survive the next PR sync — so a failure
         // is reported rather than logged.
         let pr = match pr_retarget {
             None => PrRetarget::NoPr,
-            Some(r) => match crate::git::try_retarget_pr_base(
+            Some(r) => match crate::git::hosting::try_retarget_review_base(
+                provider,
                 &r.repo_path,
                 r.pr_number,
                 &r.new_base_branch,
@@ -2495,12 +2724,15 @@ impl CommanderService {
                     }
                     *lc = Some(now);
                 }
+                // One provider snapshot governs this entire sweep, including
+                // every awaited branch query.
+                let (provider, epoch) = service.review_provider_snapshot().await;
                 // Adopt any branch renames before polling, so this same tick
                 // queries GitHub with the corrected `--head` name.
                 if let Err(e) = service.reconcile_session_branches().await {
                     debug!("reconcile_session_branches failed: {e}");
                 }
-                if !service.gh_available().await {
+                if !service.code_host_cli_available(provider).await {
                     continue;
                 }
                 let sessions_to_check = service.pr_poll_targets().await;
@@ -2512,15 +2744,20 @@ impl CommanderService {
                         |(id, branch, repo_path, created_at)| async move {
                             (
                                 id,
-                                crate::git::check_pr_for_branch(&repo_path, &branch, created_at)
-                                    .await,
+                                crate::git::hosting::check_review_for_branch(
+                                    provider, &repo_path, &branch, created_at,
+                                )
+                                .await,
                             )
                         },
                     ))
                     .buffer_unordered(PR_FANOUT_CONCURRENCY)
                     .collect()
                     .await;
-                if let Err(e) = service.apply_pr_results(results).await {
+                if let Err(e) = service
+                    .apply_pr_results_at_epoch(provider, epoch, results)
+                    .await
+                {
                     debug!("apply_pr_results failed: {e}");
                 }
             }
@@ -2591,20 +2828,75 @@ impl CommanderService {
     /// Reload the state file on a fixed cadence, waking the change-feed when
     /// another instance mutated it. No-op loop when `interval_ms` is 0.
     fn spawn_state_sync_loop(&self, interval_ms: u64) -> tokio::task::JoinHandle<()> {
-        let store = self.store.clone();
+        let service = self.clone();
         tokio::spawn(async move {
             if interval_ms == 0 {
                 return;
             }
+            let data_dir = service.store.data_dir();
+            let mut watcher = tokio::task::spawn_blocking(move || {
+                crate::file_events::FileEvents::state(&data_dir)
+            })
+            .await
+            .ok()
+            .and_then(|result| result.ok());
+            let mut retry_at = std::time::Instant::now() + Duration::from_secs(30);
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
-                match store.reload_if_changed().await {
-                    Ok(_) => {}
-                    Err(e) => debug!("State sync check failed: {e}"),
+                if watcher.is_none() && std::time::Instant::now() >= retry_at {
+                    let data_dir = service.store.data_dir();
+                    watcher = tokio::task::spawn_blocking(move || {
+                        crate::file_events::FileEvents::state(&data_dir)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
+                }
+                let event = tokio::select! {
+                    _ = interval.tick() => false,
+                    _ = async {
+                        match &mut watcher {
+                            Some(watcher) => { watcher.changed().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => true,
+                };
+                if event {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Drain the coalesced batch, including events during the delay.
+                    if let Some(watcher) = &mut watcher {
+                        watcher.take_changed();
+                    }
+                }
+                let review_changed = watcher.as_ref().is_some_and(|w| w.take_review_changed());
+                service.reconcile_state_files(review_changed).await;
+                if watcher.as_ref().is_some_and(|w| !w.healthy()) {
+                    watcher = None;
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
                 }
             }
         })
+    }
+
+    async fn reconcile_state_files(&self, review_changed: bool) {
+        if review_changed {
+            self.comments.invalidate_pending().await;
+        }
+        let reloaded = match self.store.reload_if_changed().await {
+            Ok(changed) => changed,
+            Err(e) => {
+                debug!("State sync check failed: {e}");
+                false
+            }
+        };
+        // reload_if_changed notifies for external state writes. Healthy events
+        // for our own state writes need no second wakeup; uncertain/rescan
+        // events still conservatively invalidate review consumers.
+        if review_changed && !reloaded {
+            self.store.notify_change();
+        }
     }
 
     // -- Internal helpers for the workspace surface --
@@ -2615,6 +2907,48 @@ impl CommanderService {
             .gh_available
             .get_or_init(|| async { is_gh_available().await })
             .await
+    }
+
+    async fn code_host_status(&self) -> claude_commander_protocol::api::CodeHostStatus {
+        let (provider, hostname) = {
+            let config = self.config_store.read();
+            (
+                config.code_host_provider,
+                (config.code_host_provider == CodeHostProvider::Gitlab)
+                    .then(|| config.gitlab_hostname.clone())
+                    .flatten(),
+            )
+        };
+        let cli_available = self.code_host_cli_available(provider).await;
+        claude_commander_protocol::api::CodeHostStatus {
+            provider,
+            hostname,
+            cli_available,
+        }
+    }
+
+    async fn code_host_cli_available(&self, provider: CodeHostProvider) -> bool {
+        match provider {
+            CodeHostProvider::Github => self.gh_available().await,
+            CodeHostProvider::Gitlab => {
+                let cached = *self
+                    .glab_available
+                    .lock()
+                    .expect("glab availability poisoned");
+                if let Some((at, available)) = cached
+                    && at.elapsed() < Duration::from_secs(if available { 30 } else { 5 })
+                {
+                    return available;
+                }
+                let available = crate::git::hosting::gitlab::is_available().await;
+                *self
+                    .glab_available
+                    .lock()
+                    .expect("glab availability poisoned") =
+                    Some((std::time::Instant::now(), available));
+                available
+            }
+        }
     }
 
     /// Error with `NotFound` when a session id doesn't exist, so mutations can
@@ -3240,6 +3574,7 @@ pub fn snapshot_from_state(state: &AppState) -> Snapshot {
         operations: Vec::new(),
         server: ServerStatus {
             gh_available: false,
+            code_host: Default::default(),
             tmux_ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
@@ -3304,6 +3639,21 @@ fn clone_dir_name(req: &CloneRequest) -> Result<String> {
                 .map_or(full_name.as_str(), |(_, name)| name)
                 .to_string()
         }
+        CloneSource::Gitlab {
+            full_name,
+            hostname,
+        } => {
+            validate_hosted_repo_slug(CodeHostProvider::Gitlab, full_name)
+                .map_err(clone_source_rejected)?;
+            if let Some(hostname) = hostname {
+                validate_gitlab_hostname(hostname).map_err(clone_source_rejected)?;
+            }
+            full_name
+                .rsplit('/')
+                .next()
+                .expect("validated slug")
+                .to_string()
+        }
         CloneSource::Url { url } => {
             validate_clone_url(url)
                 .map_err(clone_source_rejected)?
@@ -3326,6 +3676,7 @@ fn clone_dir_name(req: &CloneRequest) -> Result<String> {
 fn clone_source_label(source: &CloneSource) -> &str {
     match source {
         CloneSource::Github { full_name } => full_name,
+        CloneSource::Gitlab { full_name, .. } => full_name,
         CloneSource::Url { url } => url,
     }
 }
@@ -3796,6 +4147,62 @@ mod tests {
     /// `Config::data_dir()`. Writing a comment proves the on-disk path is the
     /// injected one (test-isolation regression).
     #[tokio::test]
+    async fn provider_transition_preserves_a_concurrent_synchronous_setting() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let state_guard = svc.store().read().await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let svc = svc.clone();
+            let entered = entered.clone();
+            async move {
+                svc.edit_code_host_config(move |config| {
+                    config.code_host_provider = CodeHostProvider::Gitlab;
+                    entered.notify_one();
+                    Ok(())
+                })
+                .await
+            }
+        });
+        entered.notified().await;
+        let mut config = svc.read_config();
+        config.ui_refresh_fps = 23;
+        svc.update_config(config).unwrap();
+        drop(state_guard);
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.read_config().ui_refresh_fps, 23);
+    }
+
+    #[tokio::test]
+    async fn partial_config_edit_reads_latest_provider_and_resets_cli_probe() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        *svc.glab_available.lock().unwrap() = Some((std::time::Instant::now(), false));
+        svc.edit_code_host_config(|config| {
+            config.ui_refresh_fps = 23;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.read_config().ui_refresh_fps, 23);
+        assert!(svc.glab_available.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn comment_writes_stay_under_injected_data_dir() {
         let dir = tempfile::TempDir::new().unwrap();
         // Built through the shared helper rather than by hand, so this test
@@ -3896,6 +4303,18 @@ mod tests {
                 "core test services must not clone into the real ~/Projects (got {projects_dir:?})"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn state_sync_does_not_notify_again_for_our_own_state_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_project_session(&svc).await;
+        let generation = svc.store().generation();
+        // Exercise a classified state-only event directly. Native watcher
+        // startup may also emit a conservative rescan on macOS.
+        svc.reconcile_state_files(false).await;
+        assert_eq!(svc.store().generation(), generation);
     }
 
     /// Seed one project with one session and return their ids.
@@ -4606,6 +5025,77 @@ mod tests {
         let s = state.get_session(&sid).unwrap();
         assert!(s.pr_number.is_none());
         assert!(s.pr_base_branch.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_change_clears_reviews_and_rejects_old_in_flight_results() {
+        use crate::git::{PrCheckResult, PrInfo, PrState};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        let review = |number| {
+            PrCheckResult::Found(PrInfo {
+                number,
+                url: format!("https://github.example/pr/{number}"),
+                state: PrState::Open,
+                is_draft: true,
+                labels: vec!["review".into()],
+                review_decision: Some(crate::git::ReviewDecision::Approved),
+                reviewers: vec!["alice".into()],
+                base_ref_name: Some("parent".into()),
+            })
+        };
+
+        svc.apply_pr_results_for_provider(CodeHostProvider::Github, vec![(sid, review(42))])
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_number,
+            Some(42)
+        );
+
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Gitlab;
+        svc.update_code_host_config(config).await.unwrap();
+
+        // Simulate the GitHub sweep that was already in flight when the user
+        // switched. It must not repopulate fields after invalidation.
+        svc.apply_pr_results_for_provider(CodeHostProvider::Github, vec![(sid, review(99))])
+            .await
+            .unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert!(session.pr_number.is_none());
+        assert!(session.pr_url.is_none());
+        assert!(session.pr_state.is_none());
+        assert!(!session.pr_draft);
+        assert!(session.pr_labels.is_empty());
+        assert!(!session.pr_merged);
+        assert!(session.review_decision.is_none());
+        assert!(session.pr_reviewers.is_empty());
+        assert!(session.pr_base_branch.is_none());
+        drop(state);
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Github;
+        svc.update_code_host_config(config).await.unwrap();
+        svc.apply_pr_results_at_epoch(CodeHostProvider::Github, 0, vec![(sid, review(101))])
+            .await
+            .unwrap();
+        assert!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_number
+                .is_none()
+        );
     }
 
     /// Run `git` in `dir`, panicking on failure. Signing is forced off by
@@ -5852,6 +6342,36 @@ mod tests {
         // reflects the corrected commander_running.
         let after = svc.agent_states(false).await;
         assert!(!after.commander_running);
+    }
+
+    #[tokio::test]
+    async fn agent_states_fresh_advances_shared_unread_baseline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            commander_enabled: false,
+            ..Config::default()
+        };
+        let svc = service_with_config(&dir, config);
+        let sid = SessionId::new();
+        svc.agent_states_cache
+            .write()
+            .await
+            .states
+            .insert(sid, AgentState::Working);
+        let idle = BTreeMap::from([(sid, AgentState::Idle)]);
+        assert_eq!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle),
+            vec![sid]
+        );
+        // There are no active sessions; the fresh scan clears the old baseline
+        // without any tmux queries. This is also the cache read by the poll loop.
+        let fresh = svc.agent_states(true).await;
+        assert_eq!(svc.agent_states_cache.read().await.states, fresh.states);
+        assert!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle)
+                .is_empty()
+        );
+        assert_eq!(svc.agent_states(false).await.states, fresh.states);
     }
 
     #[tokio::test]

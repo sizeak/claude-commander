@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 750374583;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1320545105;
 
 // Section: executor
 
@@ -1856,6 +1856,41 @@ fn wire__crate__api__simple__rename_workspace_impl(
         },
     )
 }
+fn wire__crate__api__simple__repositories_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "repositories",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_handle = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::simple::repositories(api_handle)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__simple__request_pr_refresh_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2607,6 +2642,17 @@ const _: fn() = || {
         let _: uuid::Uuid = CloneJobId_.0;
     }
     {
+        let CodeHost = None::<crate::api::mirrors::CodeHost>.unwrap();
+        let _: crate::api::mirrors::CodeHostProvider = CodeHost.provider;
+        let _: Option<String> = CodeHost.hostname;
+    }
+    {
+        let CodeHostStatus = None::<crate::api::mirrors::CodeHostStatus>.unwrap();
+        let _: crate::api::mirrors::CodeHostProvider = CodeHostStatus.provider;
+        let _: Option<String> = CodeHostStatus.hostname;
+        let _: bool = CodeHostStatus.cli_available;
+    }
+    {
         let CreateOptions = None::<crate::api::mirrors::CreateOptions>.unwrap();
         let _: String = CreateOptions.default_program;
         let _: Vec<crate::api::mirrors::ProgramInfo> = CreateOptions.programs;
@@ -2627,6 +2673,20 @@ const _: fn() = || {
         let _: Option<chrono::DateTime<chrono::Utc>> = GithubRepo.pushed_at;
     }
     {
+        let HostedRepository = None::<crate::api::mirrors::HostedRepository>.unwrap();
+        let _: String = HostedRepository.full_name;
+        let _: String = HostedRepository.namespace;
+        let _: String = HostedRepository.name;
+        let _: Option<String> = HostedRepository.description;
+        let _: crate::api::mirrors::RepositoryVisibility = HostedRepository.visibility;
+        let _: bool = HostedRepository.fork;
+        let _: bool = HostedRepository.archived;
+        let _: Option<String> = HostedRepository.default_branch;
+        let _: String = HostedRepository.clone_url;
+        let _: String = HostedRepository.ssh_url;
+        let _: Option<chrono::DateTime<chrono::Utc>> = HostedRepository.activity_at;
+    }
+    {
         let MergedWorkspace = None::<crate::api::workspace::MergedWorkspace>.unwrap();
         let _: Option<String> = MergedWorkspace.name;
         let _: String = MergedWorkspace.label;
@@ -2641,8 +2701,14 @@ const _: fn() = || {
         let _: uuid::Uuid = ProjectId_.0;
     }
     {
+        let RepositoryListing = None::<crate::api::mirrors::RepositoryListing>.unwrap();
+        let _: crate::api::mirrors::CodeHost = RepositoryListing.host;
+        let _: Vec<crate::api::mirrors::HostedRepository> = RepositoryListing.repositories;
+    }
+    {
         let ServerStatus = None::<crate::api::mirrors::ServerStatus>.unwrap();
         let _: bool = ServerStatus.gh_available;
+        let _: crate::api::mirrors::CodeHostStatus = ServerStatus.code_host;
         let _: bool = ServerStatus.tmux_ok;
         let _: String = ServerStatus.version;
     }
@@ -2909,9 +2975,11 @@ impl SseDecode for crate::api::mirrors::CloneSourceDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_kind = <crate::api::mirrors::CloneSourceKind>::sse_decode(deserializer);
         let mut var_value = <String>::sse_decode(deserializer);
+        let mut var_hostname = <Option<String>>::sse_decode(deserializer);
         return crate::api::mirrors::CloneSourceDto {
             kind: var_kind,
             value: var_value,
+            hostname: var_hostname,
         };
     }
 }
@@ -2922,7 +2990,8 @@ impl SseDecode for crate::api::mirrors::CloneSourceKind {
         let mut inner = <i32>::sse_decode(deserializer);
         return match inner {
             0 => crate::api::mirrors::CloneSourceKind::Github,
-            1 => crate::api::mirrors::CloneSourceKind::Url,
+            1 => crate::api::mirrors::CloneSourceKind::Gitlab,
+            2 => crate::api::mirrors::CloneSourceKind::Url,
             _ => unreachable!("Invalid variant for CloneSourceKind: {}", inner),
         };
     }
@@ -2956,6 +3025,44 @@ impl SseDecode for crate::api::mirrors::CloneStatusKind {
             2 => crate::api::mirrors::CloneStatusKind::Failed,
             3 => crate::api::mirrors::CloneStatusKind::DestinationExists,
             _ => unreachable!("Invalid variant for CloneStatusKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::CodeHost {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_provider = <crate::api::mirrors::CodeHostProvider>::sse_decode(deserializer);
+        let mut var_hostname = <Option<String>>::sse_decode(deserializer);
+        return crate::api::mirrors::CodeHost {
+            provider: var_provider,
+            hostname: var_hostname,
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::CodeHostProvider {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::mirrors::CodeHostProvider::Github,
+            1 => crate::api::mirrors::CodeHostProvider::Gitlab,
+            _ => unreachable!("Invalid variant for CodeHostProvider: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::CodeHostStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_provider = <crate::api::mirrors::CodeHostProvider>::sse_decode(deserializer);
+        let mut var_hostname = <Option<String>>::sse_decode(deserializer);
+        let mut var_cliAvailable = <bool>::sse_decode(deserializer);
+        return crate::api::mirrors::CodeHostStatus {
+            provider: var_provider,
+            hostname: var_hostname,
+            cli_available: var_cliAvailable,
         };
     }
 }
@@ -3212,6 +3319,37 @@ impl SseDecode for crate::api::mirrors::GithubRepo {
     }
 }
 
+impl SseDecode for crate::api::mirrors::HostedRepository {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_fullName = <String>::sse_decode(deserializer);
+        let mut var_namespace = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_description = <Option<String>>::sse_decode(deserializer);
+        let mut var_visibility =
+            <crate::api::mirrors::RepositoryVisibility>::sse_decode(deserializer);
+        let mut var_fork = <bool>::sse_decode(deserializer);
+        let mut var_archived = <bool>::sse_decode(deserializer);
+        let mut var_defaultBranch = <Option<String>>::sse_decode(deserializer);
+        let mut var_cloneUrl = <String>::sse_decode(deserializer);
+        let mut var_sshUrl = <String>::sse_decode(deserializer);
+        let mut var_activityAt = <Option<chrono::DateTime<chrono::Utc>>>::sse_decode(deserializer);
+        return crate::api::mirrors::HostedRepository {
+            full_name: var_fullName,
+            namespace: var_namespace,
+            name: var_name,
+            description: var_description,
+            visibility: var_visibility,
+            fork: var_fork,
+            archived: var_archived,
+            default_branch: var_defaultBranch,
+            clone_url: var_cloneUrl,
+            ssh_url: var_sshUrl,
+            activity_at: var_activityAt,
+        };
+    }
+}
+
 impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3319,6 +3457,20 @@ impl SseDecode for Vec<crate::api::mirrors::GithubRepo> {
         let mut ans_ = vec![];
         for idx_ in 0..len_ {
             ans_.push(<crate::api::mirrors::GithubRepo>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::mirrors::HostedRepository> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::mirrors::HostedRepository>::sse_decode(
+                deserializer,
+            ));
         }
         return ans_;
     }
@@ -3867,6 +4019,32 @@ impl SseDecode for crate::api::mirrors::PullStatusKind {
     }
 }
 
+impl SseDecode for crate::api::mirrors::RepositoryListing {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_host = <crate::api::mirrors::CodeHost>::sse_decode(deserializer);
+        let mut var_repositories =
+            <Vec<crate::api::mirrors::HostedRepository>>::sse_decode(deserializer);
+        return crate::api::mirrors::RepositoryListing {
+            host: var_host,
+            repositories: var_repositories,
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::RepositoryVisibility {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::mirrors::RepositoryVisibility::Public,
+            1 => crate::api::mirrors::RepositoryVisibility::Internal,
+            2 => crate::api::mirrors::RepositoryVisibility::Private,
+            _ => unreachable!("Invalid variant for RepositoryVisibility: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::review::ReviewCommentSide {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4030,10 +4208,12 @@ impl SseDecode for crate::api::mirrors::ServerStatus {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_ghAvailable = <bool>::sse_decode(deserializer);
+        let mut var_codeHost = <crate::api::mirrors::CodeHostStatus>::sse_decode(deserializer);
         let mut var_tmuxOk = <bool>::sse_decode(deserializer);
         let mut var_version = <String>::sse_decode(deserializer);
         return crate::api::mirrors::ServerStatus {
             gh_available: var_ghAvailable,
+            code_host: var_codeHost,
             tmux_ok: var_tmuxOk,
             version: var_version,
         };
@@ -4340,27 +4520,28 @@ fn pde_ffi_dispatcher_primary_impl(
         46 => wire__crate__api__simple__remove_project_impl(port, ptr, rust_vec_len, data_len),
         47 => wire__crate__api__simple__rename_session_impl(port, ptr, rust_vec_len, data_len),
         48 => wire__crate__api__simple__rename_workspace_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__simple__request_pr_refresh_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__simple__scan_directory_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__simple__session_preview_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__simple__set_programs_impl(port, ptr, rust_vec_len, data_len),
-        56 => {
+        49 => wire__crate__api__simple__repositories_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__simple__request_pr_refresh_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__simple__scan_directory_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__simple__session_preview_impl(port, ptr, rust_vec_len, data_len),
+        56 => wire__crate__api__simple__set_programs_impl(port, ptr, rust_vec_len, data_len),
+        57 => {
             wire__crate__api__simple__set_project_workspace_impl(port, ptr, rust_vec_len, data_len)
         }
-        57 => wire__crate__api__simple__set_section_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__simple__set_workspaces_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__simple__snapshot_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__simple__start_clone_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
-        63 => {
+        58 => wire__crate__api__simple__set_section_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__simple__set_workspaces_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__simple__snapshot_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__simple__start_clone_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
+        64 => {
             wire__crate__api__terminal__terminal_send_input_impl(port, ptr, rust_vec_len, data_len)
         }
-        64 => {
+        65 => {
             wire__crate__api__review__toggle_file_reviewed_impl(port, ptr, rust_vec_len, data_len)
         }
-        65 => wire__crate__api__simple__toggle_keep_alive_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__simple__toggle_keep_alive_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4376,13 +4557,13 @@ fn pde_ffi_dispatcher_sync_impl(
         18 => wire__crate__api__workspace__definitions_for_server_impl(ptr, rust_vec_len, data_len),
         26 => wire__crate__api__query__fuzzy_score_impl(ptr, rust_vec_len, data_len),
         39 => wire__crate__api__workspace__merge_workspaces_impl(ptr, rust_vec_len, data_len),
-        50 => {
+        51 => {
             wire__crate__api__workspace__resolve_startup_workspace_impl(ptr, rust_vec_len, data_len)
         }
-        54 => wire__crate__api__query__session_score_impl(ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__workspace__workspace_label_error_impl(ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__workspace__workspace_name_error_impl(ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__workspace__workspace_name_taken_impl(ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__query__session_score_impl(ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__workspace__workspace_label_error_impl(ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__workspace__workspace_name_error_impl(ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__workspace__workspace_name_taken_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4610,6 +4791,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::mirrors::CloneSourceDto {
         [
             self.kind.into_into_dart().into_dart(),
             self.value.into_into_dart().into_dart(),
+            self.hostname.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4630,7 +4812,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::mirrors::CloneSourceKind {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
             Self::Github => 0.into_dart(),
-            Self::Url => 1.into_dart(),
+            Self::Gitlab => 1.into_dart(),
+            Self::Url => 2.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -4691,6 +4874,70 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::mirrors::CloneStatusKind>
 {
     fn into_into_dart(self) -> crate::api::mirrors::CloneStatusKind {
         self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::CodeHost> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.provider.into_into_dart().into_dart(),
+            self.0.hostname.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::CodeHost>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::CodeHost>>
+    for crate::api::mirrors::CodeHost
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::CodeHost> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::CodeHostProvider> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::mirrors::CodeHostProvider::Github => 0.into_dart(),
+            crate::api::mirrors::CodeHostProvider::Gitlab => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::CodeHostProvider>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::CodeHostProvider>>
+    for crate::api::mirrors::CodeHostProvider
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::CodeHostProvider> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::CodeHostStatus> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.provider.into_into_dart().into_dart(),
+            self.0.hostname.into_into_dart().into_dart(),
+            self.0.cli_available.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::CodeHostStatus>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::CodeHostStatus>>
+    for crate::api::mirrors::CodeHostStatus
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::CodeHostStatus> {
+        self.into()
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -5032,6 +5279,36 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::GithubRep
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::HostedRepository> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.full_name.into_into_dart().into_dart(),
+            self.0.namespace.into_into_dart().into_dart(),
+            self.0.name.into_into_dart().into_dart(),
+            self.0.description.into_into_dart().into_dart(),
+            self.0.visibility.into_into_dart().into_dart(),
+            self.0.fork.into_into_dart().into_dart(),
+            self.0.archived.into_into_dart().into_dart(),
+            self.0.default_branch.into_into_dart().into_dart(),
+            self.0.clone_url.into_into_dart().into_dart(),
+            self.0.ssh_url.into_into_dart().into_dart(),
+            self.0.activity_at.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::HostedRepository>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::HostedRepository>>
+    for crate::api::mirrors::HostedRepository
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::HostedRepository> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::workspace::MergedWorkspace> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -5337,6 +5614,49 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::mirrors::PullStatusKind>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::RepositoryListing> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.host.into_into_dart().into_dart(),
+            self.0.repositories.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::RepositoryListing>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::RepositoryListing>>
+    for crate::api::mirrors::RepositoryListing
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::RepositoryListing> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::RepositoryVisibility> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::mirrors::RepositoryVisibility::Public => 0.into_dart(),
+            crate::api::mirrors::RepositoryVisibility::Internal => 1.into_dart(),
+            crate::api::mirrors::RepositoryVisibility::Private => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::RepositoryVisibility>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::RepositoryVisibility>>
+    for crate::api::mirrors::RepositoryVisibility
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::RepositoryVisibility> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewCommentSide {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
@@ -5573,6 +5893,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::ServerSta
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.0.gh_available.into_into_dart().into_dart(),
+            self.0.code_host.into_into_dart().into_dart(),
             self.0.tmux_ok.into_into_dart().into_dart(),
             self.0.version.into_into_dart().into_dart(),
         ]
@@ -6020,6 +6341,7 @@ impl SseEncode for crate::api::mirrors::CloneSourceDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <crate::api::mirrors::CloneSourceKind>::sse_encode(self.kind, serializer);
         <String>::sse_encode(self.value, serializer);
+        <Option<String>>::sse_encode(self.hostname, serializer);
     }
 }
 
@@ -6029,7 +6351,8 @@ impl SseEncode for crate::api::mirrors::CloneSourceKind {
         <i32>::sse_encode(
             match self {
                 crate::api::mirrors::CloneSourceKind::Github => 0,
-                crate::api::mirrors::CloneSourceKind::Url => 1,
+                crate::api::mirrors::CloneSourceKind::Gitlab => 1,
+                crate::api::mirrors::CloneSourceKind::Url => 2,
                 _ => {
                     unimplemented!("");
                 }
@@ -6065,6 +6388,39 @@ impl SseEncode for crate::api::mirrors::CloneStatusKind {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::mirrors::CodeHost {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::mirrors::CodeHostProvider>::sse_encode(self.provider, serializer);
+        <Option<String>>::sse_encode(self.hostname, serializer);
+    }
+}
+
+impl SseEncode for crate::api::mirrors::CodeHostProvider {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::mirrors::CodeHostProvider::Github => 0,
+                crate::api::mirrors::CodeHostProvider::Gitlab => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::mirrors::CodeHostStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::mirrors::CodeHostProvider>::sse_encode(self.provider, serializer);
+        <Option<String>>::sse_encode(self.hostname, serializer);
+        <bool>::sse_encode(self.cli_available, serializer);
     }
 }
 
@@ -6268,6 +6624,23 @@ impl SseEncode for crate::api::mirrors::GithubRepo {
     }
 }
 
+impl SseEncode for crate::api::mirrors::HostedRepository {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.full_name, serializer);
+        <String>::sse_encode(self.namespace, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <Option<String>>::sse_encode(self.description, serializer);
+        <crate::api::mirrors::RepositoryVisibility>::sse_encode(self.visibility, serializer);
+        <bool>::sse_encode(self.fork, serializer);
+        <bool>::sse_encode(self.archived, serializer);
+        <Option<String>>::sse_encode(self.default_branch, serializer);
+        <String>::sse_encode(self.clone_url, serializer);
+        <String>::sse_encode(self.ssh_url, serializer);
+        <Option<chrono::DateTime<chrono::Utc>>>::sse_encode(self.activity_at, serializer);
+    }
+}
+
 impl SseEncode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6358,6 +6731,16 @@ impl SseEncode for Vec<crate::api::mirrors::GithubRepo> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::mirrors::GithubRepo>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::mirrors::HostedRepository> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::mirrors::HostedRepository>::sse_encode(item, serializer);
         }
     }
 }
@@ -6808,6 +7191,31 @@ impl SseEncode for crate::api::mirrors::PullStatusKind {
     }
 }
 
+impl SseEncode for crate::api::mirrors::RepositoryListing {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::mirrors::CodeHost>::sse_encode(self.host, serializer);
+        <Vec<crate::api::mirrors::HostedRepository>>::sse_encode(self.repositories, serializer);
+    }
+}
+
+impl SseEncode for crate::api::mirrors::RepositoryVisibility {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::mirrors::RepositoryVisibility::Public => 0,
+                crate::api::mirrors::RepositoryVisibility::Internal => 1,
+                crate::api::mirrors::RepositoryVisibility::Private => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::review::ReviewCommentSide {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6954,6 +7362,7 @@ impl SseEncode for crate::api::mirrors::ServerStatus {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.gh_available, serializer);
+        <crate::api::mirrors::CodeHostStatus>::sse_encode(self.code_host, serializer);
         <bool>::sse_encode(self.tmux_ok, serializer);
         <String>::sse_encode(self.version, serializer);
     }

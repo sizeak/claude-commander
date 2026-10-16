@@ -143,34 +143,32 @@ pub struct WorktreeSession {
     /// Shell tmux session name (for secondary shell sessions)
     #[serde(default)]
     pub shell_tmux_session_name: Option<String>,
-    /// GitHub PR number (if a PR exists for this branch)
+    /// Hosted review number (GitHub PR number or GitLab MR IID), if present.
     #[serde(default)]
     pub pr_number: Option<u32>,
-    /// GitHub PR URL
+    /// Hosted pull-request or merge-request URL.
     #[serde(default)]
     pub pr_url: Option<String>,
-    /// Whether the PR has been merged (kept for backward compat — derived from pr_state)
+    /// Whether the review has been merged (kept for backward compat — derived from pr_state).
     #[serde(default)]
     pub pr_merged: bool,
-    /// PR lifecycle state (open / closed / merged). None = unknown / no PR.
+    /// Review lifecycle state (open / closed / merged). None = unknown / absent.
     #[serde(default)]
     pub pr_state: Option<crate::git::PrState>,
-    /// Whether the PR is a draft
+    /// Whether the pull request or merge request is a draft.
     #[serde(default)]
     pub pr_draft: bool,
-    /// Label names attached to the PR (used for review-needed colouring)
+    /// Label names attached to the hosted review (used for review-needed colouring).
     #[serde(default)]
     pub pr_labels: Vec<String>,
-    /// GitHub `reviewDecision` for the PR (None when no PR or no decision data).
+    /// GitHub `reviewDecision`; `None` for GitLab and when no decision data exists.
     #[serde(default)]
     pub review_decision: Option<crate::git::ReviewDecision>,
-    /// Reviewer logins on the PR — the union of requested reviewers and
-    /// submitted review authors. Empty when there's no PR or no reviewers.
+    /// Reviewer usernames on the hosted review. Empty when absent or unassigned.
     #[serde(default)]
     pub pr_reviewers: Vec<String>,
-    /// Branch the PR targets, as reported by GitHub (e.g. `main` or another
-    /// session's branch). Populated from `gh pr` JSON's `baseRefName`; used
-    /// as the source of truth for PR-stack detection.
+    /// Target branch reported by the selected provider (e.g. `main` or another
+    /// session's branch), used as the source of truth for stack detection.
     #[serde(default)]
     pub pr_base_branch: Option<String>,
     /// Fallback parent link for PR-stack grouping, set when the session is
@@ -370,6 +368,21 @@ impl WorktreeSession {
     pub fn branch_owned_since(&self) -> DateTime<Utc> {
         self.branch_adopted_at
             .map_or(self.created_at, |adopted| adopted.max(self.created_at))
+    }
+
+    /// Clear every field populated by hosted pull/merge-request polling.
+    /// Provider changes use this as one operation so metadata discovered by one
+    /// CLI can never be interpreted or mutated through another provider.
+    pub(crate) fn clear_review_metadata(&mut self) {
+        self.pr_number = None;
+        self.pr_url = None;
+        self.pr_state = None;
+        self.pr_draft = false;
+        self.pr_labels.clear();
+        self.pr_merged = false;
+        self.review_decision = None;
+        self.pr_reviewers.clear();
+        self.pr_base_branch = None;
     }
 
     /// True when the session's PR is merged on GitHub. Honours the legacy
