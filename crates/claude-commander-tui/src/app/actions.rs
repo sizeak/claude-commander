@@ -2241,8 +2241,10 @@ impl App {
         // it must not drift if the tree selection moves while the picker is open.
         let backend = self.selected_backend_id();
         let status = self.view_for(backend).snapshot.server.effective_code_host();
+        let generation = self.ui_state.repo_picker.generation;
         self.ui_state.repo_picker = super::RepoPicker {
             backend,
+            generation,
             host: claude_commander_protocol::hosting::CodeHost {
                 provider: status.provider,
                 hostname: status.hostname,

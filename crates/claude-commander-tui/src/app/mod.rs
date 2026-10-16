@@ -59,7 +59,6 @@ use claude_commander_core::config::{
 };
 use claude_commander_core::git::{
     AiSummary, BlockReason, DiffInfo, EnrichedPrInfo, diff_hash, fetch_branch_summary,
-    fetch_enriched_pr, is_gh_available,
 };
 use claude_commander_core::session::{
     AgentState, Board, BoardPos, ProjectId, SessionId, SessionListItem, SessionStatus,
@@ -583,12 +582,12 @@ pub enum PaletteMode {
     /// Remote-server picker for the remove-server flow: one entry per
     /// configured `[[remote_servers]]`; selecting one opens a confirm modal.
     RemoteServerPicker,
-    /// GitHub repo picker for the clone flow. Rows come from
+    /// Hosted-repository picker for the clone flow. Rows come from
     /// [`AppUiState::repo_picker`] (fetched asynchronously); selecting one opens
     /// the destination-name prompt. Unlike the other picker modes this one also
     /// acts on an *unmatched* query, treating it as a clone URL — that is the
     /// "clone something not in the list" path.
-    GithubRepoPicker,
+    RepositoryPicker,
     /// Stack-base picker for a specific session: one row per eligible session
     /// in the same project, plus a row for the project's main branch.
     /// Selecting a row opens a confirm modal that retargets the session's base.
@@ -633,8 +632,8 @@ pub enum QuickSwitchItem {
         label: String,
     },
     /// Selecting this row opens the destination-name prompt for cloning
-    /// `full_name` (GitHub repo-picker palette mode).
-    GithubRepo {
+    /// `full_name` (hosted-repository picker palette mode).
+    HostedRepository {
         /// `owner/name`, the form `gh repo clone` takes.
         full_name: String,
         /// The repo's own directory name, the destination-name default.
@@ -701,7 +700,7 @@ pub struct CommandEntry {
 /// way the picker's URL path stays usable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum RepoFetch {
-    /// A listing is in flight (`gh api --paginate` can take many seconds).
+    /// A provider listing is in flight (a paginated API can take many seconds).
     #[default]
     Loading,
     /// The listing arrived; `repos` is authoritative (possibly empty).
@@ -710,7 +709,7 @@ pub enum RepoFetch {
     Failed(String),
 }
 
-/// State behind [`PaletteMode::GithubRepoPicker`].
+/// State behind [`PaletteMode::RepositoryPicker`].
 ///
 /// Held on `AppUiState` (rather than inside the modal) for the same reason
 /// `program_picker_choices` is: the fetch resolves asynchronously and the
@@ -723,7 +722,8 @@ pub struct RepoPicker {
     /// runs where the sessions run, and the two hosts have different disks.
     pub backend: BackendId,
     /// Repos fetched from `backend`; the source the fuzzy filter narrows.
-    pub repos: Vec<claude_commander_protocol::github::GithubRepo>,
+    pub host: claude_commander_protocol::hosting::CodeHost,
+    pub repos: Vec<claude_commander_protocol::hosting::HostedRepository>,
     /// Where the listing is up to.
     pub fetch: RepoFetch,
     /// Bumped on each (re)fetch so a superseded response is dropped on arrival.
@@ -734,6 +734,10 @@ impl Default for RepoPicker {
     fn default() -> Self {
         Self {
             backend: LOCAL_BACKEND_ID,
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: Default::default(),
+                hostname: None,
+            },
             repos: Vec::new(),
             fetch: RepoFetch::default(),
             generation: 0,
@@ -1520,7 +1524,7 @@ pub enum InputAction {
         /// Backend the clone runs on — the one the picker was opened against,
         /// carried explicitly so it can't drift with the tree selection.
         backend: BackendId,
-        source: claude_commander_protocol::github::CloneSource,
+        source: claude_commander_protocol::hosting::CloneSource,
     },
 }
 
@@ -1773,8 +1777,8 @@ pub struct AppUiState {
     /// Whether the previous frame was a full-screen modal takeover
     /// (ReviewDiff/Conversation). A true→false transition triggers a `Clear`.
     pub prev_fullscreen: bool,
-    /// Whether the `gh` CLI is available
-    pub gh_available: bool,
+    /// Config reload is waiting on the service; ticks must not enqueue more.
+    pub config_reload_in_flight: bool,
     /// When the last enriched-PR fetch was spawned (None = not in flight).
     /// Guards `spawn_info_fetch` against double-spawns: `update_selection` now
     /// runs it every tick (via `refresh_list_items`), so without this an open
@@ -1842,7 +1846,7 @@ pub struct AppUiState {
     /// `program_picker_choices`, only read while that palette is open.
     pub program_picker_current: String,
     /// Repo listing + fetch state behind the clone picker
-    /// ([`PaletteMode::GithubRepoPicker`]). Reset each time the picker opens;
+    /// ([`PaletteMode::RepositoryPicker`]). Reset each time the picker opens;
     /// only read while it is open, so a stale value between opens is inert.
     pub repo_picker: RepoPicker,
 }
@@ -1914,7 +1918,7 @@ impl Default for AppUiState {
             shell_toggle_pair: None,
             force_clear: false,
             prev_fullscreen: false,
-            gh_available: false,
+            config_reload_in_flight: false,
             enriched_pr_fetch_spawned_at: None,
             review_refresh_in_flight: false,
             terminal_size: Rect::default(),
@@ -2527,9 +2531,19 @@ impl App {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         let backend = self.backend_arc(id);
+        let old_host = self
+            .backend(id)
+            .map(|handle| handle.view.snapshot.server.effective_code_host());
         let (snapshot, states) = tokio::join!(backend.snapshot(), backend.agent_states(false));
+        let mut changed_host = None;
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
+                let host = snapshot.server.effective_code_host();
+                if old_host.is_some_and(|old| {
+                    old.provider != host.provider || old.hostname != host.hostname
+                }) {
+                    changed_host = Some(host);
+                }
                 handle.view_revision = revision;
                 handle.view.snapshot = snapshot;
                 // Local: derive connection from the snapshot's tmux health;
@@ -2543,6 +2557,41 @@ impl App {
             if let Ok(states) = states {
                 handle.agent_states_revision = revision;
                 handle.view.agent_states = states;
+            }
+        }
+        if let Some(host) = changed_host {
+            self.invalidate_code_host_caches(id, host);
+            let _ = backend.request_pr_refresh().await;
+        }
+    }
+
+    fn invalidate_code_host_caches(
+        &mut self,
+        id: BackendId,
+        host: claude_commander_protocol::api::CodeHostStatus,
+    ) {
+        self.ui_state.enriched_pr = None;
+        self.ui_state.enriched_pr_unavailable = None;
+        self.ui_state.enriched_pr_fetch_spawned_at = None;
+        if self.ui_state.repo_picker.backend == id {
+            let generation = self.ui_state.repo_picker.generation.wrapping_add(1);
+            self.ui_state.repo_picker = RepoPicker {
+                backend: id,
+                generation,
+                host: claude_commander_protocol::hosting::CodeHost {
+                    provider: host.provider,
+                    hostname: host.hostname,
+                },
+                ..Default::default()
+            };
+            if matches!(
+                self.ui_state.modal,
+                Modal::QuickSwitch {
+                    mode: PaletteMode::RepositoryPicker,
+                    ..
+                }
+            ) {
+                self.refetch_repositories();
             }
         }
     }
@@ -3013,12 +3062,6 @@ impl App {
         // runtime (no-op unless enabled in config). Deliberately not started in
         // CommanderService::new so one-shot CLI commands never trigger it.
         self.service.start_hibernation_loop();
-
-        // Cache gh availability for the enriched-PR info fetch (the PR-status
-        // loop gates on its own cached probe inside the service).
-        if self.config.pr_check_interval_secs > 0 {
-            self.ui_state.gh_available = is_gh_available().await;
-        }
 
         // Probe terminal graphics capability ONCE, here — BEFORE the background
         // input reader starts below. `from_query_stdio` writes DA/DSR escape
