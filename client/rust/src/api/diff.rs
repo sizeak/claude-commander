@@ -11,11 +11,10 @@
 //!
 //! ## Stateless by design
 //!
-//! Every call re-parses and re-lays-out from the raw text. There is no
-//! Rust-side layout registry, so nothing leaks when a Dart page is disposed and
-//! nothing goes stale when the diff refreshes; the cost is one parse per
-//! *layout change* (file switch, mode flip, gap expansion), not per frame — Dart
-//! holds the returned rows in widget state and scrolls them for free. Expansion
+//! Layout is rebuilt per request. A cache of two raw reviews (at most 8 MiB
+//! of source keys) reuses parsing across file switches, mode flips and gap
+//! expansion. Exact input keys keep changed reviews fresh. Dart holds returned
+//! rows while scrolling. Expansion
 //! state travels as a replayable list of [`DiffExpansion`]s for the same reason.
 //!
 //! ## Why the DTOs are flat
@@ -226,6 +225,34 @@ pub struct DiffLayoutDto {
 // cdylib entry point.
 // ---------------------------------------------------------------------------
 
+/// Two recently-used raw reviews, bounded by bytes as well as entry count.
+/// Mode flips and gap expansion reuse parsing; layout remains per-call.
+fn parsed_review(raw: &str) -> std::sync::Arc<Vec<FileDiff<'static>>> {
+    type Cache = std::collections::VecDeque<(String, std::sync::Arc<Vec<FileDiff<'static>>>)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| std::sync::Mutex::new(Cache::new()))
+        .lock()
+        .expect("diff parse cache poisoned");
+    if let Some(index) = cache.iter().position(|(key, _)| key == raw) {
+        let entry = cache.remove(index).expect("known cache entry");
+        let files = entry.1.clone();
+        cache.push_back(entry);
+        return files;
+    }
+    let files = std::sync::Arc::new(parse_all(raw));
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    if raw.len() <= MAX_BYTES {
+        while cache.len() >= 2
+            || cache.iter().map(|(key, _)| key.len()).sum::<usize>() + raw.len() > MAX_BYTES
+        {
+            cache.pop_front();
+        }
+        cache.push_back((raw.to_string(), files.clone()));
+    }
+    files
+}
+
 /// Lay one file of a review diff out into rows of styled runs.
 ///
 /// `raw` is [`crate::api::review::ReviewSnapshotDto::raw`]; when it is `None`
@@ -247,17 +274,12 @@ pub fn diff_rows(
 ) -> Result<DiffLayoutDto> {
     let file = match raw.as_deref() {
         Some(raw) => {
-            let mut files = parse_all(raw);
-            match files
+            let files = parsed_review(raw);
+            files
                 .iter()
-                .position(|f| f.display_path() == fallback.display_path)
-            {
-                Some(i) => files.swap_remove(i),
-                // The raw text and the parsed snapshot disagree about which
-                // files are in the diff. Render what the snapshot listed rather
-                // than an empty view.
-                None => from_wire(&fallback),
-            }
+                .find(|f| f.display_path() == fallback.display_path)
+                .cloned()
+                .unwrap_or_else(|| from_wire(&fallback))
         }
         None => from_wire(&fallback),
     };

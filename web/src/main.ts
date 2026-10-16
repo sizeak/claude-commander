@@ -7,7 +7,7 @@
 // address bar), else from localStorage, else the connect screen. A server
 // running without auth needs none; the connect screen only opens on a 401.
 
-import { Api, Auth, act, Unauthorized } from "./api.ts";
+import { Api, ApiError, Auth, act, Unauthorized } from "./api.ts";
 import {
   closeDrawer,
   closeModal,
@@ -23,6 +23,7 @@ import {
   wireContextMenu,
   wireModals,
 } from "./dom.ts";
+import { initSessionEditor, openSessionEditor } from "./edit_session.ts";
 import { initForms, openNewSession, removeProject } from "./forms.ts";
 import type { ProjectInfo, SessionInfo } from "./generated/index.ts";
 import { NotifyTracker, requestPermissionOnFirstClick, showNotifications } from "./notify.ts";
@@ -162,6 +163,41 @@ async function poll(): Promise<void> {
   }
 }
 
+// A separate change wait keeps explicit refresh free of the long-poll latency.
+let changesSupported = false;
+function refreshCadence(): void {
+  poller.setIntervalMs(
+    document.hidden ? 60_000 : changesSupported && haltState() !== "gone" ? 30_000 : POLL_MS,
+  );
+}
+async function watchChanges(): Promise<void> {
+  let generation: number | undefined;
+  for (;;) {
+    if (auth.rejected) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      continue;
+    }
+    try {
+      const next = await api.changes(generation);
+      changesSupported = true;
+      refreshCadence();
+      if (generation !== next && !document.hidden) await refreshAll();
+      generation = next;
+    } catch (error) {
+      changesSupported = false;
+      generation = undefined;
+      refreshCadence();
+      await new Promise((resolve) =>
+        setTimeout(resolve, error instanceof ApiError && error.status === 404 ? 30_000 : POLL_MS),
+      );
+    }
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  refreshCadence();
+  if (!document.hidden) refreshAll();
+});
+
 // ---- tree + toolbar ------------------------------------------------------------
 
 const treeHandlers: TreeHandlers = {
@@ -195,6 +231,7 @@ function renderToolbar(): void {
   const sel = currentSession();
   const active = !!sel && sel.status !== "creating";
   els.restart.disabled = !sel;
+  els.editSession.disabled = !sel;
   els.kill.disabled = !active;
   els.delete.disabled = !sel;
   els.infoBtn.disabled = !sel;
@@ -233,6 +270,7 @@ function sessionMenuItems(s: SessionInfo): MenuItem[] {
   const items: MenuItem[] = [
     { type: "label", text: s.title },
     { text: "Open", onClick: () => selectSession(s.id) },
+    { text: "Edit session", onClick: () => openSessionEditor(s) },
   ];
   if (s.status !== "creating") {
     items.push({ text: "Restart", onClick: () => restartSession(s) });
@@ -317,9 +355,22 @@ function handleViewportChange(): void {
 
 function wire(): void {
   wireModals();
+  initSessionEditor(api, refreshAll, (id) => {
+    if (state.selectedId === id) reattach();
+  });
+  els.editSession.addEventListener("click", () => {
+    const s = currentSession();
+    if (s) void openSessionEditor(s);
+  });
   wireContextMenu();
   requestPermissionOnFirstClick();
-  initTerminal(auth, { onAuthRejected: (token) => api.unauthorized(token) });
+  initTerminal(auth, {
+    onAuthRejected: (token) => api.unauthorized(token),
+    onRecoveryChanged: () => {
+      refreshCadence();
+      if (haltState() === "gone") void refreshAll();
+    },
+  });
   initReview(api);
   initSettings(api);
   initForms(api, { refresh: refreshAll, select: selectSession });
@@ -369,6 +420,7 @@ function boot(): void {
   // unreachable server is bounded by the request timeout, then retried). A 401
   // opens the connect screen (Api's onUnauthorized).
   void poller.start();
+  void watchChanges();
 }
 
 boot();

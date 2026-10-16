@@ -86,12 +86,20 @@ impl DiffInfo {
     }
 }
 
+struct RootWatch {
+    watcher: Option<crate::file_events::FileEvents>,
+    attempted_at: Instant,
+}
+
 /// Cached diff computation, generic over key type
 pub struct DiffCache<K> {
     /// Cache of key -> diff info
     cache: Arc<RwLock<HashMap<K, Arc<DiffInfo>>>>,
     /// Cache TTL
     ttl: Duration,
+    flights: Arc<crate::singleflight::Flights<K>>,
+    stats_cache: Arc<RwLock<HashMap<K, Arc<DiffInfo>>>>,
+    watchers: Arc<std::sync::Mutex<HashMap<K, RootWatch>>>,
 }
 
 impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static>
@@ -107,17 +115,74 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
             ttl,
+            flights: Arc::new(crate::singleflight::Flights::default()),
+            stats_cache: Arc::new(RwLock::new(HashMap::new())),
+            watchers: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Watch at most 32 recently requested roots. Failed/unavailable watches
+    /// retain the configured TTL; healthy ones reconcile every 30 seconds.
+    async fn freshness(&self, key: K, path: &Path) -> (bool, Duration) {
+        let should_watch = {
+            let watchers = self.watchers.lock().expect("diff watchers poisoned");
+            match watchers.get(&key) {
+                Some(entry) => {
+                    !entry.watcher.as_ref().is_some_and(|w| w.healthy())
+                        && entry.attempted_at.elapsed() >= Duration::from_secs(30)
+                }
+                None => watchers.len() < 32,
+            }
+        };
+        if should_watch {
+            let path = path.to_path_buf();
+            let watcher =
+                tokio::task::spawn_blocking(move || crate::file_events::FileEvents::git(&path))
+                    .await
+                    .ok()
+                    .and_then(|result| result.ok());
+            let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
+            if watchers.len() < 32 || watchers.contains_key(&key) {
+                watchers.insert(
+                    key,
+                    RootWatch {
+                        watcher,
+                        attempted_at: Instant::now(),
+                    },
+                );
+            }
+        }
+        let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
+        match watchers
+            .get_mut(&key)
+            .and_then(|entry| entry.watcher.as_mut())
+        {
+            Some(watcher) if watcher.healthy() => (
+                watcher.take_changed(),
+                if self.ttl == DEFAULT_DIFF_CACHE_TTL {
+                    Duration::from_secs(30)
+                } else {
+                    self.ttl
+                },
+            ),
+            _ => (false, self.ttl),
         }
     }
 
     /// Get cached diff or compute fresh
     #[instrument(skip(self, worktree_path))]
     pub async fn get_diff(&self, key: &K, worktree_path: &Path) -> Result<Arc<DiffInfo>> {
+        let flight = self.flights.for_key(*key);
+        let _guard = flight.lock().await;
+        let (changed, ttl) = self.freshness(*key, worktree_path).await;
+        if changed {
+            self.invalidate(key).await;
+        }
         // Fast path: check cache
         {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get(key)
-                && !cached.is_stale(self.ttl)
+                && !cached.is_stale(ttl)
             {
                 debug!("Diff cache hit for {}", key);
                 return Ok(Arc::clone(cached));
@@ -129,6 +194,24 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         self.compute_diff(key, worktree_path).await
     }
 
+    /// Stats consumers never generate or transfer a patch.
+    pub async fn get_stats(&self, key: &K, path: &Path) -> Result<Arc<DiffInfo>> {
+        let flight = self.flights.for_key(*key);
+        let _guard = flight.lock().await;
+        let (changed, ttl) = self.freshness(*key, path).await;
+        if changed {
+            self.invalidate(key).await;
+        }
+        if let Some(cached) = self.stats_cache.read().await.get(key)
+            && !cached.is_stale(ttl)
+        {
+            return Ok(cached.clone());
+        }
+        let info = Arc::new(compute_diff_stats_for_path(path).await?);
+        self.stats_cache.write().await.insert(*key, info.clone());
+        Ok(info)
+    }
+
     /// Compute a fresh diff
     pub async fn compute_diff(&self, key: &K, worktree_path: &Path) -> Result<Arc<DiffInfo>> {
         let info = Arc::new(compute_diff_for_path(worktree_path).await?);
@@ -137,6 +220,10 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         {
             let mut cache = self.cache.write().await;
             cache.insert(*key, Arc::clone(&info));
+            self.stats_cache
+                .write()
+                .await
+                .insert(*key, Arc::clone(&info));
         }
 
         Ok(info)
@@ -146,12 +233,14 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
     pub async fn invalidate(&self, key: &K) {
         let mut cache = self.cache.write().await;
         cache.remove(key);
+        self.stats_cache.write().await.remove(key);
     }
 
     /// Clear all cached diffs
     pub async fn clear(&self) {
         let mut cache = self.cache.write().await;
         cache.clear();
+        self.stats_cache.write().await.clear();
     }
 }
 
@@ -168,6 +257,9 @@ impl<K> Clone for DiffCache<K> {
         Self {
             cache: self.cache.clone(),
             ttl: self.ttl,
+            flights: self.flights.clone(),
+            stats_cache: self.stats_cache.clone(),
+            watchers: self.watchers.clone(),
         }
     }
 }
@@ -239,6 +331,45 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
         line_count,
         computed_at: Instant::now(),
         base_commit: "HEAD".to_string(),
+    })
+}
+
+/// Match preview counts without generating the tracked or untracked patch.
+/// As in `compute_diff_for_path`, untracked files contribute to file count only.
+pub async fn compute_diff_stats_for_path(path: &Path) -> Result<DiffInfo> {
+    let (stat, untracked) = tokio::join!(
+        git_command()
+            .current_dir(path)
+            .args(["diff", "--stat", "HEAD"])
+            .stdin(Stdio::null())
+            .output(),
+        git_command()
+            .current_dir(path)
+            .args(["ls-files", "--others", "--exclude-standard", "-z"])
+            .stdin(Stdio::null())
+            .output(),
+    );
+    let stat = stat.map_err(|e| GitError::DiffFailed(e.to_string()))?;
+    let (mut files_changed, lines_added, lines_removed) = if stat.status.success() {
+        parse_diff_stat(&String::from_utf8_lossy(&stat.stdout))
+    } else {
+        (0, 0, 0)
+    };
+    if let Ok(untracked) = untracked
+        && untracked.status.success()
+    {
+        files_changed += untracked
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .count();
+    }
+    Ok(DiffInfo {
+        files_changed,
+        lines_added,
+        lines_removed,
+        base_commit: "HEAD".into(),
+        ..DiffInfo::empty()
     })
 }
 
@@ -475,6 +606,184 @@ pub async fn diff_stat_summary(path: &Path, base: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::git::fixture::fixture_git;
+
+    #[tokio::test]
+    async fn unavailable_watches_use_ttl_and_retry_after_a_cooldown() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("not-yet-created");
+        let cache = DiffCache::<u64>::new();
+        assert_eq!(cache.freshness(1, &path).await.1, DEFAULT_DIFF_CACHE_TTL);
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(cache.freshness(1, &path).await.1, DEFAULT_DIFF_CACHE_TTL);
+        cache
+            .watchers
+            .lock()
+            .unwrap()
+            .get_mut(&1)
+            .unwrap()
+            .attempted_at = Instant::now() - Duration::from_secs(31);
+        assert_eq!(cache.freshness(1, &path).await.1, Duration::from_secs(30));
+    }
+
+    async fn tracked_repo() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        for args in [
+            vec!["init"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        ] {
+            assert!(
+                fixture_git()
+                    .current_dir(dir.path())
+                    .args(args)
+                    .output()
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        std::fs::write(dir.path().join("Cargo.lock"), "one\n").unwrap();
+        assert!(
+            fixture_git()
+                .current_dir(dir.path())
+                .args(["add", "."])
+                .output()
+                .await
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            fixture_git()
+                .current_dir(dir.path())
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    "tracked"
+                ])
+                .output()
+                .await
+                .unwrap()
+                .status
+                .success()
+        );
+        dir
+    }
+
+    #[tokio::test]
+    async fn stats_only_matches_preview_counts_without_a_patch() {
+        let dir = tracked_repo().await;
+        std::fs::write(dir.path().join("Cargo.lock"), "two\n").unwrap();
+        std::fs::write(dir.path().join("new file\nwith newline"), "new\n").unwrap();
+        let stats = compute_diff_stats_for_path(dir.path()).await.unwrap();
+        assert_eq!(
+            (stats.files_changed, stats.lines_added, stats.lines_removed),
+            (2, 1, 1)
+        );
+        assert!(stats.diff.is_empty());
+        assert_eq!(stats.line_count, 0);
+    }
+
+    #[tokio::test]
+    async fn cloned_diff_caches_observe_worktree_edits_before_reconciliation() {
+        let dir = tracked_repo().await;
+        let cache = DiffCache::<u64>::new();
+        let initial = cache.get_diff(&1, dir.path()).await.unwrap();
+        assert!(!initial.has_changes());
+        let watcher_is_healthy = || {
+            cache
+                .watchers
+                .lock()
+                .unwrap()
+                .get(&1)
+                .and_then(|watch| watch.watcher.as_ref())
+                .is_some_and(|watcher| watcher.healthy())
+        };
+        assert!(
+            watcher_is_healthy(),
+            "this regression requires a live watcher"
+        );
+        let clone = cache.clone();
+        std::fs::write(dir.path().join("Cargo.lock"), "updated\n").unwrap();
+        // Allow event delivery and Git work under parallel CI load, while
+        // staying below the healthy watch's 30-second reconciliation interval.
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if clone
+                    .get_diff(&1, dir.path())
+                    .await
+                    .unwrap()
+                    .diff
+                    .contains("+updated")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "filesystem edits should invalidate the shared cache; watcher healthy: {}, cache age: {:?}",
+            watcher_is_healthy(),
+            initial.computed_at.elapsed(),
+        );
+        assert!(
+            watcher_is_healthy(),
+            "reconciliation must not satisfy this regression"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_diff_misses_share_the_computed_value() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(
+            crate::git::fixture::fixture_git_std()
+                .current_dir(dir.path())
+                .args(["init"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            crate::git::fixture::fixture_git_std()
+                .current_dir(dir.path())
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial"
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        let cache = DiffCache::<u64>::with_ttl(Duration::from_secs(60));
+        let (first, second) = tokio::join!(
+            cache.get_diff(&1, dir.path()),
+            cache.get_diff(&1, dir.path())
+        );
+        assert!(Arc::ptr_eq(&first.unwrap(), &second.unwrap()));
+    }
 
     #[test]
     fn test_format_diff_stat_summary_pluralization() {

@@ -15,11 +15,17 @@ import type {
   CreatedId,
   CreateOptions,
   CreateSessionOpts,
+  EditSession,
+  EditSessionOutcome,
   NewComment,
+  PlanSessionEdit,
   ProjectId,
   ReviewedToggle,
   ReviewSnapshot,
   ScanResponse,
+  SessionEditorInput,
+  SessionEditorModel,
+  SessionEditorPlan,
   SessionId,
   Snapshot,
   ToggleReviewed,
@@ -178,7 +184,7 @@ export class Api {
     method: Method,
     path: string,
     body?: unknown,
-    timeout: "read" | "long" = method === "GET" ? "read" : "long",
+    timeout: "read" | "long" | "changes" = method === "GET" ? "read" : "long",
   ): Promise<T> {
     const sent = this.auth.token;
     const headers: Record<string, string> = { Accept: "application/json", ...this.auth.headers() };
@@ -187,7 +193,12 @@ export class Api {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    const ms = timeout === "read" ? this.readTimeoutMs : this.writeTimeoutMs;
+    const ms =
+      timeout === "read"
+        ? this.readTimeoutMs
+        : timeout === "changes"
+          ? 30_000
+          : this.writeTimeoutMs;
     // A write that timed out may well still be running server-side (a create
     // fetching the remote): say so, or the natural retry makes a duplicate.
     const expiredMessage =
@@ -216,6 +227,15 @@ export class Api {
 
   // ---- workspace -----------------------------------------------------------
 
+  changes(since?: number): Promise<number> {
+    return this.request(
+      "GET",
+      since === undefined ? "/changes" : `/changes?since=${since}`,
+      undefined,
+      "changes",
+    );
+  }
+
   workspace = () => this.request<Snapshot>("GET", "/workspace");
   agentStates = () => this.request<AgentStatesSnapshot>("GET", "/agent-states");
   createOptions = () => this.request<CreateOptions>("GET", "/create-options");
@@ -224,6 +244,12 @@ export class Api {
 
   createSession = (opts: CreateSessionOpts) =>
     this.request<CreatedId<SessionId>>("POST", "/sessions", opts);
+  sessionEditorModel = (input: SessionEditorInput) =>
+    this.request<SessionEditorModel>("POST", "/session-editor/model", input);
+  planSessionEdit = (input: PlanSessionEdit) =>
+    this.request<SessionEditorPlan>("POST", "/session-editor/plan", input);
+  editSession = (id: SessionId, edit: EditSession) =>
+    this.request<EditSessionOutcome>("PATCH", `/sessions/${id}`, { op: "edit", ...edit });
   restartSession = (id: SessionId) => this.request<unknown>("POST", `/sessions/${id}/restart`);
   killSession = (id: SessionId) => this.request<unknown>("POST", `/sessions/${id}/kill`);
   deleteSession = (id: SessionId) => this.request<unknown>("DELETE", `/sessions/${id}`);

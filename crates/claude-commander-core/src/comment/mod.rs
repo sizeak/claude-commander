@@ -45,14 +45,24 @@ pub enum AnchorResult {
 
 /// Per-session comment store, persisted as one JSON array per session under
 /// a directory (typically `<data_dir>/comments/`).
+struct PendingComments {
+    mtime: Option<std::time::SystemTime>,
+    checked_at: std::time::Instant,
+    sessions: std::collections::HashSet<SessionId>,
+}
+
 pub struct CommentStore {
     dir: PathBuf,
+    pending: tokio::sync::Mutex<Option<PendingComments>>,
 }
 
 impl CommentStore {
     /// Construct a store rooted at `dir` (created lazily on first save).
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            pending: tokio::sync::Mutex::new(None),
+        }
     }
 
     fn path_for(&self, sid: SessionId) -> PathBuf {
@@ -87,7 +97,12 @@ impl CommentStore {
         fs::rename(&tmp, self.path_for(sid))
             .await
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        self.invalidate_pending().await;
         Ok(())
+    }
+
+    pub async fn invalidate_pending(&self) {
+        *self.pending.lock().await = None;
     }
 
     /// Append an comment to a session.
@@ -108,6 +123,17 @@ impl CommentStore {
     /// directory (a missing directory yields an empty set); unreadable or
     /// malformed files are skipped rather than failing the whole scan.
     pub async fn sessions_with_pending(&self) -> Result<std::collections::HashSet<SessionId>> {
+        let mtime = fs::metadata(&self.dir)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let mut cached = self.pending.lock().await;
+        if let Some(previous) = &*cached
+            && previous.mtime == mtime
+            && previous.checked_at.elapsed() < std::time::Duration::from_secs(30)
+        {
+            return Ok(previous.sessions.clone());
+        }
         let mut out = std::collections::HashSet::new();
         let mut entries = match fs::read_dir(&self.dir).await {
             Ok(e) => e,
@@ -139,6 +165,11 @@ impl CommentStore {
                 out.insert(sid);
             }
         }
+        *cached = Some(PendingComments {
+            mtime,
+            checked_at: std::time::Instant::now(),
+            sessions: out.clone(),
+        });
         Ok(out)
     }
 

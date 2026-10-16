@@ -23,6 +23,7 @@ pub struct Preview<'a> {
     scroll: u16,
     /// Opacity for unfocused dimming (None = no dimming, Some(0.4) = 40% brightness)
     dim_opacity: Option<f32>,
+    parsed: Option<&'a Paragraph<'static>>,
 }
 
 impl<'a> Preview<'a> {
@@ -33,6 +34,7 @@ impl<'a> Preview<'a> {
             block: None,
             scroll: 0,
             dim_opacity: None,
+            parsed: None,
         }
     }
 
@@ -49,6 +51,11 @@ impl<'a> Preview<'a> {
     }
 
     /// Set the opacity for unfocused dimming (0.0 = black, 1.0 = unchanged)
+    pub fn with_paragraph(mut self, text: &'a Paragraph<'static>) -> Self {
+        self.parsed = Some(text);
+        self
+    }
+
     pub fn dim_opacity(mut self, opacity: Option<f32>) -> Self {
         self.dim_opacity = opacity;
         self
@@ -57,12 +64,19 @@ impl<'a> Preview<'a> {
 
 impl<'a> Widget for Preview<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Convert ANSI escape codes to ratatui styled text
-        let mut text: Text<'_> = self
+        if let Some(paragraph) = self.parsed {
+            let inner = self.block.as_ref().map_or(area, |block| block.inner(area));
+            if let Some(block) = self.block {
+                block.render(area, buf);
+            }
+            paragraph.render(inner, buf);
+            return;
+        }
+        // Convert ANSI escape codes when no cached paragraph was supplied.
+        let mut text = self
             .content
             .into_text()
             .unwrap_or_else(|_| Text::raw(self.content));
-
         if let Some(opacity) = self.dim_opacity {
             for line in &mut text.lines {
                 for span in &mut line.spans {
@@ -103,6 +117,10 @@ pub struct PreviewState {
     /// never turn follow back on, so scrolling to the bottom once doesn't
     /// silently convert them into tailing panes. See [`Self::anchored_top`].
     anchored: bool,
+    cached_source: String,
+    parsed: Text<'static>,
+    dimmed: Paragraph<'static>,
+    cached_opacity: Option<f32>,
 }
 
 impl Default for PreviewState {
@@ -113,6 +131,10 @@ impl Default for PreviewState {
             visible_height: 0,
             follow: true,
             anchored: false,
+            cached_source: String::new(),
+            parsed: Text::default(),
+            dimmed: Paragraph::default(),
+            cached_opacity: None,
         }
     }
 }
@@ -141,14 +163,21 @@ impl PreviewState {
 
     /// Update content info
     pub fn set_content(&mut self, content: &str, visible_height: u16) {
-        // Exclude trailing empty lines (tmux capture-pane returns full pane height)
-        self.total_lines = content
-            .lines()
-            .collect::<Vec<_>>()
-            .iter()
-            .rposition(|l| !l.trim().is_empty())
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        if self.cached_source != content {
+            self.cached_source = content.to_string();
+            self.total_lines = content
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| !line.trim().is_empty())
+                .map(|(i, _)| i + 1)
+                .last()
+                .unwrap_or(0);
+            self.parsed = content
+                .into_text()
+                .unwrap_or_else(|_| Text::raw(content.to_string()));
+            self.dimmed = Paragraph::new(self.parsed.clone());
+            self.cached_opacity = None;
+        }
         self.visible_height = visible_height;
 
         if self.follow {
@@ -156,6 +185,30 @@ impl PreviewState {
         } else {
             self.clamp_scroll();
         }
+    }
+
+    /// Borrow cached styling and layout without copying every captured span.
+    pub fn paragraph(&mut self, opacity: Option<f32>) -> &Paragraph<'static> {
+        if self.cached_opacity != opacity {
+            let mut text = self.parsed.clone();
+            if let Some(opacity) = opacity {
+                for line in &mut text.lines {
+                    for span in &mut line.spans {
+                        span.style = span
+                            .style
+                            .fg(dim_color(
+                                span.style.fg.unwrap_or(ratatui::style::Color::Reset),
+                                opacity,
+                            ))
+                            .remove_modifier(Modifier::REVERSED);
+                    }
+                }
+            }
+            self.dimmed = Paragraph::new(text);
+            self.cached_opacity = opacity;
+        }
+        self.dimmed = std::mem::take(&mut self.dimmed).scroll((self.scroll_offset, 0));
+        &self.dimmed
     }
 
     /// Update metrics directly without scanning content.

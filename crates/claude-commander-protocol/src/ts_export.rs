@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::TS;
 
-use crate::{api, comment, config, connection, diff, github, pr, session, workspace, ws};
+use crate::{api, comment, config, connection, diff, github, hosting, pr, session, workspace, ws};
 
 /// Set to regenerate the committed bindings instead of checking them.
 const REGENERATE_ENV: &str = "CC_TS_REGENERATE";
@@ -82,6 +82,14 @@ fn export_into(dir: &Path) {
         api::PrRetarget,
         api::SetSessionBaseOutcome,
         api::ChangeProgram,
+        api::EditSession,
+        api::EditSessionOutcome,
+        crate::session_editor::SessionEditorInput,
+        crate::session_editor::SessionEditorBase,
+        crate::session_editor::SessionEditorDraft,
+        crate::session_editor::SessionEditorModel,
+        crate::session_editor::SessionEditorPlan,
+        crate::session_editor::PlanSessionEdit,
         api::PatchSession,
         api::MarkUnread,
         // Generic: the declaration is `CreatedId<T>`; the argument here only
@@ -109,7 +117,13 @@ fn export_into(dir: &Path) {
         diff::FileDiff,
         diff::ParsedDiff,
         github::GithubRepo,
-        github::CloneSource,
+        hosting::CloneSource,
+        hosting::CodeHostProvider,
+        hosting::CodeHost,
+        hosting::HostedRepository,
+        hosting::RepositoryListing,
+        hosting::RepositoryVisibility,
+        api::CodeHostStatus,
         github::CloneRequest,
         github::CloneJobId,
         github::CloneStatus,

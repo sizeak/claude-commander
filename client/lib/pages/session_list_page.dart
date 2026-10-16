@@ -322,11 +322,13 @@ class _SessionListBodyState extends State<SessionListBody> {
     bool multi,
     String? workspace,
   ) {
-    return ListView(
-      padding: const EdgeInsets.only(top: 6, bottom: 12),
-      children: [
-        for (final store in servers)
-          _ServerSection(
+    final rows = <(String, Widget Function(BuildContext))>[];
+    for (final store in servers) {
+      final prefix = store.config.id;
+      if (store.snapshot == null) {
+        rows.add((
+          '$prefix/loading',
+          (context) => _ServerSection(
             store: store,
             workspace: workspace,
             showHeader: multi,
@@ -335,28 +337,82 @@ class _SessionListBodyState extends State<SessionListBody> {
             query: _query,
             quick: _quick,
           ),
-      ],
+        ));
+        continue;
+      }
+      if (multi) {
+        rows.add((
+          '$prefix/header',
+          (context) => _ServerHeader(
+            store: store,
+            count: store.sessionsIn(workspace).length,
+          ),
+        ));
+      }
+      if (store.cascadePaused != null) {
+        rows.add((
+          '$prefix/cascade',
+          (context) =>
+              CommanderStoreScope(store: store, child: CascadeBanner()),
+        ));
+      }
+      var matches = 0;
+      for (final group in store.sessionsByProjectIn(workspace)) {
+        final sessions = matchingSessions(group.sessions, _query)
+            .where(
+              (session) =>
+                  (_quick == null || _matchesQuick(_quick!, store, session)),
+            )
+            .toList();
+        if (sessions.isEmpty) continue;
+        matches += sessions.length;
+        rows.add((
+          '$prefix/project/${group.project.id}',
+          (context) => ChromeEyebrow(
+            '${group.project.name.toUpperCase()} · ${sessions.length}',
+          ),
+        ));
+        for (final (i, session) in sessions.indexed) {
+          rows.add((
+            '$prefix/session/${session.id}',
+            (context) => Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
+              child: _groupedRow(
+                context,
+                store: store,
+                session: session,
+                selected: session.id == widget.selectedId,
+                position: _rowPosition(i, sessions.length),
+                onTap: () => widget.onSelect(store, session),
+              ),
+            ),
+          ));
+        }
+      }
+      if (matches == 0) {
+        rows.add((
+          '$prefix/empty',
+          (context) => _InlineNote(
+            icon: _query.isNotEmpty || _quick != null
+                ? Icons.search_off
+                : Icons.inbox_outlined,
+            text: _query.isNotEmpty || _quick != null
+                ? 'No matches'
+                : 'No sessions',
+          ),
+        ));
+      }
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.only(top: 6, bottom: 12),
+      itemCount: rows.length,
+      itemBuilder: (context, index) => KeyedSubtree(
+        key: ValueKey(rows[index].$1),
+        child: rows[index].$2(context),
+      ),
     );
   }
 
-  /// The Recent tab: every server's sessions flattened to (store, session)
-  /// pairs, active-and-attached-only, newest-attach first (the TUI's MRU
-  /// order). A live query filters that set by fuzzy score, ranking best matches
-  /// first while keeping recency as the stable tie-break; an active quick filter
-  /// narrows it further.
-  ///
-  /// Two deliberate differences from the TUI's pinned recents block, and they
-  /// go together: this tab is uncapped (the TUI caps at `recent_sessions_limit`)
-  /// *and* it excludes stopped sessions (the TUI shows any attached session
-  /// regardless of status). The TUI's fixed cap already bounds how much stale
-  /// history shows; an uncapped list has no such bound, so it filters to active
-  /// sessions to avoid accumulating dead ones indefinitely.
-  ///
-  /// A third: the ordering key is [sessionRecency], not `lastAttachedAt`, so a
-  /// never-attached session sorts by its creation time instead of dropping out.
-  /// The TUI can drop those, because its recents block is pinned *above* the
-  /// full tree; here Recent is one of two exclusive tabs, so dropping a session
-  /// hides it outright — including the one the user has only just created.
   Widget _buildRecent(
     BuildContext context,
     List<CommanderStore> servers,
@@ -377,12 +433,14 @@ class _SessionListBodyState extends State<SessionListBody> {
     if (pairs.isEmpty) {
       return ListView(children: [_recentEmptyState(context, servers)]);
     }
-    return ListView(
+    return ListView.builder(
       padding: const EdgeInsets.fromLTRB(12, 2, 12, 12),
-      children: [
-        // One flat run, so the position is the index in the whole list.
-        for (final (i, (store, session)) in pairs.indexed)
-          _recentRow(
+      itemCount: pairs.length,
+      itemBuilder: (context, i) {
+        final (store, session) = pairs[i];
+        return KeyedSubtree(
+          key: ValueKey('${store.config.id}/${session.id}'),
+          child: _recentRow(
             context,
             store: store,
             session: session,
@@ -390,14 +448,11 @@ class _SessionListBodyState extends State<SessionListBody> {
             position: _rowPosition(i, pairs.length),
             onTap: () => widget.onSelect(store, session),
           ),
-      ],
+        );
+      },
     );
   }
 
-  /// What to show when the flattened recent list is empty. A bare "No recent
-  /// sessions" would hide a server that is merely still connecting or down, so
-  /// mirror All mode: surface a spinner while any server is loading and an
-  /// error+Retry when one has failed, before falling back to the empty note.
   Widget _recentEmptyState(BuildContext context, List<CommanderStore> servers) {
     // Loading/error take priority over the query notes, so typing while the
     // only server is still connecting shows the spinner (as All mode does),

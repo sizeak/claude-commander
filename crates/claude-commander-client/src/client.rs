@@ -10,6 +10,7 @@
 //! to mobile targets.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use claude_commander_protocol::api::{
@@ -21,6 +22,9 @@ use claude_commander_protocol::api::{
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::{
+    CodeHost, CodeHostProvider, HostedRepository, RepositoryListing,
+};
 use claude_commander_protocol::session::{ProjectId, SessionId};
 use claude_commander_protocol::workspace::{
     DeleteWorkspaceRequest, RenameWorkspaceRequest, SetProjectWorkspace, SetWorkspacesRequest,
@@ -96,11 +100,32 @@ const REPO_LIST_TIMEOUT: Duration =
 /// client, the resolved base URL, and the (redacted) bearer token. Cloneable via
 /// `Arc`; the poll task holds an `Arc` of this — never of the adapter backend —
 /// so there's no cycle.
+#[derive(Default)]
+struct SnapshotCache {
+    epoch: u64,
+    fetched_at: Option<std::time::Instant>,
+    workspace: Option<Snapshot>,
+    agents: Option<AgentStatesSnapshot>,
+}
+
+impl SnapshotCache {
+    fn expire(&mut self) {
+        if self
+            .fetched_at
+            .is_some_and(|at| at.elapsed() > Duration::from_secs(2))
+        {
+            self.workspace = None;
+            self.agents = None;
+        }
+    }
+}
+
 pub struct RemoteClient {
     name: String,
     client: Client,
     base: Url,
     token: Option<SecretString>,
+    snapshots: Mutex<SnapshotCache>,
 }
 
 impl RemoteClient {
@@ -136,6 +161,7 @@ impl RemoteClient {
             client,
             base,
             token: spec.token,
+            snapshots: Mutex::new(SnapshotCache::default()),
         })
     }
 
@@ -211,10 +237,20 @@ impl RemoteClient {
             Some(token) => request.bearer_auth(token.expose()),
             None => request,
         };
-        request.send().await.map_err(|err| {
+        let request = request.build().map_err(error::transport_error)?;
+        let mutation = request.method() != reqwest::Method::GET;
+        if mutation {
+            self.invalidate_snapshots();
+        }
+        let response = self.client.execute(request).await.map_err(|err| {
             tracing::debug!(server = %self.name, error = %err, "remote request failed in transport");
             error::transport_error(err)
-        })
+        });
+        // A poll started during a mutation may have read the old state.
+        if mutation {
+            self.invalidate_snapshots();
+        }
+        response
     }
 
     /// Turn a non-success status into the matching [`ClientError`], reading the
@@ -344,6 +380,16 @@ impl RemoteClient {
     }
 
     /// PATCH a JSON body, discarding the (204) response.
+    async fn patch_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: Url,
+        body: &impl serde::Serialize,
+    ) -> ClientResult<T> {
+        let response = self.send(self.client.patch(url).json(body)).await?;
+        let response = self.check(response).await?;
+        decode_json(response).await
+    }
+
     async fn patch_json_ok<B: Serialize>(&self, url: Url, body: &B) -> ClientResult<()> {
         let response = self.send(self.client.patch(url).json(body)).await?;
         self.check(response).await?;
@@ -396,13 +442,48 @@ impl RemoteClient {
     /// whether observable state moved. Any HTTP/transport failure propagates so
     /// the poller can go degraded.
     pub async fn poll_hashes(&self) -> ClientResult<u64> {
-        let workspace = self.get_bytes(self.endpoint(&["workspace"])).await?;
-        let agent_states = self.get_bytes(self.endpoint(&["agent-states"])).await?;
+        let epoch = self
+            .snapshots
+            .lock()
+            .expect("snapshot cache poisoned")
+            .epoch;
+        let (workspace, agent_states) = tokio::try_join!(
+            self.get_bytes(self.endpoint(&["workspace"])),
+            self.get_bytes(self.endpoint(&["agent-states"])),
+        )?;
+        let snapshot =
+            serde_json::from_slice(&workspace).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        let agents = serde_json::from_slice(&agent_states)
+            .map_err(|e| ClientError::Protocol(e.to_string()))?;
         let mut hasher = Xxh3::new();
         hasher.update(&workspace);
         hasher.update(b"\x00");
         hasher.update(&agent_states);
+        let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
+        if cache.epoch == epoch {
+            cache.fetched_at = Some(std::time::Instant::now());
+            cache.workspace = Some(snapshot);
+            cache.agents = Some(agents);
+        }
         Ok(hasher.digest())
+    }
+
+    fn invalidate_snapshots(&self) {
+        let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
+        cache.epoch = cache.epoch.wrapping_add(1);
+        cache.workspace = None;
+        cache.agents = None;
+    }
+
+    /// Wait for a server generation. A 404 means an older server: the poller
+    /// continues using its configured fallback cadence.
+    pub async fn wait_for_change(&self, since: Option<u64>) -> ClientResult<u64> {
+        let mut url = self.endpoint(&["changes"]);
+        if let Some(since) = since {
+            url.query_pairs_mut()
+                .append_pair("since", &since.to_string());
+        }
+        self.get_json(url).await
     }
 
     // -- Per-route methods --
@@ -444,10 +525,30 @@ impl RemoteClient {
     }
 
     pub async fn snapshot(&self) -> ClientResult<Snapshot> {
-        self.get_json(self.endpoint(&["workspace"])).await
+        let cached = {
+            let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
+            cache.expire();
+            cache.workspace.take()
+        };
+        match cached {
+            Some(snapshot) => Ok(snapshot),
+            None => self.get_json(self.endpoint(&["workspace"])).await,
+        }
     }
 
     pub async fn agent_states(&self, fresh: bool) -> ClientResult<AgentStatesSnapshot> {
+        if !fresh {
+            let cached = {
+                let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
+                cache.expire();
+                cache.agents.take()
+            };
+            if let Some(states) = cached {
+                return Ok(states);
+            }
+        } else {
+            self.invalidate_snapshots();
+        }
         let mut url = self.endpoint(&["agent-states"]);
         url.query_pairs_mut()
             .append_pair("fresh", if fresh { "true" } else { "false" });
@@ -465,6 +566,26 @@ impl RemoteClient {
                 .append_pair("lines", &lines.to_string());
         }
         self.get_json_opt(url).await
+    }
+
+    pub async fn preview_part(
+        &self,
+        id: Option<SessionId>,
+        project: Option<ProjectId>,
+        lines: Option<usize>,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> ClientResult<PreviewData> {
+        let mut url = match (id, project) {
+            (Some(id), _) => self.session_url(id, &["preview"]),
+            (_, Some(id)) => self.project_url(id, &["preview"]),
+            _ => return Err(ClientError::InvalidRequest("preview needs a target".into())),
+        };
+        url.query_pairs_mut().append_pair("part", part.as_str());
+        if let Some(lines) = lines {
+            url.query_pairs_mut()
+                .append_pair("lines", &lines.to_string());
+        }
+        self.get_json(url).await
     }
 
     /// Preview payload for a session (`GET /api/sessions/{id}/preview?lines=`).
@@ -540,8 +661,105 @@ impl RemoteClient {
             .await
     }
 
+    pub async fn recover_session_fresh(&self, id: SessionId) -> ClientResult<()> {
+        match self
+            .post_empty_ok(self.session_url(id, &["recover-fresh"]))
+            .await
+        {
+            Err(crate::ClientError::NotFound) => {
+                let detail = self
+                    .session_detail(&id.as_uuid().to_string(), None)
+                    .await?
+                    .ok_or(crate::ClientError::NotFound)?;
+                if detail.info.pending_program.is_some() {
+                    return Err(crate::ClientError::InvalidRequest("Upgrade this server to recover an exited agent without applying its pending program.".into()));
+                }
+                self.restart_session_fresh(id).await
+            }
+            result => result,
+        }
+    }
+
     pub async fn delete_session(&self, id: SessionId) -> ClientResult<()> {
         self.delete_ok(self.session_url(id, &[])).await
+    }
+
+    pub async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> ClientResult<claude_commander_protocol::api::EditSessionOutcome> {
+        let result = self
+            .patch_json(self.session_url(id, &[]), &PatchSession::Edit(edit.clone()))
+            .await;
+        match result {
+            Err(crate::ClientError::InvalidRequest(ref message))
+                if message.contains("unknown variant `edit`") =>
+            {
+                self.edit_session_legacy(id, edit).await
+            }
+            result => result,
+        }
+    }
+
+    async fn edit_session_legacy(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> ClientResult<claude_commander_protocol::api::EditSessionOutcome> {
+        // Old servers cannot retain a deferred program. Reject before any writes.
+        if edit.program.is_some() || edit.restart {
+            return Err(crate::ClientError::InvalidRequest("This server needs an upgrade to save program changes through Edit session. No settings were changed.".into()));
+        }
+        let keep_alive = if edit.keep_alive.is_some() {
+            Some(
+                self.session_detail(&id.as_uuid().to_string(), None)
+                    .await?
+                    .ok_or(crate::ClientError::NotFound)?
+                    .info
+                    .keep_alive,
+            )
+        } else {
+            None
+        };
+        let mut outcome = claude_commander_protocol::api::EditSessionOutcome::default();
+        let mut saved = false;
+        let result: ClientResult<()> = async {
+            if let Some(title) = edit.title {
+                self.rename_session(id, title).await?;
+                saved = true;
+            }
+            if let Some(section) = edit.section {
+                self.set_section(id, section).await?;
+                saved = true;
+            }
+            if let Some(base) = edit.base {
+                let base = self.set_session_base(id, base.parent_session_id).await?;
+                if let claude_commander_protocol::api::PrRetarget::Failed { message, .. } = &base.pr
+                {
+                    outcome.warnings.push(format!(
+                        "Session saved, but PR target update failed: {message}"
+                    ));
+                }
+                outcome.base = Some(base);
+                saved = true;
+            }
+            if let Some(value) = edit.keep_alive
+                && Some(value) != keep_alive
+            {
+                self.toggle_keep_alive(id).await?;
+                saved = true;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if !saved {
+                return Err(error);
+            }
+            outcome.warnings.push(format!("Some settings were saved, but this older server could not complete the edit: {error}. Refresh and check the remaining settings."));
+        }
+        Ok(outcome)
     }
 
     pub async fn rename_session(&self, id: SessionId, title: String) -> ClientResult<()> {
@@ -719,12 +937,34 @@ impl RemoteClient {
         self.post_json(url, &body).await
     }
 
-    // -- GitHub repos / repository clone --
+    // -- Hosted repositories / repository clone --
+
+    /// Provider-neutral listing. Falls back to the legacy GitHub endpoint only
+    /// when an older server answers 404; all other failures retain their meaning.
+    pub async fn repositories(&self) -> ClientResult<RepositoryListing> {
+        match self
+            .get_json_within(self.endpoint(&["repositories"]), REPO_LIST_TIMEOUT)
+            .await
+        {
+            Ok(listing) => Ok(listing),
+            Err(ClientError::NotFound) => {
+                let repos = self.github_repos().await?;
+                Ok(RepositoryListing {
+                    host: CodeHost {
+                        provider: CodeHostProvider::Github,
+                        hostname: None,
+                    },
+                    repositories: repos.into_iter().map(HostedRepository::from).collect(),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
 
     /// `GET /github/repos` — every repo the server-side `gh` user can clone, for
     /// the repo picker.
     ///
-    /// The list is the server's to produce: `gh` runs where the repositories will
+    /// The list is the server's to produce: `gh` runs where repositories will
     /// be checked out, so a phone with no `gh` and no GitHub credentials still gets
     /// a picker. An absent `gh` surfaces as [`ClientError::Unavailable`] (the
     /// server's 503 for a missing backing tool, as with tmux), which a frontend can
@@ -921,7 +1161,101 @@ fn diff_side_param(side: DiffSide) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn delayed_explicit_refresh_does_not_consume_an_old_poll() {
+        use std::sync::atomic::Ordering;
+        let server = crate::test_server::Server::start(true).await;
+        server.client.poll_hashes().await.unwrap();
+        server.client.snapshots.lock().unwrap().fetched_at =
+            Some(std::time::Instant::now() - Duration::from_secs(3));
+        server.client.snapshot().await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn polled_payloads_are_reused_once_and_invalidated_by_mutations() {
+        use std::sync::atomic::Ordering;
+        let server = crate::test_server::Server::start(true).await;
+        server.client.poll_hashes().await.unwrap();
+        server.client.snapshot().await.unwrap();
+        server.client.agent_states(false).await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 1);
+        assert_eq!(server.data.agents.load(Ordering::SeqCst), 1);
+        server.client.snapshot().await.unwrap();
+        server.client.agent_states(false).await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
+        assert_eq!(server.data.agents.load(Ordering::SeqCst), 2);
+        server.client.poll_hashes().await.unwrap();
+        server.client.request_pr_refresh().await.unwrap();
+        server.client.snapshot().await.unwrap();
+        server.client.agent_states(false).await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 4);
+        assert_eq!(server.data.agents.load(Ordering::SeqCst), 4);
+    }
+
     use super::*;
+
+    async fn test_client_with_responses(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (RemoteClient, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = vec![0; 4096];
+                let read = socket.read(&mut buffer).await.unwrap();
+                requests.push(String::from_utf8_lossy(&buffer[..read]).into_owned());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let client = RemoteClient::new(RemoteServerSpec {
+            name: "test".into(),
+            base_url: format!("http://{addr}"),
+            token: None,
+        })
+        .unwrap();
+        (client, task)
+    }
+
+    #[tokio::test]
+    async fn repositories_falls_back_to_legacy_github_route_only_on_404() {
+        let legacy = r#"[{"full_name":"owner/repo","owner":"owner","name":"repo","description":null,"private":false,"fork":false,"archived":false,"default_branch":"main","clone_url":"https://github.com/owner/repo.git","ssh_url":"git@github.com:owner/repo.git","pushed_at":null}]"#;
+        let (client, requests) = test_client_with_responses(vec![
+            ("404 Not Found", r#"{"error":{"message":"missing"}}"#),
+            ("200 OK", legacy),
+        ])
+        .await;
+        let listing = client.repositories().await.unwrap();
+        assert_eq!(listing.host.provider, CodeHostProvider::Github);
+        assert_eq!(listing.repositories[0].full_name, "owner/repo");
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("GET /api/repositories "));
+        assert!(requests[1].starts_with("GET /api/github/repos "));
+    }
+
+    #[tokio::test]
+    async fn repositories_does_not_fallback_on_server_error() {
+        let (client, requests) = test_client_with_responses(vec![(
+            "500 Internal Server Error",
+            r#"{"error":{"message":"boom"}}"#,
+        )])
+        .await;
+        assert!(matches!(
+            client.repositories().await,
+            Err(ClientError::Server(_))
+        ));
+        assert_eq!(requests.await.unwrap().len(), 1);
+    }
 
     /// The connect budget must outlast a link that is merely *waking* — the
     /// phone client's normal case. On the RFC 6298 / Linux schedule cited on
@@ -1179,5 +1513,158 @@ mod tests {
             matches!(err, ClientError::Unavailable { .. }),
             "a valid image must reach the transport, got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod session_edit_tests {
+    use super::*;
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::patch};
+    use serde::Deserialize;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Deserialize)]
+    #[serde(tag = "op", rename_all = "snake_case")]
+    enum LegacyPatch {
+        Rename { title: String },
+        SetSection { section: Option<String> },
+    }
+
+    #[tokio::test]
+    async fn legacy_edit_fallback_is_narrow_and_reports_partial_saves() {
+        for (unsupported, program, section_failure) in [
+            (true, false, false),
+            (true, true, false),
+            (false, false, false),
+            (true, false, true),
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let counter = attempts.clone();
+            let app = if unsupported {
+                Router::new().route("/api/sessions/{id}", patch(move |State(calls): State<Arc<Mutex<Vec<String>>>>, Json(body): Json<LegacyPatch>| async move {
+                    let op = match body {
+                        LegacyPatch::Rename { title } => { assert_eq!(title, "renamed"); "rename" },
+                        LegacyPatch::SetSection { section } => { assert_eq!(section.as_deref(), Some("Review")); "set_section" },
+                    };
+                    calls.lock().unwrap().push(op.into());
+                    if section_failure && op == "set_section" {
+                        (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error":{"kind":"bad_request","message":"validation failed"}})))
+                    } else { (StatusCode::NO_CONTENT, Json(serde_json::Value::Null)) }
+                }))
+            } else {
+                Router::new().route("/api/sessions/{id}", patch(|| async {
+                    (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error":{"kind":"bad_request","message":"validation failed"}})))
+                }))
+            }.with_state(calls.clone()).layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async move { next.run(request).await }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = RemoteClient::new(RemoteServerSpec {
+                name: "legacy".into(),
+                base_url: format!("http://{addr}"),
+                token: None,
+            })
+            .unwrap();
+            let edit = claude_commander_protocol::api::EditSession {
+                title: Some("renamed".into()),
+                program: program.then(|| "codex".into()),
+                section: section_failure.then(|| Some("Review".into())),
+                ..Default::default()
+            };
+            if unsupported {
+                let raw = reqwest::Client::new()
+                    .patch(format!("http://{addr}/api/sessions/test"))
+                    .json(&serde_json::json!({"op":"edit"}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                assert!(raw.starts_with("Failed to deserialize the JSON body into the target type: op: unknown variant `edit`"), "legacy extractor response: {raw}");
+                attempts.store(0, Ordering::SeqCst);
+            }
+            let result = client.edit_session(SessionId::new(), edit).await;
+            if !unsupported || program {
+                assert!(result.is_err());
+                assert_eq!(attempts.load(Ordering::SeqCst), 1);
+                assert!(calls.lock().unwrap().is_empty());
+            } else {
+                let outcome = result.unwrap();
+                assert_eq!(outcome.warnings.is_empty(), !section_failure);
+                assert_eq!(calls.lock().unwrap()[0], "rename");
+                assert_eq!(
+                    attempts.load(Ordering::SeqCst),
+                    if section_failure { 3 } else { 2 }
+                );
+                if section_failure {
+                    assert_eq!(calls.lock().unwrap()[1], "set_section");
+                }
+            }
+            server.abort();
+        }
+    }
+    #[tokio::test]
+    async fn old_server_recovery_falls_back_only_without_a_pending_program() {
+        use axum::{
+            extract::Path,
+            routing::{get, post},
+        };
+        for pending in [None, Some("codex")] {
+            let sid = SessionId::new();
+            let expected_id = sid.as_uuid().to_string();
+            let resets = Arc::new(AtomicUsize::new(0));
+            let recorded = resets.clone();
+            let detail = serde_json::json!({
+                "id":expected_id, "session_id":sid, "title":"task", "branch":"task", "status":"running",
+                "program":"claude", "pending_program":pending, "project_id":claude_commander_protocol::session::ProjectId::new(),
+                "project_name":"repo", "pr_number":null, "pr_url":null, "pr_state":"open", "pr_draft":false,
+                "pr_labels":[], "review_decision":null, "pr_reviewers":[], "created_at":"2026-01-01T00:00:00Z",
+                "agent_state":"idle", "diff_stat":null, "pane_content":null
+            });
+            let app = Router::new()
+                .route(
+                    "/api/sessions/{id}/detail",
+                    get(move |Path(id): Path<String>| {
+                        assert_eq!(id, expected_id);
+                        let detail = detail.clone();
+                        async move { Json(detail) }
+                    }),
+                )
+                .route(
+                    "/api/sessions/{id}/restart-fresh",
+                    post(move || {
+                        recorded.fetch_add(1, Ordering::SeqCst);
+                        async { StatusCode::NO_CONTENT }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = RemoteClient::new(RemoteServerSpec {
+                name: "legacy".into(),
+                base_url: format!("http://{addr}"),
+                token: None,
+            })
+            .unwrap();
+            let result = client.recover_session_fresh(sid).await;
+            assert_eq!(result.is_ok(), pending.is_none());
+            assert_eq!(
+                resets.load(Ordering::SeqCst),
+                usize::from(pending.is_none())
+            );
+            server.abort();
+        }
     }
 }

@@ -23,6 +23,38 @@ test.describe("review view", () => {
     await expect(page.locator("#review-title")).toHaveText(`Review — ${REVIEW_SESSION}`);
   });
 
+  test("large single-file diffs mount rows only near the viewport", async ({ page }) => {
+    await page.locator("#review-close").click();
+    await page.route("**/api/sessions/*/review", async (route) => {
+      const response = await route.fetch();
+      const snapshot = await response.json();
+      snapshot.diff.files[0].hunks = [
+        {
+          old_start: 1,
+          old_lines: 0,
+          new_start: 1,
+          new_lines: 5000,
+          header: "",
+          lines: Array.from({ length: 5000 }, (_, i) => ({
+            origin: "addition",
+            old_lineno: null,
+            new_lineno: i + 1,
+            content: `large-line-${i}`,
+          })),
+        },
+      ];
+      await route.fulfill({ response, json: snapshot });
+    });
+    await page.locator("#review-btn").click();
+    await expect(page.locator(".rv-line").first()).toBeVisible();
+    expect(await page.locator(".rv-line").count()).toBeLessThan(1000);
+    await page.locator("#review-body").evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    await expect(page.locator(".rv-line", { hasText: "large-line-4999" })).toBeVisible();
+    expect(await page.locator(".rv-line").count()).toBeLessThan(1500);
+  });
+
   test("renders the session's diff against its base", async ({ page }) => {
     const file = page.locator(".rv-file").filter({ hasText: REVIEW_FILE });
     await expect(file.locator(".rv-file-path")).toHaveText(REVIEW_FILE);

@@ -99,12 +99,27 @@ impl SessionManager {
     /// is forked off that base branch rather than `origin/<main>`. This backs
     /// the CLI `--base-branch` flag. For stacked sessions the fork point is
     /// derived from the stack parent instead and takes precedence.
-    #[instrument(skip(self))]
     pub async fn finalize_session(
         &self,
         session_id: &SessionId,
         initial_prompt: Option<String>,
         base_branch: Option<String>,
+    ) -> Result<SessionId> {
+        let provider = self.config_store.read().code_host_provider;
+        self.finalize_session_for_provider(session_id, initial_prompt, base_branch, provider)
+            .await
+    }
+
+    /// Finalize using the provider snapshotted by the service at the beginning
+    /// of the wider create operation. Direct manager callers use
+    /// [`Self::finalize_session`], which snapshots at their own operation edge.
+    #[instrument(skip(self))]
+    pub(crate) async fn finalize_session_for_provider(
+        &self,
+        session_id: &SessionId,
+        initial_prompt: Option<String>,
+        base_branch: Option<String>,
+        provider: claude_commander_protocol::hosting::CodeHostProvider,
     ) -> Result<SessionId> {
         // Read session and project info, plus stack parent's branch if any so
         // we know to fork from it below.
@@ -286,11 +301,7 @@ impl SessionManager {
                 if let Some(pb) = stack_parent_branch.as_deref()
                     && accepts_prompt
                 {
-                    prompt_parts.push(format!(
-                        "This branch is stacked on `{pb}` (not main). \
-                     When creating a PR for this session, use: \
-                     gh pr create --base {pb}"
-                    ));
+                    prompt_parts.push(crate::git::hosting::stack_instruction(provider, pb));
                 }
                 if let Some(ref user_prompt) = initial_prompt
                     && accepts_prompt
@@ -418,6 +429,16 @@ impl SessionManager {
     /// Restart a session (kill tmux and recreate, optionally with --resume)
     #[instrument(skip(self))]
     pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
+        if self
+            .store
+            .read()
+            .await
+            .get_session(session_id)
+            .is_some_and(|s| s.pending_program.is_some())
+        {
+            return self.restart_session_fresh(session_id).await;
+        }
+
         let (
             tmux_session_name,
             shell_tmux_name,
@@ -508,11 +529,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Restart a session's tmux pane without `--resume`, identified by session
-    /// id. Resolves the tmux name and delegates to
-    /// [`Self::restart_session_fresh_by_tmux_name`]; the attach loop uses this
-    /// (it holds the [`SessionId`], not the tmux name) to give a fresh
-    /// conversation when the agent process exits.
+    /// Explicitly restart without resume, applying any pending program change.
     pub async fn restart_session_fresh(&self, session_id: &SessionId) -> Result<()> {
         let tmux_name = {
             let state = self.store.read().await;
@@ -522,14 +539,28 @@ impl SessionManager {
                 .tmux_session_name
                 .clone()
         };
+        self.recreate_session_fresh(&tmux_name, true).await
+    }
+
+    /// Recover an exited agent without resume, preserving pending settings.
+    pub async fn recover_session_fresh(&self, session_id: &SessionId) -> Result<()> {
+        let tmux_name = self
+            .store
+            .read()
+            .await
+            .get_session(session_id)
+            .ok_or(SessionError::NotFound(*session_id))?
+            .tmux_session_name
+            .clone();
         self.restart_session_fresh_by_tmux_name(&tmux_name).await
     }
 
-    /// Restart a session's tmux pane without `--resume`, identified by tmux
-    /// session name. Used when the process inside the pane exits (e.g. Claude
-    /// had nothing to resume) so the user seamlessly gets a fresh conversation
-    /// instead of being dropped back to the TUI.
+    /// Name-based automatic recovery; deferred programs await an explicit restart.
     pub async fn restart_session_fresh_by_tmux_name(&self, tmux_name: &str) -> Result<()> {
+        self.recreate_session_fresh(tmux_name, false).await
+    }
+
+    async fn recreate_session_fresh(&self, tmux_name: &str, apply_pending: bool) -> Result<()> {
         let (session_id, worktree_path, title, program, status_bar) = {
             let state = self.store.read().await;
             let session = state
@@ -541,7 +572,15 @@ impl SessionManager {
                 session.id,
                 session.worktree_path.clone(),
                 session.title.clone(),
-                session.program.clone(),
+                if apply_pending {
+                    session
+                        .pending_program
+                        .as_ref()
+                        .unwrap_or(&session.program)
+                        .clone()
+                } else {
+                    session.program.clone()
+                },
                 self.status_bar_info(session, &state),
             )
         };
@@ -591,6 +630,11 @@ impl SessionManager {
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
+                    session.program = program.clone();
+                    if apply_pending && session.pending_program.as_deref() == Some(program.as_str())
+                    {
+                        session.pending_program = None;
+                    }
                     session.set_status(SessionStatus::Running);
                     // The pane is live again, so clear the hibernation marker to
                     // uphold the "live pane ⇒ not hibernated" invariant (matches
@@ -826,6 +870,7 @@ impl SessionManager {
     /// Delete a session (remove from state)
     #[instrument(skip(self))]
     pub async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
+        let provider = self.config_store.read().code_host_provider;
         // Resolve the owning project's repo path up front (needed to open the
         // git backend for worktree removal) — a cheap store read while the
         // session still exists.
@@ -878,20 +923,36 @@ impl SessionManager {
             warn!("Failed to remove worktree while deleting session: {}", e);
         }
 
-        // Durably retarget child PRs on GitHub (best-effort, non-fatal).
-        Self::retarget_child_prs(pr_retargets).await;
+        // Durably retarget child reviews on the selected host (best-effort,
+        // non-fatal).
+        Self::retarget_child_prs(provider, pr_retargets).await;
 
         info!("Deleted session {}", session_id);
         Ok(())
     }
 
-    /// Run the planned GitHub PR-base edits for a stack deletion. Best-effort:
-    /// each `gh pr edit` failure is logged and skipped — the local metadata
+    /// Run planned review-base edits for a stack deletion. Best-effort: each
+    /// CLI failure is logged and skipped — the local metadata
     /// retarget already keeps the UI correct. Shared by the CLI and TUI delete
     /// paths.
-    pub async fn retarget_child_prs(retargets: Vec<crate::config::PrBaseRetarget>) {
+    pub async fn retarget_child_prs(
+        provider: claude_commander_protocol::hosting::CodeHostProvider,
+        retargets: Vec<crate::config::PrBaseRetarget>,
+    ) {
         for r in retargets {
-            crate::git::retarget_pr_base(&r.repo_path, r.pr_number, &r.new_base_branch).await;
+            if let Err(message) = crate::git::hosting::try_retarget_review_base(
+                provider,
+                &r.repo_path,
+                r.pr_number,
+                &r.new_base_branch,
+            )
+            .await
+            {
+                warn!(
+                    "Failed to retarget review #{} to '{}': {}",
+                    r.pr_number, r.new_base_branch, message
+                );
+            }
         }
     }
 }
