@@ -6148,8 +6148,13 @@ async fn fold_backend_states(
 ) {
     app.backend_mut_for_test(id).view.agent_states.states = old_states;
     let snapshot = app.view_for(id).snapshot.clone();
+    let revision = app
+        .backend_mut_for_test(id)
+        .refresh_sequence
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
     app.handle_state_update(StateUpdate::BackendChanged {
-        revision: 0,
+        revision,
         backend_id: id.0,
         snapshot: Box::new(snapshot),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
