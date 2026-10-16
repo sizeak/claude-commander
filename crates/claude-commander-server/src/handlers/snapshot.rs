@@ -40,6 +40,32 @@ pub async fn create_options(State(state): State<AppState>) -> Json<CreateOptions
     Json(state.service.create_options())
 }
 
+/// Stateless projections of the same pure editor used by the native frontends.
+pub async fn session_editor_model(
+    crate::extract::SafeJson(input): crate::extract::SafeJson<
+        claude_commander_protocol::session_editor::SessionEditorInput,
+    >,
+) -> Json<claude_commander_protocol::session_editor::SessionEditorModel> {
+    Json(claude_commander_viewmodel::session_editor::model(
+        &input.session,
+        &input.peers,
+        input.main_branch.as_deref(),
+        input.options.as_ref(),
+    ))
+}
+
+pub async fn plan_session_edit(
+    crate::extract::SafeJson(input): crate::extract::SafeJson<
+        claude_commander_protocol::session_editor::PlanSessionEdit,
+    >,
+) -> Result<Json<claude_commander_protocol::session_editor::SessionEditorPlan>, ApiError> {
+    claude_commander_viewmodel::session_editor::plan(&input.model, input.draft)
+        .map(Json)
+        .map_err(|message| {
+            ApiError(claude_commander_core::error::SessionError::InvalidProgram(message).into())
+        })
+}
+
 /// `POST /pr-refresh` → `request_pr_refresh` → 202. Wakes the server's
 /// background PR-status loop; the refreshed state arrives via a later
 /// `/workspace` poll.

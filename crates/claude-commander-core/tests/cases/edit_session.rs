@@ -1,5 +1,75 @@
 use super::*;
 
+#[tokio::test]
+async fn deferred_program_survives_wake_and_automatic_recreation() {
+    if !tmux_available().await {
+        return;
+    }
+    for hibernate in [false, true] {
+        let (_repo, path) = create_test_repo().await;
+        let state_dir = TempDir::new().unwrap();
+        let worktrees = TempDir::new().unwrap();
+        let config = Config {
+            resume_session: true,
+            worktrees_dir: Some(worktrees.path().into()),
+            ..Config::default()
+        };
+        let config = create_isolated_config_store(&state_dir, config);
+        let store = create_isolated_store(&state_dir);
+        let manager = SessionManager::new(config, store.clone(), "");
+        let project = manager.add_project(path, None).await.unwrap();
+        let id = manager
+            .prepare_session(&project, "wake".into(), Some("sleep 60".into()), None)
+            .await
+            .unwrap();
+        manager.finalize_session(&id, None, None).await.unwrap();
+        let name = store
+            .read()
+            .await
+            .get_session(&id)
+            .unwrap()
+            .tmux_session_name
+            .clone();
+        store
+            .mutate(move |state| {
+                state.get_session_mut(&id).unwrap().pending_program = Some("cat".into())
+            })
+            .await
+            .unwrap();
+        if hibernate {
+            manager.hibernate_session(&id).await.unwrap();
+        } else {
+            manager.tmux.kill_session(&name).await.unwrap();
+        }
+        manager.ensure_attachable(&id).await.unwrap();
+        {
+            let state = store.read().await;
+            let session = state.get_session(&id).unwrap();
+            assert_eq!(
+                session.program, "sleep 60",
+                "wake must preserve the live program"
+            );
+            assert_eq!(session.pending_program.as_deref(), Some("cat"));
+        }
+        manager
+            .restart_session_fresh_by_tmux_name(&name)
+            .await
+            .unwrap();
+        {
+            let state = store.read().await;
+            let session = state.get_session(&id).unwrap();
+            assert_eq!(
+                session.program, "sleep 60",
+                "automatic recreation must not consume a pending change"
+            );
+            assert_eq!(session.pending_program.as_deref(), Some("cat"));
+        }
+        manager.restart_session(&id).await.unwrap();
+        assert_eq!(store.read().await.get_session(&id).unwrap().program, "cat");
+        manager.kill_session(&id, false).await.unwrap();
+    }
+}
+
 /// Saving a different harness keeps the old pane alive; the next restart must
 /// consume the pending command and launch fresh even when resume is enabled.
 #[tokio::test]
@@ -57,10 +127,10 @@ async fn test_edit_session_program_restart_choices() {
             .edit_session(
                 &sid,
                 EditSession {
-                    title: "edited".into(),
-                    program: new_program.clone(),
+                    title: Some("edited".into()),
+                    program: Some(new_program.clone()),
                     section: None,
-                    keep_alive: true,
+                    keep_alive: Some(true),
                     base: None,
                     restart,
                 },

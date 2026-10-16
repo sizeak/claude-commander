@@ -147,27 +147,15 @@ Future<void> restartSession({required String handle, required String id}) =>
 Future<void> deleteSession({required String handle, required String id}) =>
     RustLib.instance.api.crateApiSimpleDeleteSession(handle: handle, id: id);
 
-/// Save all session settings; program changes may wait until the next restart.
+/// Save only the changed fields produced by the shared editor planner.
 Future<String?> editSession({
   required String handle,
   required String id,
-  required String title,
-  required String program,
-  String? section,
-  required bool keepAlive,
-  required bool changeBase,
-  String? parentId,
-  required bool restart,
+  required String patchJson,
 }) => RustLib.instance.api.crateApiSimpleEditSession(
   handle: handle,
   id: id,
-  title: title,
-  program: program,
-  section: section,
-  keepAlive: keepAlive,
-  changeBase: changeBase,
-  parentId: parentId,
-  restart: restart,
+  patchJson: patchJson,
 );
 
 /// Rename a session's title.

@@ -2064,12 +2064,7 @@ impl AppUiState {
         for &action in BindableAction::ALL {
             if matches!(
                 action,
-                BindableAction::RenameSession
-                    | BindableAction::ChangeProgram
-                    | BindableAction::MoveToSection
-                    | BindableAction::ToggleKeepAlive
-                    | BindableAction::SetSessionBase
-                    | BindableAction::NavigateUp
+                BindableAction::NavigateUp
                     | BindableAction::NavigateDown
                     | BindableAction::NextGroup
                     | BindableAction::PreviousGroup
@@ -2763,6 +2758,16 @@ impl App {
             .or_else(|| self.backends.iter().find_map(|h| find_in(&h.view)))
     }
 
+    /// Attach-loop recovery must preserve deferred program changes on every backend.
+    async fn recover_ended_session(
+        &self,
+        session: SessionRef,
+    ) -> claude_commander_core::backend::BResult<()> {
+        self.backend_arc(session.backend)
+            .recover_session_fresh(session.id)
+            .await
+    }
+
     /// Open an attach connection for `target`: through the owning backend for a
     /// session pane (which stamps last-attached and revives a dead tmux
     /// session), or via the local name-based path for the commander / project
@@ -3448,11 +3453,7 @@ impl App {
                                         (auto, &current)
                                     {
                                         consecutive_ends += 1;
-                                        match self
-                                            .backend_arc(session.backend)
-                                            .restart_session_fresh(session.id)
-                                            .await
-                                        {
+                                        match self.recover_ended_session(*session).await {
                                             Ok(()) => {
                                                 info!(
                                                     "Auto-restarted session fresh (attempt {consecutive_ends})"

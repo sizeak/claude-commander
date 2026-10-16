@@ -2180,46 +2180,65 @@ impl CommanderService {
         self.manager.restart_session_fresh(id).await
     }
 
+    /// Recover an exited agent without applying deferred settings.
+    pub async fn recover_session_fresh(&self, id: &SessionId) -> Result<()> {
+        self.manager.recover_session_fresh(id).await
+    }
+
     /// Save session settings, optionally restarting fresh when the program changes.
     /// A pending program never changes live-agent detection or stops the existing pane.
     pub async fn edit_session(
         &self,
         id: &SessionId,
         edit: claude_commander_protocol::api::EditSession,
-    ) -> Result<Option<SetSessionBaseOutcome>> {
-        let title = edit.title.trim().to_string();
-        if title.is_empty() {
+    ) -> Result<claude_commander_protocol::api::EditSessionOutcome> {
+        let title = edit.title.map(|v| v.trim().to_string());
+        if title.as_ref().is_some_and(|v| v.is_empty()) {
             return Err(SessionError::InvalidName {
-                name: title,
+                name: String::new(),
                 reason: "session name cannot be empty".into(),
             }
             .into());
         }
-        let program = edit.program.trim().to_string();
-        if program.is_empty() {
+        let program = edit.program.map(|v| v.trim().to_string());
+        if program.as_ref().is_some_and(|v| v.is_empty()) {
             return Err(SessionError::InvalidProgram("program cannot be empty".into()).into());
         }
-        self.ensure_session_exists(id).await?;
-        let base_outcome = if let Some(base) = edit.base {
-            Some(self.set_session_base(id, base.parent_session_id).await?)
-        } else {
-            None
-        };
+        let _guard = self.review_provider_lock.lock().await;
+        let provider = self.config_store.read().code_host_provider;
         let sections =
             crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let sid = *id;
-        let restart = edit.restart;
-        let pending = self
+        let (base, pending) = self
             .store
             .try_mutate(move |state| {
+                if state.get_session(&sid).is_none() {
+                    return Err(SessionError::NotFound(sid).into());
+                }
+                let base = edit
+                    .base
+                    .map(|base| {
+                        state
+                            .set_session_base(&sid, base.parent_session_id)
+                            .map_err(crate::Error::from)
+                    })
+                    .transpose()?;
                 let session = state
                     .get_session_mut(&sid)
                     .ok_or(SessionError::NotFound(sid))?;
-                session.title = title;
-                session.pending_program = (program != session.program).then_some(program);
-                session.keep_alive = edit.keep_alive;
-                if edit.section != session.section_override {
-                    match edit.section {
+                if let Some(title) = title {
+                    session.title = title;
+                }
+                if let Some(program) = program {
+                    session.pending_program = (program != session.program).then_some(program);
+                }
+                if let Some(keep_alive) = edit.keep_alive {
+                    session.keep_alive = keep_alive;
+                }
+                if let Some(section) = edit.section
+                    && section != session.section_override
+                {
+                    match section {
                         Some(name) => {
                             session.section_override = Some(name);
                             apply_assignment(session, &sections, chrono::Utc::now());
@@ -2229,14 +2248,27 @@ impl CommanderService {
                         }
                     }
                 }
-                Ok::<_, crate::Error>(session.pending_program.is_some())
+                Ok::<_, crate::Error>((base, session.pending_program.is_some()))
             })
             .await?;
         self.telemetry.feature("session.edit");
-        if restart && pending {
-            self.manager.restart_session_fresh(id).await?;
+        let mut outcome = claude_commander_protocol::api::EditSessionOutcome::default();
+        if let Some((plan, retarget)) = base {
+            let base = self.finish_base_change(provider, plan, retarget).await;
+            if let PrRetarget::Failed { message, .. } = &base.pr {
+                outcome.warnings.push(format!(
+                    "Session saved, but PR target update failed: {message}"
+                ));
+            }
+            outcome.base = Some(base);
         }
-        Ok(base_outcome)
+        if edit.restart && pending {
+            match self.manager.restart_session_fresh(id).await {
+                Ok(()) => outcome.restarted = true,
+                Err(error) => outcome.warnings.push(format!("Session saved, but restart failed: {error}. The program change remains pending; retry restart.")),
+            }
+        }
+        Ok(outcome)
     }
 
     /// Move a session to a section (`Some(name)`) or clear its manual override
@@ -2306,6 +2338,15 @@ impl CommanderService {
             })
             .await?;
 
+        Ok(self.finish_base_change(provider, plan, pr_retarget).await)
+    }
+
+    async fn finish_base_change(
+        &self,
+        provider: claude_commander_protocol::hosting::CodeHostProvider,
+        plan: crate::config::storage::SetBasePlan,
+        pr_retarget: Option<crate::config::storage::PrBaseRetarget>,
+    ) -> SetSessionBaseOutcome {
         // Durable half, best-effort. The local mirror already re-stacked the
         // tree, but only this makes it survive the next PR sync — so a failure
         // is reported rather than logged.
@@ -2329,11 +2370,11 @@ impl CommanderService {
             },
         };
 
-        Ok(SetSessionBaseOutcome {
+        SetSessionBaseOutcome {
             new_base_branch: plan.new_base_branch,
             old_base_branch: plan.old_base_branch,
             pr,
-        })
+        }
     }
 
     /// Stamp a session's `last_attached_at` to now, for MRU ordering in the
@@ -5679,16 +5720,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_session_patch_preserves_settings_changed_since_dialog_opened() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        svc.set_section(&sid, Some("Concurrent".into()))
+            .await
+            .unwrap();
+        svc.toggle_keep_alive(&sid).await.unwrap();
+        let edit = serde_json::from_value(serde_json::json!({"title":"renamed"})).unwrap();
+        svc.edit_session(&sid, edit).await.unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "renamed");
+        assert_eq!(session.section_override.as_deref(), Some("Concurrent"));
+        assert!(session.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn edit_session_invalid_base_rolls_back_all_local_settings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        let edit = serde_json::from_value(serde_json::json!({
+            "title":"renamed", "program":"codex", "keep_alive":true,
+            "base":{"parent_session_id":sid}
+        }))
+        .unwrap();
+        assert!(svc.edit_session(&sid, edit).await.is_err());
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "task");
+        assert!(!session.keep_alive);
+        assert!(session.pending_program.is_none());
+        assert!(session.stack_parent_session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_session_restart_failure_reports_saved_settings_and_pending_program() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        // A NUL argument forces subprocess launch to fail before tmux runs.
+        svc.store()
+            .mutate(move |state| {
+                state.get_session_mut(&sid).unwrap().tmux_session_name =
+                    format!("invalid-{sid}\0name");
+            })
+            .await
+            .unwrap();
+        let edit = serde_json::from_value(serde_json::json!({
+            "title":"saved", "program":"codex", "restart":true
+        }))
+        .unwrap();
+        let outcome = svc.edit_session(&sid, edit).await.unwrap();
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| w.contains("restart failed"))
+        );
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "saved");
+        assert_eq!(session.pending_program.as_deref(), Some("codex"));
+    }
+
+    #[tokio::test]
     async fn edit_session_defers_program_without_touching_running_agent() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let (_, sid) = seed_project_session(&svc).await;
         let before = svc.store().read().await.get_session(&sid).unwrap().clone();
         let edit = claude_commander_protocol::api::EditSession {
-            title: " renamed ".into(),
-            program: "codex".into(),
-            section: Some("Review".into()),
-            keep_alive: true,
+            title: Some(" renamed ".into()),
+            program: Some("codex".into()),
+            section: Some(Some("Review".into())),
+            keep_alive: Some(true),
             base: None,
             restart: false,
         };
@@ -5713,10 +5821,10 @@ mod tests {
         let svc = service(&dir);
         let (_, sid) = seed_project_session(&svc).await;
         let edit = claude_commander_protocol::api::EditSession {
-            title: "new name".into(),
-            program: "  ".into(),
+            title: Some("new name".into()),
+            program: Some("  ".into()),
             section: None,
-            keep_alive: true,
+            keep_alive: Some(true),
             base: None,
             restart: false,
         };
@@ -5742,10 +5850,10 @@ mod tests {
             .program
             .clone();
         let mut edit = claude_commander_protocol::api::EditSession {
-            title: "task".into(),
-            program: "codex".into(),
+            title: Some("task".into()),
+            program: Some("codex".into()),
             section: None,
-            keep_alive: false,
+            keep_alive: Some(false),
             base: None,
             restart: false,
         };
@@ -5760,7 +5868,7 @@ mod tests {
                 .as_deref(),
             Some("codex")
         );
-        edit.program = original.clone();
+        edit.program = Some(original.clone());
         // Returning to the running program does not need a restart, even if requested.
         edit.restart = true;
         svc.edit_session(&sid, edit).await.unwrap();
@@ -5802,10 +5910,10 @@ mod tests {
         svc.edit_session(
             &sid,
             claude_commander_protocol::api::EditSession {
-                title: "renamed".into(),
-                program,
+                title: Some("renamed".into()),
+                program: Some(program),
                 section: None,
-                keep_alive: false,
+                keep_alive: Some(false),
                 base: None,
                 restart: false,
             },

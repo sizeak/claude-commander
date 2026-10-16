@@ -529,11 +529,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Restart a session's tmux pane without `--resume`, identified by session
-    /// id. Resolves the tmux name and delegates to
-    /// [`Self::restart_session_fresh_by_tmux_name`]; the attach loop uses this
-    /// (it holds the [`SessionId`], not the tmux name) to give a fresh
-    /// conversation when the agent process exits.
+    /// Explicitly restart without resume, applying any pending program change.
     pub async fn restart_session_fresh(&self, session_id: &SessionId) -> Result<()> {
         let tmux_name = {
             let state = self.store.read().await;
@@ -543,14 +539,28 @@ impl SessionManager {
                 .tmux_session_name
                 .clone()
         };
+        self.recreate_session_fresh(&tmux_name, true).await
+    }
+
+    /// Recover an exited agent without resume, preserving pending settings.
+    pub async fn recover_session_fresh(&self, session_id: &SessionId) -> Result<()> {
+        let tmux_name = self
+            .store
+            .read()
+            .await
+            .get_session(session_id)
+            .ok_or(SessionError::NotFound(*session_id))?
+            .tmux_session_name
+            .clone();
         self.restart_session_fresh_by_tmux_name(&tmux_name).await
     }
 
-    /// Restart a session's tmux pane without `--resume`, identified by tmux
-    /// session name. Used when the process inside the pane exits (e.g. Claude
-    /// had nothing to resume) so the user seamlessly gets a fresh conversation
-    /// instead of being dropped back to the TUI.
+    /// Name-based automatic recovery; deferred programs await an explicit restart.
     pub async fn restart_session_fresh_by_tmux_name(&self, tmux_name: &str) -> Result<()> {
+        self.recreate_session_fresh(tmux_name, false).await
+    }
+
+    async fn recreate_session_fresh(&self, tmux_name: &str, apply_pending: bool) -> Result<()> {
         let (session_id, worktree_path, title, program, status_bar) = {
             let state = self.store.read().await;
             let session = state
@@ -562,11 +572,15 @@ impl SessionManager {
                 session.id,
                 session.worktree_path.clone(),
                 session.title.clone(),
-                session
-                    .pending_program
-                    .as_ref()
-                    .unwrap_or(&session.program)
-                    .clone(),
+                if apply_pending {
+                    session
+                        .pending_program
+                        .as_ref()
+                        .unwrap_or(&session.program)
+                        .clone()
+                } else {
+                    session.program.clone()
+                },
                 self.status_bar_info(session, &state),
             )
         };
@@ -617,7 +631,8 @@ impl SessionManager {
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
                     session.program = program.clone();
-                    if session.pending_program.as_deref() == Some(program.as_str()) {
+                    if apply_pending && session.pending_program.as_deref() == Some(program.as_str())
+                    {
                         session.pending_program = None;
                     }
                     session.set_status(SessionStatus::Running);

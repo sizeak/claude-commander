@@ -1,35 +1,23 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../src/rust/api/mirrors.dart';
+import '../services/session_editor.dart';
+export '../services/session_editor.dart' show SessionEdit;
 
-class SessionEdit {
-  final String title;
-  final String program;
-  final String? section;
-  final bool keepAlive;
-  final bool changeBase;
-  final String? parentId;
-  final bool restart;
-  const SessionEdit({
-    required this.title,
-    required this.program,
-    this.section,
-    required this.keepAlive,
-    required this.changeBase,
-    this.parentId,
-    required this.restart,
-  });
-}
-
-/// Edits launch settings without changing the current process until confirmed.
+/// Renders the shared Rust editor model and submits its changed-field plan.
 class EditSessionDialog extends StatefulWidget {
   final SessionInfo session;
   final List<SessionInfo> peers;
+  final String? mainBranch;
   final Future<CreateOptions> options;
+  final SessionEditorBridge? bridge;
   const EditSessionDialog({
     super.key,
     required this.session,
     required this.peers,
+    this.mainBranch,
     required this.options,
+    this.bridge,
   });
   @override
   State<EditSessionDialog> createState() => _EditSessionDialogState();
@@ -37,47 +25,49 @@ class EditSessionDialog extends StatefulWidget {
 
 class _EditSessionDialogState extends State<EditSessionDialog> {
   final _form = GlobalKey<FormState>();
-  late final _name = TextEditingController(text: widget.session.title);
-  late final _program = TextEditingController(
-    text: widget.session.pendingProgram ?? widget.session.program,
-  );
-  late String? _section = widget.session.sectionOverride;
-  late final String? _originalParent = _currentParent();
-  late String? _parent = _originalParent;
-  String? _currentParent() {
-    final branch = widget.session.prBaseBranch;
-    if (branch != null) {
-      for (final peer in widget.peers) {
-        if (peer.projectId == widget.session.projectId &&
-            peer.id != widget.session.id &&
-            peer.branch == branch) {
-          return peer.id;
-        }
-      }
-      return '__current__';
-    }
-    return widget.session.stackParentSessionId?.field0.toString();
-  }
-
-  late bool _keepAlive = widget.session.keepAlive;
-  CreateOptions? _options;
+  late Map<String, dynamic> _model;
+  late final TextEditingController _name;
+  late String _program;
+  late String? _section;
+  late String _base;
+  late bool _keepAlive;
   bool _confirming = false;
-  String? _optionsError;
+  String? _error;
 
+  SessionEditorBridge get _bridge =>
+      widget.bridge ??
+      debugSessionEditorBridge ??
+      const NativeSessionEditorBridge();
+
+  Map<String, dynamic> _readModel(CreateOptions? options) =>
+      jsonDecode(
+            _bridge.model(
+              widget.session,
+              widget.peers,
+              widget.mainBranch,
+              options,
+            ),
+          )
+          as Map<String, dynamic>;
   @override
   void initState() {
     super.initState();
+    _model = _readModel(null);
+    final original = _model['original'] as Map<String, dynamic>;
+    _name = TextEditingController(text: original['title'] as String);
+    _program = original['program'] as String;
+    _section = original['section'] as String?;
+    _base = original['base'] as String;
+    _keepAlive = original['keep_alive'] as bool;
     widget.options
         .then((options) {
-          if (mounted) {
-            setState(() => _options = options);
-          }
+          if (mounted) setState(() => _model = _readModel(options));
         })
         .catchError((Object error) {
           if (mounted) {
             setState(
-              () => _optionsError =
-                  'Could not load program and section choices. You can still edit the program.',
+              () => _error =
+                  'Could not load program and section choices. Existing settings can still be saved.',
             );
           }
         });
@@ -86,15 +76,33 @@ class _EditSessionDialogState extends State<EditSessionDialog> {
   @override
   void dispose() {
     _name.dispose();
-    _program.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
     if (_confirming || !_form.currentState!.validate()) return;
+    final Map<String, dynamic> plan;
+    try {
+      plan =
+          jsonDecode(
+                _bridge.plan(
+                  jsonEncode(_model),
+                  jsonEncode({
+                    'title': _name.text,
+                    'program': _program,
+                    'section': _section,
+                    'base': _base,
+                    'keep_alive': _keepAlive,
+                  }),
+                ),
+              )
+              as Map<String, dynamic>;
+    } catch (error) {
+      setState(() => _error = error.toString());
+      return;
+    }
     var restart = false;
-    if (_program.text.trim() !=
-        (widget.session.pendingProgram ?? widget.session.program)) {
+    if (plan['requires_restart'] as bool) {
       setState(() => _confirming = true);
       final choice = await showDialog<bool>(
         context: context,
@@ -125,174 +133,108 @@ class _EditSessionDialogState extends State<EditSessionDialog> {
       restart = choice;
     }
     if (!mounted) return;
-    Navigator.pop(
-      context,
-      SessionEdit(
-        title: _name.text.trim(),
-        program: _program.text.trim(),
-        section: _section,
-        keepAlive: _keepAlive,
-        changeBase: _parent != _originalParent,
-        parentId: _parent == "__current__" ? null : _parent,
-        restart: restart,
-      ),
-    );
-  }
-
-  String? _required(String? value) =>
-      value == null || value.trim().isEmpty ? 'Required' : null;
-
-  Widget _programField() {
-    if (_options == null && _optionsError == null) {
-      return const InputDecorator(
-        decoration: InputDecoration(labelText: 'Program'),
-        child: Text('Loading…'),
-      );
-    }
-    final configured = _options?.programs ?? const <ProgramInfo>[];
-    if (configured.isEmpty) {
-      return TextFormField(
-        controller: _program,
-        decoration: const InputDecoration(labelText: 'Program'),
-        validator: _required,
-      );
-    }
-    final choices = <String, ProgramInfo>{};
-    for (final program in configured) {
-      choices.putIfAbsent(program.command, () => program);
-    }
-    // Keep the live command available to cancel a pending change.
-    for (final command in {
-      widget.session.program,
-      ?widget.session.pendingProgram,
-    }) {
-      choices.putIfAbsent(
-        command,
-        () => ProgramInfo(label: command, command: command),
-      );
-    }
-    return DropdownButtonFormField<String>(
-      isExpanded: true,
-      initialValue: _program.text,
-      decoration: const InputDecoration(labelText: 'Program'),
-      items: [
-        for (final program in choices.values)
-          DropdownMenuItem(
-            value: program.command,
-            child: Text(program.label, overflow: TextOverflow.ellipsis),
-          ),
-      ],
-      validator: _required,
-      onChanged: (value) {
-        if (value != null) setState(() => _program.text = value);
-      },
-    );
+    final patch = plan['edit'] as Map<String, dynamic>;
+    patch['restart'] = restart;
+    Navigator.pop(context, SessionEdit(jsonEncode(patch)));
   }
 
   @override
-  Widget build(BuildContext context) {
-    final sections = <String>{?_section, ...?_options?.sections};
-    final parents = widget.peers
-        .where(
-          (s) =>
-              s.projectId == widget.session.projectId &&
-              s.id != widget.session.id,
-        )
-        .toList();
-    return AlertDialog(
-      title: const Text('Edit session'),
-      content: SizedBox(
-        width: 460,
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Edit session'),
+    content: SizedBox(
+      width: 460,
+      child: Form(
+        key: _form,
         child: SingleChildScrollView(
-          child: Form(
-            key: _form,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextFormField(
-                  controller: _name,
-                  autofocus: true,
-                  decoration: const InputDecoration(labelText: 'Session name'),
-                  validator: _required,
-                ),
-                _programField(),
-                DropdownButtonFormField<String>(
-                  isExpanded: true,
-                  initialValue: _section ?? '',
-                  decoration: const InputDecoration(labelText: 'Section'),
-                  items: [
-                    const DropdownMenuItem(value: '', child: Text('Automatic')),
-                    for (final s in sections)
-                      DropdownMenuItem(
-                        value: s,
-                        child: Text(s, overflow: TextOverflow.ellipsis),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: _name,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Session name'),
+                validator: (v) =>
+                    v == null || v.trim().isEmpty ? 'Required' : null,
+              ),
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                initialValue: _program,
+                decoration: const InputDecoration(labelText: 'Program'),
+                items: [
+                  for (final p in _model['programs'] as List)
+                    DropdownMenuItem(
+                      value: p['command'] as String,
+                      child: Text(
+                        p['label'] as String,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                  ],
-                  onChanged: (value) =>
-                      setState(() => _section = value == '' ? null : value),
-                ),
-                DropdownButtonFormField<String>(
-                  isExpanded: true,
-                  initialValue: _parent ?? '',
-                  decoration: const InputDecoration(labelText: 'Stack base'),
-                  items: [
-                    const DropdownMenuItem(
-                      value: '',
-                      child: Text('Project base'),
                     ),
-                    if (_originalParent == '__current__' ||
-                        (_originalParent != null &&
-                            !parents.any((p) => p.id == _originalParent)))
-                      DropdownMenuItem(
-                        value: _originalParent,
-                        child: Text(
-                          'Current base (${widget.session.prBaseBranch ?? 'session unavailable'})',
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                ],
+                onChanged: (value) {
+                  if (value != null) setState(() => _program = value);
+                },
+              ),
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                initialValue: _section ?? '',
+                decoration: const InputDecoration(labelText: 'Section'),
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('Automatic')),
+                  for (final s in _model['sections'] as List)
+                    DropdownMenuItem(
+                      value: s as String,
+                      child: Text(s, overflow: TextOverflow.ellipsis),
+                    ),
+                ],
+                onChanged: (value) =>
+                    setState(() => _section = value == '' ? null : value),
+              ),
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                initialValue: _base,
+                decoration: const InputDecoration(labelText: 'Stack base'),
+                items: [
+                  for (final b in _model['bases'] as List)
+                    DropdownMenuItem(
+                      value: b['id'] as String,
+                      child: Text(
+                        b['label'] as String,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                    for (final p in parents)
-                      DropdownMenuItem(
-                        value: p.id,
-                        child: Text(
-                          '${p.title} (${p.branch})',
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                  onChanged: (value) =>
-                      setState(() => _parent = value == '' ? null : value),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value != null) setState(() => _base = value);
+                },
+              ),
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'Stack base changes metadata and the PR target. Git history is unchanged.',
                 ),
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Text(
-                    'Stack base changes metadata and the PR target. Git history is unchanged.',
-                  ),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Keep alive'),
-                  subtitle: const Text('Prevent automatic hibernation'),
-                  value: _keepAlive,
-                  onChanged: (value) => setState(() => _keepAlive = value),
-                ),
-                if (_optionsError != null) Text(_optionsError!),
-              ],
-            ),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Keep alive'),
+                subtitle: const Text('Prevent automatic hibernation'),
+                value: _keepAlive,
+                onChanged: (value) => setState(() => _keepAlive = value),
+              ),
+              if (_error != null) Text(_error!),
+            ],
           ),
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: _confirming ? null : () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: _confirming || (_options == null && _optionsError == null)
-              ? null
-              : _save,
-          child: const Text('Save'),
-        ),
-      ],
-    );
-  }
+    ),
+    actions: [
+      TextButton(
+        onPressed: _confirming ? null : () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: _confirming ? null : _save,
+        child: const Text('Save'),
+      ),
+    ],
+  );
 }

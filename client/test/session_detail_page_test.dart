@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:claude_commander_client/services/session_editor.dart';
+import 'support/fake_session_editor.dart';
 
 import 'package:claude_commander_client/pages/review_page.dart';
 import 'package:claude_commander_client/pages/session_detail_page.dart';
@@ -297,109 +300,30 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
   });
 
-  testWidgets(
-    'edit session prefills settings and saves metadata without restart',
-    (tester) async {
-      final info = sessionInfo(title: 'Old', status: SessionStatus.running);
-      api.getSessionDetailResponse = sessionDetail(info: info);
-      await pump(tester, info);
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Edit session'));
-      await tester.pumpAndSettle();
-      expect(find.widgetWithText(TextFormField, 'Old'), findsOneWidget);
-      await tester.enterText(
-        find.widgetWithText(TextFormField, 'Session name'),
-        'New name',
-      );
-      await tester.tap(find.byType(SwitchListTile));
-      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
-      await tester.pumpAndSettle();
-      expect(api.countOf('editSession'), 1);
-      final args = api.lastCall('editSession')!.args;
-      expect(args['title'], 'New name');
-      expect(args['program'], info.program);
-      expect(args['keepAlive'], true);
-      expect(args['restart'], false);
-      expect(args['changeBase'], false);
-    },
-  );
-
-  testWidgets(
-    'editor prefills pending program without changing live agent settings',
-    (tester) async {
-      final info = sessionInfo(program: 'claude', pendingProgram: 'codex');
-      api.getSessionDetailResponse = sessionDetail(info: info);
-      await pump(tester, info);
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Edit session'));
-      await tester.pumpAndSettle();
-      expect(find.widgetWithText(TextFormField, 'codex'), findsOneWidget);
-      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
-      await tester.pumpAndSettle();
-      expect(find.text('Restart session?'), findsNothing);
-      final args = api.lastCall('editSession')!.args;
-      expect(args['program'], 'codex');
-      expect(args['restart'], false);
-    },
-  );
-
-  for (final restart in [false, true]) {
-    testWidgets('program change confirms restart=$restart before saving', (
-      tester,
-    ) async {
-      final info = sessionInfo(status: SessionStatus.running);
-      api.getSessionDetailResponse = sessionDetail(info: info);
-      await pump(tester, info);
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Edit session'));
-      await tester.pumpAndSettle();
-      await tester.enterText(
-        find.widgetWithText(TextFormField, 'Program'),
-        'codex',
-      );
-      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
-      await tester.pumpAndSettle();
-      expect(find.text('Restart session?'), findsOneWidget);
-      expect(api.countOf('editSession'), 0);
-      await tester.tap(
-        find.text(
-          restart ? 'Yes, restart and clear' : 'No, save for next restart',
-        ),
-      );
-      await tester.pumpAndSettle();
-      final args = api.lastCall('editSession')!.args;
-      expect(args['program'], 'codex');
-      expect(args['restart'], restart);
-    });
-  }
-
-  testWidgets(
-    'back from restart warning keeps edits and cancellation saves nothing',
-    (tester) async {
-      final info = sessionInfo(status: SessionStatus.running);
-      api.getSessionDetailResponse = sessionDetail(info: info);
-      await pump(tester, info);
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Edit session'));
-      await tester.pumpAndSettle();
-      await tester.enterText(
-        find.widgetWithText(TextFormField, 'Program'),
-        'codex',
-      );
-      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Back'));
-      await tester.pumpAndSettle();
-      expect(find.widgetWithText(TextFormField, 'codex'), findsOneWidget);
-      await tester.tap(find.text('Cancel'));
-      await tester.pumpAndSettle();
-      expect(api.countOf('editSession'), 0);
-    },
-  );
+  testWidgets('editor forwards the shared changed-field plan', (tester) async {
+    final bridge = FakeSessionEditorBridge();
+    debugSessionEditorBridge = bridge;
+    addTearDown(() => debugSessionEditorBridge = null);
+    final info = sessionInfo(title: 'Old', status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit session'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Session name'),
+      'New name',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pumpAndSettle();
+    expect(bridge.lastDraft!['title'], 'New name');
+    expect(api.countOf('editSession'), 1);
+    expect(
+      jsonDecode(api.lastCall('editSession')!.args['patchJson'] as String),
+      {'title': 'New name', 'restart': false},
+    );
+  });
 
   testWidgets('opening an unread session marks it read once', (tester) async {
     final info = sessionInfo(unread: true);

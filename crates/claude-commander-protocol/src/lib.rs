@@ -41,3 +41,5 @@ mod ts_export;
 pub const CHANGE_WAIT_SECS: u64 = 20;
 
 pub mod preview;
+
+pub mod session_editor;

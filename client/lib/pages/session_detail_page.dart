@@ -373,6 +373,10 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
       builder: (_) => EditSessionDialog(
         session: info,
         peers: store.sessions,
+        mainBranch: store.projects
+            .where((p) => p.id == info.projectId)
+            .firstOrNull
+            ?.mainBranch,
         options: store.api.createOptions(handle: store.handle!),
       ),
     );
@@ -380,16 +384,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     String? warning;
     await _mutate(
       () async {
-        warning = await store.editSession(
-          _id,
-          title: edit.title,
-          program: edit.program,
-          section: edit.section,
-          keepAlive: edit.keepAlive,
-          changeBase: edit.changeBase,
-          parentId: edit.parentId,
-          restart: edit.restart,
-        );
+        warning = await store.editSession(_id, patchJson: edit.patchJson);
       },
       'Session updated',
       successMessage: () => warning,

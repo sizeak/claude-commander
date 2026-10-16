@@ -32,9 +32,9 @@ pub struct SessionInfo {
     pub title: String,
     pub branch: String,
     pub status: SessionStatus,
-    // Program used by the current agent pane.
+    /// Program used by the current agent pane.
     pub program: String,
-    // Program saved for the next fresh restart, if different from the live one.
+    /// Program saved for the next fresh restart, if different from the live one.
     #[serde(default)]
     pub pending_program: Option<String>,
     pub project_id: ProjectId,
@@ -591,17 +591,42 @@ pub struct ChangeProgram {
 
 /// All editable session settings. Omit `base` to preserve the current stack base.
 /// Program changes can be saved for the next restart, or launched fresh now.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EditSession {
-    pub title: String,
-    pub program: String,
-    pub section: Option<String>,
-    pub keep_alive: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// Missing preserves the assignment; null clears the manual override.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "edit_section"
+    )]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub section: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<SetSessionBase>,
     #[serde(default)]
     pub restart: bool,
+}
+
+fn edit_section<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+/// Local settings are saved before best-effort external operations run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EditSessionOutcome {
+    pub restarted: bool,
+    pub base: Option<SetSessionBaseOutcome>,
+    pub warnings: Vec<String>,
 }
 
 /// `PATCH /sessions/{id}` body: rename a session, move it to a section
