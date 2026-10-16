@@ -150,7 +150,10 @@ fn constants_ts() -> String {
     format!(
         "{GENERATED_HEADER}import type {{ SessionId }} from \"./SessionId\";\n\
          \n\
-         /** `ServerControl.error` message for a rejected auth token (`ws::WS_ERR_AUTH`). */\n\
+         /** Server change-wait budget in seconds. */\n\
+export const CHANGE_WAIT_SECS = {change_wait};\n\
+\n\
+/** `ServerControl.error` message for a rejected auth token (`ws::WS_ERR_AUTH`). */\n\
          export const WS_ERR_AUTH = {auth};\n\
          \n\
          /** `ServerControl.error` message for an attach to an unknown session (`ws::WS_ERR_NO_SESSION`). */\n\
@@ -162,6 +165,7 @@ fn constants_ts() -> String {
          * rendering per-session rows.\n \
          */\n\
          export const COMMANDER_SENTINEL_ID: SessionId = {sentinel};\n",
+        change_wait = crate::CHANGE_WAIT_SECS,
         auth = ts_string(ws::WS_ERR_AUTH),
         no_session = ts_string(ws::WS_ERR_NO_SESSION),
     )

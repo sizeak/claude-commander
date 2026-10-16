@@ -314,6 +314,8 @@ class FakeCommanderApi implements CommanderApi {
   /// [onSnapshot] runs, so a hook can arm the gate for the *next* fetch
   /// without parking its own.
   Completer<void>? snapshotGate;
+  final snapshotGates = <String, Completer<void>>{};
+  final snapshotErrors = <String, Object>{};
 
   /// Called on every [snapshot] — the seam for a test that needs
   /// something to happen *while* a refresh is in flight (e.g. [emitChange],
@@ -324,6 +326,8 @@ class FakeCommanderApi implements CommanderApi {
   Future<SnapshotDto> snapshot({required String handle}) async {
     _record('snapshot', {'handle': handle});
     if (snapshotGate != null) await snapshotGate!.future;
+    await snapshotGates[handle]?.future;
+    if (snapshotErrors[handle] case final error?) throw error;
     onSnapshot?.call();
     if (snapshotError != null) throw snapshotError!;
     return snapshotResponse;
