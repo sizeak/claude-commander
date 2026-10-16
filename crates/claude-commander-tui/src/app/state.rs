@@ -6,11 +6,61 @@ use std::collections::BTreeMap;
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
         match update {
+            StateUpdate::ActionFinished {
+                backend_id,
+                message,
+            } => {
+                match message {
+                    Ok(text) => {
+                        self.ui_state.status_message =
+                            Some((text, Instant::now() + Duration::from_secs(3)))
+                    }
+                    Err(message) => {
+                        if matches!(self.ui_state.modal, Modal::None) {
+                            self.ui_state.modal = Modal::Error { message };
+                        } else {
+                            self.ui_state.status_message =
+                                Some((message, Instant::now() + Duration::from_secs(10)));
+                        }
+                    }
+                }
+                self.spawn_backend_view_refresh(BackendId(backend_id));
+            }
+            StateUpdate::ViewedAgentStatesUpdated {
+                backend_id,
+                revision,
+                states,
+            } => {
+                let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) else {
+                    return;
+                };
+                if revision < handle.agent_states_revision {
+                    return;
+                }
+                handle.agent_states_revision = revision;
+                apply_viewed_session_refresh(&mut handle.view.agent_states.states, states.clone());
+                if handle.id == LOCAL_BACKEND_ID {
+                    apply_viewed_session_refresh(&mut self.ui_state.agent_states, states);
+                }
+                self.refresh_list_items().await;
+            }
             StateUpdate::BackendChanged {
+                revision,
                 backend_id,
                 snapshot,
                 states,
             } => {
+                let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) else {
+                    return;
+                };
+                if revision < handle.view_revision {
+                    return;
+                }
+                handle.view_revision = revision;
+                let states_are_current = revision >= handle.agent_states_revision;
+                if states_are_current {
+                    handle.agent_states_revision = revision;
+                }
                 let states = *states;
                 let is_local = backend_id == claude_commander_core::backend::LOCAL_BACKEND_ID.0;
                 // Diff the OLD agent states (before we overwrite them) against
@@ -23,7 +73,9 @@ impl App {
                 // own per-backend `view.agent_states` captured here before the
                 // fold below overwrites them. Either way `spawn_review_refresh`
                 // routes to the session's owning backend.
-                let review_refresh = if is_local {
+                let review_refresh = if !states_are_current {
+                    None
+                } else if is_local {
                     self.review_refresh_on_transition(&self.ui_state.agent_states, &states.states)
                 } else {
                     self.backends
@@ -35,7 +87,9 @@ impl App {
 
                 if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
                     handle.view.snapshot = *snapshot;
-                    handle.view.agent_states = states.clone();
+                    if states_are_current {
+                        handle.view.agent_states = states.clone();
+                    }
                     // The local backend's connection derives from the snapshot's
                     // tmux health; a remote backend's is owned by its
                     // connection-watch task, so a fold must not touch it.
@@ -50,7 +104,7 @@ impl App {
                 // commander chip, and the project-pull badges (folded out of the
                 // snapshot the poll loops maintain). Single-backend this phase;
                 // Phase E merges every backend's states into one tree.
-                if is_local {
+                if is_local && states_are_current {
                     self.ui_state.agent_states = states.states;
                     self.ui_state.commander_running = states.commander_running;
                 }
@@ -67,7 +121,35 @@ impl App {
                 // this a remote's pending markers would never render and a
                 // cross-frontend marker change would never propagate.
                 self.refresh_comment_indicators();
+                if let Some(created) = self.ui_state.pending_created
+                    && created.backend.0 == backend_id
+                    && self
+                        .view_for(created.backend)
+                        .snapshot
+                        .sessions
+                        .iter()
+                        .any(|s| s.session_id == created.id)
+                {
+                    self.ui_state.pending_created = None;
+                    self.spawn_lfs_pull(created.id).await;
+                }
+                // Insert LFS badges before rebuilding the rows for the first paint.
                 self.refresh_list_items().await;
+                if let Some((backend, project)) = self.ui_state.pending_project
+                    && backend.0 == backend_id
+                {
+                    self.ui_state.pending_project = None;
+                    self.select_project_in_sidebar(project);
+                }
+                if let Some(selection) = self.ui_state.pending_selection
+                    && selection.backend.0 == backend_id
+                {
+                    self.ui_state.pending_selection = None;
+                    if self.select_session_in_tree(selection.id) {
+                        self.ui_state.preview_update_spawned_at = None;
+                        self.spawn_preview_update();
+                    }
+                }
             }
             StateUpdate::BackendConnection { backend_id, state } => {
                 if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
@@ -106,7 +188,8 @@ impl App {
                 // and a result for a selection that moved on *without* a
                 // respawn still has to release its own, or the next fetch is
                 // blocked until the 5s backstop.
-                if self.ui_state.preview_update_spawned_at == Some(spawned_at) {
+                let owns_fetch = self.ui_state.preview_update_spawned_at == Some(spawned_at);
+                if owns_fetch {
                     self.ui_state.preview_update_spawned_at = None;
                 }
                 // Only paint if the same thing is still selected — otherwise the
@@ -115,7 +198,7 @@ impl App {
                 // enough.
                 let still_selected = self.ui_state.selected_session_id.map(|r| r.id) == session_id
                     && self.ui_state.selected_project_id.map(|(_, p)| p) == project_id;
-                if still_selected {
+                if owns_fetch && still_selected {
                     self.ui_state.preview_content = preview_content;
                     self.ui_state.shell_content = shell_content;
                     self.ui_state.diff_info = diff_info;
@@ -169,28 +252,23 @@ impl App {
             } => {
                 debug!("Session created: {}", session_id);
                 let backend_id = BackendId(backend_id);
+                let Some(handle) = self.backends.iter().find(|h| h.id == backend_id) else {
+                    return;
+                };
+                let sequence = handle.refresh_sequence.clone();
                 self.ui_state.modal = Modal::None;
                 self.ui_state.status_message = Some((
                     format!("Created session {}", session_id),
                     Instant::now() + Duration::from_secs(3),
                 ));
-                // Reconcile the section on (and refresh the view of) the OWNING
-                // backend — not always the local one — so the new row is present
-                // in that backend's cached view before we try to select it.
-                // Selecting before the view carried the session was the bug that
-                // left a remote create half-landed (no reconcile, no selection).
-                self.reconcile_one_section_assignment(backend_id, session_id)
-                    .await;
-                // Materialise LFS content in the background (worktree was
-                // created with smudging skipped). Inserts into lfs_pull_in_flight
-                // before the refresh below so the marker shows on first paint.
-                // Self-guards to local sessions (remote worktrees are
-                // server-side; the id won't resolve in the local view).
-                self.spawn_lfs_pull(session_id).await;
-                self.refresh_list_items().await;
-                // Select the newly created session
-                self.select_session_in_tree(session_id);
-                self.spawn_preview_update();
+                self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+                self.ui_state.pending_created = Some(SessionRef::new(backend_id, session_id));
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let _ = backend.reconcile_one_section(session_id).await;
+                    super::fetch_and_send_backend_change(sequence, backend_id.0, backend, tx).await;
+                });
             }
             StateUpdate::SessionCreateFailed { message } => {
                 debug!("Session creation failed: {}", message);
@@ -291,8 +369,8 @@ impl App {
                     "Added project".to_string(),
                     Instant::now() + Duration::from_secs(4),
                 ));
-                self.refresh_backend_view(BackendId(backend_id)).await;
-                self.refresh_list_items().await;
+                self.ui_state.pending_project = Some((BackendId(backend_id), project_id));
+                self.spawn_backend_view_refresh(BackendId(backend_id));
             }
             StateUpdate::GithubReposLoaded {
                 backend_id,
@@ -365,15 +443,12 @@ impl App {
                 backend_id,
                 session_id,
             } => {
-                self.refresh_backend_view(BackendId(backend_id)).await;
-                self.refresh_list_items().await;
-                // The session may have moved position (rename re-sorts, a section
-                // move relocates it); keep it selected and refresh the Info
-                // modal's diff if it is open.
-                if self.select_session_in_tree(session_id) {
-                    self.ui_state.preview_update_spawned_at = None;
-                    self.spawn_preview_update();
+                let backend_id = BackendId(backend_id);
+                if !self.backends.iter().any(|h| h.id == backend_id) {
+                    return;
                 }
+                self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+                self.spawn_backend_view_refresh(backend_id);
             }
             StateUpdate::NewSessionProgramsLoaded {
                 project_id,
@@ -725,21 +800,6 @@ impl App {
     pub(super) async fn reconcile_section_assignments(&mut self) {
         let _ = self.local_arc().reconcile_sections().await;
         self.refresh_local_view().await;
-    }
-
-    /// Re-run section assignment for a single freshly created session on the
-    /// backend that owns it, then refresh that backend's cached view so the new
-    /// (possibly re-sectioned) row is present before the caller selects it.
-    pub(super) async fn reconcile_one_section_assignment(
-        &mut self,
-        backend_id: BackendId,
-        session_id: SessionId,
-    ) {
-        let _ = self
-            .backend_arc(backend_id)
-            .reconcile_one_section(session_id)
-            .await;
-        self.refresh_backend_view(backend_id).await;
     }
 
     pub(super) async fn refresh_list_items(&mut self) {

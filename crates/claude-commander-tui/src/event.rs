@@ -97,6 +97,10 @@ pub enum StateUpdate {
     SessionRemoved { session_id: SessionId },
     /// Error occurred
     Error { message: String },
+    ActionFinished {
+        backend_id: usize,
+        message: Result<String, String>,
+    },
     /// Session creation completed successfully
     SessionCreated {
         session_id: SessionId,
@@ -139,9 +143,16 @@ pub enum StateUpdate {
     /// [`BackendView`](claude_commander_core::backend::BackendView). `backend_id` indexes the
     /// TUI's `Vec<BackendHandle>`.
     BackendChanged {
+        revision: u64,
         backend_id: usize,
         snapshot: Box<claude_commander_core::api::Snapshot>,
         states: Box<claude_commander_core::api::AgentStatesSnapshot>,
+    },
+    /// Fresh detection after detach, limited to sessions actually viewed.
+    ViewedAgentStatesUpdated {
+        backend_id: usize,
+        revision: u64,
+        states: std::collections::BTreeMap<SessionId, claude_commander_core::session::AgentState>,
     },
     /// A backend's connection health changed (a remote server's poller moved
     /// between Connecting/Connected/Degraded). Folded into that backend's

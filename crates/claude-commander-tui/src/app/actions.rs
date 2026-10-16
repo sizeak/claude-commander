@@ -796,6 +796,23 @@ impl App {
         });
     }
 
+    fn spawn_add_local_project(&self, path: PathBuf, workspace: Option<String>) {
+        let backend = self.local_arc();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let update = match backend.add_project(path, workspace).await {
+                Ok(project_id) => StateUpdate::ProjectAdded {
+                    backend_id: LOCAL_BACKEND_ID.0,
+                    project_id,
+                },
+                Err(error) => StateUpdate::Error {
+                    message: format!("Failed to add project: {error}"),
+                },
+            };
+            let _ = tx.send(AppEvent::StateUpdate(update)).await;
+        });
+    }
+
     pub(super) async fn handle_new_session(&mut self) {
         if let Some((backend, project_id)) = self.ui_state.selected_project_id {
             let repo_path = self
@@ -1681,28 +1698,27 @@ impl App {
         let Some(session_id) = self.ui_state.selected_session_id else {
             return;
         };
-        match self
-            .backend_arc(session_id.backend)
-            .toggle_keep_alive(session_id.id)
-            .await
-        {
-            Ok(keep_alive) => {
-                let msg = if keep_alive {
-                    "Keep-alive on — session won't auto-hibernate"
-                } else {
-                    "Keep-alive off — idle session may auto-hibernate"
-                };
-                self.ui_state.status_message =
-                    Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
-                self.refresh_list_items().await;
-            }
-            Err(e) => {
-                self.ui_state.status_message = Some((
-                    format!("Failed to toggle keep-alive: {e}"),
-                    Instant::now() + Duration::from_secs(3),
-                ));
-            }
-        }
+        let backend = self.backend_arc(session_id.backend);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let message = backend
+                .toggle_keep_alive(session_id.id)
+                .await
+                .map(|keep_alive| {
+                    if keep_alive {
+                        "Keep-alive on — session won't auto-hibernate".to_string()
+                    } else {
+                        "Keep-alive off — idle session may auto-hibernate".to_string()
+                    }
+                })
+                .map_err(|e| format!("Failed to toggle keep-alive: {e}"));
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ActionFinished {
+                    backend_id: session_id.backend.0,
+                    message,
+                }))
+                .await;
+        });
     }
 
     /// Handle delete session - show confirmation
@@ -2086,8 +2102,8 @@ impl App {
         session_id: SessionId,
         result: std::result::Result<claude_commander_core::api::SetSessionBaseOutcome, String>,
     ) {
-        self.refresh_backend_view(backend_id).await;
-        self.refresh_list_items().await;
+        self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+        self.spawn_backend_view_refresh(backend_id);
         if self.select_session_in_tree(session_id) {
             self.ui_state.preview_update_spawned_at = None;
             self.spawn_preview_update();
@@ -2472,8 +2488,7 @@ impl App {
             }
             CloneStatus::Succeeded { .. } => {
                 self.ui_state.status_message = toast(format!("Cloned {}", job.source_label));
-                self.refresh_backend_view(backend_id).await;
-                self.refresh_list_items().await;
+                self.spawn_backend_view_refresh(backend_id);
             }
             CloneStatus::Failed { message } => {
                 self.ui_state.status_message = None;
@@ -2864,23 +2879,7 @@ impl App {
                 // backend. Remote add-project routing is deferred until there's
                 // a server-side path completer to pick a remote path with.
                 let workspace = self.active_workspace();
-                match self.local_arc().add_project(path, workspace).await {
-                    Ok(project_id) => {
-                        self.ui_state.status_message = Some((
-                            format!("Added project {}", project_id),
-                            Instant::now() + Duration::from_secs(3),
-                        ));
-                        self.refresh_local_view().await;
-                        self.refresh_list_items().await;
-                        // Select the newly added project in the sidebar.
-                        self.select_project_in_sidebar(project_id);
-                    }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to add project: {}", e),
-                        };
-                    }
-                }
+                self.spawn_add_local_project(path, workspace);
             }
             InputAction::RenameSession { session_id } => {
                 let new_title = value.trim().to_string();
@@ -2910,85 +2909,48 @@ impl App {
             InputAction::ScanDirectory => {
                 let expanded = crate::path_completer::expand_tilde(value.trim());
                 let path = PathBuf::from(expanded);
-                if !path.exists() {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Path does not exist: {}", path.display()),
-                    };
-                    return;
-                }
                 if !path.is_dir() {
                     self.ui_state.modal = Modal::Error {
                         message: format!("Not a directory: {}", path.display()),
                     };
                     return;
                 }
-
-                // If the path itself is a git repo, just add it directly
+                let workspace = self.active_workspace();
                 if path.join(".git").exists() {
-                    let workspace = self.active_workspace();
-                    match self.local_arc().add_project(path, workspace).await {
-                        Ok(project_id) => {
-                            self.ui_state.status_message = Some((
-                                format!("Added project {}", project_id),
-                                Instant::now() + Duration::from_secs(3),
-                            ));
-                            self.refresh_local_view().await;
-                            self.refresh_list_items().await;
-                            self.select_project_in_sidebar(project_id);
-                        }
-                        Err(e) => {
-                            self.ui_state.modal = Modal::Error {
-                                message: format!("Failed to add project: {}", e),
-                            };
-                        }
-                    }
+                    self.spawn_add_local_project(path, workspace);
                     return;
                 }
-
-                // Show loading modal
-                self.ui_state.modal = Modal::Loading {
-                    title: "Scanning".to_string(),
-                    message: format!("Scanning {} for git repos…", path.display()),
-                    hint: None,
-                };
-
-                // Local-only this phase for the same reason as add-project above:
-                // the scanned directory is a local filesystem path. Remote
-                // scan/add routing is deferred until a server-side path picker
-                // exists. What it registers lands in the workspace being looked
-                // at, as a single add does.
-                let workspace = self.active_workspace();
-                match self
-                    .local_arc()
-                    .scan_directory(path.clone(), workspace)
-                    .await
-                {
-                    Ok(result) => {
-                        if result.added == 0 && result.skipped == 0 {
-                            self.ui_state.modal = Modal::Error {
-                                message: format!("No git repositories found in {}", path.display()),
-                            };
-                        } else {
-                            self.ui_state.modal = Modal::None;
-                            self.ui_state.status_message = Some((
-                                format!(
-                                    "Added {} project{} ({} already existed)",
+                self.ui_state.modal = Modal::None;
+                self.ui_state.status_message = Some((
+                    format!("Scanning {} for git repos…", path.display()),
+                    Instant::now() + Duration::from_secs(30),
+                ));
+                let backend = self.local_arc();
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let message = backend
+                        .scan_directory(path.clone(), workspace)
+                        .await
+                        .map_err(|e| format!("Failed to scan directory: {e}"))
+                        .and_then(|result| {
+                            if result.added == 0 && result.skipped == 0 {
+                                Err(format!("No git repositories found in {}", path.display()))
+                            } else {
+                                Ok(format!(
+                                    "Added {} project{}, skipped {} existing",
                                     result.added,
                                     if result.added == 1 { "" } else { "s" },
-                                    result.skipped,
-                                ),
-                                Instant::now() + Duration::from_secs(5),
-                            ));
-                            self.refresh_local_view().await;
-                            self.refresh_list_items().await;
-                        }
-                    }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Scan failed: {}", e),
-                        };
-                    }
-                }
+                                    result.skipped
+                                ))
+                            }
+                        });
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::ActionFinished {
+                            backend_id: LOCAL_BACKEND_ID.0,
+                            message,
+                        }))
+                        .await;
+                });
             }
             InputAction::AddRemoteServerName => {
                 let name = value.trim().to_string();

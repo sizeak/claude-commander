@@ -16,7 +16,7 @@ impl App {
     /// Whether an Info surface is currently showing: the `i` modal, or the list
     /// views' right-pane Info tab. The enriched-PR and AI-summary fetches feed
     /// only those, so they are gated on this.
-    fn is_info_open(&self) -> bool {
+    pub(super) fn is_info_open(&self) -> bool {
         matches!(self.ui_state.modal, Modal::Info { .. }) || self.is_info_tab_showing()
     }
 
@@ -36,9 +36,7 @@ impl App {
     /// Spawn a background fetch of the selected session's (or project's) pane
     /// capture, shell capture and working-tree diff.
     ///
-    /// One `backend.preview()` round trip serves every consumer — the right
-    /// pane's Preview/Shell tabs and the Info modal's diffstat — so this is not
-    /// split per surface. Gated on something actually showing that data, and
+    /// Only acquire the resource used by the visible surface. Gated on something actually showing that data, and
     /// guarded by a 5s in-flight window so a slow backend can't queue fetches.
     /// The fetch goes through the backend trait, so a remote session's content
     /// arrives over the wire. Results arrive as [`StateUpdate::PreviewReady`].
@@ -68,9 +66,38 @@ impl App {
         let spawned_at = Instant::now();
         self.ui_state.preview_update_spawned_at = Some(spawned_at);
 
-        tokio::spawn(async move {
+        use claude_commander_protocol::preview::PreviewPart;
+        let part = if self.is_info_open() || self.ui_state.right_pane_view == RightPaneView::Info {
+            PreviewPart::Stats
+        } else if self.ui_state.right_pane_view == RightPaneView::Shell || session_id.is_none() {
+            PreviewPart::Shell
+        } else {
+            PreviewPart::Pane
+        };
+        let old_pane = self.ui_state.preview_content.clone();
+        let old_shell = self.ui_state.shell_content.clone();
+        let old_diff = self.ui_state.diff_info.clone();
+        if let Some(task) = self.ui_state.preview_task.take() {
+            task.abort();
+        }
+        self.ui_state.preview_task = Some(tokio::spawn(async move {
             let (preview_content, diff_info, shell_content) =
-                fetch_preview_data(&backend, session_id, project_id).await;
+                fetch_preview_part(&backend, session_id, project_id, part).await;
+            let preview_content = if part == PreviewPart::Pane {
+                preview_content
+            } else {
+                old_pane
+            };
+            let shell_content = if part == PreviewPart::Shell {
+                shell_content
+            } else {
+                old_shell
+            };
+            let diff_info = if matches!(part, PreviewPart::Diff | PreviewPart::Stats) {
+                diff_info
+            } else {
+                old_diff
+            };
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::PreviewReady {
                     spawned_at,
@@ -81,7 +108,7 @@ impl App {
                     diff_info,
                 }))
                 .await;
-        });
+        }));
     }
 
     /// Spawn a background re-compose of the open review diff. When the working
@@ -361,10 +388,11 @@ fn diff_info_from_preview(
 ///
 /// A project has no agent pane, so its preview content is empty; the
 /// placeholder strings are what the panes render when there is nothing to show.
-pub(super) async fn fetch_preview_data(
+async fn fetch_preview_part(
     backend: &Arc<dyn claude_commander_core::backend::CommanderBackend>,
     session_id: Option<SessionId>,
     project_id: Option<ProjectId>,
+    part: claude_commander_protocol::preview::PreviewPart,
 ) -> (String, Arc<DiffInfo>, String) {
     let no_shell = || "No shell session. Press 's' to open one.".to_string();
     let target = match (session_id, project_id) {
@@ -381,7 +409,7 @@ pub(super) async fn fetch_preview_data(
     };
     let on_session = session_id.is_some();
 
-    match backend.preview(target).await {
+    match backend.preview_part(target, part).await {
         Ok(claude_commander_core::api::PreviewData {
             pane,
             diff_text,

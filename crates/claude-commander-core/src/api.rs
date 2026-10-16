@@ -1883,13 +1883,27 @@ impl CommanderService {
     /// or a project. Lifts the TUI's `fetch_preview_data`; the TUI keeps its own
     /// copy until Phase C deletes it.
     pub async fn preview(&self, target: PreviewTarget) -> Result<PreviewData> {
+        self.preview_part(target, claude_commander_protocol::preview::PreviewPart::All)
+            .await
+    }
+
+    pub async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
         match target {
-            PreviewTarget::Session { id, lines } => self.session_preview(&id, lines).await,
-            PreviewTarget::Project(id) => self.project_preview(&id).await,
+            PreviewTarget::Session { id, lines } => self.session_preview(&id, lines, part).await,
+            PreviewTarget::Project(id) => self.project_preview(&id, part).await,
         }
     }
 
-    async fn session_preview(&self, sid: &SessionId, lines: Option<usize>) -> Result<PreviewData> {
+    async fn session_preview(
+        &self,
+        sid: &SessionId,
+        lines: Option<usize>,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
         let (is_creating, tmux_name) = {
             let state = self.store.read().await;
             match state.get_session(sid) {
@@ -1911,41 +1925,89 @@ impl CommanderService {
             });
         }
 
-        // An explicit line count captures the pane directly; otherwise use the
-        // manager's cached content (matches the TUI preview).
-        let pane = match lines {
-            Some(n) => capture_pane(&self.manager.tmux, &tmux_name, Some(n)).await?,
-            None => self.manager.get_content(sid).await.ok().map(|c| c.content),
-        };
-        let diff = self.manager.get_diff(sid).await.ok();
-        let shell = self
-            .manager
-            .get_shell_content(sid)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.content);
+        use claude_commander_protocol::preview::PreviewPart;
+        let (pane, diff, shell) = tokio::join!(
+            async {
+                if !matches!(part, PreviewPart::All | PreviewPart::Pane) {
+                    return Ok(None);
+                }
+                match lines {
+                    Some(n) => capture_pane(&self.manager.tmux, &tmux_name, Some(n)).await,
+                    None => Ok(self.manager.get_content(sid).await.ok().map(|c| c.content)),
+                }
+            },
+            async {
+                if part == PreviewPart::Stats {
+                    self.manager.get_diff_stats(sid).await.ok()
+                } else if matches!(part, PreviewPart::All | PreviewPart::Diff) {
+                    self.manager.get_diff(sid).await.ok()
+                } else {
+                    None
+                }
+            },
+            async {
+                if matches!(part, PreviewPart::All | PreviewPart::Shell) {
+                    self.manager
+                        .get_shell_content(sid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.content)
+                } else {
+                    None
+                }
+            },
+        );
+        let pane = pane?;
         Ok(PreviewData {
             pane,
-            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_text: if part == PreviewPart::Stats {
+                String::new()
+            } else {
+                diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default()
+            },
             diff_stat: diff.as_ref().map(|d| d.summary()),
             stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
         })
     }
 
-    async fn project_preview(&self, pid: &ProjectId) -> Result<PreviewData> {
-        let diff = self.manager.get_project_diff(pid).await.ok();
-        let shell = self
-            .manager
-            .get_project_shell_content(pid)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.content);
+    async fn project_preview(
+        &self,
+        pid: &ProjectId,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
+        use claude_commander_protocol::preview::PreviewPart;
+        let (diff, shell) = tokio::join!(
+            async {
+                if part == PreviewPart::Stats {
+                    self.manager.get_project_diff_stats(pid).await.ok()
+                } else if matches!(part, PreviewPart::All | PreviewPart::Diff) {
+                    self.manager.get_project_diff(pid).await.ok()
+                } else {
+                    None
+                }
+            },
+            async {
+                if matches!(part, PreviewPart::All | PreviewPart::Shell) {
+                    self.manager
+                        .get_project_shell_content(pid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.content)
+                } else {
+                    None
+                }
+            },
+        );
         Ok(PreviewData {
             pane: None,
-            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_text: if part == PreviewPart::Stats {
+                String::new()
+            } else {
+                diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default()
+            },
             diff_stat: diff.as_ref().map(|d| d.summary()),
             stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
@@ -2591,20 +2653,75 @@ impl CommanderService {
     /// Reload the state file on a fixed cadence, waking the change-feed when
     /// another instance mutated it. No-op loop when `interval_ms` is 0.
     fn spawn_state_sync_loop(&self, interval_ms: u64) -> tokio::task::JoinHandle<()> {
-        let store = self.store.clone();
+        let service = self.clone();
         tokio::spawn(async move {
             if interval_ms == 0 {
                 return;
             }
+            let data_dir = service.store.data_dir();
+            let mut watcher = tokio::task::spawn_blocking(move || {
+                crate::file_events::FileEvents::state(&data_dir)
+            })
+            .await
+            .ok()
+            .and_then(|result| result.ok());
+            let mut retry_at = std::time::Instant::now() + Duration::from_secs(30);
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
-                match store.reload_if_changed().await {
-                    Ok(_) => {}
-                    Err(e) => debug!("State sync check failed: {e}"),
+                if watcher.is_none() && std::time::Instant::now() >= retry_at {
+                    let data_dir = service.store.data_dir();
+                    watcher = tokio::task::spawn_blocking(move || {
+                        crate::file_events::FileEvents::state(&data_dir)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
+                }
+                let event = tokio::select! {
+                    _ = interval.tick() => false,
+                    _ = async {
+                        match &mut watcher {
+                            Some(watcher) => { watcher.changed().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => true,
+                };
+                if event {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Drain the coalesced batch, including events during the delay.
+                    if let Some(watcher) = &mut watcher {
+                        watcher.take_changed();
+                    }
+                }
+                let review_changed = watcher.as_ref().is_some_and(|w| w.take_review_changed());
+                service.reconcile_state_files(review_changed).await;
+                if watcher.as_ref().is_some_and(|w| !w.healthy()) {
+                    watcher = None;
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
                 }
             }
         })
+    }
+
+    async fn reconcile_state_files(&self, review_changed: bool) {
+        if review_changed {
+            self.comments.invalidate_pending().await;
+        }
+        let reloaded = match self.store.reload_if_changed().await {
+            Ok(changed) => changed,
+            Err(e) => {
+                debug!("State sync check failed: {e}");
+                false
+            }
+        };
+        // reload_if_changed notifies for external state writes. Healthy events
+        // for our own state writes need no second wakeup; uncertain/rescan
+        // events still conservatively invalidate review consumers.
+        if review_changed && !reloaded {
+            self.store.notify_change();
+        }
     }
 
     // -- Internal helpers for the workspace surface --
@@ -3896,6 +4013,18 @@ mod tests {
                 "core test services must not clone into the real ~/Projects (got {projects_dir:?})"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn state_sync_does_not_notify_again_for_our_own_state_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_project_session(&svc).await;
+        let generation = svc.store().generation();
+        // Exercise a classified state-only event directly. Native watcher
+        // startup may also emit a conservative rescan on macOS.
+        svc.reconcile_state_files(false).await;
+        assert_eq!(svc.store().generation(), generation);
     }
 
     /// Seed one project with one session and return their ids.
@@ -5852,6 +5981,36 @@ mod tests {
         // reflects the corrected commander_running.
         let after = svc.agent_states(false).await;
         assert!(!after.commander_running);
+    }
+
+    #[tokio::test]
+    async fn agent_states_fresh_advances_shared_unread_baseline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            commander_enabled: false,
+            ..Config::default()
+        };
+        let svc = service_with_config(&dir, config);
+        let sid = SessionId::new();
+        svc.agent_states_cache
+            .write()
+            .await
+            .states
+            .insert(sid, AgentState::Working);
+        let idle = BTreeMap::from([(sid, AgentState::Idle)]);
+        assert_eq!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle),
+            vec![sid]
+        );
+        // There are no active sessions; the fresh scan clears the old baseline
+        // without any tmux queries. This is also the cache read by the poll loop.
+        let fresh = svc.agent_states(true).await;
+        assert_eq!(svc.agent_states_cache.read().await.states, fresh.states);
+        assert!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle)
+                .is_empty()
+        );
+        assert_eq!(svc.agent_states(false).await.states, fresh.states);
     }
 
     #[tokio::test]

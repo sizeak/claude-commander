@@ -542,12 +542,14 @@ impl App {
         };
         state.set_content(content, inner_height);
         let scroll = state.scroll_offset;
+        let parsed = state.paragraph(dim_opacity);
 
         frame.render_widget(
             Preview::new(content)
+                .with_paragraph(parsed)
                 .block(block)
                 .scroll(scroll)
-                .dim_opacity(dim_opacity),
+                .dim_opacity(None),
             area,
         );
     }
