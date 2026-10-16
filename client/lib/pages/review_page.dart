@@ -440,8 +440,9 @@ class _ReviewBodyState extends State<ReviewBody> {
       reviewed: _reviewed.contains(file.displayPath),
       expanded: _expandedFiles.contains(file.displayPath),
       onExpand: () => setState(() {
-        if (!_expandedFiles.add(file.displayPath))
+        if (!_expandedFiles.add(file.displayPath)) {
           _expandedFiles.remove(file.displayPath);
+        }
       }),
       onToggleReviewed: (_busy || _toggling.contains(file.displayPath))
           ? null
