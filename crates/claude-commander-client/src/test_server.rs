@@ -83,13 +83,15 @@ async fn changes(
     if !data.supported {
         return Err(StatusCode::NOT_FOUND);
     }
+    // Fail before parking, so the failure arrives without a generation bump:
+    // a poller that retried with its old `since` would park instead of recovering.
+    if data.fail_wait.swap(false, Ordering::SeqCst) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let mut rx = data.generation.subscribe();
     let current = *rx.borrow_and_update();
     if q.get("since").and_then(|s| s.parse().ok()) == Some(current) {
         rx.changed().await.unwrap();
-    }
-    if data.fail_wait.swap(false, Ordering::SeqCst) {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let next = *rx.borrow();
     Ok(Json(next))

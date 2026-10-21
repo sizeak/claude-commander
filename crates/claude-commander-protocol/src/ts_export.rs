@@ -151,9 +151,9 @@ fn constants_ts() -> String {
         "{GENERATED_HEADER}import type {{ SessionId }} from \"./SessionId\";\n\
          \n\
          /** Server change-wait budget in seconds. */\n\
-export const CHANGE_WAIT_SECS = {change_wait};\n\
-\n\
-/** `ServerControl.error` message for a rejected auth token (`ws::WS_ERR_AUTH`). */\n\
+         export const CHANGE_WAIT_SECS = {change_wait};\n\
+         \n\
+         /** `ServerControl.error` message for a rejected auth token (`ws::WS_ERR_AUTH`). */\n\
          export const WS_ERR_AUTH = {auth};\n\
          \n\
          /** `ServerControl.error` message for an attach to an unknown session (`ws::WS_ERR_NO_SESSION`). */\n\
