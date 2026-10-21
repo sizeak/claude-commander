@@ -658,7 +658,36 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         let cache = DiffCache::<u64>::with_ttl(Duration::from_millis(20));
         cache.get_diff(&1, dir.path()).await.unwrap();
+        let take_changed = || {
+            cache
+                .watchers
+                .lock()
+                .unwrap()
+                .get_mut(&1)
+                .and_then(|watch| watch.watcher.as_mut())
+                .expect("this regression requires a registered watcher")
+                .take_changed()
+        };
+        // Drain anything the diff's own git invocations produced.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        take_changed();
+
+        // Pin non-recursion directly: a nested edit must not reach the watch
+        // (a recursive registration would report it), while a root-level
+        // edit still does.
         std::fs::write(nested.join("new.txt"), "nested change").unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!take_changed(), "nested edits must not be watched");
+        std::fs::write(dir.path().join("root.txt"), "root change").unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            while !take_changed() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(observed.is_ok(), "root-level edits must still be watched");
+
+        // The nested edit is still picked up, by the TTL alone.
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(
             cache
@@ -806,23 +835,26 @@ mod tests {
         let cache = DiffCache::<u64>::with_ttl(Duration::from_secs(60));
         let initial = cache.get_diff(&1, dir.path()).await.unwrap();
         assert!(!initial.has_changes());
-        let watcher_is_healthy = || {
+        // `None` when no watch is registered, else whether it is healthy.
+        let watcher_health = || {
             cache
                 .watchers
                 .lock()
                 .unwrap()
                 .get(&1)
                 .and_then(|watch| watch.watcher.as_ref())
-                .is_some_and(|watcher| watcher.healthy())
+                .map(|watcher| watcher.healthy())
         };
         assert!(
-            watcher_is_healthy(),
-            "this regression requires a live watcher"
+            watcher_health().is_some(),
+            "this regression requires a registered watcher"
         );
         let clone = cache.clone();
         std::fs::write(dir.path().join("Cargo.lock"), "updated\n").unwrap();
         // Allow event delivery and Git work under parallel CI load, while
-        // staying below the healthy watch's 30-second reconciliation interval.
+        // staying well below the 60-second TTL, so only the watch can satisfy
+        // this. Health is not asserted afterwards: a watcher marked failed
+        // still invalidates, and macOS may report a startup rescan.
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if clone
@@ -840,13 +872,9 @@ mod tests {
         .await;
         assert!(
             result.is_ok(),
-            "filesystem edits should invalidate the shared cache; watcher healthy: {}, cache age: {:?}",
-            watcher_is_healthy(),
+            "filesystem edits should invalidate the shared cache; watcher healthy: {:?}, cache age: {:?}",
+            watcher_health(),
             initial.computed_at.elapsed(),
-        );
-        assert!(
-            watcher_is_healthy(),
-            "reconciliation must not satisfy this regression"
         );
     }
 
