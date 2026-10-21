@@ -150,28 +150,31 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
             // release it here rather than holding it until LRU eviction. The
             // existence checks are blocking stats, so they run beside the
             // watch registration rather than under the lock on this worker.
-            let others: Vec<(K, std::path::PathBuf)> = self
+            let others: Vec<(K, std::path::PathBuf, Instant)> = self
                 .watchers
                 .lock()
                 .expect("diff watchers poisoned")
                 .iter()
                 .filter(|(k, _)| **k != key)
-                .map(|(k, entry)| (*k, entry.root.clone()))
+                .map(|(k, entry)| (*k, entry.root.clone(), entry.attempted_at))
                 .collect();
             let (watcher, vanished) = tokio::task::spawn_blocking(move || {
-                let vanished: Vec<(K, std::path::PathBuf)> = others
+                let vanished: Vec<(K, std::path::PathBuf, Instant)> = others
                     .into_iter()
-                    .filter(|(_, root)| !root.exists())
+                    .filter(|(_, root, _)| !root.exists())
                     .collect();
                 (crate::file_events::FileEvents::git(&path).ok(), vanished)
             })
             .await
             .unwrap_or_default();
             let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
-            for (k, root) in &vanished {
+            for (k, root, attempted_at) in &vanished {
                 // Only drop the slot that was checked: it may have been
-                // re-registered for another root while the stats ran.
-                if watchers.get(k).is_some_and(|entry| entry.root == *root) {
+                // re-registered (even for the same root) while the stats ran.
+                if watchers
+                    .get(k)
+                    .is_some_and(|entry| entry.root == *root && entry.attempted_at == *attempted_at)
+                {
                     watchers.remove(k);
                 }
             }
@@ -266,8 +269,14 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         Ok(info)
     }
 
-    /// Invalidate cache for a key
+    /// Invalidate cache for a key.
+    ///
+    /// Takes the key's flight lock so a `get_diff`/`get_stats` already past
+    /// its registration cannot insert a watch slot after this returns. Must
+    /// not be called while holding that key's flight.
     pub async fn invalidate(&self, key: &K) {
+        let flight = self.flights.for_key(*key);
+        let _guard = flight.lock().await;
         self.watchers
             .lock()
             .expect("diff watchers poisoned")
@@ -739,6 +748,29 @@ mod tests {
         assert!(!cache.watchers.lock().unwrap().contains_key(&0));
         cache.clear().await;
         assert!(cache.watchers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalidate_waits_for_an_in_flight_registration() {
+        // A get_diff whose watch registration began before teardown must not
+        // re-insert its slot after `invalidate` has already run.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = DiffCache::<u64>::new();
+        let flight = cache.flights.for_key(1);
+        let guard = flight.lock().await;
+        let invalidating = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.invalidate(&1).await }
+        });
+        // Current-thread runtime: this lets `invalidate` run until it blocks.
+        tokio::task::yield_now().await;
+        cache.freshness(1, dir.path()).await;
+        drop(guard);
+        invalidating.await.unwrap();
+        assert!(
+            !cache.is_watching(&1),
+            "invalidate must release a slot registered by an in-flight get_diff"
+        );
     }
 
     #[tokio::test]
