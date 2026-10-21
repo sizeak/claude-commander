@@ -1865,8 +1865,18 @@ impl App {
     /// without the hot-reload noticing, and [`persist_config`](Self::persist_config)
     /// writes the whole cached config — so a stale cache would revert those
     /// fields (and a stale provider would be rejected outright).
+    ///
+    /// The cached `remote_servers` is also the list the live backends were
+    /// last reconciled against, which [`apply_config_reload`](Self::apply_config_reload)
+    /// diffs to connect or drop servers. The hot-reload loads the service in a
+    /// spawned task before `ConfigReloaded` reaches the TUI, so a sync in that
+    /// gap would hide the change from the diff; reconcile it here instead.
     pub(super) fn sync_config_from_service(&mut self) {
-        self.config = self.service.read_config();
+        let old = std::mem::replace(&mut self.config, self.service.read_config()).remote_servers;
+        if old != self.config.remote_servers {
+            let new = self.config.remote_servers.clone();
+            self.apply_remote_servers_reload(&old, &new);
+        }
     }
 
     /// Persist the current config via the store (updates mtime so hot-reload
@@ -1932,6 +1942,22 @@ impl App {
         if state.tab == SettingsTab::Programs {
             self.handle_programs_key(key, state);
             return;
+        }
+
+        // Rebuild the rows from the synced config so a toggle flips, and an
+        // editor prefills, the current value rather than the one rendered
+        // before another writer changed it. A Keybindings list may hold a
+        // search-filtered view (kept after `Enter`), and none of its edits
+        // read the rendered value, so it is left as is.
+        if state.tab != SettingsTab::Keybindings {
+            let selected = state
+                .rows
+                .get(state.selected_row)
+                .map(|r| r.field_key.clone());
+            state.rows = self.settings_rows(&state);
+            state.selected_row = selected
+                .and_then(|k| state.rows.iter().position(|r| r.field_key == k))
+                .unwrap_or_else(|| first_selectable_from(&state.rows, 0));
         }
 
         // Keybindings-tab search: while the filter box is focused, typing

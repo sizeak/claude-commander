@@ -13319,6 +13319,69 @@ async fn tui_toggle_after_web_code_host_edit_keeps_the_web_values() {
     assert_eq!(app.config.gitlab_hostname, persisted.gitlab_hostname);
 }
 
+/// Open the General settings tab with the `field_key` row selected.
+fn open_general_settings_on(app: &mut App, field_key: &str) {
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let selected_row = rows
+        .iter()
+        .position(|r| r.field_key == field_key)
+        .expect("row exists");
+    app.ui_state.modal = Modal::Settings(SettingsState {
+        tab: SettingsTab::General,
+        selected_row,
+        editing: None,
+        rows,
+        sections_state: SectionsState::default(),
+        workspaces_state: WorkspacesState::default(),
+        programs_state: ProgramsState::default(),
+        theme_scope: crate::app::ThemeScope::Usual,
+        search: None,
+    });
+}
+
+/// The hot-reload runs in a spawned task, so the service holds a newly added
+/// remote server before the TUI handles `ConfigReloaded`. A settings key
+/// handled in that gap syncs the cache from the service; the reload must
+/// still connect the server rather than diffing the synced cache against
+/// itself and skipping the reconcile.
+#[tokio::test]
+async fn settings_key_before_config_reloaded_still_connects_a_new_server() {
+    let mut app = make_test_app();
+    assert_eq!(app.backends.len(), 1);
+    let mut reloaded = app.service.read_config();
+    reloaded
+        .remote_servers
+        .push(server_cfg("buildbox", "http://b:7878"));
+    app.service.update_config(reloaded).unwrap();
+
+    open_general_settings_on(&mut app, "rounded_borders");
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Down).await;
+    app.apply_config_reload(Ok(true));
+
+    let names: Vec<String> = app
+        .backends
+        .iter()
+        .map(|h| h.backend.descriptor().name)
+        .collect();
+    assert_eq!(names, vec!["local", "buildbox"]);
+}
+
+/// A toggle flips the service's current value, not the one the open modal
+/// rendered before another writer (a web `PATCH /config`) changed it.
+#[tokio::test]
+async fn settings_toggle_after_external_change_flips_the_fresh_value() {
+    let mut app = make_test_app();
+    open_general_settings_on(&mut app, "rounded_borders");
+    let external = !app.config.rounded_borders;
+    let mut patched = app.service.read_config();
+    patched.rounded_borders = external;
+    app.service.update_config(patched).unwrap();
+
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
+
+    assert_eq!(app.service.read_config().rounded_borders, !external);
+}
+
 /// A settings save the service rejects is surfaced to the user and the cached
 /// config resynchronised, never only logged.
 #[tokio::test]
