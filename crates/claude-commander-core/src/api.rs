@@ -241,11 +241,11 @@ impl CommanderService {
     ///
     /// Rejects a config whose provider differs from the stored one: provider
     /// changes must go through [`update_code_host_config`](Self::update_code_host_config)
-    /// so review metadata is invalidated. The comparison runs inside `mutate`,
+    /// so review metadata is invalidated. The comparison runs inside `try_mutate`,
     /// against the value being replaced, so a whole-config write built from a
     /// cache that predates a concurrent switch cannot revert it.
     pub fn update_config(&self, config: Config) -> Result<()> {
-        self.config_store.mutate(|current| {
+        self.config_store.try_mutate(|current| {
             if config.code_host_provider != current.code_host_provider {
                 return Err(ConfigError::InvalidValue {
                     key: "code_host_provider".into(),
@@ -255,7 +255,7 @@ impl CommanderService {
             }
             *current = config;
             Ok(())
-        })?
+        })
     }
 
     /// Persist a config whose code-host provider changed and invalidate all
@@ -276,22 +276,15 @@ impl CommanderService {
         edit: impl Fn(&mut Config) -> Result<()> + Send,
     ) -> Result<()> {
         let _guard = self.review_provider_lock.lock().await;
-        let (old_provider, old_hostname) = {
-            let config = self.config_store.read();
-            (config.code_host_provider, config.gitlab_hostname.clone())
-        };
         // Persist first, then invalidate, under the same lock — the order
-        // `reload_config` uses — so a rejected edit invalidates nothing.
-        let persisted = self.config_store.mutate(|current| {
-            let mut latest = current.clone();
-            edit(&mut latest)?;
-            *current = latest;
-            Ok::<(), crate::Error>(())
-        });
-        // `ConfigStore::mutate` applies the edit in memory before saving, so a
-        // failed save still leaves the new provider where pollers read it.
-        // Invalidate on what is in memory, not on whether the save succeeded.
-        let new_config = self.config_store.read().clone();
+        // `reload_config` uses. `try_mutate` commits nothing unless both the
+        // edit and the save succeed, so a rejected or unsaved edit leaves the
+        // provider pollers read unchanged and invalidates nothing.
+        let (old_provider, old_hostname, new_config) = self.config_store.try_mutate(|current| {
+            let old = (current.code_host_provider, current.gitlab_hostname.clone());
+            edit(current)?;
+            Ok((old.0, old.1, current.clone()))
+        })?;
         let provider_changed = new_config.code_host_provider != old_provider;
         if provider_changed || new_config.gitlab_hostname != old_hostname {
             *self
@@ -305,7 +298,7 @@ impl CommanderService {
             }
             self.pr_refresh.notify_one();
         }
-        persisted?
+        Ok(())
     }
 
     /// Rename a configured section, migrating every session that refers to it
@@ -4198,7 +4191,7 @@ mod tests {
 
     /// A whole-config write built from a cache that predates a provider switch
     /// must be rejected without reverting the switch. The comparison runs
-    /// inside the store's `mutate`, against the value it is about to replace.
+    /// inside the store's `try_mutate`, against the value it is about to replace.
     #[tokio::test]
     async fn stale_provider_update_is_rejected_without_reverting_the_switch() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -4296,11 +4289,11 @@ mod tests {
         );
     }
 
-    /// When the config write fails, invalidation still tracks the in-memory
-    /// provider pollers read (`ConfigStore::mutate` applies the edit before
-    /// saving): metadata is cleared exactly when the provider changed.
+    /// When the config write fails nothing changes: the edit is applied to a
+    /// copy that is only committed once saved, so the provider pollers read
+    /// stays put and review metadata is left alone.
     #[tokio::test]
-    async fn persist_failure_keeps_review_metadata_consistent_with_provider() {
+    async fn persist_failure_changes_neither_provider_nor_review_metadata() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         let sid = seed_review_metadata(&svc).await;
@@ -4313,9 +4306,99 @@ mod tests {
             })
             .await;
         assert!(result.is_err());
-        let switched = svc.read_config().code_host_provider == CodeHostProvider::Gitlab;
-        let cleared = svc.store().read().await.sessions[&sid].pr_number.is_none();
-        assert_eq!(cleared, switched);
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Github
+        );
+        assert_eq!(svc.store().read().await.sessions[&sid].pr_number, Some(7));
+        assert_eq!(
+            svc.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    /// Persist the service's config, then overwrite the file the way a hand
+    /// edit would, with a later mtime and a changed `ui_refresh_fps`. Returns
+    /// the edited file's bytes and mtime.
+    fn external_config_edit(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+    ) -> (Vec<u8>, std::time::SystemTime) {
+        let path = dir.path().join("config.toml");
+        svc.update_config(svc.read_config()).unwrap();
+        // Filesystem mtime granularity: make the external write observable.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut edited = svc.read_config();
+        edited.ui_refresh_fps = 41;
+        std::fs::write(&path, toml::to_string_pretty(&edited).unwrap()).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        (std::fs::read(&path).unwrap(), meta.modified().unwrap())
+    }
+
+    /// Assert the config file still holds the external edit, and that the
+    /// hot-reload then picks it up — a rejected write must not have recorded
+    /// a new mtime that hides it.
+    async fn assert_external_edit_survives(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+        (bytes, mtime): (Vec<u8>, std::time::SystemTime),
+    ) {
+        let path = dir.path().join("config.toml");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "config.toml rewritten"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        assert_ne!(svc.read_config().ui_refresh_fps, 41);
+        assert!(svc.reload_config().await.unwrap(), "external edit lost");
+        assert_eq!(svc.read_config().ui_refresh_fps, 41);
+    }
+
+    #[tokio::test]
+    async fn rejected_update_config_leaves_config_file_and_memory_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let external = external_config_edit(&svc, &dir);
+        let before = svc.read_config();
+        let mut stale = before.clone();
+        stale.code_host_provider = CodeHostProvider::Gitlab;
+        stale.rounded_borders = !before.rounded_borders;
+        assert!(svc.update_config(stale).is_err());
+        assert_eq!(svc.read_config().rounded_borders, before.rounded_borders);
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            before.code_host_provider
+        );
+        assert_external_edit_survives(&svc, &dir, external).await;
+    }
+
+    #[tokio::test]
+    async fn rejected_code_host_edit_leaves_config_file_and_memory_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let external = external_config_edit(&svc, &dir);
+        let before = svc.read_config();
+        let result = svc
+            .edit_code_host_config(|config| {
+                // Half-applied before the rejection: none of it may stick.
+                config.rounded_borders = !config.rounded_borders;
+                config.code_host_provider = CodeHostProvider::Gitlab;
+                Err(ConfigError::InvalidValue {
+                    key: "gitlab_hostname".into(),
+                    reason: "rejected".into(),
+                }
+                .into())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(svc.read_config().rounded_borders, before.rounded_borders);
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            before.code_host_provider
+        );
+        assert_external_edit_survives(&svc, &dir, external).await;
     }
 
     #[tokio::test]
