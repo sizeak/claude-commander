@@ -1116,6 +1116,7 @@ fn server_tab_rejects_a_bad_bind_or_port_without_changing_config() {
 fn submitting_the_token_placeholder_leaves_the_token_alone() {
     let mut app = make_test_app();
     app.config.server.token = Some("sekret".into());
+    persist_seeded_config(&app);
     app.apply_settings_edit(SettingsTab::Server, "server_token", "(set)");
     assert_eq!(app.config.server.token.as_deref(), Some("sekret"));
 
@@ -1129,6 +1130,7 @@ fn submitting_the_token_placeholder_leaves_the_token_alone() {
         .map(|r| r.text_value().to_string())
         .expect("token row");
     app.config.server.token = Some("sekret".into());
+    persist_seeded_config(&app);
     app.apply_settings_edit(SettingsTab::Server, "server_token", &unset_placeholder);
     assert_eq!(
         app.config.server.token.as_deref(),
@@ -1138,6 +1140,7 @@ fn submitting_the_token_placeholder_leaves_the_token_alone() {
 
     // An explicit empty value does clear it.
     app.config.server.token = Some("sekret".into());
+    persist_seeded_config(&app);
     app.apply_settings_edit(SettingsTab::Server, "server_token", "");
     assert!(app.config.server.token.is_none());
 
@@ -2401,6 +2404,14 @@ fn render_keybindings_search_box_filters_and_shows_prompt() {
     );
 }
 
+/// Persist fixture edits made directly to `app.config` through the service.
+/// Settings edits re-read the service's config before applying (so a web
+/// `PATCH /config` is never reverted), so a seed held only in the TUI's cache
+/// would be discarded by the next settings key.
+fn persist_seeded_config(app: &App) {
+    app.service.update_config(app.config.clone()).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Programs settings tab
 // ---------------------------------------------------------------------------
@@ -2526,6 +2537,7 @@ async fn programs_tab_rename_rejects_duplicate_and_empty_labels() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Move to the second entry and rename it to a duplicate of the first.
@@ -2817,6 +2829,7 @@ async fn programs_tab_editing_field_label_rejects_duplicate() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Focus the fields pane on the second entry and edit its label to a dup.
@@ -2839,6 +2852,7 @@ async fn programs_tab_esc_cancels_rename_and_edit_without_change() {
 
     let mut app = make_test_app();
     app.config.programs = vec![program_entry("Claude", "claude")];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Rename: type a new label then Esc — nothing changes.
@@ -3253,6 +3267,7 @@ async fn commit_to_missing_backend_does_not_clobber_local_config() {
     let mut app = make_test_app();
     // Local config has its own programs, which must be left untouched.
     app.config.programs = vec![program_entry("Local", "local-cmd")];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Simulate a tab that was pointed at a remote server which has since been
@@ -12242,6 +12257,7 @@ mod workspaces {
     /// positions and hexes depend on the terminal running the tests).
     fn pin_truecolor(app: &mut App) {
         app.config.theme.preset = Some("truecolor".into());
+        persist_seeded_config(app);
         app.reload_theme();
     }
 
@@ -12472,6 +12488,7 @@ mod workspaces {
         app.config.theme.border_focused = Some(claude_commander_core::config::theme::ColorValue(
             rgb("#010203"),
         ));
+        persist_seeded_config(&app);
         app.reload_theme();
         feed(&mut app, KeyCode::Enter).await;
         let Some(SettingsEditing::OptionPicker { options, .. }) = &settings(&app).editing else {
@@ -12519,6 +12536,7 @@ mod workspaces {
         app.config
             .workspace_themes
             .insert("Work".into(), preset_entry("lcars"));
+        persist_seeded_config(&app);
         app.reload_theme();
         feed(&mut app, KeyCode::Enter).await;
         assert!(app.config.workspace_themes.is_empty());
@@ -12541,6 +12559,7 @@ mod workspaces {
         app.config
             .workspace_themes
             .insert("Work".into(), preset_entry("lcars"));
+        persist_seeded_config(&app);
         assert!(app.workspace_theme_customised(Some("Work")));
         assert!(!app.workspace_theme_customised(None));
         open_workspaces_tab(&mut app);
@@ -12561,10 +12580,7 @@ mod workspaces {
     /// a remote snapshot dropping it.
     async fn lose_work(app: &mut App) {
         app.service.delete_workspace("Work").await.unwrap();
-        // `pin_truecolor` set the usual theme in memory only; keep it.
-        let usual = app.config.theme.clone();
         app.config = app.service.read_config();
-        app.config.theme = usual;
         app.sync_local_view_from_store_for_test().await;
     }
 
@@ -13272,6 +13288,37 @@ async fn settings_edit_after_external_provider_switch_is_not_lost() {
     assert_eq!(app.config.code_host_provider, CodeHostProvider::Gitlab);
 }
 
+/// A web/Flutter `PATCH /config` that changes the provider *and* other fields
+/// must survive a later TUI toggle of an unrelated setting. Saving the TUI's
+/// whole cached config — even with the service's provider patched in — wrote
+/// back the stale `gitlab_hostname`, silently reverting the web edit (and,
+/// bypassing `edit_code_host_config`, without any probe reset or PR refresh).
+#[tokio::test]
+async fn tui_toggle_after_web_code_host_edit_keeps_the_web_values() {
+    use claude_commander_protocol::hosting::CodeHostProvider;
+    let mut app = make_test_app();
+    app.service
+        .edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            config.gitlab_hostname = Some("gitlab.example.com".into());
+            config.branch_prefix = "web/".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let rounded = !app.config.rounded_borders;
+    app.apply_bool_setting("rounded_borders", rounded);
+    let persisted = app.service.read_config();
+    assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
+    assert_eq!(persisted.code_host_provider, CodeHostProvider::Gitlab);
+    assert_eq!(
+        persisted.gitlab_hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+    assert_eq!(persisted.branch_prefix, "web/");
+    assert_eq!(app.config.gitlab_hostname, persisted.gitlab_hostname);
+}
+
 /// A settings save the service rejects is surfaced to the user and the cached
 /// config resynchronised, never only logged.
 #[tokio::test]
@@ -13280,7 +13327,11 @@ async fn rejected_settings_save_is_surfaced_and_config_reloaded() {
     // A directory where the config file belongs makes the write fail.
     let _ = std::fs::remove_file(&config_path);
     std::fs::create_dir_all(&config_path).unwrap();
-    app.apply_bool_setting("rounded_borders", !app.config.rounded_borders);
+    let rounded = app.config.rounded_borders;
+    app.apply_bool_setting("rounded_borders", !rounded);
+    // The unsaved edit is discarded, matching the service, which kept none of it.
+    assert_eq!(app.config.rounded_borders, rounded);
+    assert_eq!(app.service.read_config().rounded_borders, rounded);
     let (message, _) = app
         .ui_state
         .status_message

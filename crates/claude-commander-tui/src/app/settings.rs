@@ -1359,6 +1359,7 @@ impl App {
 
     /// Apply an edited value from the settings modal to the config.
     pub(super) fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
+        self.sync_config_from_service();
         let previous_provider = self.config.code_host_provider;
         match tab {
             SettingsTab::General => match field_key {
@@ -1827,6 +1828,7 @@ impl App {
     /// Booleans are stored as real `bool`s on [`Config`]; this avoids the
     /// stringify/parse round-trip used by the text-input edit path.
     pub(super) fn apply_bool_setting(&mut self, field_key: &str, value: bool) {
+        self.sync_config_from_service();
         match field_key {
             "per_repo_worktree_dirs" => self.config.per_repo_worktree_dirs = value,
             "fetch_before_create" => self.config.fetch_before_create = value,
@@ -1856,25 +1858,34 @@ impl App {
         self.persist_config();
     }
 
+    /// Re-read the cached config from the service before applying a settings
+    /// edit, so the edit lands on the latest values rather than on a cache
+    /// another writer has since moved past: under `--serve` a web/Flutter
+    /// `PATCH /config` (or `PUT /config/programs`) changes the shared service
+    /// without the hot-reload noticing, and [`persist_config`](Self::persist_config)
+    /// writes the whole cached config — so a stale cache would revert those
+    /// fields (and a stale provider would be rejected outright).
+    pub(super) fn sync_config_from_service(&mut self) {
+        self.config = self.service.read_config();
+    }
+
     /// Persist the current config via the store (updates mtime so hot-reload
-    /// won't re-read our own write).
+    /// won't re-read our own write). Callers apply their edit on a cache
+    /// freshly [synced](Self::sync_config_from_service) from the service.
     ///
-    /// On failure the cache is resynchronised from the service and the user
-    /// told, so an edit is never dropped with only a log line.
+    /// A rejected or unsaved write leaves the service's config untouched, so
+    /// on failure the cache is reset to it — discarding the edit — and the
+    /// user told, never only a log line.
     fn persist_config(&mut self) {
-        // This path never changes the provider (`apply_settings_edit` hands
-        // that to `edit_code_host_config`), but the cached one can be stale: a
-        // shared-service PATCH under `--serve` switches it without the
-        // hot-reload noticing, and `update_config` rejects any provider
-        // mismatch. Carry the service's provider so the edit applies to it.
-        self.config.code_host_provider = self.service.read_config().code_host_provider;
         let Err(e) = self.service.update_config(self.config.clone()) else {
             return;
         };
         warn!("Failed to save config: {}", e);
-        self.config = self.service.read_config();
+        self.sync_config_from_service();
+        // A theme edit has already been applied to the screen.
+        self.reload_theme();
         self.ui_state.status_message = Some((
-            format!("Failed to save settings: {e} (settings reloaded)"),
+            format!("Failed to save settings: {e} (change not applied)"),
             Instant::now() + Duration::from_secs(10),
         ));
     }
@@ -1904,6 +1915,9 @@ impl App {
         mut state: SettingsState,
     ) {
         use crossterm::event::KeyCode;
+
+        // Every tab's edits mutate the cached config and persist all of it.
+        self.sync_config_from_service();
 
         if state.tab == SettingsTab::Sections {
             self.handle_sections_key(key, state).await;
