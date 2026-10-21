@@ -13689,6 +13689,30 @@ async fn settings_key_before_config_reloaded_still_connects_a_new_server() {
     assert_eq!(names, vec!["local", "buildbox"]);
 }
 
+/// A code-host edit completing between a hot-reload and its `ConfigReloaded`
+/// event must not hide a server the reload added, as a settings key must not.
+#[tokio::test]
+async fn code_host_update_before_config_reloaded_still_connects_a_new_server() {
+    let mut app = make_test_app();
+    assert_eq!(app.backends.len(), 1);
+    let mut reloaded = app.service.read_config();
+    reloaded
+        .remote_servers
+        .push(server_cfg("buildbox", "http://b:7878"));
+    app.service.update_config(reloaded).unwrap();
+
+    app.handle_state_update(StateUpdate::CodeHostConfigUpdated { result: Ok(()) })
+        .await;
+    app.apply_config_reload(Ok(true));
+
+    let names: Vec<String> = app
+        .backends
+        .iter()
+        .map(|h| h.backend.descriptor().name)
+        .collect();
+    assert_eq!(names, vec!["local", "buildbox"]);
+}
+
 /// A toggle flips the service's current value, not the one the open modal
 /// rendered before another writer (a web `PATCH /config`) changed it.
 #[tokio::test]

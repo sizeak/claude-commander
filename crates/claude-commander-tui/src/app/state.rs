@@ -7,7 +7,7 @@ impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
         match update {
             StateUpdate::CodeHostConfigUpdated { result } => {
-                self.config = self.service.read_config();
+                self.sync_config_from_service();
                 if let Modal::Settings(state) = &self.ui_state.modal {
                     let rows = self.settings_rows(state);
                     if let Modal::Settings(state) = &mut self.ui_state.modal {
