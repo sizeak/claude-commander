@@ -340,7 +340,7 @@ backend as you make them.
 
 ### Editing a session
 
-Use **Edit session** in the terminal command palette (`Shift+E`), browser toolbar or session menu, or Flutter session overflow menu. Edit the name, program, section, stack base and keep-alive setting. Program changes can restart fresh immediately or wait for the next restart, leaving the current agent running. Stack-base changes update metadata and the PR target without rebasing git history.
+Use **Edit session** in the terminal command palette (`Shift+E`), browser toolbar or session menu, or Flutter session overflow menu. Edit the name, program, section, stack base and keep-alive setting. Program changes can restart fresh immediately or wait for the next restart, leaving the current agent running. A saved change is applied by the next explicit restart, which starts fresh under the new program (no `--resume`, since the previous agent's conversation belongs to a different CLI); waking a hibernated session and automatic recovery of an exited agent keep the current program until then. Stack-base changes update metadata and the PR target without rebasing git history.
 
 ## Web UI
 
@@ -392,7 +392,7 @@ detail, then the live agent terminal. It ships two themes, **Mission Control**
 Above it, the same page bodies become a desktop layout: the fleet list beside a
 workspace whose Overview / Agent / Shell / Changes tabs switch in place.
 
-The **Edit session** dialog lets you change the name, configured program, section, stack base, and keep-alive setting. Program changes can restart immediately or wait for an explicit restart.
+The **Edit session** dialog lets you change the name, configured program, section, stack base, and keep-alive setting. Program changes can restart immediately or wait for an explicit restart, which then starts fresh under the new program (see [Editing a session](#editing-a-session)).
 
 <p align="center">
   <img src="docs/images/client-edit-session.png" alt="Edit session dialog with configured program aliases and session settings" width="45%">
