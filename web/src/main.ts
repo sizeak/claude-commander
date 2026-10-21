@@ -166,9 +166,7 @@ async function poll(): Promise<void> {
 // A separate change wait keeps explicit refresh free of the long-poll latency.
 let changesSupported = false;
 function refreshCadence(): void {
-  poller.setIntervalMs(
-    document.hidden ? 60_000 : changesSupported && haltState() !== "gone" ? 30_000 : POLL_MS,
-  );
+  poller.setIntervalMs(changesSupported && haltState() !== "gone" ? 30_000 : POLL_MS);
 }
 async function watchChanges(): Promise<void> {
   let generation: number | undefined;
@@ -181,7 +179,7 @@ async function watchChanges(): Promise<void> {
       const next = await api.changes(generation);
       changesSupported = true;
       refreshCadence();
-      if (generation !== next && !document.hidden) await refreshAll();
+      if (generation !== next) await refreshAll();
       generation = next;
     } catch (error) {
       changesSupported = false;

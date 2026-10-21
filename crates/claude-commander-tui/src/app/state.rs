@@ -6,6 +6,25 @@ use std::collections::BTreeMap;
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
         match update {
+            StateUpdate::CodeHostConfigUpdated { result } => {
+                self.config = self.service.read_config();
+                if let Modal::Settings(state) = &self.ui_state.modal {
+                    let rows = self.settings_rows(state);
+                    if let Modal::Settings(state) = &mut self.ui_state.modal {
+                        state.rows = rows;
+                    }
+                }
+                self.ui_state.enriched_pr = None;
+                self.ui_state.enriched_pr_unavailable = None;
+                self.ui_state.enriched_pr_fetch_spawned_at = None;
+                if let Err(message) = result {
+                    self.ui_state.status_message = Some((
+                        format!("Failed to change code host: {message}"),
+                        Instant::now() + Duration::from_secs(10),
+                    ));
+                }
+                self.spawn_backend_view_refresh(LOCAL_BACKEND_ID);
+            }
             StateUpdate::ActionFinished {
                 backend_id,
                 message,
@@ -15,7 +34,14 @@ impl App {
                         self.ui_state.status_message =
                             Some((text, Instant::now() + Duration::from_secs(3)))
                     }
-                    Err(message) => self.ui_state.modal = Modal::Error { message },
+                    Err(message) => {
+                        if matches!(self.ui_state.modal, Modal::None) {
+                            self.ui_state.modal = Modal::Error { message };
+                        } else {
+                            self.ui_state.status_message =
+                                Some((message, Instant::now() + Duration::from_secs(10)));
+                        }
+                    }
                 }
                 self.spawn_backend_view_refresh(BackendId(backend_id));
             }
@@ -136,21 +162,43 @@ impl App {
                 // this a remote's pending markers would never render and a
                 // cross-frontend marker change would never propagate.
                 self.refresh_comment_indicators();
+                let mut pending_created = std::mem::take(&mut self.ui_state.pending_created);
+                let snapshot = &self.view_for(BackendId(backend_id)).snapshot;
+                let mut hydrate = Vec::new();
+                pending_created.retain(|created| {
+                    match created.settle(backend_id, revision, snapshot) {
+                        None => true,
+                        Some(true) => {
+                            hydrate.push(created.session.id);
+                            false
+                        }
+                        Some(false) => false,
+                    }
+                });
+                self.ui_state.pending_created = pending_created;
+                for id in hydrate {
+                    self.spawn_lfs_pull(id).await;
+                }
+                // Insert LFS badges before rebuilding the rows for the first paint.
                 self.refresh_list_items().await;
                 if let Some((backend, project)) = self.ui_state.pending_project
                     && backend.0 == backend_id
                 {
-                    self.select_project_in_sidebar(project);
                     self.ui_state.pending_project = None;
+                    self.select_project_in_sidebar(project);
                 }
                 if let Some(selection) = self.ui_state.pending_selection
-                    && selection.backend.0 == backend_id
-                    && self.select_session_in_tree(selection.id)
+                    && let Some(present) = selection.settle(
+                        backend_id,
+                        revision,
+                        &self.view_for(BackendId(backend_id)).snapshot,
+                    )
                 {
                     self.ui_state.pending_selection = None;
-                    self.spawn_lfs_pull(selection.id).await;
-                    self.ui_state.preview_update_spawned_at = None;
-                    self.spawn_preview_update();
+                    if present && self.select_session_in_tree(selection.session.id) {
+                        self.ui_state.preview_update_spawned_at = None;
+                        self.spawn_preview_update();
+                    }
                 }
             }
             StateUpdate::BackendConnection { backend_id, state } => {
@@ -269,7 +317,9 @@ impl App {
                     format!("Created session {}", session_id),
                     Instant::now() + Duration::from_secs(3),
                 ));
-                self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+                let pending = self.pending_session(SessionRef::new(backend_id, session_id));
+                self.ui_state.pending_selection = pending;
+                self.ui_state.pending_created.extend(pending);
                 let backend = self.backend_arc(backend_id);
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
@@ -469,7 +519,8 @@ impl App {
                 if !self.backends.iter().any(|h| h.id == backend_id) {
                     return;
                 }
-                self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+                self.ui_state.pending_selection =
+                    self.pending_session(SessionRef::new(backend_id, session_id));
                 self.spawn_backend_view_refresh(backend_id);
             }
             StateUpdate::NewSessionProgramsLoaded {

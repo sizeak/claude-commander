@@ -18,6 +18,7 @@ pub struct Data {
     pub waits: watch::Sender<usize>,
     pub workspace: Arc<AtomicUsize>,
     pub agents: Arc<AtomicUsize>,
+    pub fail_wait: Arc<AtomicBool>,
     pub fail_workspace: Arc<AtomicBool>,
     pub supported: bool,
 }
@@ -38,6 +39,7 @@ impl Server {
             waits: watch::channel(0).0,
             workspace: Arc::new(AtomicUsize::new(0)),
             agents: Arc::new(AtomicUsize::new(0)),
+            fail_wait: Arc::new(AtomicBool::new(false)),
             fail_workspace: Arc::new(AtomicBool::new(false)),
             supported,
         };
@@ -80,6 +82,11 @@ async fn changes(
     data.waits.send_modify(|n| *n += 1);
     if !data.supported {
         return Err(StatusCode::NOT_FOUND);
+    }
+    // Fail before parking, so the failure arrives without a generation bump:
+    // a poller that retried with its old `since` would park instead of recovering.
+    if data.fail_wait.swap(false, Ordering::SeqCst) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let mut rx = data.generation.subscribe();
     let current = *rx.borrow_and_update();

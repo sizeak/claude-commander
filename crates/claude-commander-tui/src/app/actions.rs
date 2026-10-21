@@ -1725,7 +1725,7 @@ impl App {
                     if keep_alive {
                         "Keep-alive on — session won't auto-hibernate".to_string()
                     } else {
-                        "Keep-alive off — idle session will auto-hibernate".to_string()
+                        "Keep-alive off — idle session may auto-hibernate".to_string()
                     }
                 })
                 .map_err(|e| format!("Failed to toggle keep-alive: {e}"));
@@ -2119,7 +2119,8 @@ impl App {
         session_id: SessionId,
         result: std::result::Result<claude_commander_core::api::SetSessionBaseOutcome, String>,
     ) {
-        self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+        self.ui_state.pending_selection =
+            self.pending_session(SessionRef::new(backend_id, session_id));
         self.spawn_backend_view_refresh(backend_id);
         if self.select_session_in_tree(session_id) {
             self.ui_state.preview_update_spawned_at = None;
@@ -2250,8 +2251,10 @@ impl App {
         // it must not drift if the tree selection moves while the picker is open.
         let backend = self.selected_backend_id();
         let status = self.view_for(backend).snapshot.server.effective_code_host();
+        let generation = self.ui_state.repo_picker.generation;
         self.ui_state.repo_picker = super::RepoPicker {
             backend,
+            generation,
             host: claude_commander_protocol::hosting::CodeHost {
                 provider: status.provider,
                 hostname: status.hostname,

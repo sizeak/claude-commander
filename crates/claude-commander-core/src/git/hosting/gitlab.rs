@@ -355,8 +355,7 @@ pub async fn try_retarget_review_base(
     number: u32,
     new_base: &str,
 ) -> std::result::Result<(), String> {
-    let output = retarget_review_command(repo_path, number, new_base)
-        .output()
+    let output = super::review_output(retarget_review_command(repo_path, number, new_base), "glab")
         .await
         .map_err(|error| format!("could not run glab: {error}"))?;
     if output.status.success() {

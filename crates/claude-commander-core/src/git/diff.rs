@@ -88,7 +88,9 @@ impl DiffInfo {
 
 struct RootWatch {
     watcher: Option<crate::file_events::FileEvents>,
+    root: std::path::PathBuf,
     attempted_at: Instant,
+    requested_at: Instant,
 }
 
 /// Cached diff computation, generic over key type
@@ -122,32 +124,77 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
     }
 
     /// Watch at most 32 recently requested roots. Failed/unavailable watches
-    /// retain the configured TTL; healthy ones reconcile every 30 seconds.
+    /// retain the configured TTL, including for nested working-tree edits.
     async fn freshness(&self, key: K, path: &Path) -> (bool, Duration) {
         let should_watch = {
-            let watchers = self.watchers.lock().expect("diff watchers poisoned");
-            match watchers.get(&key) {
+            let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
+            match watchers.get_mut(&key) {
                 Some(entry) => {
+                    entry.requested_at = Instant::now();
                     !entry.watcher.as_ref().is_some_and(|w| w.healthy())
                         && entry.attempted_at.elapsed() >= Duration::from_secs(30)
                 }
-                None => watchers.len() < 32,
+                None => true,
             }
         };
+        let replacing = should_watch
+            && self
+                .watchers
+                .lock()
+                .expect("diff watchers poisoned")
+                .contains_key(&key);
         if should_watch {
-            let path = path.to_path_buf();
-            let watcher =
-                tokio::task::spawn_blocking(move || crate::file_events::FileEvents::git(&path))
-                    .await
-                    .ok()
-                    .and_then(|result| result.ok());
+            let root = path.to_path_buf();
+            let path = root.clone();
+            // A root deleted by another process has no `invalidate` caller;
+            // release it here rather than holding it until LRU eviction. The
+            // existence checks are blocking stats, so they run beside the
+            // watch registration rather than under the lock on this worker.
+            let others: Vec<(K, std::path::PathBuf, Instant)> = self
+                .watchers
+                .lock()
+                .expect("diff watchers poisoned")
+                .iter()
+                .filter(|(k, _)| **k != key)
+                .map(|(k, entry)| (*k, entry.root.clone(), entry.attempted_at))
+                .collect();
+            let (watcher, vanished) = tokio::task::spawn_blocking(move || {
+                let vanished: Vec<(K, std::path::PathBuf, Instant)> = others
+                    .into_iter()
+                    .filter(|(_, root, _)| !root.exists())
+                    .collect();
+                (crate::file_events::FileEvents::git(&path).ok(), vanished)
+            })
+            .await
+            .unwrap_or_default();
             let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
-            if watchers.len() < 32 || watchers.contains_key(&key) {
+            for (k, root, attempted_at) in &vanished {
+                // Only drop the slot that was checked: it may have been
+                // re-registered (even for the same root) while the stats ran.
+                if watchers
+                    .get(k)
+                    .is_some_and(|entry| entry.root == *root && entry.attempted_at == *attempted_at)
+                {
+                    watchers.remove(k);
+                }
+            }
+            if watchers.len() >= 32
+                && !watchers.contains_key(&key)
+                && let Some(oldest) = watchers
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.requested_at)
+                    .map(|(key, _)| *key)
+            {
+                watchers.remove(&oldest);
+            }
+            {
                 watchers.insert(
                     key,
                     RootWatch {
                         watcher,
+                        root,
                         attempted_at: Instant::now(),
+                        requested_at: Instant::now(),
                     },
                 );
             }
@@ -157,14 +204,7 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
             .get_mut(&key)
             .and_then(|entry| entry.watcher.as_mut())
         {
-            Some(watcher) if watcher.healthy() => (
-                watcher.take_changed(),
-                if self.ttl == DEFAULT_DIFF_CACHE_TTL {
-                    Duration::from_secs(30)
-                } else {
-                    self.ttl
-                },
-            ),
+            Some(watcher) => (watcher.take_changed() || replacing, self.ttl),
             _ => (false, self.ttl),
         }
     }
@@ -176,7 +216,7 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         let _guard = flight.lock().await;
         let (changed, ttl) = self.freshness(*key, worktree_path).await;
         if changed {
-            self.invalidate(key).await;
+            self.invalidate_values(key).await;
         }
         // Fast path: check cache
         {
@@ -200,7 +240,7 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         let _guard = flight.lock().await;
         let (changed, ttl) = self.freshness(*key, path).await;
         if changed {
-            self.invalidate(key).await;
+            self.invalidate_values(key).await;
         }
         if let Some(cached) = self.stats_cache.read().await.get(key)
             && !cached.is_stale(ttl)
@@ -229,8 +269,22 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         Ok(info)
     }
 
-    /// Invalidate cache for a key
+    /// Invalidate cache for a key.
+    ///
+    /// Takes the key's flight lock so a `get_diff`/`get_stats` already past
+    /// its registration cannot insert a watch slot after this returns. Must
+    /// not be called while holding that key's flight.
     pub async fn invalidate(&self, key: &K) {
+        let flight = self.flights.for_key(*key);
+        let _guard = flight.lock().await;
+        self.watchers
+            .lock()
+            .expect("diff watchers poisoned")
+            .remove(key);
+        self.invalidate_values(key).await;
+    }
+
+    async fn invalidate_values(&self, key: &K) {
         let mut cache = self.cache.write().await;
         cache.remove(key);
         self.stats_cache.write().await.remove(key);
@@ -238,9 +292,28 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
 
     /// Clear all cached diffs
     pub async fn clear(&self) {
+        self.watchers
+            .lock()
+            .expect("diff watchers poisoned")
+            .clear();
         let mut cache = self.cache.write().await;
         cache.clear();
         self.stats_cache.write().await.clear();
+    }
+
+    /// Test hook: register (or refresh) the watch slot for `key`.
+    #[cfg(test)]
+    pub(crate) async fn watch_for_test(&self, key: K, path: &Path) {
+        self.freshness(key, path).await;
+    }
+
+    /// Test hook: whether `key` still holds a watch slot.
+    #[cfg(test)]
+    pub(crate) fn is_watching(&self, key: &K) -> bool {
+        self.watchers
+            .lock()
+            .expect("diff watchers poisoned")
+            .contains_key(key)
     }
 }
 
@@ -608,6 +681,117 @@ mod tests {
     use crate::git::fixture::fixture_git;
 
     #[tokio::test]
+    async fn nested_worktree_edits_reconcile_without_recursive_watches() {
+        let dir = tracked_repo().await;
+        let nested = dir.path().join("target/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let cache = DiffCache::<u64>::with_ttl(Duration::from_millis(20));
+        cache.get_diff(&1, dir.path()).await.unwrap();
+        let take_changed = || {
+            cache
+                .watchers
+                .lock()
+                .unwrap()
+                .get_mut(&1)
+                .and_then(|watch| watch.watcher.as_mut())
+                .expect("this regression requires a registered watcher")
+                .take_changed()
+        };
+        // Drain anything the diff's own git invocations produced.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        take_changed();
+
+        // Pin non-recursion directly: a nested edit must not reach the watch
+        // (a recursive registration would report it), while a root-level
+        // edit still does.
+        std::fs::write(nested.join("new.txt"), "nested change").unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!take_changed(), "nested edits must not be watched");
+        std::fs::write(dir.path().join("root.txt"), "root change").unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            while !take_changed() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(observed.is_ok(), "root-level edits must still be watched");
+
+        // The nested edit is still picked up, by the TTL alone.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            cache
+                .get_diff(&1, dir.path())
+                .await
+                .unwrap()
+                .diff
+                .contains("nested change")
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_slots_follow_recent_roots_and_are_released() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = DiffCache::<u64>::new();
+        for key in 0..32 {
+            cache.freshness(key, dir.path()).await;
+        }
+        cache.freshness(0, dir.path()).await;
+        cache.freshness(32, dir.path()).await;
+        {
+            let watchers = cache.watchers.lock().unwrap();
+            assert_eq!(watchers.len(), 32);
+            assert!(watchers.contains_key(&0));
+            assert!(!watchers.contains_key(&1));
+            assert!(watchers.contains_key(&32));
+        }
+        cache.invalidate(&0).await;
+        assert!(!cache.watchers.lock().unwrap().contains_key(&0));
+        cache.clear().await;
+        assert!(cache.watchers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalidate_waits_for_an_in_flight_registration() {
+        // A get_diff whose watch registration began before teardown must not
+        // re-insert its slot after `invalidate` has already run.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = DiffCache::<u64>::new();
+        let flight = cache.flights.for_key(1);
+        let guard = flight.lock().await;
+        let invalidating = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.invalidate(&1).await }
+        });
+        // Current-thread runtime: this lets `invalidate` run until it blocks.
+        tokio::task::yield_now().await;
+        cache.freshness(1, dir.path()).await;
+        drop(guard);
+        invalidating.await.unwrap();
+        assert!(
+            !cache.is_watching(&1),
+            "invalidate must release a slot registered by an in-flight get_diff"
+        );
+    }
+
+    #[tokio::test]
+    async fn watchers_for_roots_deleted_elsewhere_are_pruned() {
+        // Another process deleted the worktree: nothing calls `invalidate`,
+        // and LRU eviction alone would hold its slot until the 33rd key.
+        let gone = tempfile::TempDir::new().unwrap();
+        let live = tempfile::TempDir::new().unwrap();
+        let cache = DiffCache::<u64>::new();
+        cache.freshness(1, gone.path()).await;
+        assert!(cache.is_watching(&1));
+        drop(gone);
+        cache.freshness(2, live.path()).await;
+        assert!(
+            !cache.is_watching(&1),
+            "a vanished root must release its slot"
+        );
+        assert!(cache.is_watching(&2));
+    }
+
+    #[tokio::test]
     async fn unavailable_watches_use_ttl_and_retry_after_a_cooldown() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("not-yet-created");
@@ -622,7 +806,7 @@ mod tests {
             .get_mut(&1)
             .unwrap()
             .attempted_at = Instant::now() - Duration::from_secs(31);
-        assert_eq!(cache.freshness(1, &path).await.1, Duration::from_secs(30));
+        assert_eq!(cache.freshness(1, &path).await.1, DEFAULT_DIFF_CACHE_TTL);
     }
 
     async fn tracked_repo() -> tempfile::TempDir {
@@ -700,26 +884,29 @@ mod tests {
     #[tokio::test]
     async fn cloned_diff_caches_observe_worktree_edits_before_reconciliation() {
         let dir = tracked_repo().await;
-        let cache = DiffCache::<u64>::new();
+        let cache = DiffCache::<u64>::with_ttl(Duration::from_secs(60));
         let initial = cache.get_diff(&1, dir.path()).await.unwrap();
         assert!(!initial.has_changes());
-        let watcher_is_healthy = || {
+        // `None` when no watch is registered, else whether it is healthy.
+        let watcher_health = || {
             cache
                 .watchers
                 .lock()
                 .unwrap()
                 .get(&1)
                 .and_then(|watch| watch.watcher.as_ref())
-                .is_some_and(|watcher| watcher.healthy())
+                .map(|watcher| watcher.healthy())
         };
         assert!(
-            watcher_is_healthy(),
-            "this regression requires a live watcher"
+            watcher_health().is_some(),
+            "this regression requires a registered watcher"
         );
         let clone = cache.clone();
         std::fs::write(dir.path().join("Cargo.lock"), "updated\n").unwrap();
         // Allow event delivery and Git work under parallel CI load, while
-        // staying below the healthy watch's 30-second reconciliation interval.
+        // staying well below the 60-second TTL, so only the watch can satisfy
+        // this. Health is not asserted afterwards: a watcher marked failed
+        // still invalidates, and macOS may report a startup rescan.
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if clone
@@ -737,13 +924,9 @@ mod tests {
         .await;
         assert!(
             result.is_ok(),
-            "filesystem edits should invalidate the shared cache; watcher healthy: {}, cache age: {:?}",
-            watcher_is_healthy(),
+            "filesystem edits should invalidate the shared cache; watcher healthy: {:?}, cache age: {:?}",
+            watcher_health(),
             initial.computed_at.elapsed(),
-        );
-        assert!(
-            watcher_is_healthy(),
-            "reconciliation must not satisfy this regression"
         );
     }
 

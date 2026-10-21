@@ -4,7 +4,10 @@
 //! Servers expose an authenticated change wait; older servers fall back to polling.
 //! The poller waits on the server generation before reconciling snapshots;
 //! unsupported servers use [`PollConfig::interval`]. Payload changes, generation
-//! changes and recovery notify consumers, which reuse the downloaded values.
+//! changes and recovery bump a [`watch`] generation counter; the consumer (the
+//! remote adapter's change-feed task) waits on it and re-fetches the snapshots
+//! itself. The poll's payloads are only hashed, never handed on, so a change
+//! costs the poll's two GETs plus the consumer's own reads.
 //!
 //! Alongside the generation counter the poller drives a [`ConnectionState`]
 //! watch: `Connecting` until the first successful poll, `Connected` while polls
@@ -139,6 +142,7 @@ async fn run(
     let mut generation = None;
     let mut push_supported = true;
     let mut consecutive_failures: u32 = 0;
+    let mut last_poll: Option<tokio::time::Instant> = None;
 
     loop {
         let previous_generation = generation;
@@ -147,6 +151,7 @@ async fn run(
                 Ok(next) => generation = Some(next),
                 Err(ClientError::NotFound) => push_supported = false,
                 Err(err) => {
+                    generation = None;
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     mark_degraded(&conn_tx, err.to_string());
                     tokio::time::sleep(backoff_delay(&config.backoff, consecutive_failures)).await;
@@ -154,6 +159,10 @@ async fn run(
                 }
             }
         }
+        if let Some(last) = last_poll {
+            tokio::time::sleep_until(last + Duration::from_millis(250)).await;
+        }
+        last_poll = Some(tokio::time::Instant::now());
         match client.poll_hashes().await {
             Ok(hash) => {
                 let content_changed = last_hash != Some(hash);
@@ -230,6 +239,38 @@ mod tests {
             .unwrap();
         rx.borrow_and_update();
     }
+    #[tokio::test]
+    async fn failed_wait_reconnects_without_waiting_for_another_change() {
+        use std::sync::atomic::Ordering;
+        let server = crate::test_server::Server::start(true).await;
+        let poller = spawn_poller(server.client.clone(), fast_config());
+        let mut rx = poller.generation_watch();
+        next_change(&mut rx).await;
+        server.wait_for_requests(2).await;
+        // The parked wait has already passed the failure check, so this bump
+        // wakes it normally; the *next* wait (since = the new generation) fails
+        // with the generation unchanged.
+        server.data.fail_wait.store(true, Ordering::SeqCst);
+        server.data.generation.send_modify(|g| *g += 1);
+        next_change(&mut rx).await;
+        let mut conn = poller.connection_watch();
+        wait_for_state(&mut conn, |s| matches!(s, ConnectionState::Degraded { .. })).await;
+        // Recovery must not wait for another server change: a retry that kept
+        // `since` would park for up to CHANGE_WAIT_SECS (forever, here).
+        wait_for_state(&mut conn, |s| *s == ConnectionState::Connected).await;
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 3);
+    }
+
+    async fn wait_for_state(
+        rx: &mut watch::Receiver<ConnectionState>,
+        want: impl Fn(&ConnectionState) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), rx.wait_for(|s| want(s)))
+            .await
+            .expect("connection state did not arrive in time")
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn generation_changes_wake_even_when_payloads_are_identical() {
         use std::sync::atomic::Ordering;

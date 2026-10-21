@@ -78,6 +78,9 @@ pub enum StateUpdate {
         session: claude_commander_core::backend::SessionRef,
         result: Result<claude_commander_protocol::api::CreateOptions, String>,
     },
+    CodeHostConfigUpdated {
+        result: std::result::Result<(), String>,
+    },
     /// Periodic config reload completed without holding up input/rendering.
     ConfigReloaded { result: Result<bool, String> },
     /// Session content updated

@@ -8,12 +8,12 @@ refreshing after changes, and limiting work to visible content.
 | TUI event loop | Draws when events invalidate the view. Idle ticks do not rebuild session lists or boards. Event draining has an 8 ms / 128-event budget. Animation, preview acquisition and age/config maintenance have separate deadlines. |
 | TUI actions | Keep-alive, creation reconciliation, post-mutation snapshot refreshes, local project registration and directory scans complete in background tasks. Refresh revisions prevent older responses replacing newer views. |
 | Preview | The protocol supports pane, shell, full diff and stats-only requests; callers omitting the selector retain the full payload. Live captures use a 100 ms deadline; Info stats use one second. Superseded tasks are cancelled and queued stale results are rejected. ANSI parsing, dimming and line metrics are cached; rendering borrows the cached paragraph. |
-| Remote refresh | Authenticated `/api/changes?since=...` waits up to 20 seconds. Successful mutations, observable state changes and clone completion wake it. Native clients reuse workspace/agent payloads once, with mutation invalidation and a two-second age limit. Older servers keep their configured polling fallback. |
-| Browser | Explicit refreshes stay independent of long waits. Healthy connections reconcile every 30 seconds; unsupported servers use 1.5 seconds. Hidden tabs reconcile every 60 seconds and refresh on visibility. Ended-terminal recovery temporarily restores the fast cadence. Unchanged cadence updates preserve the existing deadline. |
-| Flutter lists/review | Session rows and review diff rows are built lazily with stable keys. Project/workspace membership indexes are reused per snapshot. Redundant nested store listeners were removed. Terminal throughput updates only its meter. Raw diff parsing has an exact-key cache limited to two reviews and 8 MiB of source keys. |
+| Remote refresh | Authenticated `/api/changes?since=...` waits up to 20 seconds. Successful mutations, observable state changes and clone completion wake it. Native reads always fetch current server state; the poller only hashes its own poll payloads. Native refresh work is coalesced to at most four cycles per second. Older servers keep their configured polling fallback. |
+| Browser | Explicit refreshes stay independent of long waits. Healthy connections reconcile every 30 seconds; unsupported servers use 1.5 seconds. Hidden tabs consume change notifications too; unsupported servers retain the 1.5-second cadence. Tabs refresh on visibility. Ended-terminal recovery temporarily restores the fast cadence. Unchanged cadence updates preserve the existing deadline. |
+| Flutter lists/review | Session rows, collapsed file headers, and review diff rows are built lazily with stable keys. Project/workspace membership indexes are reused per snapshot. Redundant nested store listeners were removed. Terminal throughput updates only its meter. Raw diff parsing has an exact-key cache limited to two reviews and 8 MiB of source keys. |
 | Browser rendering | Unchanged project subtrees retain their DOM nodes. Review rows mount in 100-row chunks near the viewport, retaining mounted rows and composers. Comment anchors are indexed per file. |
 | State/comments | No-op state mutations retain the existing durable file and generation. Pending-comment indexing is cached and invalidated on saves and external events, with a 30-second reconciliation limit. Nonrecursive watches cover only state/comments/reviewed directories, handle atomic replacement, and fall back to configured polling on watcher failure or directory replacement. |
-| Git/pane caches | Concurrent misses for the same key share computation. Diff watchers cover worktrees, linked-worktree metadata and shared refs; healthy default caches reconcile every 30 seconds, while unavailable/failed watchers retain the configured TTL. Watch registration runs off async workers and is capped at 32 roots per cache. |
+| Git/pane caches | Concurrent misses for the same key share computation. Diff watchers cover only root directories, linked-worktree metadata and shared refs. All diff caches retain their configured TTL (500 ms by default), including for nested worktree edits; build trees are never registered recursively. Watch registration runs off async workers and is capped at 32 recent roots per cache, with LRU eviction. Removing a session or project releases its watchers, and roots deleted by another process are pruned when a new watch is registered. |
 | Agent inspection | One tmux listing gathers active pane titles for a batch; conclusive titles avoid captures. Inconclusive inspection has bounded concurrency. Unsupported harnesses remain conservative. |
 
 Periodic PR refresh, hourly project pulls, hibernation policy evaluation,
@@ -30,11 +30,9 @@ lockfile changes, shared diff cache invalidation, stats-only counts, authenticat
 mutation wakeups, legacy fallback, payload failure recovery, snapshot request
 counts, change-wait cleanup, and lazy large-diff rendering.
 
-The native transport request-count fixture verifies that one poll plus its
-consumer requires one workspace GET and one agent-state GET. Flutter's 5,000-row
-fixture checks that fewer than 100 intrinsic-height row widgets are mounted.
-The browser's 5,000-row fixture checks bounded DOM construction and reaching the
-last row by scrolling. These are workload bounds, not wall-clock speed claims.
+Flutter's 5,000-row fixture checks that fewer than 100 intrinsic-height row
+widgets are mounted. The browser's 5,000-row fixture checks bounded DOM
+construction and reaching the last row by scrolling. These are workload bounds, not wall-clock speed claims.
 
 Run the full pinned checks with:
 

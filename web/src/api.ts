@@ -1,3 +1,4 @@
+import { CHANGE_WAIT_SECS } from "./generated/constants.ts";
 // The commander HTTP API, typed over the shapes generated from
 // claude-commander-protocol (src/generated). This is the one place that knows
 // about the bearer header and what a 401 means; nothing else calls fetch.
@@ -197,7 +198,7 @@ export class Api {
       timeout === "read"
         ? this.readTimeoutMs
         : timeout === "changes"
-          ? 30_000
+          ? (CHANGE_WAIT_SECS + 10) * 1000
           : this.writeTimeoutMs;
     // A write that timed out may well still be running server-side (a create
     // fetching the remote): say so, or the natural retry makes a duplicate.

@@ -4,6 +4,13 @@ use super::*;
 use crate::agent::AgentKind;
 use crate::git::git_command;
 
+pub(crate) struct DeletePlan {
+    provider: claude_commander_protocol::hosting::CodeHostProvider,
+    repo_path: Option<PathBuf>,
+    session: WorktreeSession,
+    retargets: Vec<crate::config::PrBaseRetarget>,
+}
+
 impl SessionManager {
     /// Prepare a placeholder session in `Creating` state.
     ///
@@ -412,6 +419,7 @@ impl SessionManager {
                 state.remove_session(&sid);
             })
             .await?;
+        self.diff_cache.invalidate(session_id).await;
         info!("Removed creating session {}", session_id);
         Ok(())
     }
@@ -870,6 +878,15 @@ impl SessionManager {
     /// Delete a session (remove from state)
     #[instrument(skip(self))]
     pub async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
+        let plan = self.prepare_delete_session(session_id).await?;
+        self.finish_delete_session(plan).await;
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_delete_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<DeletePlan> {
         let provider = self.config_store.read().code_host_provider;
         // Resolve the owning project's repo path up front (needed to open the
         // git backend for worktree removal) — a cheap store read while the
@@ -903,6 +920,21 @@ impl SessionManager {
             return Err(SessionError::NotFound(*session_id).into());
         };
 
+        Ok(DeletePlan {
+            provider,
+            repo_path,
+            session,
+            retargets: pr_retargets,
+        })
+    }
+
+    pub(crate) async fn finish_delete_session(&self, plan: DeletePlan) {
+        let DeletePlan {
+            provider,
+            repo_path,
+            session,
+            retargets: pr_retargets,
+        } = plan;
         // Tear down the (already-removed) session's resources. Unconditional: a
         // Stopped session has no live tmux session but its worktree is still on
         // disk and must be cleaned up. A failure here can't restore the row and
@@ -922,13 +954,17 @@ impl SessionManager {
         {
             warn!("Failed to remove worktree while deleting session: {}", e);
         }
+        // Release the worktree's filesystem watch along with its cached diff
+        // only now: a get_diff racing the teardown could otherwise re-register
+        // a watch on the still-present worktree. Unconditional even when the
+        // removal failed — the session is gone, so nothing would release it.
+        self.diff_cache.invalidate(&session.id).await;
 
         // Durably retarget child reviews on the selected host (best-effort,
         // non-fatal).
         Self::retarget_child_prs(provider, pr_retargets).await;
 
-        info!("Deleted session {}", session_id);
-        Ok(())
+        info!("Deleted session {}", session.id);
     }
 
     /// Run planned review-base edits for a stack deletion. Best-effort: each

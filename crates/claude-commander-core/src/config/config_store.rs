@@ -143,6 +143,43 @@ impl ConfigStore {
         Ok(result)
     }
 
+    /// Apply a fallible mutation to a copy of the config and commit it — to
+    /// memory and to disk — only if the closure succeeds and the save does.
+    ///
+    /// Unlike [`mutate`](Self::mutate), a rejected edit touches nothing: no
+    /// half-applied in-memory config, no rewrite of `config.toml` (which would
+    /// clobber a hand edit the hot-reload has not read yet and record an mtime
+    /// that hides it for good), and no save error masking the rejection.
+    pub fn try_mutate<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Config) -> Result<T>,
+    {
+        let mut config = self.config.write().expect("config lock poisoned");
+        let mut edited = config.clone();
+        let result = f(&mut edited)?;
+        self.save_to_disk(&edited)?;
+        *config = edited;
+        Ok(result)
+    }
+
+    /// Apply a mutation to a copy of the config and commit it only when the
+    /// closure reports it changed something (`true`). Like
+    /// [`try_mutate`](Self::try_mutate), a refused or no-op edit writes
+    /// nothing, for edits whose refusal is an `Ok(false)` rather than an error.
+    pub fn mutate_if<F>(&self, f: F) -> Result<bool>
+    where
+        F: FnOnce(&mut Config) -> bool,
+    {
+        let mut config = self.config.write().expect("config lock poisoned");
+        let mut edited = config.clone();
+        if !f(&mut edited) {
+            return Ok(false);
+        }
+        self.save_to_disk(&edited)?;
+        *config = edited;
+        Ok(true)
+    }
+
     /// Write the given config to `self.config_path` and update the tracked mtime.
     fn save_to_disk(&self, config: &Config) -> Result<()> {
         use crate::error::ConfigError;
@@ -308,6 +345,40 @@ mod tests {
 
         // No spurious reload after our own write
         assert!(!store.reload_if_changed().unwrap());
+    }
+
+    #[test]
+    fn rejected_try_mutate_leaves_memory_and_disk_untouched() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        write_config(&config_path, &Config::default());
+        let bytes = std::fs::read(&config_path).unwrap();
+        let store = ConfigStore::with_path(Config::default(), config_path.clone());
+
+        let result = store.try_mutate(|c| {
+            c.ui_refresh_fps = 41;
+            Err::<(), _>(crate::error::ConfigError::SaveFailed("rejected".into()).into())
+        });
+
+        assert!(result.is_err());
+        assert_ne!(store.read().ui_refresh_fps, 41, "half-applied edit kept");
+        assert_eq!(std::fs::read(&config_path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn failed_save_in_try_mutate_leaves_memory_untouched() {
+        let dir = TempDir::new().unwrap();
+        // A directory where the config file belongs makes the write fail.
+        let config_path = dir.path().join("config.toml");
+        std::fs::create_dir_all(&config_path).unwrap();
+        let store = ConfigStore::with_path(Config::default(), config_path);
+
+        let result = store.try_mutate(|c| {
+            c.ui_refresh_fps = 41;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_ne!(store.read().ui_refresh_fps, 41);
     }
 
     #[test]
