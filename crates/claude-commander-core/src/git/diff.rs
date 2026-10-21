@@ -88,6 +88,7 @@ impl DiffInfo {
 
 struct RootWatch {
     watcher: Option<crate::file_events::FileEvents>,
+    root: std::path::PathBuf,
     attempted_at: Instant,
     requested_at: Instant,
 }
@@ -143,13 +144,17 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
                 .expect("diff watchers poisoned")
                 .contains_key(&key);
         if should_watch {
-            let path = path.to_path_buf();
+            let root = path.to_path_buf();
+            let path = root.clone();
             let watcher =
                 tokio::task::spawn_blocking(move || crate::file_events::FileEvents::git(&path))
                     .await
                     .ok()
                     .and_then(|result| result.ok());
             let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
+            // A root deleted by another process has no `invalidate` caller;
+            // release it here rather than holding it until LRU eviction.
+            watchers.retain(|k, entry| *k == key || entry.root.exists());
             if watchers.len() >= 32
                 && !watchers.contains_key(&key)
                 && let Some(oldest) = watchers
@@ -164,6 +169,7 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
                     key,
                     RootWatch {
                         watcher,
+                        root,
                         attempted_at: Instant::now(),
                         requested_at: Instant::now(),
                     },
@@ -264,6 +270,21 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         let mut cache = self.cache.write().await;
         cache.clear();
         self.stats_cache.write().await.clear();
+    }
+
+    /// Test hook: register (or refresh) the watch slot for `key`.
+    #[cfg(test)]
+    pub(crate) async fn watch_for_test(&self, key: K, path: &Path) {
+        self.freshness(key, path).await;
+    }
+
+    /// Test hook: whether `key` still holds a watch slot.
+    #[cfg(test)]
+    pub(crate) fn is_watching(&self, key: &K) -> bool {
+        self.watchers
+            .lock()
+            .expect("diff watchers poisoned")
+            .contains_key(key)
     }
 }
 
@@ -669,6 +690,24 @@ mod tests {
         assert!(!cache.watchers.lock().unwrap().contains_key(&0));
         cache.clear().await;
         assert!(cache.watchers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn watchers_for_roots_deleted_elsewhere_are_pruned() {
+        // Another process deleted the worktree: nothing calls `invalidate`,
+        // and LRU eviction alone would hold its slot until the 33rd key.
+        let gone = tempfile::TempDir::new().unwrap();
+        let live = tempfile::TempDir::new().unwrap();
+        let cache = DiffCache::<u64>::new();
+        cache.freshness(1, gone.path()).await;
+        assert!(cache.is_watching(&1));
+        drop(gone);
+        cache.freshness(2, live.path()).await;
+        assert!(
+            !cache.is_watching(&1),
+            "a vanished root must release its slot"
+        );
+        assert!(cache.is_watching(&2));
     }
 
     #[tokio::test]

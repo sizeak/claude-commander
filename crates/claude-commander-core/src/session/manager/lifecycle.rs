@@ -401,6 +401,7 @@ impl SessionManager {
                 state.remove_session(&sid);
             })
             .await?;
+        self.diff_cache.invalidate(session_id).await;
         info!("Removed creating session {}", session_id);
         Ok(())
     }
@@ -857,6 +858,8 @@ impl SessionManager {
             // A concurrent delete won the race and already removed it.
             return Err(SessionError::NotFound(*session_id).into());
         };
+        // Release the worktree's filesystem watch along with its cached diff.
+        self.diff_cache.invalidate(session_id).await;
 
         // Tear down the (already-removed) session's resources. Unconditional: a
         // Stopped session has no live tmux session but its worktree is still on
