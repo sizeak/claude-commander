@@ -858,8 +858,6 @@ impl SessionManager {
             // A concurrent delete won the race and already removed it.
             return Err(SessionError::NotFound(*session_id).into());
         };
-        // Release the worktree's filesystem watch along with its cached diff.
-        self.diff_cache.invalidate(session_id).await;
 
         // Tear down the (already-removed) session's resources. Unconditional: a
         // Stopped session has no live tmux session but its worktree is still on
@@ -880,6 +878,11 @@ impl SessionManager {
         {
             warn!("Failed to remove worktree while deleting session: {}", e);
         }
+        // Release the worktree's filesystem watch along with its cached diff
+        // only now: a get_diff racing the teardown could otherwise re-register
+        // a watch on the still-present worktree. Unconditional even when the
+        // removal failed — the session is gone, so nothing would release it.
+        self.diff_cache.invalidate(session_id).await;
 
         // Durably retarget child PRs on GitHub (best-effort, non-fatal).
         Self::retarget_child_prs(pr_retargets).await;

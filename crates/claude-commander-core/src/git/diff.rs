@@ -146,15 +146,35 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         if should_watch {
             let root = path.to_path_buf();
             let path = root.clone();
-            let watcher =
-                tokio::task::spawn_blocking(move || crate::file_events::FileEvents::git(&path))
-                    .await
-                    .ok()
-                    .and_then(|result| result.ok());
-            let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
             // A root deleted by another process has no `invalidate` caller;
-            // release it here rather than holding it until LRU eviction.
-            watchers.retain(|k, entry| *k == key || entry.root.exists());
+            // release it here rather than holding it until LRU eviction. The
+            // existence checks are blocking stats, so they run beside the
+            // watch registration rather than under the lock on this worker.
+            let others: Vec<(K, std::path::PathBuf)> = self
+                .watchers
+                .lock()
+                .expect("diff watchers poisoned")
+                .iter()
+                .filter(|(k, _)| **k != key)
+                .map(|(k, entry)| (*k, entry.root.clone()))
+                .collect();
+            let (watcher, vanished) = tokio::task::spawn_blocking(move || {
+                let vanished: Vec<(K, std::path::PathBuf)> = others
+                    .into_iter()
+                    .filter(|(_, root)| !root.exists())
+                    .collect();
+                (crate::file_events::FileEvents::git(&path).ok(), vanished)
+            })
+            .await
+            .unwrap_or_default();
+            let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
+            for (k, root) in &vanished {
+                // Only drop the slot that was checked: it may have been
+                // re-registered for another root while the stats ran.
+                if watchers.get(k).is_some_and(|entry| entry.root == *root) {
+                    watchers.remove(k);
+                }
+            }
             if watchers.len() >= 32
                 && !watchers.contains_key(&key)
                 && let Some(oldest) = watchers
