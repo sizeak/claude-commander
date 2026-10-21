@@ -13205,6 +13205,56 @@ async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
     assert!(app.event_loop.try_next().is_none());
 }
 
+/// A GitLab hostname edit goes through the service's code-host path, as a
+/// provider change does, so the cached glab probe is reset and PRs refetched
+/// rather than the hostname only being written to config.
+#[tokio::test]
+async fn gitlab_hostname_edit_runs_through_the_code_host_path() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.handle_command(UserCommand::ShowSettings).await;
+    if let Modal::Settings(state) = &mut app.ui_state.modal {
+        state.selected_row = state
+            .rows
+            .iter()
+            .position(|r| r.field_key == "gitlab_hostname")
+            .unwrap();
+    }
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let keys = std::iter::once(KeyCode::Enter)
+        .chain(std::iter::repeat_n(KeyCode::Backspace, 32))
+        .chain("gitlab.example.com".chars().map(KeyCode::Char))
+        .chain(std::iter::once(KeyCode::Enter));
+    for code in keys {
+        app.process_event(AppEvent::Input(crate::event::InputEvent::Key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+        )))
+        .await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = app.event_loop.next().await.unwrap();
+            let done = matches!(
+                &event,
+                AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated { result: Ok(()) })
+            );
+            app.process_event(event).await;
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the edit should complete through edit_code_host_config");
+    assert_eq!(
+        app.service.read_config().gitlab_hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+    assert_eq!(
+        app.config.gitlab_hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
 #[tokio::test]
 async fn provider_picker_runs_in_background_and_refreshes_its_display() {
     let (mut app, _) = app_with_remote_session().await;

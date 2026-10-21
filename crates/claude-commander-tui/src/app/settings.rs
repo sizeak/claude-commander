@@ -1380,17 +1380,9 @@ impl App {
                     }
                 }
                 "gitlab_hostname" => {
-                    let hostname =
-                        (!value.is_empty() && value != "(default)").then(|| value.to_string());
-                    if let Some(hostname) = hostname.as_deref()
-                        && let Err(reason) =
-                            claude_commander_protocol::hosting::validate_gitlab_hostname(hostname)
-                    {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Invalid GitLab hostname: {reason}"),
-                        };
+                    let Some(hostname) = self.parse_gitlab_hostname_setting(value) else {
                         return;
-                    }
+                    };
                     self.config.gitlab_hostname = hostname;
                 }
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
@@ -1792,35 +1784,67 @@ impl App {
         }
     }
 
-    /// Apply an edit and finish provider transitions through the service's
-    /// serialized cache-invalidation path.
-    async fn apply_settings_edit_live(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
-        if tab == SettingsTab::General && field_key == "code_host_provider" {
-            use claude_commander_protocol::hosting::CodeHostProvider;
-            let provider = match value {
-                "GitHub" | "github" => CodeHostProvider::Github,
-                "GitLab" | "gitlab" => CodeHostProvider::Gitlab,
-                _ => return,
+    /// Parse the GitLab hostname editor's value (`None` inside = the default
+    /// host). An invalid hostname opens an error dialog and returns `None`.
+    fn parse_gitlab_hostname_setting(&mut self, value: &str) -> Option<Option<String>> {
+        let hostname = (!value.is_empty() && value != "(default)").then(|| value.to_string());
+        if let Some(hostname) = hostname.as_deref()
+            && let Err(reason) =
+                claude_commander_protocol::hosting::validate_gitlab_hostname(hostname)
+        {
+            self.ui_state.modal = Modal::Error {
+                message: format!("Invalid GitLab hostname: {reason}"),
             };
-            let service = self.service.clone();
-            let tx = self.event_loop.sender();
-            tokio::spawn(async move {
-                let result = service
-                    .edit_code_host_config(move |config| {
-                        config.code_host_provider = provider;
-                        Ok(())
-                    })
-                    .await
-                    .map_err(|error| error.to_string());
-                let _ = tx
-                    .send(AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated {
-                        result,
-                    }))
-                    .await;
-            });
+            return None;
+        }
+        Some(hostname)
+    }
+
+    /// Apply an edit and finish code-host changes (provider and GitLab
+    /// hostname) through the service's serialized cache-invalidation path,
+    /// which also resets the glab probe and refetches PRs.
+    async fn apply_settings_edit_live(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
+        if tab != SettingsTab::General {
+            self.apply_settings_edit(tab, field_key, value);
             return;
         }
-        self.apply_settings_edit(tab, field_key, value);
+        let edit: Box<dyn Fn(&mut claude_commander_core::config::Config) + Send> = match field_key {
+            "code_host_provider" => {
+                use claude_commander_protocol::hosting::CodeHostProvider;
+                let provider = match value {
+                    "GitHub" | "github" => CodeHostProvider::Github,
+                    "GitLab" | "gitlab" => CodeHostProvider::Gitlab,
+                    _ => return,
+                };
+                Box::new(move |config| config.code_host_provider = provider)
+            }
+            "gitlab_hostname" => {
+                let Some(hostname) = self.parse_gitlab_hostname_setting(value) else {
+                    return;
+                };
+                Box::new(move |config| config.gitlab_hostname = hostname.clone())
+            }
+            _ => {
+                self.apply_settings_edit(tab, field_key, value);
+                return;
+            }
+        };
+        let service = self.service.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = service
+                .edit_code_host_config(move |config| {
+                    edit(config);
+                    Ok(())
+                })
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated {
+                    result,
+                }))
+                .await;
+        });
     }
 
     /// Set a boolean General-tab setting to a typed value and persist.
