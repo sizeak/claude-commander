@@ -2102,7 +2102,8 @@ impl App {
         session_id: SessionId,
         result: std::result::Result<claude_commander_core::api::SetSessionBaseOutcome, String>,
     ) {
-        self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+        self.ui_state.pending_selection =
+            self.pending_session(SessionRef::new(backend_id, session_id));
         self.spawn_backend_view_refresh(backend_id);
         if self.select_session_in_tree(session_id) {
             self.ui_state.preview_update_spawned_at = None;

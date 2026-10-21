@@ -12958,7 +12958,7 @@ async fn late_background_error_preserves_a_new_modal() {
 async fn failed_pending_selection_is_discarded_without_lfs() {
     let (mut app, _) = app_with_remote_session().await;
     let id = SessionId::new();
-    app.ui_state.pending_selection = Some(SessionRef::new(BackendId(1), id));
+    app.ui_state.pending_selection = app.pending_session(SessionRef::new(BackendId(1), id));
     let view = app.view_for(BackendId(1));
     let snapshot = Box::new(view.snapshot.clone());
     let states = Box::new(view.agent_states.clone());
@@ -12993,7 +12993,7 @@ async fn selecting_a_mutated_session_does_not_start_lfs() {
     let dir = tempfile::TempDir::new().unwrap();
     snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
     app.config.skip_lfs_smudge = true;
-    app.ui_state.pending_selection = Some(SessionRef::local(sid));
+    app.ui_state.pending_selection = app.pending_session(SessionRef::local(sid));
     app.handle_state_update(StateUpdate::BackendChanged {
         backend_id: LOCAL_BACKEND_ID.0,
         revision: 1,
@@ -13011,7 +13011,12 @@ async fn create_lfs_intent_survives_an_older_snapshot() {
     let dir = tempfile::TempDir::new().unwrap();
     snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
     app.config.skip_lfs_smudge = true;
-    app.ui_state.pending_created = Some(SessionRef::local(sid));
+    // Revision 1 was fetched before the create; the post-create refresh is 2.
+    let pending = PendingSession {
+        session: SessionRef::local(sid),
+        settles_at: 2,
+    };
+    app.ui_state.pending_created = vec![pending];
     let mut old = snapshot.clone();
     old.sessions.clear();
     app.handle_state_update(StateUpdate::BackendChanged {
@@ -13021,7 +13026,7 @@ async fn create_lfs_intent_survives_an_older_snapshot() {
         states: agent_states_box(),
     })
     .await;
-    assert_eq!(app.ui_state.pending_created, Some(SessionRef::local(sid)));
+    assert_eq!(app.ui_state.pending_created, vec![pending]);
     app.handle_state_update(StateUpdate::BackendChanged {
         backend_id: LOCAL_BACKEND_ID.0,
         revision: 2,
@@ -13029,6 +13034,106 @@ async fn create_lfs_intent_survives_an_older_snapshot() {
         states: agent_states_box(),
     })
     .await;
-    assert!(app.ui_state.pending_created.is_none());
+    assert!(app.ui_state.pending_created.is_empty());
     assert!(app.ui_state.lfs_pull_in_flight.contains(&sid));
+}
+
+#[tokio::test]
+async fn created_session_selection_survives_a_snapshot_fetched_before_the_create() {
+    // A change-feed fetch that took its revision BEFORE the create committed but
+    // lands AFTER `SessionCreated` passes the revision fence while carrying a
+    // snapshot without the new session. That must not discard the pending
+    // selection: the post-create refresh is what should select the new row.
+    let (mut app, _) = app_with_remote_session().await;
+    let stale_revision = app
+        .backend_mut_for_test(BackendId(1))
+        .refresh_sequence
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    let stale = app.view_for(BackendId(1)).snapshot.clone();
+    let new_id = remote_mock(&app, BackendId(1))
+        .create_session(claude_commander_core::api::CreateSessionOpts {
+            project_path: std::path::PathBuf::from("/tmp/rp"),
+            title: "new".to_string(),
+            program: None,
+            initial_prompt: None,
+            model: None,
+            effort: None,
+            mode: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        })
+        .await
+        .unwrap();
+    app.handle_state_update(StateUpdate::SessionCreated {
+        session_id: new_id,
+        backend_id: BackendId(1).0,
+    })
+    .await;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: 1,
+        revision: stale_revision,
+        snapshot: Box::new(stale),
+        states: agent_states_box(),
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("creation refresh should complete");
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(new_id),
+        "the post-create refresh must select the new session"
+    );
+}
+
+#[tokio::test]
+async fn two_creates_before_the_first_refresh_both_hydrate_lfs() {
+    // Two `SessionCreated` events landing before either session's refresh must
+    // each keep their LFS intent; one snapshot containing both hydrates both.
+    let mut app = make_test_app();
+    app.config.skip_lfs_smudge = true;
+    let (mut snapshot, first, _) = snapshot_with_one_session();
+    let mut second_session = snapshot.sessions[0].clone();
+    let second = SessionId::new();
+    second_session.session_id = second;
+    snapshot.sessions.push(second_session);
+    let dirs = [
+        tempfile::TempDir::new().unwrap(),
+        tempfile::TempDir::new().unwrap(),
+    ];
+    for (session, dir) in snapshot.sessions.iter_mut().zip(&dirs) {
+        session.worktree_path = dir.path().to_string_lossy().into_owned();
+    }
+    for id in [first, second] {
+        app.handle_state_update(StateUpdate::SessionCreated {
+            session_id: id,
+            backend_id: LOCAL_BACKEND_ID.0,
+        })
+        .await;
+    }
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: u64::MAX,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&first));
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&second));
+    assert!(app.ui_state.pending_created.is_empty());
+}
+
+#[tokio::test]
+async fn refreshing_an_unknown_backend_is_a_no_op() {
+    // A refresh can race the removal of its server; an unknown id must not panic.
+    let mut app = make_test_app();
+    app.refresh_backend_view(BackendId(999)).await;
 }
