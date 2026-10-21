@@ -10,7 +10,6 @@
 //! to mobile targets.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use claude_commander_protocol::api::{
@@ -101,32 +100,11 @@ const REPO_LIST_TIMEOUT: Duration =
 /// client, the resolved base URL, and the (redacted) bearer token. Cloneable via
 /// `Arc`; the poll task holds an `Arc` of this — never of the adapter backend —
 /// so there's no cycle.
-#[derive(Default)]
-struct SnapshotCache {
-    epoch: u64,
-    fetched_at: Option<std::time::Instant>,
-    workspace: Option<Snapshot>,
-    agents: Option<AgentStatesSnapshot>,
-}
-
-impl SnapshotCache {
-    fn expire(&mut self) {
-        if self
-            .fetched_at
-            .is_some_and(|at| at.elapsed() > Duration::from_secs(2))
-        {
-            self.workspace = None;
-            self.agents = None;
-        }
-    }
-}
-
 pub struct RemoteClient {
     name: String,
     client: Client,
     base: Url,
     token: Option<SecretString>,
-    snapshots: Mutex<SnapshotCache>,
 }
 
 impl RemoteClient {
@@ -162,7 +140,6 @@ impl RemoteClient {
             client,
             base,
             token: spec.token,
-            snapshots: Mutex::new(SnapshotCache::default()),
         })
     }
 
@@ -238,20 +215,10 @@ impl RemoteClient {
             Some(token) => request.bearer_auth(token.expose()),
             None => request,
         };
-        let request = request.build().map_err(error::transport_error)?;
-        let mutation = request.method() != reqwest::Method::GET;
-        if mutation {
-            self.invalidate_snapshots();
-        }
-        let response = self.client.execute(request).await.map_err(|err| {
+        request.send().await.map_err(|err| {
             tracing::debug!(server = %self.name, error = %err, "remote request failed in transport");
             error::transport_error(err)
-        });
-        // A poll started during a mutation may have read the old state.
-        if mutation {
-            self.invalidate_snapshots();
-        }
-        response
+        })
     }
 
     /// Turn a non-success status into the matching [`ClientError`], reading the
@@ -433,37 +400,15 @@ impl RemoteClient {
     /// whether observable state moved. Any HTTP/transport failure propagates so
     /// the poller can go degraded.
     pub async fn poll_hashes(&self) -> ClientResult<u64> {
-        let epoch = self
-            .snapshots
-            .lock()
-            .expect("snapshot cache poisoned")
-            .epoch;
         let (workspace, agent_states) = tokio::try_join!(
             self.get_bytes(self.endpoint(&["workspace"])),
             self.get_bytes(self.endpoint(&["agent-states"])),
         )?;
-        let snapshot =
-            serde_json::from_slice(&workspace).map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let agents = serde_json::from_slice(&agent_states)
-            .map_err(|e| ClientError::Protocol(e.to_string()))?;
         let mut hasher = Xxh3::new();
         hasher.update(&workspace);
         hasher.update(b"\x00");
         hasher.update(&agent_states);
-        let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
-        if cache.epoch == epoch {
-            cache.fetched_at = Some(std::time::Instant::now());
-            cache.workspace = Some(snapshot);
-            cache.agents = Some(agents);
-        }
         Ok(hasher.digest())
-    }
-
-    fn invalidate_snapshots(&self) {
-        let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
-        cache.epoch = cache.epoch.wrapping_add(1);
-        cache.workspace = None;
-        cache.agents = None;
     }
 
     /// Wait for a server generation. A 404 means an older server: the poller
@@ -519,44 +464,7 @@ impl RemoteClient {
         self.get_json(self.endpoint(&["workspace"])).await
     }
 
-    /// Consume the most recent poll payload, or fetch if absent/expired.
-    /// Automatic change-feed consumers may opt in; explicit refreshes use snapshot.
-    pub async fn polled_snapshot(&self) -> ClientResult<Snapshot> {
-        let cached = {
-            let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
-            cache.expire();
-            cache.workspace.take()
-        };
-        match cached {
-            Some(snapshot) => Ok(snapshot),
-            None => self.get_json(self.endpoint(&["workspace"])).await,
-        }
-    }
-
     pub async fn agent_states(&self, fresh: bool) -> ClientResult<AgentStatesSnapshot> {
-        if fresh {
-            self.invalidate_snapshots();
-        }
-        let mut url = self.endpoint(&["agent-states"]);
-        url.query_pairs_mut()
-            .append_pair("fresh", if fresh { "true" } else { "false" });
-        self.get_json(url).await
-    }
-
-    /// Opt-in counterpart to polled_snapshot for automatic change-feed consumers.
-    pub async fn polled_agent_states(&self, fresh: bool) -> ClientResult<AgentStatesSnapshot> {
-        if !fresh {
-            let cached = {
-                let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
-                cache.expire();
-                cache.agents.take()
-            };
-            if let Some(states) = cached {
-                return Ok(states);
-            }
-        } else {
-            self.invalidate_snapshots();
-        }
         let mut url = self.endpoint(&["agent-states"]);
         url.query_pairs_mut()
             .append_pair("fresh", if fresh { "true" } else { "false" });
@@ -1081,38 +989,6 @@ mod tests {
         server.client.agent_states(false).await.unwrap();
         assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
         assert_eq!(server.data.agents.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn delayed_explicit_refresh_does_not_consume_an_old_poll() {
-        use std::sync::atomic::Ordering;
-        let server = crate::test_server::Server::start(true).await;
-        server.client.poll_hashes().await.unwrap();
-        server.client.snapshots.lock().unwrap().fetched_at =
-            Some(std::time::Instant::now() - Duration::from_secs(3));
-        server.client.snapshot().await.unwrap();
-        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn polled_payloads_are_reused_once_and_invalidated_by_mutations() {
-        use std::sync::atomic::Ordering;
-        let server = crate::test_server::Server::start(true).await;
-        server.client.poll_hashes().await.unwrap();
-        server.client.polled_snapshot().await.unwrap();
-        server.client.polled_agent_states(false).await.unwrap();
-        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 1);
-        assert_eq!(server.data.agents.load(Ordering::SeqCst), 1);
-        server.client.polled_snapshot().await.unwrap();
-        server.client.polled_agent_states(false).await.unwrap();
-        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
-        assert_eq!(server.data.agents.load(Ordering::SeqCst), 2);
-        server.client.poll_hashes().await.unwrap();
-        server.client.request_pr_refresh().await.unwrap();
-        server.client.polled_snapshot().await.unwrap();
-        server.client.polled_agent_states(false).await.unwrap();
-        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 4);
-        assert_eq!(server.data.agents.load(Ordering::SeqCst), 4);
     }
 
     use super::*;

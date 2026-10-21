@@ -4,7 +4,10 @@
 //! Servers expose an authenticated change wait; older servers fall back to polling.
 //! The poller waits on the server generation before reconciling snapshots;
 //! unsupported servers use [`PollConfig::interval`]. Payload changes, generation
-//! changes and recovery notify consumers, which reuse the downloaded values.
+//! changes and recovery bump a [`watch`] generation counter; the consumer (the
+//! remote adapter's change-feed task) waits on it and re-fetches the snapshots
+//! itself. The poll's payloads are only hashed, never handed on, so a change
+//! costs the poll's two GETs plus the consumer's own reads.
 //!
 //! Alongside the generation counter the poller drives a [`ConnectionState`]
 //! watch: `Connecting` until the first successful poll, `Connected` while polls
@@ -244,11 +247,28 @@ mod tests {
         let mut rx = poller.generation_watch();
         next_change(&mut rx).await;
         server.wait_for_requests(2).await;
+        // The parked wait has already passed the failure check, so this bump
+        // wakes it normally; the *next* wait (since = the new generation) fails
+        // with the generation unchanged.
         server.data.fail_wait.store(true, Ordering::SeqCst);
         server.data.generation.send_modify(|g| *g += 1);
         next_change(&mut rx).await;
-        assert_eq!(poller.connection_state(), ConnectionState::Connected);
-        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
+        let mut conn = poller.connection_watch();
+        wait_for_state(&mut conn, |s| matches!(s, ConnectionState::Degraded { .. })).await;
+        // Recovery must not wait for another server change: a retry that kept
+        // `since` would park for up to CHANGE_WAIT_SECS (forever, here).
+        wait_for_state(&mut conn, |s| *s == ConnectionState::Connected).await;
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 3);
+    }
+
+    async fn wait_for_state(
+        rx: &mut watch::Receiver<ConnectionState>,
+        want: impl Fn(&ConnectionState) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), rx.wait_for(|s| want(s)))
+            .await
+            .expect("connection state did not arrive in time")
+            .unwrap();
     }
 
     #[tokio::test]
