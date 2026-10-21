@@ -1858,11 +1858,25 @@ impl App {
 
     /// Persist the current config via the store (updates mtime so hot-reload
     /// won't re-read our own write).
+    ///
+    /// On failure the cache is resynchronised from the service and the user
+    /// told, so an edit is never dropped with only a log line.
     fn persist_config(&mut self) {
-        let updated = self.config.clone();
-        if let Err(e) = self.service.update_config(updated) {
-            warn!("Failed to save config: {}", e);
-        }
+        // This path never changes the provider (`apply_settings_edit` hands
+        // that to `edit_code_host_config`), but the cached one can be stale: a
+        // shared-service PATCH under `--serve` switches it without the
+        // hot-reload noticing, and `update_config` rejects any provider
+        // mismatch. Carry the service's provider so the edit applies to it.
+        self.config.code_host_provider = self.service.read_config().code_host_provider;
+        let Err(e) = self.service.update_config(self.config.clone()) else {
+            return;
+        };
+        warn!("Failed to save config: {}", e);
+        self.config = self.service.read_config();
+        self.ui_state.status_message = Some((
+            format!("Failed to save settings: {e} (settings reloaded)"),
+            Instant::now() + Duration::from_secs(10),
+        ));
     }
 
     /// Switch the settings modal to the next (`forward`) or previous tab,
@@ -2530,10 +2544,7 @@ impl App {
 
     /// Persist the current sections config to disk and reconcile session assignments.
     async fn save_sections_config(&mut self) {
-        let updated = self.config.clone();
-        if let Err(e) = self.service.update_config(updated) {
-            warn!("Failed to save sections config: {}", e);
-        }
+        self.persist_config();
         self.reconcile_section_assignments().await;
     }
 

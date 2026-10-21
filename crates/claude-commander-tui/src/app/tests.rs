@@ -13247,6 +13247,48 @@ async fn provider_picker_runs_in_background_and_refreshes_its_display() {
     );
 }
 
+/// Under `--serve` a web/Flutter `PATCH /config` can switch the provider on the
+/// service this TUI shares, without the hot-reload ever re-reading it (the
+/// shared store's own write updates the tracked mtime). A later TUI settings
+/// edit, sent from the now-stale cached config, must still land — not be
+/// rejected for its stale provider and silently dropped.
+#[tokio::test]
+async fn settings_edit_after_external_provider_switch_is_not_lost() {
+    use claude_commander_protocol::hosting::CodeHostProvider;
+    let mut app = make_test_app();
+    app.service
+        .edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(app.config.code_host_provider, CodeHostProvider::Github);
+    let rounded = !app.config.rounded_borders;
+    app.apply_bool_setting("rounded_borders", rounded);
+    let persisted = app.service.read_config();
+    assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
+    assert_eq!(persisted.code_host_provider, CodeHostProvider::Gitlab);
+    assert_eq!(app.config.code_host_provider, CodeHostProvider::Gitlab);
+}
+
+/// A settings save the service rejects is surfaced to the user and the cached
+/// config resynchronised, never only logged.
+#[tokio::test]
+async fn rejected_settings_save_is_surfaced_and_config_reloaded() {
+    let (mut app, config_path) = make_test_app_with_path();
+    // A directory where the config file belongs makes the write fail.
+    let _ = std::fs::remove_file(&config_path);
+    std::fs::create_dir_all(&config_path).unwrap();
+    app.apply_bool_setting("rounded_borders", !app.config.rounded_borders);
+    let (message, _) = app
+        .ui_state
+        .status_message
+        .as_ref()
+        .expect("a failed save must be visible");
+    assert!(message.contains("Failed to save settings"), "{message}");
+}
+
 #[tokio::test]
 async fn late_background_error_preserves_a_new_modal() {
     let (mut app, _) = app_with_remote_session().await;
