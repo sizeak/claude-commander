@@ -6519,8 +6519,6 @@ mod tests {
         assert_eq!(s.base_branch.as_deref(), Some("branch-other"));
     }
 
-    /// An unknown session must keep the API's 404 semantics rather than falling
-    /// through the rejection enum's 400/409 mapping.
     /// The provider lock only guards the state mutation: the PR retarget and the
     /// fresh restart that follow can take seconds, and holding the lock across
     /// them would stall every review poll and provider switch behind an edit.
@@ -6576,6 +6574,8 @@ mod tests {
         assert_eq!(*svc.slow_step_lock_free.lock().unwrap(), vec![true]);
     }
 
+    /// An unknown session must keep the API's 404 semantics rather than falling
+    /// through the rejection enum's 400/409 mapping.
     #[tokio::test]
     async fn set_session_base_on_missing_session_is_not_found() {
         let dir = tempfile::TempDir::new().unwrap();
