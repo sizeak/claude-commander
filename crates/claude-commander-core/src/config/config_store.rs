@@ -162,6 +162,24 @@ impl ConfigStore {
         Ok(result)
     }
 
+    /// Apply a mutation to a copy of the config and commit it only when the
+    /// closure reports it changed something (`true`). Like
+    /// [`try_mutate`](Self::try_mutate), a refused or no-op edit writes
+    /// nothing, for edits whose refusal is an `Ok(false)` rather than an error.
+    pub fn mutate_if<F>(&self, f: F) -> Result<bool>
+    where
+        F: FnOnce(&mut Config) -> bool,
+    {
+        let mut config = self.config.write().expect("config lock poisoned");
+        let mut edited = config.clone();
+        if !f(&mut edited) {
+            return Ok(false);
+        }
+        self.save_to_disk(&edited)?;
+        *config = edited;
+        Ok(true)
+    }
+
     /// Write the given config to `self.config_path` and update the tracked mtime.
     fn save_to_disk(&self, config: &Config) -> Result<()> {
         use crate::error::ConfigError;

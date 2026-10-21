@@ -318,7 +318,7 @@ impl CommanderService {
         if new == old {
             return Ok(false);
         }
-        let renamed = self.config_store.mutate(|c| {
+        let renamed = self.config_store.mutate_if(|c| {
             let Some(idx) = c.sections.iter().position(|s| s.name == old) else {
                 return false;
             };
@@ -411,15 +411,13 @@ impl CommanderService {
     /// workspace. The theme moves even then: it is local config, and the TUI
     /// keeps themes for workspaces that live only on a remote server.
     pub async fn rename_workspace(&self, from: &str, to: &str) -> Result<bool> {
-        let renamed_def = self
-            .config_store
-            .mutate(|c| {
-                let renamed = workspace::rename_workspace_def(c, from, to)?;
-                // `to` is valid and unclaimed once the def rename accepted it.
-                workspace::rename_workspace_theme(c, from, to.trim());
-                Ok(renamed)
-            })?
-            .map_err(|e| workspace::workspace_rejected(to, e))?;
+        let renamed_def = self.config_store.try_mutate(|c| {
+            let renamed = workspace::rename_workspace_def(c, from, to)
+                .map_err(|e| workspace::workspace_rejected(to, e))?;
+            // `to` is valid and unclaimed once the def rename accepted it.
+            workspace::rename_workspace_theme(c, from, to.trim());
+            Ok(renamed)
+        })?;
         let to = claude_commander_protocol::workspace::validate_workspace_name(to)
             .map_err(|e| workspace::workspace_rejected(to, e))?;
         let (from_owned, to_tag) = (from.to_string(), to.clone());
@@ -445,9 +443,12 @@ impl CommanderService {
     /// Returns `false` when there was no definition or tag to delete (a theme
     /// alone is still dropped). Main itself has no name and cannot be deleted.
     pub async fn delete_workspace(&self, name: &str) -> Result<bool> {
-        let removed_def = self.config_store.mutate(|c| {
-            workspace::delete_workspace_theme(c, name);
-            workspace::delete_workspace_def(c, name)
+        let mut removed_def = false;
+        self.config_store.mutate_if(|c| {
+            let startup = c.startup_workspace.clone();
+            let removed_theme = workspace::delete_workspace_theme(c, name);
+            removed_def = workspace::delete_workspace_def(c, name);
+            removed_theme || removed_def || c.startup_workspace != startup
         })?;
         let owned = name.to_string();
         let moved = self
@@ -4371,6 +4372,29 @@ mod tests {
             svc.read_config().code_host_provider,
             before.code_host_provider
         );
+        assert_external_edit_survives(&svc, &dir, external).await;
+    }
+
+    /// A refused section rename, a rejected workspace rename and a workspace
+    /// delete with nothing to delete change no config, so none may rewrite
+    /// `config.toml` and hide a pending hand edit from the hot-reload.
+    #[tokio::test]
+    async fn refused_section_and_workspace_edits_leave_config_file_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service_with_config(&dir, config_with_section("Parking"));
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        let external = external_config_edit(&svc, &dir);
+
+        assert!(!svc.rename_section("Nonexistent", "Waiting").await.unwrap());
+        assert!(!svc.rename_section("Parking", "   ").await.unwrap());
+        assert!(svc.rename_workspace("Work", "Play").await.is_err());
+        assert!(!svc.delete_workspace("Nope").await.unwrap());
+
         assert_external_edit_survives(&svc, &dir, external).await;
     }
 
