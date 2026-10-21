@@ -238,15 +238,24 @@ impl CommanderService {
 
     /// Overwrite the persisted config (updates mtime so the hot-reload watcher
     /// won't re-read our own write).
+    ///
+    /// Rejects a config whose provider differs from the stored one: provider
+    /// changes must go through [`update_code_host_config`](Self::update_code_host_config)
+    /// so review metadata is invalidated. The comparison runs inside `mutate`,
+    /// against the value being replaced, so a whole-config write built from a
+    /// cache that predates a concurrent switch cannot revert it.
     pub fn update_config(&self, config: Config) -> Result<()> {
-        if config.code_host_provider != self.config_store.read().code_host_provider {
-            return Err(ConfigError::InvalidValue {
-                key: "code_host_provider".into(),
-                reason: "provider changes must use update_code_host_config".into(),
+        self.config_store.mutate(|current| {
+            if config.code_host_provider != current.code_host_provider {
+                return Err(ConfigError::InvalidValue {
+                    key: "code_host_provider".into(),
+                    reason: "provider changes must use update_code_host_config".into(),
+                }
+                .into());
             }
-            .into());
-        }
-        self.config_store.mutate(|c| *c = config)
+            *current = config;
+            Ok(())
+        })?
     }
 
     /// Persist a config whose code-host provider changed and invalidate all
@@ -267,26 +276,36 @@ impl CommanderService {
         edit: impl Fn(&mut Config) -> Result<()> + Send,
     ) -> Result<()> {
         let _guard = self.review_provider_lock.lock().await;
-        let mut config = self.read_config();
-        let old_provider = config.code_host_provider;
-        edit(&mut config)?;
-        *self
-            .glab_available
-            .lock()
-            .expect("glab availability poisoned") = None;
-        if config.code_host_provider != old_provider {
-            self.invalidate_review_metadata(&config).await?;
-            self.review_provider_epoch
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        self.config_store.mutate(|current| {
+        let (old_provider, old_hostname) = {
+            let config = self.config_store.read();
+            (config.code_host_provider, config.gitlab_hostname.clone())
+        };
+        // Persist first, then invalidate, under the same lock — the order
+        // `reload_config` uses — so a rejected edit invalidates nothing.
+        let persisted = self.config_store.mutate(|current| {
             let mut latest = current.clone();
             edit(&mut latest)?;
             *current = latest;
             Ok::<(), crate::Error>(())
-        })??;
-        self.pr_refresh.notify_one();
-        Ok(())
+        });
+        // `ConfigStore::mutate` applies the edit in memory before saving, so a
+        // failed save still leaves the new provider where pollers read it.
+        // Invalidate on what is in memory, not on whether the save succeeded.
+        let new_config = self.config_store.read().clone();
+        let provider_changed = new_config.code_host_provider != old_provider;
+        if provider_changed || new_config.gitlab_hostname != old_hostname {
+            *self
+                .glab_available
+                .lock()
+                .expect("glab availability poisoned") = None;
+            if provider_changed {
+                self.review_provider_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.invalidate_review_metadata(&new_config).await?;
+            }
+            self.pr_refresh.notify_one();
+        }
+        persisted?
     }
 
     /// Rename a configured section, migrating every session that refers to it
@@ -1414,10 +1433,6 @@ impl CommanderService {
             .await
     }
 
-    /// Apply results only while their provider snapshot is still current. The
-    /// provider-transition lock spans both the check and persisted mutation, so
-    /// a switch cannot clear the cache and then be overwritten by an older
-    /// in-flight sweep.
     async fn review_provider_snapshot(&self) -> (CodeHostProvider, u64) {
         let _guard = self.review_provider_lock.lock().await;
         (
@@ -1440,6 +1455,10 @@ impl CommanderService {
             .await
     }
 
+    /// Apply results only while their provider snapshot is still current. The
+    /// provider-transition lock spans both the check and persisted mutation, so
+    /// a switch cannot clear the cache and then be overwritten by an older
+    /// in-flight sweep.
     async fn apply_pr_results_at_epoch(
         &self,
         provider: CodeHostProvider,
@@ -4177,8 +4196,163 @@ mod tests {
         assert_eq!(svc.read_config().ui_refresh_fps, 23);
     }
 
+    /// A whole-config write built from a cache that predates a provider switch
+    /// must be rejected without reverting the switch. The comparison runs
+    /// inside the store's `mutate`, against the value it is about to replace.
     #[tokio::test]
-    async fn partial_config_edit_reads_latest_provider_and_resets_cli_probe() {
+    async fn stale_provider_update_is_rejected_without_reverting_the_switch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let mut stale = svc.read_config();
+        svc.edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        stale.ui_refresh_fps = 23;
+        assert!(svc.update_config(stale).is_err());
+        let config = svc.read_config();
+        assert_eq!(config.code_host_provider, CodeHostProvider::Gitlab);
+        assert_ne!(config.ui_refresh_fps, 23);
+    }
+
+    async fn seed_review_metadata(svc: &CommanderService) -> SessionId {
+        let (_, sid) = seed_project_session(svc).await;
+        svc.store()
+            .mutate(move |state| {
+                state.sessions.get_mut(&sid).unwrap().pr_number = Some(7);
+            })
+            .await
+            .unwrap();
+        sid
+    }
+
+    /// The edit is applied once, inside the persist, and invalidation follows
+    /// it. Applying it a second time to a pre-read snapshot (and invalidating
+    /// on that) wiped review metadata and bumped the epoch even when the
+    /// persisted application then failed and the provider never changed.
+    #[tokio::test]
+    async fn provider_edit_is_applied_once_and_invalidation_follows_the_persist() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_review_metadata(&svc).await;
+        // Succeeds on its first application and fails on any later one, as a
+        // validating merge would when the latest config differs from the
+        // snapshot it was first tried against.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        svc.edit_code_host_config(|config| {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0 {
+                return Err(ConfigError::InvalidValue {
+                    key: "code_host_provider".into(),
+                    reason: "rejected".into(),
+                }
+                .into());
+            }
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.store().read().await.sessions[&sid].pr_number, None);
+        assert_eq!(
+            svc.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    /// An edit rejected by its own validation changes nothing: no metadata
+    /// wipe, no epoch bump.
+    #[tokio::test]
+    async fn rejected_provider_edit_does_not_invalidate_review_metadata() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_review_metadata(&svc).await;
+        let result = svc
+            .edit_code_host_config(|config| {
+                config.code_host_provider = CodeHostProvider::Gitlab;
+                Err(ConfigError::InvalidValue {
+                    key: "gitlab_hostname".into(),
+                    reason: "rejected".into(),
+                }
+                .into())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Github
+        );
+        assert_eq!(svc.store().read().await.sessions[&sid].pr_number, Some(7));
+        assert_eq!(
+            svc.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    /// When the config write fails, invalidation still tracks the in-memory
+    /// provider pollers read (`ConfigStore::mutate` applies the edit before
+    /// saving): metadata is cleared exactly when the provider changed.
+    #[tokio::test]
+    async fn persist_failure_keeps_review_metadata_consistent_with_provider() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_review_metadata(&svc).await;
+        // A directory where the config file belongs makes the write fail.
+        std::fs::create_dir_all(dir.path().join("config.toml")).unwrap();
+        let result = svc
+            .edit_code_host_config(|config| {
+                config.code_host_provider = CodeHostProvider::Gitlab;
+                Ok(())
+            })
+            .await;
+        assert!(result.is_err());
+        let switched = svc.read_config().code_host_provider == CodeHostProvider::Gitlab;
+        let cleared = svc.store().read().await.sessions[&sid].pr_number.is_none();
+        assert_eq!(cleared, switched);
+    }
+
+    #[tokio::test]
+    async fn unrelated_config_edit_keeps_cli_probe_and_skips_pr_refresh() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        *svc.glab_available.lock().unwrap() = Some((std::time::Instant::now(), false));
+        svc.edit_code_host_config(|config| {
+            config.ui_refresh_fps = 23;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(svc.glab_available.lock().unwrap().is_some());
+        assert!(
+            futures::FutureExt::now_or_never(svc.pr_refresh.notified()).is_none(),
+            "an edit that leaves the code host alone must not wake the PR poll"
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_hostname_edit_resets_cli_probe_and_wakes_pr_refresh() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        *svc.glab_available.lock().unwrap() = Some((std::time::Instant::now(), false));
+        svc.edit_code_host_config(|config| {
+            config.gitlab_hostname = Some("gitlab.example.com".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(svc.glab_available.lock().unwrap().is_none());
+        assert!(futures::FutureExt::now_or_never(svc.pr_refresh.notified()).is_some());
+    }
+
+    #[tokio::test]
+    async fn partial_config_edit_reads_latest_provider() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
         svc.edit_code_host_config(|config| {
@@ -4187,7 +4361,6 @@ mod tests {
         })
         .await
         .unwrap();
-        *svc.glab_available.lock().unwrap() = Some((std::time::Instant::now(), false));
         svc.edit_code_host_config(|config| {
             config.ui_refresh_fps = 23;
             Ok(())
@@ -4199,7 +4372,6 @@ mod tests {
             CodeHostProvider::Gitlab
         );
         assert_eq!(svc.read_config().ui_refresh_fps, 23);
-        assert!(svc.glab_available.lock().unwrap().is_none());
     }
 
     #[tokio::test]
