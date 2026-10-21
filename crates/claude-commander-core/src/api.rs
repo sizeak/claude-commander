@@ -4596,6 +4596,50 @@ mod tests {
         assert_eq!(svc.store().generation(), generation);
     }
 
+    /// The same regression through a live `FileEvents::state` watcher: our own
+    /// `mutate` must be classified as a state-only event, and processing it as
+    /// the sync loop does must not wake the change feed a second time.
+    #[tokio::test]
+    async fn own_state_write_under_a_live_state_watcher_notifies_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_project_session(&svc).await;
+        let mut watcher = crate::file_events::FileEvents::state(&svc.store().data_dir()).unwrap();
+
+        svc.store()
+            .mutate(|state| {
+                state.add_project(Project::new("other", PathBuf::from("/tmp/other"), "main"))
+            })
+            .await
+            .unwrap();
+        let generation = svc.store().generation();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), watcher.changed())
+                .await
+                .unwrap(),
+            "the watcher must observe our own state write"
+        );
+        // Mirror `spawn_state_sync_loop`'s handling of a watcher event.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        watcher.take_changed();
+        // A startup rescan (seen on macOS) marks the watch failed, which
+        // deliberately takes the conservative path; inotify emits none.
+        if cfg!(target_os = "linux") {
+            assert!(watcher.healthy());
+        }
+        if !watcher.healthy() {
+            return;
+        }
+        let review_changed = watcher.take_review_changed();
+        assert!(!review_changed, "a state.json write is not a review change");
+        svc.reconcile_state_files(review_changed).await;
+        assert_eq!(
+            svc.store().generation(),
+            generation,
+            "our own write must not be notified again"
+        );
+    }
+
     /// Seed one project with one session and return their ids.
     async fn seed_project_session(svc: &CommanderService) -> (ProjectId, SessionId) {
         let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");

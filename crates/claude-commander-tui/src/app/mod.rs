@@ -1576,6 +1576,45 @@ pub enum ConfirmAction {
     },
 }
 
+/// A session a backend refresh should act on once it appears (select it, or
+/// hydrate its LFS), with `settles_at`: the first refresh revision issued after
+/// the intent was recorded. A change-feed fetch that took its revision earlier
+/// can land later carrying a snapshot without the session, so only a snapshot
+/// at or past `settles_at` that still lacks it proves the session is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingSession {
+    pub session: SessionRef,
+    pub settles_at: u64,
+}
+
+impl PendingSession {
+    /// Whether a `BackendChanged` fold of `snapshot` at `revision` from
+    /// `backend_id` resolves this intent: `Some(true)` when the session is
+    /// present, `Some(false)` when a post-intent snapshot lacks it, `None` to
+    /// keep waiting (another backend, or a snapshot fetched too early).
+    fn settle(
+        &self,
+        backend_id: usize,
+        revision: u64,
+        snapshot: &claude_commander_core::api::Snapshot,
+    ) -> Option<bool> {
+        if self.session.backend.0 != backend_id {
+            return None;
+        }
+        if snapshot
+            .sessions
+            .iter()
+            .any(|s| s.session_id == self.session.id)
+        {
+            Some(true)
+        } else if revision >= self.settles_at {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
 /// Application UI state
 pub struct AppUiState {
     /// Active view. List modes (`ProjectGrouped`/`SectionGrouped`/
@@ -1683,8 +1722,10 @@ pub struct AppUiState {
     pub last_preview_refresh: Instant,
     pub last_ui_maintenance: Instant,
     pub last_animation: Instant,
-    pub pending_selection: Option<SessionRef>,
-    pub pending_created: Option<SessionRef>,
+    pub pending_selection: Option<PendingSession>,
+    /// Created sessions awaiting their first snapshot to start LFS hydration.
+    /// A set, so creates landing before an earlier one's refresh each keep it.
+    pub pending_created: Vec<PendingSession>,
     pub last_recording: bool,
     pub pending_project: Option<(BackendId, ProjectId)>,
     /// Right-pane rect from the last render frame, for wheel hit-testing.
@@ -1890,7 +1931,7 @@ impl Default for AppUiState {
             last_ui_maintenance: Instant::now(),
             last_animation: Instant::now(),
             pending_selection: None,
-            pending_created: None,
+            pending_created: Vec::new(),
             last_recording: false,
             pending_project: None,
             right_pane_rect: None,
@@ -2471,6 +2512,16 @@ impl App {
         self.backends.iter().find(|h| h.id == id)
     }
 
+    /// A [`PendingSession`] for `session` that only a refresh issued from now on
+    /// can discard; `None` when its backend is unknown.
+    pub(super) fn pending_session(&self, session: SessionRef) -> Option<PendingSession> {
+        let sequence = &self.backend(session.backend)?.refresh_sequence;
+        Some(PendingSession {
+            session,
+            settles_at: sequence.load(std::sync::atomic::Ordering::Relaxed) + 1,
+        })
+    }
+
     /// The backend trait object for `id`, cloneable into a spawned task. Falls
     /// back to the local backend when the id is unknown (e.g. its server was
     /// just removed) so callers never panic on a stale id.
@@ -2522,11 +2573,10 @@ impl App {
     /// its connection state) untouched, so a degraded remote keeps its last
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
-        let revision = self
-            .backends
-            .iter()
-            .find(|h| h.id == id)
-            .expect("known backend")
+        let Some(handle) = self.backends.iter().find(|h| h.id == id) else {
+            return;
+        };
+        let revision = handle
             .refresh_sequence
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;

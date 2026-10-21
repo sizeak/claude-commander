@@ -419,6 +419,7 @@ impl SessionManager {
                 state.remove_session(&sid);
             })
             .await?;
+        self.diff_cache.invalidate(session_id).await;
         info!("Removed creating session {}", session_id);
         Ok(())
     }
@@ -920,6 +921,11 @@ impl SessionManager {
         {
             warn!("Failed to remove worktree while deleting session: {}", e);
         }
+        // Release the worktree's filesystem watch along with its cached diff
+        // only now: a get_diff racing the teardown could otherwise re-register
+        // a watch on the still-present worktree. Unconditional even when the
+        // removal failed — the session is gone, so nothing would release it.
+        self.diff_cache.invalidate(&session.id).await;
 
         // Durably retarget child reviews on the selected host (best-effort,
         // non-fatal).
