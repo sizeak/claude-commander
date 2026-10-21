@@ -637,17 +637,6 @@ impl RemoteClient {
         if edit.program.is_some() || edit.restart {
             return Err(crate::ClientError::InvalidRequest("This server needs an upgrade to save program changes through Edit session. No settings were changed.".into()));
         }
-        let keep_alive = if edit.keep_alive.is_some() {
-            Some(
-                self.session_detail(&id.as_uuid().to_string(), None)
-                    .await?
-                    .ok_or(crate::ClientError::NotFound)?
-                    .info
-                    .keep_alive,
-            )
-        } else {
-            None
-        };
         let mut outcome = claude_commander_protocol::api::EditSessionOutcome::default();
         let mut saved = false;
         let result: ClientResult<()> = async {
@@ -670,11 +659,28 @@ impl RemoteClient {
                 outcome.base = Some(base);
                 saved = true;
             }
-            if let Some(value) = edit.keep_alive
-                && Some(value) != keep_alive
-            {
-                self.toggle_keep_alive(id).await?;
-                saved = true;
+            // Old servers only offer a toggle, so read the current value as
+            // late as possible — after the steps above, which can take seconds
+            // — and flip only if it still differs. A change landing between
+            // this read and the toggle is still inverted; the toggle's answer
+            // exposes that, and it is reported rather than toggled back (which
+            // could race the same way).
+            if let Some(value) = edit.keep_alive {
+                let current = self
+                    .session_detail(&id.as_uuid().to_string(), None)
+                    .await?
+                    .ok_or(crate::ClientError::NotFound)?
+                    .info
+                    .keep_alive;
+                if current != value {
+                    let now = self.toggle_keep_alive(id).await?;
+                    saved = true;
+                    if now != value {
+                        outcome.warnings.push(
+                            "Keep alive was changed on the server during this edit, so it no longer matches what you chose. Refresh and set it again.".into(),
+                        );
+                    }
+                }
             }
             Ok(())
         }
@@ -1518,6 +1524,86 @@ mod session_edit_tests {
             server.abort();
         }
     }
+    /// An old server only offers a keep-alive *toggle*, so the fallback must
+    /// read the current value as late as possible and report a toggle that
+    /// landed on the wrong value rather than claim success.
+    #[tokio::test]
+    async fn legacy_edit_keep_alive_reads_late_and_reports_a_lost_race() {
+        use axum::routing::{get, post};
+        // `flip_on_rename`: a concurrent change lands while the rename is in
+        // flight. `flip_after_read`: one lands between the read and the toggle.
+        for (flip_on_rename, flip_after_read) in [(true, false), (false, true)] {
+            let sid = SessionId::new();
+            let keep_alive = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let detail = serde_json::json!({
+                "id":sid.as_uuid().to_string(), "session_id":sid, "title":"task", "branch":"task",
+                "status":"running", "program":"claude", "project_id":claude_commander_protocol::session::ProjectId::new(),
+                "project_name":"repo", "pr_number":null, "pr_url":null, "pr_state":"open", "pr_draft":false,
+                "pr_labels":[], "review_decision":null, "pr_reviewers":[], "created_at":"2026-01-01T00:00:00Z",
+                "agent_state":"idle", "diff_stat":null, "pane_content":null
+            });
+            let (on_rename, on_detail, on_toggle) =
+                (keep_alive.clone(), keep_alive.clone(), keep_alive.clone());
+            let app = Router::new()
+                .route(
+                    "/api/sessions/{id}",
+                    patch(move |Json(body): Json<LegacyPatch>| async move {
+                        assert!(matches!(body, LegacyPatch::Rename { .. }));
+                        if flip_on_rename {
+                            on_rename.fetch_xor(true, Ordering::SeqCst);
+                        }
+                        StatusCode::NO_CONTENT
+                    }),
+                )
+                .route(
+                    "/api/sessions/{id}/detail",
+                    get(move || async move {
+                        let mut detail = detail.clone();
+                        detail["keep_alive"] = on_detail.load(Ordering::SeqCst).into();
+                        if flip_after_read {
+                            on_detail.fetch_xor(true, Ordering::SeqCst);
+                        }
+                        Json(detail)
+                    }),
+                )
+                .route(
+                    "/api/sessions/{id}/keep-alive",
+                    post(move || async move { Json(!on_toggle.fetch_xor(true, Ordering::SeqCst)) }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = RemoteClient::new(RemoteServerSpec {
+                name: "legacy".into(),
+                base_url: format!("http://{addr}"),
+                token: None,
+            })
+            .unwrap();
+            let edit = claude_commander_protocol::api::EditSession {
+                title: Some("renamed".into()),
+                keep_alive: Some(true),
+                ..Default::default()
+            };
+            let outcome = client.edit_session(sid, edit).await.unwrap();
+            if flip_on_rename {
+                // Read after the rename: already true, so no toggle.
+                assert!(keep_alive.load(Ordering::SeqCst));
+                assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+            } else {
+                // The toggle landed on the concurrent value; say so.
+                assert!(!keep_alive.load(Ordering::SeqCst));
+                assert!(
+                    outcome.warnings.iter().any(|w| w.contains("Keep alive")),
+                    "{:?}",
+                    outcome.warnings
+                );
+            }
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn old_server_recovery_falls_back_only_without_a_pending_program() {
         use axum::{
