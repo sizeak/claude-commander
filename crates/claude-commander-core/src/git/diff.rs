@@ -123,9 +123,11 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         }
     }
 
-    /// Watch at most 32 recently requested roots. Failed/unavailable watches
-    /// retain the configured TTL, including for nested working-tree edits.
-    async fn freshness(&self, key: K, path: &Path) -> (bool, Duration) {
+    /// Watch at most 32 recently requested roots and report whether the
+    /// key's watch saw a change. Callers apply the configured TTL regardless
+    /// of watch health, so a failed/unavailable watch still expires entries,
+    /// including for nested working-tree edits.
+    async fn freshness(&self, key: K, path: &Path) -> bool {
         let should_watch = {
             let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
             match watchers.get_mut(&key) {
@@ -204,8 +206,8 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
             .get_mut(&key)
             .and_then(|entry| entry.watcher.as_mut())
         {
-            Some(watcher) => (watcher.take_changed() || replacing, self.ttl),
-            _ => (false, self.ttl),
+            Some(watcher) => watcher.take_changed() || replacing,
+            _ => false,
         }
     }
 
@@ -214,7 +216,7 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
     pub async fn get_diff(&self, key: &K, worktree_path: &Path) -> Result<Arc<DiffInfo>> {
         let flight = self.flights.for_key(*key);
         let _guard = flight.lock().await;
-        let (changed, ttl) = self.freshness(*key, worktree_path).await;
+        let changed = self.freshness(*key, worktree_path).await;
         if changed {
             self.invalidate_values(key).await;
         }
@@ -222,7 +224,7 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get(key)
-                && !cached.is_stale(ttl)
+                && !cached.is_stale(self.ttl)
             {
                 debug!("Diff cache hit for {}", key);
                 return Ok(Arc::clone(cached));
@@ -238,12 +240,12 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
     pub async fn get_stats(&self, key: &K, path: &Path) -> Result<Arc<DiffInfo>> {
         let flight = self.flights.for_key(*key);
         let _guard = flight.lock().await;
-        let (changed, ttl) = self.freshness(*key, path).await;
+        let changed = self.freshness(*key, path).await;
         if changed {
             self.invalidate_values(key).await;
         }
         if let Some(cached) = self.stats_cache.read().await.get(key)
-            && !cached.is_stale(ttl)
+            && !cached.is_stale(self.ttl)
         {
             return Ok(cached.clone());
         }
@@ -792,13 +794,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_watches_use_ttl_and_retry_after_a_cooldown() {
+    async fn unavailable_watches_retry_after_a_cooldown() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("not-yet-created");
         let cache = DiffCache::<u64>::new();
-        assert_eq!(cache.freshness(1, &path).await.1, DEFAULT_DIFF_CACHE_TTL);
+        let has_watcher = |cache: &DiffCache<u64>| {
+            cache
+                .watchers
+                .lock()
+                .unwrap()
+                .get(&1)
+                .unwrap()
+                .watcher
+                .is_some()
+        };
+        assert!(!cache.freshness(1, &path).await);
+        assert!(!has_watcher(&cache));
         std::fs::create_dir(&path).unwrap();
-        assert_eq!(cache.freshness(1, &path).await.1, DEFAULT_DIFF_CACHE_TTL);
+        assert!(!cache.freshness(1, &path).await);
+        assert!(!has_watcher(&cache), "no retry inside the cooldown");
         cache
             .watchers
             .lock()
@@ -806,7 +820,8 @@ mod tests {
             .get_mut(&1)
             .unwrap()
             .attempted_at = Instant::now() - Duration::from_secs(31);
-        assert_eq!(cache.freshness(1, &path).await.1, DEFAULT_DIFF_CACHE_TTL);
+        cache.freshness(1, &path).await;
+        assert!(has_watcher(&cache), "retried after the cooldown");
     }
 
     async fn tracked_repo() -> tempfile::TempDir {
@@ -906,7 +921,9 @@ mod tests {
         // Allow event delivery and Git work under parallel CI load, while
         // staying well below the 60-second TTL, so only the watch can satisfy
         // this. Health is not asserted afterwards: a watcher marked failed
-        // still invalidates, and macOS may report a startup rescan.
+        // still invalidates, and (assumption, untested on macOS) notify's
+        // FSEvents backend can flag Rescan (notify 8.2.0 src/fsevent.rs:116-117,
+        // MUST_SCAN_SUBDIRS).
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if clone
