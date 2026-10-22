@@ -692,7 +692,6 @@ diff --git a/a.rs b/a.rs
 +THIRTY
 ";
 
-    /// Concatenated span text of a cell — what the user actually reads.
     #[test]
     fn parse_cache_uses_exact_keys_and_bounds_entries_and_bytes() {
         let mut cache = ParseCache::default();
@@ -719,6 +718,7 @@ diff --git a/a.rs b/a.rs
         );
     }
 
+    /// Concatenated span text of a cell — what the user actually reads.
     fn text_of(cell: &DiffCellDto) -> String {
         cell.spans.iter().map(|s| s.text.as_str()).collect()
     }

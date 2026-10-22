@@ -1,3 +1,4 @@
+import type { Page } from "@playwright/test";
 import {
   api,
   connect,
@@ -14,6 +15,32 @@ interface Snapshot {
   comments: { file: string; side: string; line_range: [number, number]; comment: string }[];
 }
 
+/** Closes the review, then reopens it over a synthetic 5000-line single-file diff. */
+async function openLargeDiff(page: Page): Promise<void> {
+  await page.locator("#review-close").click();
+  await page.route("**/api/sessions/*/review", async (route) => {
+    const response = await route.fetch();
+    const snapshot = await response.json();
+    snapshot.diff.files[0].hunks = [
+      {
+        old_start: 1,
+        old_lines: 0,
+        new_start: 1,
+        new_lines: 5000,
+        header: "",
+        lines: Array.from({ length: 5000 }, (_, i) => ({
+          origin: "addition",
+          old_lineno: null,
+          new_lineno: i + 1,
+          content: `large-line-${i}`,
+        })),
+      },
+    ];
+    await route.fulfill({ response, json: snapshot });
+  });
+  await page.locator("#review-btn").click();
+}
+
 test.describe("review view", () => {
   test.beforeEach(async ({ page }) => {
     await connect(page);
@@ -24,28 +51,7 @@ test.describe("review view", () => {
   });
 
   test("large single-file diffs mount rows only near the viewport", async ({ page }) => {
-    await page.locator("#review-close").click();
-    await page.route("**/api/sessions/*/review", async (route) => {
-      const response = await route.fetch();
-      const snapshot = await response.json();
-      snapshot.diff.files[0].hunks = [
-        {
-          old_start: 1,
-          old_lines: 0,
-          new_start: 1,
-          new_lines: 5000,
-          header: "",
-          lines: Array.from({ length: 5000 }, (_, i) => ({
-            origin: "addition",
-            old_lineno: null,
-            new_lineno: i + 1,
-            content: `large-line-${i}`,
-          })),
-        },
-      ];
-      await route.fulfill({ response, json: snapshot });
-    });
-    await page.locator("#review-btn").click();
+    await openLargeDiff(page);
     await expect(page.locator(".rv-line").first()).toBeVisible();
     expect(await page.locator(".rv-line").count()).toBeLessThan(1000);
     await page.locator("#review-body").evaluate((el) => {
@@ -53,6 +59,35 @@ test.describe("review view", () => {
     });
     await expect(page.locator(".rv-line", { hasText: "large-line-4999" })).toBeVisible();
     expect(await page.locator(".rv-line").count()).toBeLessThan(1500);
+  });
+
+  test("a reload keeps a deep scroll position in a large diff", async ({ page }) => {
+    await openLargeDiff(page);
+    // Scroll down a page at a time so every chunk above the target is mounted
+    // at its real height, as it is for a reader who scrolled there.
+    const target = await page.locator("#review-body").evaluate(async (el) => {
+      const frame = () => new Promise((r) => requestAnimationFrame(r));
+      const mounted = () =>
+        [...el.querySelectorAll(".rv-line")].some((r) =>
+          r.textContent?.endsWith("large-line-2500"),
+        );
+      while (!mounted()) {
+        el.scrollTop += el.clientHeight;
+        await frame();
+        await frame();
+      }
+      const box = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return hit?.closest(".rv-line")?.textContent?.match(/large-line-\d+$/)?.[0] ?? "";
+    });
+    expect(target).toMatch(/^large-line-\d+$/);
+    const row = page.locator(".rv-line", { hasText: new RegExp(`${target}$`) });
+    await expect(row).toBeInViewport();
+    const before = await row.elementHandle();
+    // Refresh rebuilds the view the same way a comment add/delete/apply does.
+    await page.locator("#review-refresh").click();
+    await expect.poll(() => before?.evaluate((n) => n.isConnected)).toBe(false);
+    await expect(row).toBeInViewport();
   });
 
   test("renders the session's diff against its base", async ({ page }) => {
