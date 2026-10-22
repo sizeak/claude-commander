@@ -197,7 +197,7 @@ impl App {
     /// Gated on the Info modal being open (a no-op otherwise) and guarded
     /// against double-spawns: `update_selection` calls this, and it runs on
     /// every selection/list refresh, so without the in-flight guard an open Info modal
-    /// would re-spawn a duplicate `gh` fetch each tick until the first resolves.
+    /// would re-spawn a duplicate `gh` fetch on each input or refresh until the first resolves.
     pub(super) fn spawn_info_fetch(&mut self) {
         // Only relevant when the Info modal is open; a no-op otherwise.
         if !self.is_info_open() {
