@@ -171,7 +171,7 @@ code_host_provider = "github" # "github" or "gitlab"
 # editor_gui = true
 
 # Interval in seconds between GitHub PR or GitLab MR checks (0 = disabled)
-# Run "Refresh review status" from the command palette to force an immediate
+# Run "Refresh PR status" from the command palette to force an immediate
 # re-check without waiting for this interval to elapse.
 pr_check_interval_secs = 120
 

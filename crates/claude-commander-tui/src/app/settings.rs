@@ -1360,31 +1360,8 @@ impl App {
     /// Apply an edited value from the settings modal to the config.
     pub(super) fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
         self.sync_config_from_service();
-        let previous_provider = self.config.code_host_provider;
         match tab {
             SettingsTab::General => match field_key {
-                "code_host_provider" => {
-                    use claude_commander_protocol::hosting::CodeHostProvider;
-                    let next = match value {
-                        "GitHub" | "github" => Some(CodeHostProvider::Github),
-                        "GitLab" | "gitlab" => Some(CodeHostProvider::Gitlab),
-                        _ => None,
-                    };
-                    if let Some(next) = next
-                        && next != self.config.code_host_provider
-                    {
-                        self.config.code_host_provider = next;
-                        self.ui_state.enriched_pr = None;
-                        self.ui_state.enriched_pr_unavailable = None;
-                        self.ui_state.enriched_pr_fetch_spawned_at = None;
-                    }
-                }
-                "gitlab_hostname" => {
-                    let Some(hostname) = self.parse_gitlab_hostname_setting(value) else {
-                        return;
-                    };
-                    self.config.gitlab_hostname = hostname;
-                }
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
                 "shell_program" => self.config.shell_program = value.to_string(),
                 "worktrees_dir" => {
@@ -1771,22 +1748,12 @@ impl App {
             }
         }
 
-        // Provider transitions also mutate persisted session review metadata and
-        // therefore complete through the async service operation used by the
-        // real key handler. Keep this function synchronous for the many other
-        // settings and for its pure edit tests.
-        if self.config.code_host_provider != previous_provider {
-            return;
-        }
         self.persist_config();
-        if field_key == "gitlab_hostname" {
-            self.spawn_backend_view_refresh(claude_commander_core::backend::LOCAL_BACKEND_ID);
-        }
     }
 
     /// Parse the GitLab hostname editor's value (`None` inside = the default
     /// host). An invalid hostname opens an error dialog and returns `None`.
-    fn parse_gitlab_hostname_setting(&mut self, value: &str) -> Option<Option<String>> {
+    pub(super) fn parse_gitlab_hostname_setting(&mut self, value: &str) -> Option<Option<String>> {
         let hostname = (!value.is_empty() && value != "(default)").then(|| value.to_string());
         if let Some(hostname) = hostname.as_deref()
             && let Err(reason) =

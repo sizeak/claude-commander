@@ -280,6 +280,7 @@ impl App {
                     .send(AppEvent::StateUpdate(StateUpdate::EnrichedPrReady {
                         spawned_at,
                         session_id,
+                        provider,
                         info,
                     }))
                     .await;
