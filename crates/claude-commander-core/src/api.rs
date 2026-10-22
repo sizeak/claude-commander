@@ -2271,6 +2271,50 @@ impl CommanderService {
         had_states
     }
 
+    /// Refresh and persist PR metadata before returning, without a background loop.
+    /// `None` refreshes all eligible sessions; `Some` restricts the host query to one.
+    pub async fn refresh_pr_status(&self, session: Option<&SessionId>) -> Result<usize> {
+        if let Some(id) = session {
+            self.ensure_session_exists(id).await?;
+        }
+        self.reconcile_session_branches().await?;
+        self.fetch_pr_status(session).await
+    }
+
+    async fn fetch_pr_status(&self, session: Option<&SessionId>) -> Result<usize> {
+        let targets = self.pr_refresh_targets(session).await?;
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        if !self.gh_available().await {
+            return Err(crate::error::GitError::GhUnavailable.into());
+        }
+        let results: Vec<(SessionId, PrCheckResult)> =
+            futures::stream::iter(targets.into_iter().map(
+                |(id, branch, repo_path, created_at)| async move {
+                    (
+                        id,
+                        crate::git::check_pr_for_branch(&repo_path, &branch, created_at).await,
+                    )
+                },
+            ))
+            .buffer_unordered(PR_FANOUT_CONCURRENCY)
+            .collect()
+            .await;
+        let failed = results
+            .iter()
+            .filter(|(_, result)| matches!(result, PrCheckResult::FetchFailed))
+            .count();
+        let count = results.len();
+        self.apply_pr_results(results).await?;
+        if failed > 0 {
+            return Err(crate::error::GitError::OperationFailed(format!(
+                "PR metadata refresh failed for {failed} of {count} sessions; check gh authentication and connectivity",
+            )).into());
+        }
+        Ok(count)
+    }
+
     /// Request an immediate PR-metadata refresh. Wakes the background PR-status
     /// loop ([`Self::spawn_background_tasks`]); if no loop is running (PR checks
     /// disabled, or before startup) the notification is simply dropped.
@@ -2446,12 +2490,21 @@ impl CommanderService {
     /// Extracted from the poll loop so the reconcile→poll ordering is testable:
     /// after [`Self::reconcile_session_branches`] adopts a rename, the targets
     /// returned here carry the corrected `--head` branch on the same tick.
-    async fn pr_poll_targets(&self) -> Vec<(SessionId, String, PathBuf, DateTime<Utc>)> {
+    async fn pr_refresh_targets(
+        &self,
+        session: Option<&SessionId>,
+    ) -> Result<Vec<(SessionId, String, PathBuf, DateTime<Utc>)>> {
         let state = self.store.read().await;
-        state
+        if let Some(id) = session {
+            let target = state.get_session(id).ok_or(SessionError::NotFound(*id))?;
+            if target.status == SessionStatus::Creating {
+                return Err(SessionError::InvalidState(*id).into());
+            }
+        }
+        Ok(state
             .sessions
             .values()
-            .filter(|s| s.status != SessionStatus::Creating)
+            .filter(|s| s.status != SessionStatus::Creating && session.is_none_or(|id| s.id == *id))
             .filter_map(|s| {
                 let project = state.projects.get(&s.project_id)?;
                 Some((
@@ -2461,7 +2514,7 @@ impl CommanderService {
                     s.branch_owned_since(),
                 ))
             })
-            .collect()
+            .collect())
     }
 
     /// Fan out `gh pr list` across all sessions on a fixed cadence (and on
@@ -2503,25 +2556,8 @@ impl CommanderService {
                 if !service.gh_available().await {
                     continue;
                 }
-                let sessions_to_check = service.pr_poll_targets().await;
-                if sessions_to_check.is_empty() {
-                    continue;
-                }
-                let results: Vec<(SessionId, PrCheckResult)> =
-                    futures::stream::iter(sessions_to_check.into_iter().map(
-                        |(id, branch, repo_path, created_at)| async move {
-                            (
-                                id,
-                                crate::git::check_pr_for_branch(&repo_path, &branch, created_at)
-                                    .await,
-                            )
-                        },
-                    ))
-                    .buffer_unordered(PR_FANOUT_CONCURRENCY)
-                    .collect()
-                    .await;
-                if let Err(e) = service.apply_pr_results(results).await {
-                    debug!("apply_pr_results failed: {e}");
+                if let Err(e) = service.fetch_pr_status(None).await {
+                    debug!("PR metadata refresh failed: {e}");
                 }
             }
         })
@@ -5072,7 +5108,7 @@ mod tests {
         run_git(&wt, &["branch", "-m", "feature", "renamed-feature"]);
 
         svc.reconcile_session_branches().await.unwrap();
-        let targets = svc.pr_poll_targets().await;
+        let targets = svc.pr_refresh_targets(None).await.unwrap();
 
         let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
         assert_eq!(
@@ -5103,7 +5139,7 @@ mod tests {
             .await
             .unwrap();
 
-        let targets = svc.pr_poll_targets().await;
+        let targets = svc.pr_refresh_targets(None).await.unwrap();
         let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
         assert_eq!(target.3, owned_since);
     }
@@ -5159,7 +5195,7 @@ mod tests {
             "the adoption stamp must be the moment of adoption, not creation"
         );
 
-        let targets = svc.pr_poll_targets().await;
+        let targets = svc.pr_refresh_targets(None).await.unwrap();
         let target = targets.iter().find(|(id, ..)| *id == sid).unwrap();
         assert_eq!(target.1, "renamed-feature");
         assert_eq!(
@@ -5648,6 +5684,147 @@ mod tests {
             OperationOutcome::Succeeded { detail } => assert!(detail.contains('3')),
             other => panic!("expected Succeeded, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pr_refresh_fetches_and_persists_without_background_tasks() {
+        // Isolate PATH in a child process, so concurrent tests never use the fake gh.
+        const CHILD: &str = "CC_TEST_PR_REFRESH_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let dir = tempfile::TempDir::new_in(root).unwrap();
+                let svc = service(&dir);
+                let project = Project::new("repo", dir.path().to_path_buf(), "main");
+                let first = WorktreeSession::new(
+                    project.id,
+                    "first",
+                    "first",
+                    dir.path().join("first"),
+                    "claude",
+                );
+                let second = WorktreeSession::new(
+                    project.id,
+                    "second",
+                    "second",
+                    dir.path().join("second"),
+                    "claude",
+                );
+                let (first_id, second_id) = (first.id, second.id);
+                svc.store()
+                    .mutate(move |state| {
+                        state.add_project(project);
+                        state.add_session(first);
+                        state.add_session(second);
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(svc.refresh_pr_status(Some(&first_id)).await.unwrap(), 1);
+                {
+                    let state = svc.store().read().await;
+                    assert_eq!(state.get_session(&first_id).unwrap().pr_number, Some(42));
+                    assert_eq!(state.get_session(&second_id).unwrap().pr_number, None);
+                }
+                let persisted = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
+                assert!(persisted.contains("https://github.com/example/repo/pull/42"));
+                assert_eq!(svc.refresh_pr_status(None).await.unwrap(), 2);
+                assert_eq!(
+                    svc.store()
+                        .read()
+                        .await
+                        .get_session(&second_id)
+                        .unwrap()
+                        .pr_number,
+                    Some(42)
+                );
+                std::fs::write(std::env::var_os("CC_TEST_PR_REFRESH_FAIL").unwrap(), "fail")
+                    .unwrap();
+                assert!(svc.refresh_pr_status(Some(&first_id)).await.is_err());
+                assert_eq!(
+                    svc.store()
+                        .read()
+                        .await
+                        .get_session(&first_id)
+                        .unwrap()
+                        .pr_number,
+                    Some(42)
+                );
+            });
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ -f "$CC_TEST_PR_REFRESH_FAIL" ]; then exit 1; fi
+printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","state":"OPEN"}]'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "api::tests::pr_refresh_fetches_and_persists_without_background_tasks",
+                "--nocapture",
+            ])
+            .env(CHILD, dir.path())
+            .env("CC_TEST_PR_REFRESH_FAIL", dir.path().join("fail"))
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child test failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_refresh_targets_select_only_requested_session() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let project = Project::new("repo", dir.path().join("repo"), "main");
+        let first = WorktreeSession::new(
+            project.id,
+            "first",
+            "first",
+            dir.path().join("first"),
+            "claude",
+        );
+        let second = WorktreeSession::new(
+            project.id,
+            "second",
+            "second",
+            dir.path().join("second"),
+            "claude",
+        );
+        let sid = first.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(first);
+                state.add_session(second);
+            })
+            .await
+            .unwrap();
+        let targets = svc.pr_refresh_targets(Some(&sid)).await.unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0, sid);
+        assert_eq!(svc.pr_refresh_targets(None).await.unwrap().len(), 2);
+        assert!(matches!(
+            svc.refresh_pr_status(Some(&SessionId::new())).await,
+            Err(crate::error::Error::Session(SessionError::NotFound(_)))
+        ));
     }
 
     #[tokio::test]

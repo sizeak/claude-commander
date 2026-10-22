@@ -105,6 +105,30 @@ Before touching any worktree, the cascade fetches `origin`, verifies no live age
 
 On the first conflict the cascade pauses: the affected session gets a persistent `⏸` glyph (survives a restart of the TUI), and the worktree is left in the usual `git merge` in-progress state so you can resolve it however you like — typically by attaching to the session and asking the live Claude. Once you've committed the resolved merge, **Cascade resume** from the palette picks up where it stopped and propagates the new commit on up the chain. **Cascade abandon** clears the pause without continuing, if you decide to back out.
 
+#### Refresh PR metadata from the CLI
+
+After creating a pull request, refresh its session immediately:
+
+```sh
+claude-commander refresh-pr my-session
+```
+
+The argument accepts a session name or ID prefix, as with `status`. Omit it
+for all sessions:
+
+```sh
+claude-commander refresh-pr
+```
+
+The command waits for the fetch and saves the metadata before exiting. The
+running session list picks it up through state sync, without waiting for the
+next PR poll. It also works when periodic PR checks are disabled. A missing
+session, unavailable code-host CLI, or failed fetch exits unsuccessfully;
+failed fetches preserve previously cached PR metadata.
+
+For agent instructions: “After creating a PR, run
+`claude-commander refresh-pr <session-name-or-id>` to update the session list.”
+
 #### Push stack
 
 **Push stack** (palette) runs `git push -u origin <branch>` across every session in the stack, base first then each child up the chain — pushing the base before its children keeps GitHub's PR base refs consistent. Each session shows the spinner glyph while its own push is in flight.
