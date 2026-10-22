@@ -409,8 +409,24 @@ class _SessionListBodyState extends State<SessionListBody> {
     );
   }
 
-  /// Recent shows every active session in this workspace, ordered by last use
-  /// through sessionRecency; it has no arbitrary cap that could hide an active row.
+  /// The Recent tab: every server's sessions flattened to (store, session)
+  /// pairs, active-and-attached-only, newest-attach first (the TUI's MRU
+  /// order). A live query filters that set by fuzzy score, ranking best matches
+  /// first while keeping recency as the stable tie-break; an active quick filter
+  /// narrows it further.
+  ///
+  /// Two deliberate differences from the TUI's pinned recents block, and they
+  /// go together: this tab is uncapped (the TUI caps at `recent_sessions_limit`)
+  /// *and* it excludes stopped sessions (the TUI shows any attached session
+  /// regardless of status). The TUI's fixed cap already bounds how much stale
+  /// history shows; an uncapped list has no such bound, so it filters to active
+  /// sessions to avoid accumulating dead ones indefinitely.
+  ///
+  /// A third: the ordering key is [sessionRecency], not `lastAttachedAt`, so a
+  /// never-attached session sorts by its creation time instead of dropping out.
+  /// The TUI can drop those, because its recents block is pinned *above* the
+  /// full tree; here Recent is one of two exclusive tabs, so dropping a session
+  /// hides it outright — including the one the user has only just created.
   Widget _buildRecent(
     BuildContext context,
     List<CommanderStore> servers,
@@ -451,8 +467,10 @@ class _SessionListBodyState extends State<SessionListBody> {
     );
   }
 
-  /// Explain connection state before filtering, so loading is not mistaken for
-  /// an empty workspace or an unsuccessful search.
+  /// What to show when the flattened recent list is empty. A bare "No recent
+  /// sessions" would hide a server that is merely still connecting or down, so
+  /// mirror All mode: surface a spinner while any server is loading and an
+  /// error+Retry when one has failed, before falling back to the empty note.
   Widget _recentEmptyState(BuildContext context, List<CommanderStore> servers) {
     // Loading/error take priority over the query notes, so typing while the
     // only server is still connecting shows the spinner (as All mode does),
