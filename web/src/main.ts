@@ -242,6 +242,13 @@ function renderToolbar(): void {
 }
 
 async function restartSession(s: SessionInfo): Promise<void> {
+  if (
+    s.pending_program !== null &&
+    !confirm(
+      `Restart "${s.title}" with "${s.pending_program}"? This switches the program and clears the conversation.`,
+    )
+  )
+    return;
   if (!(await act(api.restartSession(s.id)))) return;
   // The old pane's session ended (a final close); attach to the new one.
   if (state.selectedId === s.id) reattach();

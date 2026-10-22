@@ -638,10 +638,11 @@ impl SessionManager {
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
-                    session.program = program.clone();
-                    if apply_pending && session.pending_program.as_deref() == Some(program.as_str())
-                    {
-                        session.pending_program = None;
+                    if apply_pending {
+                        session.program = program.clone();
+                        if session.pending_program.as_deref() == Some(program.as_str()) {
+                            session.pending_program = None;
+                        }
                     }
                     session.set_status(SessionStatus::Running);
                     // The pane is live again, so clear the hibernation marker to

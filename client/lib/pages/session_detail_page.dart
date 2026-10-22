@@ -270,14 +270,20 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     action: () => _store!.killSession(_id),
   );
 
-  void _restart() => _runAction(
-    title: 'Restart session?',
-    message: 'Restarts the program in this session.',
-    confirmLabel: 'Restart',
-    confirmColor: CommanderTokens.of(context).working,
-    successMessage: 'Session restarted',
-    action: () => _store!.restartSession(_id),
-  );
+  void _restart() {
+    final pending = _info.pendingProgram;
+    _runAction(
+      title: 'Restart session?',
+      message: pending == null
+          ? 'Restarts the program in this session.'
+          : 'Restarts the session with "$pending". The conversation is '
+                'cleared.',
+      confirmLabel: 'Restart',
+      confirmColor: CommanderTokens.of(context).working,
+      successMessage: 'Session restarted',
+      action: () => _store!.restartSession(_id),
+    );
+  }
 
   void _delete() => _runAction(
     title: 'Delete session?',
