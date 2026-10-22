@@ -2485,12 +2485,17 @@ impl CommanderService {
                 // Wake the change-feed only when observable state actually
                 // changed (fresh states, or the commander flipped), so a steady
                 // row of idle agents doesn't trigger a snapshot re-fetch every
-                // tick. Persisting unread already bumps the feed; otherwise wake
-                // it explicitly. The cache is updated first so the snapshot the
-                // wake triggers reads the fresh states.
+                // tick. Persisting unread is not enough on its own: marking an
+                // already-unread session is a no-op mutate that skips the
+                // generation bump (pinned by
+                // `mark_unread_on_an_already_unread_session_does_not_bump_generation`),
+                // so wake the feed explicitly whenever states changed. The
+                // cache is updated first so the snapshot the wake triggers
+                // reads the fresh states.
                 if !unread_ids.is_empty() {
                     let _ = service.mark_unread(unread_ids).await;
-                } else if states_changed || commander_flipped {
+                }
+                if states_changed || commander_flipped {
                     store.notify_change();
                 }
             }
@@ -4021,8 +4026,9 @@ mod tests {
         let svc = service(&dir);
         seed_project_session(&svc).await;
         let generation = svc.store().generation();
-        // Exercise a classified state-only event directly. Native watcher
-        // startup may also emit a conservative rescan on macOS.
+        // Exercise a classified state-only event directly. Assumption, untested
+        // on macOS: notify's FSEvents backend can flag Rescan at startup
+        // (notify 8.2.0 src/fsevent.rs:116-117, MUST_SCAN_SUBDIRS).
         svc.reconcile_state_files(false).await;
         assert_eq!(svc.store().generation(), generation);
     }
@@ -4053,8 +4059,10 @@ mod tests {
         // Mirror `spawn_state_sync_loop`'s handling of a watcher event.
         tokio::time::sleep(Duration::from_millis(100)).await;
         watcher.take_changed();
-        // A startup rescan (seen on macOS) marks the watch failed, which
-        // deliberately takes the conservative path; inotify emits none.
+        // A Rescan marks the watch failed, which deliberately takes the
+        // conservative path. Assumption, untested on macOS: notify's FSEvents
+        // backend can flag one (notify 8.2.0 src/fsevent.rs:116-117,
+        // MUST_SCAN_SUBDIRS); inotify only does on overflow.
         if cfg!(target_os = "linux") {
             assert!(watcher.healthy());
         }
@@ -4742,6 +4750,21 @@ mod tests {
         svc.mark_unread(vec![sid]).await.unwrap();
         let state = svc.store().read().await;
         assert!(state.get_session(&sid).unwrap().unread);
+    }
+
+    /// Pins the premise behind the agent-state loop's unconditional
+    /// `notify_change`: re-marking an already-unread session is a no-op
+    /// mutate, which does not bump the generation, so `mark_unread` alone
+    /// cannot be relied on to wake the change feed.
+    #[tokio::test]
+    async fn mark_unread_on_an_already_unread_session_does_not_bump_generation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.mark_unread(vec![sid]).await.unwrap();
+        let generation = svc.store().generation();
+        svc.mark_unread(vec![sid]).await.unwrap();
+        assert_eq!(svc.store().generation(), generation);
     }
 
     #[tokio::test]
