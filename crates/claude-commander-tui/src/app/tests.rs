@@ -1391,10 +1391,9 @@ fn test_apply_repo_list_timeout_rejects_implausibly_short_values() {
 #[test]
 fn gitlab_hostname_editor_rejects_url_and_credentials_without_persisting_them() {
     let mut app = make_test_app();
-    app.apply_settings_edit(
-        SettingsTab::General,
-        "gitlab_hostname",
-        "https://user:secret@gitlab.example.com/group",
+    assert_eq!(
+        app.parse_gitlab_hostname_setting("https://user:secret@gitlab.example.com/group"),
+        None
     );
 
     assert!(app.config.gitlab_hostname.is_none());
@@ -8930,6 +8929,7 @@ async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at,
         session_id: sid,
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
         info: None,
     })
     .await;
@@ -9005,6 +9005,29 @@ async fn reopening_the_info_modal_retries_a_failed_enriched_fetch() {
 }
 
 #[tokio::test]
+async fn a_slow_enriched_result_still_applies_after_its_token_was_superseded() {
+    // A `gh`/`glab` call slower than the 5s in-flight backstop gets re-spawned,
+    // which overwrites the token. Discarding the original result then meant a
+    // slow fetch never landed. A superseded result for the selected session and
+    // the current provider must still apply.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    let guard = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
+    app.handle_state_update(StateUpdate::EnrichedPrReady {
+        spawned_at: guard - std::time::Duration::from_secs(6),
+        session_id: sid,
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        info: None,
+    })
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, Some(guard));
+}
+
+#[tokio::test]
 async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
     // Same generation-token rule as PreviewReady: a superseded enriched result
     // must not release the guard belonging to the fetch now in flight, or the
@@ -9018,6 +9041,7 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at: guard - std::time::Duration::from_millis(1),
         session_id: sid,
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
         info: None,
     })
     .await;
@@ -9026,17 +9050,44 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
         Some(guard),
         "a superseded enriched result must leave the live fetch's guard intact"
     );
-    assert_eq!(
-        app.ui_state.enriched_pr_unavailable, None,
-        "a superseded provider-bound result must not update negative caches"
-    );
 
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at: guard,
         session_id: sid,
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
         info: None,
     })
     .await;
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+#[tokio::test]
+async fn an_enriched_result_from_a_previous_provider_is_dropped() {
+    // Enriched review data is provider-bound: a GitHub fetch still in flight
+    // when the provider switches to GitLab must not repopulate the caches.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .snapshot
+        .server
+        .code_host
+        .provider = claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+
+    let spawned_at = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
+    app.handle_state_update(StateUpdate::EnrichedPrReady {
+        spawned_at,
+        session_id: sid,
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        info: None,
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "a result from the previous provider must not update negative caches"
+    );
     assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
 }
 

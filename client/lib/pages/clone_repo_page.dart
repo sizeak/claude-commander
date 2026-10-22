@@ -9,7 +9,7 @@ import '../util/error_text.dart';
 
 /// Reconciliation timeout while watching a clone. Server change notifications
 /// wake the wait early; this deadline also supports servers without the feed.
-const _pollInterval = Duration(seconds: 1);
+const _changeWaitFallback = Duration(seconds: 1);
 
 /// Prefix characters a client-derived directory name may contain. Deliberately
 /// narrower than the server's `check_dir_name` (which only bars `/`, `\`, `.`,
@@ -345,7 +345,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
       while (true) {
         switch (current.status.kind) {
           case CloneStatusKind.running:
-            await _store.waitForChange(_pollInterval);
+            await _store.waitForChange(_changeWaitFallback);
             if (!mounted) return _Attempt.done;
             final CloneJobDto? polled;
             try {

@@ -259,20 +259,29 @@ impl App {
             StateUpdate::EnrichedPrReady {
                 spawned_at,
                 session_id,
+                provider,
                 info,
             } => {
-                // Unlike pane previews, enriched review data is provider-bound.
-                // A provider switch clears this token, so rejecting a result
-                // that no longer owns it prevents an in-flight GitHub response
-                // from repopulating caches after switching to GitLab (and vice
-                // versa).
-                if self.ui_state.enriched_pr_fetch_spawned_at != Some(spawned_at) {
-                    debug!("Discarding superseded EnrichedPrReady for {session_id}");
-                    return;
+                // Release the guard only if this result owns it; a superseded
+                // result (a slow fetch that was re-spawned) may still apply.
+                if self.ui_state.enriched_pr_fetch_spawned_at == Some(spawned_at) {
+                    self.ui_state.enriched_pr_fetch_spawned_at = None;
                 }
-                self.ui_state.enriched_pr_fetch_spawned_at = None;
-                // Only apply if the session is still selected
-                if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
+                // Enriched review data is provider-bound: an in-flight GitHub
+                // response must not repopulate caches after switching to GitLab
+                // (and vice versa).
+                let selected = self
+                    .ui_state
+                    .selected_session_id
+                    .filter(|r| r.id == session_id);
+                let current_provider = selected.map(|r| {
+                    self.view_for(r.backend)
+                        .snapshot
+                        .server
+                        .effective_code_host()
+                        .provider
+                });
+                if current_provider == Some(provider) {
                     // An empty result caches nothing, so record the attempt
                     // separately — otherwise an open Info surface would refetch
                     // (spawning `gh`) every few seconds for the whole session.

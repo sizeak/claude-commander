@@ -138,6 +138,9 @@ pub enum StateUpdate {
         /// [`StateUpdate::PreviewReady::spawned_at`].
         spawned_at: Instant,
         session_id: SessionId,
+        /// Provider the fetch ran against; a result from a provider that is no
+        /// longer current is dropped rather than cached.
+        provider: claude_commander_protocol::hosting::CodeHostProvider,
         info: Option<EnrichedPrInfo>,
     },
     /// AI-generated branch summary ready

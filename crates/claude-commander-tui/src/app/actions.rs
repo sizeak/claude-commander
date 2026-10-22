@@ -2328,7 +2328,7 @@ impl App {
                 canonical_repo_slug(&repo.clone_url).is_some_and(|slug| registered.contains(&slug));
             let mut label = repo.full_name.clone();
             label.push_str(match repo.visibility {
-                claude_commander_protocol::hosting::RepositoryVisibility::Public => "  public",
+                claude_commander_protocol::hosting::RepositoryVisibility::Public => "",
                 claude_commander_protocol::hosting::RepositoryVisibility::Internal => "  internal",
                 claude_commander_protocol::hosting::RepositoryVisibility::Private => "  private",
             });

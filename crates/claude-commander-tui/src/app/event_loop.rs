@@ -134,16 +134,19 @@ impl App {
                     self.ui_state.throbber_state.calc_next();
                     dirty |= matches!(self.ui_state.modal, Modal::Loading { .. })
                         || self.backends.iter().any(|h| {
-                            h.view
-                                .snapshot
-                                .sessions
-                                .iter()
-                                .any(|s| s.status == SessionStatus::Creating)
-                                || h.view
-                                    .agent_states
-                                    .states
-                                    .values()
-                                    .any(|s| *s == AgentState::Working)
+                            h.view.snapshot.sessions.iter().any(|s| {
+                                matches!(
+                                    s.status,
+                                    SessionStatus::Creating
+                                        | SessionStatus::Merging
+                                        | SessionStatus::Pushing
+                                )
+                            }) || h
+                                .view
+                                .agent_states
+                                .states
+                                .values()
+                                .any(|s| *s == AgentState::Working)
                         });
                 }
                 if let Some(crate::digit_accumulator::DigitResult::Jump(n)) =

@@ -548,8 +548,7 @@ impl App {
             Preview::new(content)
                 .with_paragraph(parsed)
                 .block(block)
-                .scroll(scroll)
-                .dim_opacity(None),
+                .scroll(scroll),
             area,
         );
     }
