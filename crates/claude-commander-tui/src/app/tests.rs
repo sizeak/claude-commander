@@ -8929,7 +8929,10 @@ async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at,
         session_id: sid,
-        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        code_host: claude_commander_protocol::hosting::CodeHost {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+            hostname: None,
+        },
         info: None,
     })
     .await;
@@ -9019,7 +9022,10 @@ async fn a_slow_enriched_result_still_applies_after_its_token_was_superseded() {
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at: guard - std::time::Duration::from_secs(6),
         session_id: sid,
-        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        code_host: claude_commander_protocol::hosting::CodeHost {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+            hostname: None,
+        },
         info: None,
     })
     .await;
@@ -9041,7 +9047,10 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at: guard - std::time::Duration::from_millis(1),
         session_id: sid,
-        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        code_host: claude_commander_protocol::hosting::CodeHost {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+            hostname: None,
+        },
         info: None,
     })
     .await;
@@ -9054,7 +9063,10 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at: guard,
         session_id: sid,
-        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        code_host: claude_commander_protocol::hosting::CodeHost {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+            hostname: None,
+        },
         info: None,
     })
     .await;
@@ -9080,7 +9092,10 @@ async fn an_enriched_result_from_a_previous_provider_is_dropped() {
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at,
         session_id: sid,
-        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        code_host: claude_commander_protocol::hosting::CodeHost {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+            hostname: None,
+        },
         info: None,
     })
     .await;
@@ -9089,6 +9104,39 @@ async fn an_enriched_result_from_a_previous_provider_is_dropped() {
         "a result from the previous provider must not update negative caches"
     );
     assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+#[tokio::test]
+async fn an_enriched_result_from_a_previous_gitlab_host_is_dropped() {
+    // Switching GitLab hostname keeps the provider, so the host must be part of
+    // the identity a result is checked against.
+    use claude_commander_protocol::hosting::{CodeHost, CodeHostProvider};
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    let code_host = &mut app
+        .backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .snapshot
+        .server
+        .code_host;
+    code_host.provider = CodeHostProvider::Gitlab;
+    code_host.hostname = Some("new.example.com".into());
+
+    app.handle_state_update(StateUpdate::EnrichedPrReady {
+        spawned_at: Instant::now(),
+        session_id: sid,
+        code_host: CodeHost {
+            provider: CodeHostProvider::Gitlab,
+            hostname: Some("old.example.com".into()),
+        },
+        info: None,
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "a result from the previous GitLab host must not update negative caches"
+    );
 }
 
 // ---------------------------------------------------------------------------

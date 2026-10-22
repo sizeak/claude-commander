@@ -259,7 +259,7 @@ impl App {
             StateUpdate::EnrichedPrReady {
                 spawned_at,
                 session_id,
-                provider,
+                code_host,
                 info,
             } => {
                 // Release the guard only if this result owns it; a superseded
@@ -267,21 +267,22 @@ impl App {
                 if self.ui_state.enriched_pr_fetch_spawned_at == Some(spawned_at) {
                     self.ui_state.enriched_pr_fetch_spawned_at = None;
                 }
-                // Enriched review data is provider-bound: an in-flight GitHub
-                // response must not repopulate caches after switching to GitLab
-                // (and vice versa).
+                // Enriched review data is host-bound: an in-flight response must
+                // not repopulate caches after a switch of provider (GitHub ↔
+                // GitLab) or of GitLab hostname.
                 let selected = self
                     .ui_state
                     .selected_session_id
                     .filter(|r| r.id == session_id);
-                let current_provider = selected.map(|r| {
-                    self.view_for(r.backend)
+                let still_current = selected.is_some_and(|r| {
+                    let current = self
+                        .view_for(r.backend)
                         .snapshot
                         .server
-                        .effective_code_host()
-                        .provider
+                        .effective_code_host();
+                    current.provider == code_host.provider && current.hostname == code_host.hostname
                 });
-                if current_provider == Some(provider) {
+                if still_current {
                     // An empty result caches nothing, so record the attempt
                     // separately — otherwise an open Info surface would refetch
                     // (spawning `gh`) every few seconds for the whole session.
