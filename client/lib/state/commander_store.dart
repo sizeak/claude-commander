@@ -273,7 +273,7 @@ class CommanderStore extends ChangeNotifier {
   /// never acquired, else just refetch.
   Future<void> retry() => _handle == null ? connect() : _refresh();
 
-  // --- mutations (thin wrappers; the next change-feed tick refreshes state) --
+  // --- mutations (thin wrappers; `_mutate` refetches the snapshot after each)
 
   Future<void> killSession(String id) =>
       _mutate(() => _api.killSession(handle: _requireHandle, id: id));
