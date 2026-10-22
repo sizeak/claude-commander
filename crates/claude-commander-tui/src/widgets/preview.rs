@@ -50,12 +50,18 @@ impl<'a> Preview<'a> {
         self
     }
 
-    /// Set the opacity for unfocused dimming (0.0 = black, 1.0 = unchanged)
+    /// Render a pre-parsed (already dimmed and scrolled) paragraph from
+    /// [`PreviewState::paragraph`] instead of re-parsing `content`.
     pub fn with_paragraph(mut self, text: &'a Paragraph<'static>) -> Self {
         self.parsed = Some(text);
         self
     }
 
+    /// Set the opacity for unfocused dimming (0.0 = black, 1.0 = unchanged)
+    ///
+    /// Test-only: the app dims through [`PreviewState::paragraph`]; this keeps
+    /// the uncached path as the reference the cached one is checked against.
+    #[cfg(test)]
     pub fn dim_opacity(mut self, opacity: Option<f32>) -> Self {
         self.dim_opacity = opacity;
         self
@@ -304,6 +310,36 @@ impl PreviewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cached `PreviewState::paragraph` path must render exactly what the
+    /// uncached `Preview` path does — symbols and styles — for dimmed,
+    /// scrolled ANSI content.
+    #[test]
+    fn cached_paragraph_renders_like_uncached_preview() {
+        let content = (0..30)
+            .map(|i| format!("\x1b[1;31mred {i}\x1b[0m \x1b[7;32minv\x1b[0m plain"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let area = Rect::new(0, 0, 40, 10);
+        let mut state = PreviewState::new();
+        state.set_content(&content, area.height);
+        state.scroll_up(7);
+        let scroll = state.scroll_offset;
+        assert!(scroll > 0);
+
+        let mut uncached = Buffer::empty(area);
+        Preview::new(&content)
+            .dim_opacity(Some(0.4))
+            .scroll(scroll)
+            .render(area, &mut uncached);
+
+        let mut cached = Buffer::empty(area);
+        Preview::new(&content)
+            .with_paragraph(state.paragraph(Some(0.4)))
+            .render(area, &mut cached);
+
+        assert_eq!(cached, uncached);
+    }
 
     #[test]
     fn test_preview_state_scrolling() {

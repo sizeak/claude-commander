@@ -195,8 +195,8 @@ impl App {
     /// Spawn background fetches for Info modal data (enriched PR + AI summary).
     ///
     /// Gated on the Info modal being open (a no-op otherwise) and guarded
-    /// against double-spawns: `update_selection` calls this every tick (via
-    /// `refresh_list_items`), so without the in-flight guard an open Info modal
+    /// against double-spawns: `update_selection` calls this, and it runs on
+    /// every selection/list refresh, so without the in-flight guard an open Info modal
     /// would re-spawn a duplicate `gh` fetch each tick until the first resolves.
     pub(super) fn spawn_info_fetch(&mut self) {
         // Only relevant when the Info modal is open; a no-op otherwise.
