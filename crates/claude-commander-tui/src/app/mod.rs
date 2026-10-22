@@ -1823,7 +1823,7 @@ pub struct AppUiState {
     /// When the last enriched-PR fetch was spawned (None = not in flight).
     /// Guards `spawn_info_fetch` against double-spawns: `update_selection`
     /// calls it and runs on every selection/list refresh, so without this an open
-    /// Info modal would re-spawn a duplicate `gh` fetch each tick until the
+    /// Info modal would re-spawn a duplicate `gh` fetch on each input or refresh until the
     /// first resolves. Mirrors `preview_update_spawned_at`'s 5s safety window.
     pub enriched_pr_fetch_spawned_at: Option<Instant>,
     /// Whether a review-diff refresh re-compose is currently in flight, so the
