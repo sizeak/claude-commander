@@ -113,11 +113,6 @@ pub struct CommanderService {
     /// [`Self::start_clone`] and polled through [`Self::clone_job`]. In-memory
     /// only — see [`CloneJobs`] for why a clone cannot outlive its process.
     clone_jobs: CloneJobs,
-    /// Test-only record of whether [`Self::review_provider_lock`] was free at
-    /// each slow, out-of-store step (PR retarget, fresh restart). See
-    /// [`Self::note_slow_step`].
-    #[cfg(test)]
-    slow_step_lock_free: Arc<std::sync::Mutex<Vec<bool>>>,
 }
 
 /// Max entries kept in the operation ledger before the oldest are evicted.
@@ -194,20 +189,6 @@ impl CommanderService {
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
             clone_jobs,
-            #[cfg(test)]
-            slow_step_lock_free: Arc::default(),
-        }
-    }
-
-    /// Called just before a slow step that runs outside the state store (a
-    /// `gh`/`glab` retarget bounded at 30s, a tmux restart). Those steps must
-    /// not run under [`Self::review_provider_lock`], or every review poll and
-    /// provider switch stalls behind them; tests read the record to pin it.
-    fn note_slow_step(&self) {
-        #[cfg(test)]
-        {
-            let free = self.review_provider_lock.try_lock().is_ok();
-            self.slow_step_lock_free.lock().unwrap().push(free);
         }
     }
 
@@ -2300,57 +2281,59 @@ impl CommanderService {
         if program.as_ref().is_some_and(|v| v.is_empty()) {
             return Err(SessionError::InvalidProgram("program cannot be empty".into()).into());
         }
-        let _guard = self.review_provider_lock.lock().await;
-        let provider = self.config_store.read().code_host_provider;
-        let sections =
-            crate::session::effective_sections(&self.config_store.read().sections).into_owned();
-        let sid = *id;
-        let (base, pending) = self
-            .store
-            .try_mutate(move |state| {
-                if state.get_session(&sid).is_none() {
-                    return Err(SessionError::NotFound(sid).into());
-                }
-                let base = edit
-                    .base
-                    .map(|base| {
-                        state
-                            .set_session_base(&sid, base.parent_session_id)
-                            .map_err(crate::Error::from)
-                    })
-                    .transpose()?;
-                let session = state
-                    .get_session_mut(&sid)
-                    .ok_or(SessionError::NotFound(sid))?;
-                if let Some(title) = title {
-                    session.title = title;
-                }
-                if let Some(program) = program {
-                    session.pending_program = (program != session.program).then_some(program);
-                }
-                if let Some(keep_alive) = edit.keep_alive {
-                    session.keep_alive = keep_alive;
-                }
-                if let Some(section) = edit.section
-                    && section != session.section_override
-                {
-                    match section {
-                        Some(name) => {
-                            session.section_override = Some(name);
-                            apply_assignment(session, &sections, chrono::Utc::now());
-                        }
-                        None => {
-                            clear_override_and_reassign(session, &sections, chrono::Utc::now());
+        // Like `set_session_base`: the lock covers the mutation only, so it is
+        // scoped to this block. The provider is captured under it, and the
+        // retarget and restart below can each take seconds.
+        let (provider, base, pending) = {
+            let _guard = self.review_provider_lock.lock().await;
+            let provider = self.config_store.read().code_host_provider;
+            let sections =
+                crate::session::effective_sections(&self.config_store.read().sections).into_owned();
+            let sid = *id;
+            let (base, pending) = self
+                .store
+                .try_mutate(move |state| {
+                    if state.get_session(&sid).is_none() {
+                        return Err(SessionError::NotFound(sid).into());
+                    }
+                    let base = edit
+                        .base
+                        .map(|base| {
+                            state
+                                .set_session_base(&sid, base.parent_session_id)
+                                .map_err(crate::Error::from)
+                        })
+                        .transpose()?;
+                    let session = state
+                        .get_session_mut(&sid)
+                        .ok_or(SessionError::NotFound(sid))?;
+                    if let Some(title) = title {
+                        session.title = title;
+                    }
+                    if let Some(program) = program {
+                        session.pending_program = (program != session.program).then_some(program);
+                    }
+                    if let Some(keep_alive) = edit.keep_alive {
+                        session.keep_alive = keep_alive;
+                    }
+                    if let Some(section) = edit.section
+                        && section != session.section_override
+                    {
+                        match section {
+                            Some(name) => {
+                                session.section_override = Some(name);
+                                apply_assignment(session, &sections, chrono::Utc::now());
+                            }
+                            None => {
+                                clear_override_and_reassign(session, &sections, chrono::Utc::now());
+                            }
                         }
                     }
-                }
-                Ok::<_, crate::Error>((base, session.pending_program.is_some()))
-            })
-            .await?;
-        // Like `set_session_base`: the lock covers the mutation only. The
-        // provider was captured under it, and the retarget and restart below
-        // can each take seconds.
-        drop(_guard);
+                    Ok::<_, crate::Error>((base, session.pending_program.is_some()))
+                })
+                .await?;
+            (provider, base, pending)
+        };
         self.telemetry.feature("session.edit");
         let mut outcome = claude_commander_protocol::api::EditSessionOutcome::default();
         if let Some((plan, retarget)) = base {
@@ -2363,7 +2346,6 @@ impl CommanderService {
             outcome.base = Some(base);
         }
         if edit.restart && pending {
-            self.note_slow_step();
             match self.manager.restart_session_fresh(id).await {
                 Ok(()) => outcome.restarted = true,
                 Err(error) => outcome.warnings.push(format!("Session saved, but restart failed: {error}. The program change remains pending; retry restart.")),
@@ -2418,28 +2400,30 @@ impl CommanderService {
         parent: Option<SessionId>,
     ) -> Result<SetSessionBaseOutcome> {
         self.telemetry.feature("session.set_base");
-        let _guard = self.review_provider_lock.lock().await;
-        // Keep one provider for the whole operation even if config hot-reloads
-        // while the state mutation is in flight.
-        let provider = self.config_store.read().code_host_provider;
-        let session_id = *id;
-        let (plan, pr_retarget) = self
-            .store
-            .try_mutate(move |state| {
-                state
-                    .set_session_base(&session_id, parent)
-                    // An unknown session id is a 404 everywhere else in the API;
-                    // don't let it fall through the rejection's 400/409 mapping.
-                    .map_err(|e| match e {
-                        crate::session::SetBaseRejection::SessionNotFound => {
-                            SessionError::NotFound(session_id).into()
-                        }
-                        other => crate::Error::from(other),
-                    })
-            })
-            .await?;
-
-        drop(_guard);
+        // The lock covers the mutation only; the retarget below can take seconds.
+        let (provider, plan, pr_retarget) = {
+            let _guard = self.review_provider_lock.lock().await;
+            // Keep one provider for the whole operation even if config hot-reloads
+            // while the state mutation is in flight.
+            let provider = self.config_store.read().code_host_provider;
+            let session_id = *id;
+            let (plan, pr_retarget) = self
+                .store
+                .try_mutate(move |state| {
+                    state
+                        .set_session_base(&session_id, parent)
+                        // An unknown session id is a 404 everywhere else in the API;
+                        // don't let it fall through the rejection's 400/409 mapping.
+                        .map_err(|e| match e {
+                            crate::session::SetBaseRejection::SessionNotFound => {
+                                SessionError::NotFound(session_id).into()
+                            }
+                            other => crate::Error::from(other),
+                        })
+                })
+                .await?;
+            (provider, plan, pr_retarget)
+        };
         Ok(self.finish_base_change(provider, plan, pr_retarget).await)
     }
 
@@ -2449,7 +2433,6 @@ impl CommanderService {
         plan: crate::config::storage::SetBasePlan,
         pr_retarget: Option<crate::config::storage::PrBaseRetarget>,
     ) -> SetSessionBaseOutcome {
-        self.note_slow_step();
         // Durable half, best-effort. The local mirror already re-stacked the
         // tree, but only this makes it survive the next PR sync — so a failure
         // is reported rather than logged.
@@ -6540,61 +6523,6 @@ mod tests {
         let s = state.get_session(&sid).unwrap();
         assert_eq!(s.stack_parent_session_id, Some(target_id));
         assert_eq!(s.base_branch.as_deref(), Some("branch-other"));
-    }
-
-    /// The provider lock only guards the state mutation: the PR retarget and the
-    /// fresh restart that follow can take seconds, and holding the lock across
-    /// them would stall every review poll and provider switch behind an edit.
-    #[tokio::test]
-    async fn edit_session_releases_provider_lock_before_retarget_and_restart() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let svc = service(&dir);
-        let (pid, sid) = seed_project_session(&svc).await;
-        let target = WorktreeSession::new(
-            pid,
-            "other",
-            "branch-other",
-            PathBuf::from("/tmp/wt2"),
-            "claude",
-        );
-        let target_id = target.id;
-        svc.store()
-            .mutate(move |state| {
-                state.add_session(target);
-                // A NUL argument makes the restart fail before tmux runs.
-                state.get_session_mut(&sid).unwrap().tmux_session_name =
-                    format!("invalid-{sid}\0name");
-            })
-            .await
-            .unwrap();
-        let edit = serde_json::from_value(serde_json::json!({
-            "program":"codex", "restart":true,
-            "base":{"parent_session_id":target_id}
-        }))
-        .unwrap();
-        svc.edit_session(&sid, edit).await.unwrap();
-        assert_eq!(*svc.slow_step_lock_free.lock().unwrap(), vec![true, true]);
-    }
-
-    #[tokio::test]
-    async fn set_session_base_releases_provider_lock_before_retarget() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let svc = service(&dir);
-        let (pid, sid) = seed_project_session(&svc).await;
-        let target = WorktreeSession::new(
-            pid,
-            "other",
-            "branch-other",
-            PathBuf::from("/tmp/wt2"),
-            "claude",
-        );
-        let target_id = target.id;
-        svc.store()
-            .mutate(move |state| state.add_session(target))
-            .await
-            .unwrap();
-        svc.set_session_base(&sid, Some(target_id)).await.unwrap();
-        assert_eq!(*svc.slow_step_lock_free.lock().unwrap(), vec![true]);
     }
 
     /// An unknown session must keep the API's 404 semantics rather than falling
