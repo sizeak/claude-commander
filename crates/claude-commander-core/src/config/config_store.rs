@@ -127,39 +127,29 @@ impl ConfigStore {
 
     /// Apply a mutation to the config, then persist to disk.
     ///
-    /// Updates the tracked mtime so that `reload_if_changed()` won't
-    /// immediately re-read our own write.
+    /// Like every mutation here, the edit is applied to a copy and committed
+    /// to memory only once the save succeeds, so a failed save leaves the
+    /// in-memory config in step with disk. Updates the tracked mtime so that
+    /// `reload_if_changed()` won't immediately re-read our own write.
     pub fn mutate<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut Config) -> R,
     {
-        let result = {
-            let mut config = self.config.write().expect("config lock poisoned");
-            let result = f(&mut config);
-            self.save_to_disk(&config)?;
-            result
-        };
-
-        Ok(result)
+        self.try_mutate(|c| Ok(f(c)))
     }
 
     /// Apply a fallible mutation to a copy of the config and commit it — to
     /// memory and to disk — only if the closure succeeds and the save does.
     ///
-    /// Unlike [`mutate`](Self::mutate), a rejected edit touches nothing: no
-    /// half-applied in-memory config, no rewrite of `config.toml` (which would
-    /// clobber a hand edit the hot-reload has not read yet and record an mtime
-    /// that hides it for good), and no save error masking the rejection.
+    /// A rejected edit touches nothing: no half-applied in-memory config, no
+    /// rewrite of `config.toml` (which would clobber a hand edit the
+    /// hot-reload has not read yet and record an mtime that hides it for
+    /// good), and no save error masking the rejection.
     pub fn try_mutate<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&mut Config) -> Result<T>,
     {
-        let mut config = self.config.write().expect("config lock poisoned");
-        let mut edited = config.clone();
-        let result = f(&mut edited)?;
-        self.save_to_disk(&edited)?;
-        *config = edited;
-        Ok(result)
+        self.commit_edit(|c| Ok((f(c)?, true)))
     }
 
     /// Apply a mutation to a copy of the config and commit it only when the
@@ -170,14 +160,28 @@ impl ConfigStore {
     where
         F: FnOnce(&mut Config) -> bool,
     {
+        self.commit_edit(|c| {
+            let changed = f(c);
+            Ok((changed, changed))
+        })
+    }
+
+    /// The copy-then-commit core every mutation shares: run `f` on a clone of
+    /// the config under the write lock, and save and swap the clone in only
+    /// when `f` returns `Ok((_, true))`. `Ok((_, false))` and `Err` leave
+    /// memory and disk untouched.
+    fn commit_edit<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Config) -> Result<(T, bool)>,
+    {
         let mut config = self.config.write().expect("config lock poisoned");
         let mut edited = config.clone();
-        if !f(&mut edited) {
-            return Ok(false);
+        let (result, commit) = f(&mut edited)?;
+        if commit {
+            self.save_to_disk(&edited)?;
+            *config = edited;
         }
-        self.save_to_disk(&edited)?;
-        *config = edited;
-        Ok(true)
+        Ok(result)
     }
 
     /// Write the given config to `self.config_path` and update the tracked mtime.
