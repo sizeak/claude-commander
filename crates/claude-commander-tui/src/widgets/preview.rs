@@ -291,6 +291,32 @@ impl PreviewState {
 mod tests {
     use super::*;
 
+    /// The cached paragraph the preview renders dims every span, drops reverse
+    /// video, and rebuilds when the content changes.
+    #[test]
+    fn cached_paragraph_dims_and_follows_new_content() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::Widget};
+        let render = |state: &mut PreviewState| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
+            state
+                .paragraph(Some(0.4))
+                .clone()
+                .render(buf.area, &mut buf);
+            buf
+        };
+        let mut state = PreviewState::new();
+        state.set_content("\x1b[31;7mred\x1b[0m", 1);
+        let buf = render(&mut state);
+        assert_eq!(buf[(0, 0)].symbol(), "r");
+        assert_eq!(buf[(0, 0)].fg, dim_color(Color::Red, 0.4));
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::REVERSED));
+
+        state.set_content("\x1b[32mgreen\x1b[0m", 1);
+        let buf = render(&mut state);
+        assert_eq!(buf[(0, 0)].symbol(), "g");
+        assert_eq!(buf[(0, 0)].fg, dim_color(Color::Green, 0.4));
+    }
+
     #[test]
     fn test_preview_state_scrolling() {
         let mut state = PreviewState::new();
