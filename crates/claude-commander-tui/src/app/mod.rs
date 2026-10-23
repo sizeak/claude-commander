@@ -2586,7 +2586,7 @@ impl App {
     /// its connection state) untouched, so a degraded remote keeps its last
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
-        let Some(handle) = self.backends.iter().find(|h| h.id == id) else {
+        let Some(handle) = self.backend(id) else {
             return;
         };
         let revision = handle
@@ -2602,9 +2602,7 @@ impl App {
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
                 let host = snapshot.server.effective_code_host();
-                if old_host.is_some_and(|old| {
-                    old.provider != host.provider || old.hostname != host.hostname
-                }) {
+                if old_host.is_some_and(|old| old.host() != host.host()) {
                     changed_host = Some(host);
                 }
                 handle.view_revision = revision;
@@ -2641,10 +2639,7 @@ impl App {
             self.ui_state.repo_picker = RepoPicker {
                 backend: id,
                 generation,
-                host: claude_commander_protocol::hosting::CodeHost {
-                    provider: host.provider,
-                    hostname: host.hostname,
-                },
+                host: host.host(),
                 ..Default::default()
             };
             if matches!(

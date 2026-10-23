@@ -368,6 +368,17 @@ impl Default for CodeHostStatus {
     }
 }
 
+impl CodeHostStatus {
+    /// The host this status describes — provider and hostname, without the
+    /// CLI-availability probe — for comparing hosts and tagging host-bound data.
+    pub fn host(&self) -> crate::hosting::CodeHost {
+        crate::hosting::CodeHost {
+            provider: self.provider,
+            hostname: self.hostname.clone(),
+        }
+    }
+}
+
 impl ServerStatus {
     /// Compatibility view for responses from servers predating `code_host`.
     pub fn effective_code_host(&self) -> CodeHostStatus {

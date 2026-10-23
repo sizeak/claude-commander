@@ -1,6 +1,7 @@
 //! Main event loop: tick dispatch, event processing, and config hot-reload.
 
 use super::*;
+use crate::widgets::status_glyph::status_spins;
 
 impl App {
     /// Main event loop
@@ -134,19 +135,16 @@ impl App {
                     self.ui_state.throbber_state.calc_next();
                     dirty |= matches!(self.ui_state.modal, Modal::Loading { .. })
                         || self.backends.iter().any(|h| {
-                            h.view.snapshot.sessions.iter().any(|s| {
-                                matches!(
-                                    s.status,
-                                    SessionStatus::Creating
-                                        | SessionStatus::Merging
-                                        | SessionStatus::Pushing
-                                )
-                            }) || h
-                                .view
-                                .agent_states
-                                .states
-                                .values()
-                                .any(|s| *s == AgentState::Working)
+                            h.view
+                                .snapshot
+                                .sessions
+                                .iter()
+                                .any(|s| status_spins(s.status))
+                                || h.view
+                                    .agent_states
+                                    .states
+                                    .values()
+                                    .any(|s| *s == AgentState::Working)
                         });
                 }
                 if let Some(crate::digit_accumulator::DigitResult::Jump(n)) =
@@ -213,16 +211,10 @@ impl App {
         match result {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
-                let old_servers = self.config.remote_servers.clone();
-                self.config = self.service.read_config();
+                // Also reconciles the live backends against a changed
+                // remote-server list.
+                self.sync_config_from_service();
                 self.reload_theme();
-
-                // Reconcile the live backends against the new remote-server list
-                // (add/remove/rebuild handles) when it changed.
-                let new_servers = self.config.remote_servers.clone();
-                if old_servers != new_servers {
-                    self.apply_remote_servers_reload(&old_servers, &new_servers);
-                }
                 true
             }
             Ok(false) => false,

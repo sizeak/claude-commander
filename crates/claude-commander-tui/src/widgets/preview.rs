@@ -21,8 +21,6 @@ pub struct Preview<'a> {
     block: Option<Block<'a>>,
     /// Scroll offset
     scroll: u16,
-    /// Opacity for unfocused dimming (None = no dimming, Some(0.4) = 40% brightness)
-    dim_opacity: Option<f32>,
     parsed: Option<&'a Paragraph<'static>>,
 }
 
@@ -33,7 +31,6 @@ impl<'a> Preview<'a> {
             content,
             block: None,
             scroll: 0,
-            dim_opacity: None,
             parsed: None,
         }
     }
@@ -56,16 +53,6 @@ impl<'a> Preview<'a> {
         self.parsed = Some(text);
         self
     }
-
-    /// Set the opacity for unfocused dimming (0.0 = black, 1.0 = unchanged)
-    ///
-    /// Test-only: the app dims through [`PreviewState::paragraph`]; this keeps
-    /// the uncached path as the reference the cached one is checked against.
-    #[cfg(test)]
-    pub fn dim_opacity(mut self, opacity: Option<f32>) -> Self {
-        self.dim_opacity = opacity;
-        self
-    }
 }
 
 impl<'a> Widget for Preview<'a> {
@@ -79,21 +66,10 @@ impl<'a> Widget for Preview<'a> {
             return;
         }
         // Convert ANSI escape codes when no cached paragraph was supplied.
-        let mut text = self
+        let text = self
             .content
             .into_text()
             .unwrap_or_else(|_| Text::raw(self.content));
-        if let Some(opacity) = self.dim_opacity {
-            for line in &mut text.lines {
-                for span in &mut line.spans {
-                    let fg = span.style.fg.unwrap_or(ratatui::style::Color::Reset);
-                    span.style = span
-                        .style
-                        .fg(dim_color(fg, opacity))
-                        .remove_modifier(Modifier::REVERSED);
-                }
-            }
-        }
 
         // No .wrap() - preserve original formatting (ASCII boxes, tables, etc.)
         let paragraph = Paragraph::new(text).scroll((self.scroll, 0));
@@ -105,6 +81,20 @@ impl<'a> Widget for Preview<'a> {
         };
 
         paragraph.render(area, buf);
+    }
+}
+
+/// Dim every span of `text` towards black by `opacity` (0.0 = black,
+/// 1.0 = unchanged) and drop reverse video, for an unfocused pane.
+fn dim_text(text: &mut Text, opacity: f32) {
+    for line in &mut text.lines {
+        for span in &mut line.spans {
+            let fg = span.style.fg.unwrap_or(ratatui::style::Color::Reset);
+            span.style = span
+                .style
+                .fg(dim_color(fg, opacity))
+                .remove_modifier(Modifier::REVERSED);
+        }
     }
 }
 
@@ -198,17 +188,7 @@ impl PreviewState {
         if self.cached_opacity != opacity {
             let mut text = self.parsed.clone();
             if let Some(opacity) = opacity {
-                for line in &mut text.lines {
-                    for span in &mut line.spans {
-                        span.style = span
-                            .style
-                            .fg(dim_color(
-                                span.style.fg.unwrap_or(ratatui::style::Color::Reset),
-                                opacity,
-                            ))
-                            .remove_modifier(Modifier::REVERSED);
-                    }
-                }
+                dim_text(&mut text, opacity);
             }
             self.dimmed = Paragraph::new(text);
             self.cached_opacity = opacity;
@@ -310,36 +290,6 @@ impl PreviewState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The cached `PreviewState::paragraph` path must render exactly what the
-    /// uncached `Preview` path does — symbols and styles — for dimmed,
-    /// scrolled ANSI content.
-    #[test]
-    fn cached_paragraph_renders_like_uncached_preview() {
-        let content = (0..30)
-            .map(|i| format!("\x1b[1;31mred {i}\x1b[0m \x1b[7;32minv\x1b[0m plain"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let area = Rect::new(0, 0, 40, 10);
-        let mut state = PreviewState::new();
-        state.set_content(&content, area.height);
-        state.scroll_up(7);
-        let scroll = state.scroll_offset;
-        assert!(scroll > 0);
-
-        let mut uncached = Buffer::empty(area);
-        Preview::new(&content)
-            .dim_opacity(Some(0.4))
-            .scroll(scroll)
-            .render(area, &mut uncached);
-
-        let mut cached = Buffer::empty(area);
-        Preview::new(&content)
-            .with_paragraph(state.paragraph(Some(0.4)))
-            .render(area, &mut cached);
-
-        assert_eq!(cached, uncached);
-    }
 
     #[test]
     fn test_preview_state_scrolling() {

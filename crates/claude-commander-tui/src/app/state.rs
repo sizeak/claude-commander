@@ -80,10 +80,9 @@ impl App {
                 if revision < handle.view_revision {
                     return;
                 }
-                let old_host = handle.view.snapshot.server.effective_code_host();
                 let host = snapshot.server.effective_code_host();
                 let host_changed =
-                    old_host.provider != host.provider || old_host.hostname != host.hostname;
+                    handle.view.snapshot.server.effective_code_host().host() != host.host();
                 handle.view_revision = revision;
                 let states_are_current = revision >= handle.agent_states_revision;
                 if states_are_current {
@@ -280,7 +279,7 @@ impl App {
                         .snapshot
                         .server
                         .effective_code_host();
-                    current.provider == code_host.provider && current.hostname == code_host.hostname
+                    current.host() == code_host
                 });
                 if still_current {
                     // An empty result caches nothing, so record the attempt
