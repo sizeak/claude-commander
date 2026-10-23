@@ -88,7 +88,6 @@ impl DiffInfo {
 
 struct RootWatch {
     watcher: Option<crate::file_events::FileEvents>,
-    root: std::path::PathBuf,
     attempted_at: Instant,
     requested_at: Instant,
 }
@@ -146,40 +145,20 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
                 .expect("diff watchers poisoned")
                 .contains_key(&key);
         if should_watch {
-            let root = path.to_path_buf();
-            let path = root.clone();
-            // A root deleted by another process has no `invalidate` caller;
-            // release it here rather than holding it until LRU eviction. The
-            // existence checks are blocking stats, so they run beside the
-            // watch registration rather than under the lock on this worker.
-            let others: Vec<(K, std::path::PathBuf, Instant)> = self
-                .watchers
-                .lock()
-                .expect("diff watchers poisoned")
-                .iter()
-                .filter(|(k, _)| **k != key)
-                .map(|(k, entry)| (*k, entry.root.clone(), entry.attempted_at))
-                .collect();
-            let (watcher, vanished) = tokio::task::spawn_blocking(move || {
-                let vanished: Vec<(K, std::path::PathBuf, Instant)> = others
-                    .into_iter()
-                    .filter(|(_, root, _)| !root.exists())
-                    .collect();
-                (crate::file_events::FileEvents::git(&path).ok(), vanished)
+            let path = path.to_path_buf();
+            let watcher = tokio::task::spawn_blocking(move || {
+                crate::file_events::FileEvents::git(&path).ok()
             })
             .await
             .unwrap_or_default();
             let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
-            for (k, root, attempted_at) in &vanished {
-                // Only drop the slot that was checked: it may have been
-                // re-registered (even for the same root) while the stats ran.
-                if watchers
-                    .get(k)
-                    .is_some_and(|entry| entry.root == *root && entry.attempted_at == *attempted_at)
-                {
-                    watchers.remove(k);
-                }
-            }
+            // A root deleted by another process has no `invalidate` caller,
+            // but its watch saw the root's own Remove/rename and went
+            // unhealthy: release such slots now rather than at LRU eviction.
+            // Slots without a watcher are kept — they carry the retry
+            // cooldown for roots that could not be watched.
+            watchers
+                .retain(|k, entry| *k == key || entry.watcher.as_ref().is_none_or(|w| w.healthy()));
             if watchers.len() >= 32
                 && !watchers.contains_key(&key)
                 && let Some(oldest) = watchers
@@ -189,17 +168,14 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
             {
                 watchers.remove(&oldest);
             }
-            {
-                watchers.insert(
-                    key,
-                    RootWatch {
-                        watcher,
-                        root,
-                        attempted_at: Instant::now(),
-                        requested_at: Instant::now(),
-                    },
-                );
-            }
+            watchers.insert(
+                key,
+                RootWatch {
+                    watcher,
+                    attempted_at: Instant::now(),
+                    requested_at: Instant::now(),
+                },
+            );
         }
         let mut watchers = self.watchers.lock().expect("diff watchers poisoned");
         match watchers
@@ -785,6 +761,21 @@ mod tests {
         cache.freshness(1, gone.path()).await;
         assert!(cache.is_watching(&1));
         drop(gone);
+        // The slot is released once its watch has seen the root go.
+        let unhealthy = tokio::time::timeout(Duration::from_secs(5), async {
+            while cache.watchers.lock().unwrap()[&1]
+                .watcher
+                .as_ref()
+                .is_some_and(|w| w.healthy())
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            unhealthy.is_ok(),
+            "the watch must observe the root's removal"
+        );
         cache.freshness(2, live.path()).await;
         assert!(
             !cache.is_watching(&1),
