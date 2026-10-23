@@ -265,11 +265,8 @@ impl App {
             let spawned_at = Instant::now();
             self.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
 
+            let code_host = code_host.host();
             let provider = code_host.provider;
-            let code_host = claude_commander_protocol::hosting::CodeHost {
-                provider,
-                hostname: code_host.hostname,
-            };
             tokio::spawn(async move {
                 let info = if let Some(repo_path) = repo_path {
                     claude_commander_core::git::hosting::fetch_enriched_review(
