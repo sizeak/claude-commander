@@ -1,6 +1,7 @@
 //! Main event loop: tick dispatch, event processing, and config hot-reload.
 
 use super::*;
+use crate::widgets::status_glyph::status_spins;
 
 impl App {
     /// Main event loop
@@ -134,19 +135,16 @@ impl App {
                     self.ui_state.throbber_state.calc_next();
                     dirty |= matches!(self.ui_state.modal, Modal::Loading { .. })
                         || self.backends.iter().any(|h| {
-                            h.view.snapshot.sessions.iter().any(|s| {
-                                matches!(
-                                    s.status,
-                                    SessionStatus::Creating
-                                        | SessionStatus::Merging
-                                        | SessionStatus::Pushing
-                                )
-                            }) || h
-                                .view
-                                .agent_states
-                                .states
-                                .values()
-                                .any(|s| *s == AgentState::Working)
+                            h.view
+                                .snapshot
+                                .sessions
+                                .iter()
+                                .any(|s| status_spins(s.status))
+                                || h.view
+                                    .agent_states
+                                    .states
+                                    .values()
+                                    .any(|s| *s == AgentState::Working)
                         });
                 }
                 if let Some(crate::digit_accumulator::DigitResult::Jump(n)) =
