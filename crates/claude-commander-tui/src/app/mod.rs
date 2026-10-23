@@ -2573,7 +2573,7 @@ impl App {
     /// its connection state) untouched, so a degraded remote keeps its last
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
-        let Some(handle) = self.backends.iter().find(|h| h.id == id) else {
+        let Some(handle) = self.backend(id) else {
             return;
         };
         let revision = handle
