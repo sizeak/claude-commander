@@ -1359,7 +1359,6 @@ impl App {
 
     /// Apply an edited value from the settings modal to the config.
     pub(super) fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
-        self.sync_config_from_service();
         match tab {
             SettingsTab::General => match field_key {
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
@@ -1771,31 +1770,34 @@ impl App {
     /// hostname) through the service's serialized cache-invalidation path,
     /// which also resets the glab probe and refetches PRs.
     async fn apply_settings_edit_live(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
-        if tab != SettingsTab::General {
-            self.apply_settings_edit(tab, field_key, value);
-            return;
-        }
-        let edit: Box<dyn Fn(&mut claude_commander_core::config::Config) + Send> = match field_key {
-            "code_host_provider" => {
+        match (tab, field_key) {
+            (SettingsTab::General, "code_host_provider") => {
                 use claude_commander_protocol::hosting::CodeHostProvider;
                 let provider = match value {
                     "GitHub" | "github" => CodeHostProvider::Github,
                     "GitLab" | "gitlab" => CodeHostProvider::Gitlab,
                     _ => return,
                 };
-                Box::new(move |config| config.code_host_provider = provider)
+                self.spawn_code_host_edit(move |config| config.code_host_provider = provider);
             }
-            "gitlab_hostname" => {
+            (SettingsTab::General, "gitlab_hostname") => {
                 let Some(hostname) = self.parse_gitlab_hostname_setting(value) else {
                     return;
                 };
-                Box::new(move |config| config.gitlab_hostname = hostname.clone())
+                self.spawn_code_host_edit(move |config| {
+                    config.gitlab_hostname = hostname.clone();
+                });
             }
-            _ => {
-                self.apply_settings_edit(tab, field_key, value);
-                return;
-            }
-        };
+            _ => self.apply_settings_edit(tab, field_key, value),
+        }
+    }
+
+    /// Run a code-host config edit through the service's serialized path in
+    /// the background, reporting the outcome as `CodeHostConfigUpdated`.
+    fn spawn_code_host_edit(
+        &self,
+        edit: impl Fn(&mut claude_commander_core::config::Config) + Send + 'static,
+    ) {
         let service = self.service.clone();
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
@@ -1819,7 +1821,6 @@ impl App {
     /// Booleans are stored as real `bool`s on [`Config`]; this avoids the
     /// stringify/parse round-trip used by the text-input edit path.
     pub(super) fn apply_bool_setting(&mut self, field_key: &str, value: bool) {
-        self.sync_config_from_service();
         match field_key {
             "per_repo_worktree_dirs" => self.config.per_repo_worktree_dirs = value,
             "fetch_before_create" => self.config.fetch_before_create = value,

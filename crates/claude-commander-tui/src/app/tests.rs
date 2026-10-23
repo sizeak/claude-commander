@@ -8896,6 +8896,28 @@ async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
     assert_eq!(app.ui_state.preview_update_spawned_at, None);
 }
 
+/// The default (github.com) code host every test snapshot starts on.
+fn github_host() -> claude_commander_protocol::hosting::CodeHost {
+    claude_commander_protocol::hosting::CodeHost {
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        hostname: None,
+    }
+}
+
+fn enriched_ready(
+    spawned_at: Instant,
+    session_id: SessionId,
+    code_host: claude_commander_protocol::hosting::CodeHost,
+    info: Option<claude_commander_core::git::EnrichedPrInfo>,
+) -> StateUpdate {
+    StateUpdate::EnrichedPrReady {
+        spawned_at,
+        session_id,
+        code_host,
+        info,
+    }
+}
+
 #[tokio::test]
 async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     // An Info surface used to be a briefly-open modal; the Info *tab* can stay
@@ -8908,16 +8930,8 @@ async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
 
     let spawned_at = Instant::now();
     app.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at,
-        session_id: sid,
-        code_host: claude_commander_protocol::hosting::CodeHost {
-            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
-            hostname: None,
-        },
-        info: None,
-    })
-    .await;
+    app.handle_state_update(enriched_ready(spawned_at, sid, github_host(), None))
+        .await;
     assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
 
     // An explicit PR-status refresh is the retry path.
@@ -9001,15 +9015,12 @@ async fn a_slow_enriched_result_still_applies_after_its_token_was_superseded() {
 
     let guard = Instant::now();
     app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: guard - std::time::Duration::from_secs(6),
-        session_id: sid,
-        code_host: claude_commander_protocol::hosting::CodeHost {
-            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
-            hostname: None,
-        },
-        info: None,
-    })
+    app.handle_state_update(enriched_ready(
+        guard - std::time::Duration::from_secs(6),
+        sid,
+        github_host(),
+        None,
+    ))
     .await;
     assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
     assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, Some(guard));
@@ -9026,15 +9037,12 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
 
     let guard = Instant::now();
     app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: guard - std::time::Duration::from_millis(1),
-        session_id: sid,
-        code_host: claude_commander_protocol::hosting::CodeHost {
-            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
-            hostname: None,
-        },
-        info: None,
-    })
+    app.handle_state_update(enriched_ready(
+        guard - std::time::Duration::from_millis(1),
+        sid,
+        github_host(),
+        None,
+    ))
     .await;
     assert_eq!(
         app.ui_state.enriched_pr_fetch_spawned_at,
@@ -9042,16 +9050,8 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
         "a superseded enriched result must leave the live fetch's guard intact"
     );
 
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: guard,
-        session_id: sid,
-        code_host: claude_commander_protocol::hosting::CodeHost {
-            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
-            hostname: None,
-        },
-        info: None,
-    })
-    .await;
+    app.handle_state_update(enriched_ready(guard, sid, github_host(), None))
+        .await;
     assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
 }
 
@@ -9071,16 +9071,8 @@ async fn an_enriched_result_from_a_previous_provider_is_dropped() {
 
     let spawned_at = Instant::now();
     app.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at,
-        session_id: sid,
-        code_host: claude_commander_protocol::hosting::CodeHost {
-            provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
-            hostname: None,
-        },
-        info: None,
-    })
-    .await;
+    app.handle_state_update(enriched_ready(spawned_at, sid, github_host(), None))
+        .await;
     assert_eq!(
         app.ui_state.enriched_pr_unavailable, None,
         "a result from the previous provider must not update negative caches"
@@ -9105,15 +9097,15 @@ async fn an_enriched_result_from_a_previous_gitlab_host_is_dropped() {
     code_host.provider = CodeHostProvider::Gitlab;
     code_host.hostname = Some("new.example.com".into());
 
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: Instant::now(),
-        session_id: sid,
-        code_host: CodeHost {
+    app.handle_state_update(enriched_ready(
+        Instant::now(),
+        sid,
+        CodeHost {
             provider: CodeHostProvider::Gitlab,
             hostname: Some("old.example.com".into()),
         },
-        info: None,
-    })
+        None,
+    ))
     .await;
     assert_eq!(
         app.ui_state.enriched_pr_unavailable, None,
@@ -13310,14 +13302,7 @@ async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
 #[tokio::test]
 async fn gitlab_hostname_edit_runs_through_the_code_host_path() {
     let (mut app, _) = app_with_remote_session().await;
-    app.handle_command(UserCommand::ShowSettings).await;
-    if let Modal::Settings(state) = &mut app.ui_state.modal {
-        state.selected_row = state
-            .rows
-            .iter()
-            .position(|r| r.field_key == "gitlab_hostname")
-            .unwrap();
-    }
+    open_general_settings_on(&mut app, "gitlab_hostname");
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let keys = std::iter::once(KeyCode::Enter)
         .chain(std::iter::repeat_n(KeyCode::Backspace, 32))
@@ -13357,14 +13342,7 @@ async fn gitlab_hostname_edit_runs_through_the_code_host_path() {
 #[tokio::test]
 async fn provider_picker_runs_in_background_and_refreshes_its_display() {
     let (mut app, _) = app_with_remote_session().await;
-    app.handle_command(UserCommand::ShowSettings).await;
-    if let Modal::Settings(state) = &mut app.ui_state.modal {
-        state.selected_row = state
-            .rows
-            .iter()
-            .position(|r| r.field_key == "code_host_provider")
-            .unwrap();
-    }
+    open_general_settings_on(&mut app, "code_host_provider");
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     for code in [KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
         app.process_event(AppEvent::Input(crate::event::InputEvent::Key(
@@ -13430,7 +13408,8 @@ async fn settings_edit_after_external_provider_switch_is_not_lost() {
         .unwrap();
     assert_eq!(app.config.code_host_provider, CodeHostProvider::Github);
     let rounded = !app.config.rounded_borders;
-    app.apply_bool_setting("rounded_borders", rounded);
+    open_general_settings_on(&mut app, "rounded_borders");
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
     let persisted = app.service.read_config();
     assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
     assert_eq!(persisted.code_host_provider, CodeHostProvider::Gitlab);
@@ -13456,7 +13435,8 @@ async fn tui_toggle_after_web_code_host_edit_keeps_the_web_values() {
         .await
         .unwrap();
     let rounded = !app.config.rounded_borders;
-    app.apply_bool_setting("rounded_borders", rounded);
+    open_general_settings_on(&mut app, "rounded_borders");
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
     let persisted = app.service.read_config();
     assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
     assert_eq!(persisted.code_host_provider, CodeHostProvider::Gitlab);

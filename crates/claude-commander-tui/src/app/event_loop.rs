@@ -213,16 +213,10 @@ impl App {
         match result {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
-                let old_servers = self.config.remote_servers.clone();
-                self.config = self.service.read_config();
+                // Also reconciles the live backends against a changed
+                // remote-server list.
+                self.sync_config_from_service();
                 self.reload_theme();
-
-                // Reconcile the live backends against the new remote-server list
-                // (add/remove/rebuild handles) when it changed.
-                let new_servers = self.config.remote_servers.clone();
-                if old_servers != new_servers {
-                    self.apply_remote_servers_reload(&old_servers, &new_servers);
-                }
                 true
             }
             Ok(false) => false,
