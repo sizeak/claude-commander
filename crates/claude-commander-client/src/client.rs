@@ -1444,6 +1444,17 @@ mod session_edit_tests {
         SetSection { section: Option<String> },
     }
 
+    /// A `/detail` body as a server without `edit` serves it.
+    fn legacy_detail_json(sid: SessionId, pending: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "id":sid.as_uuid().to_string(), "session_id":sid, "title":"task", "branch":"task", "status":"running",
+            "program":"claude", "pending_program":pending, "project_id":claude_commander_protocol::session::ProjectId::new(),
+            "project_name":"repo", "pr_number":null, "pr_url":null, "pr_state":"open", "pr_draft":false,
+            "pr_labels":[], "review_decision":null, "pr_reviewers":[], "created_at":"2026-01-01T00:00:00Z",
+            "agent_state":"idle", "diff_stat":null, "pane_content":null
+        })
+    }
+
     #[tokio::test]
     async fn legacy_edit_fallback_is_narrow_and_reports_partial_saves() {
         for (unsupported, program, section_failure) in [
@@ -1474,17 +1485,8 @@ mod session_edit_tests {
                 counter.fetch_add(1, Ordering::SeqCst);
                 async move { next.run(request).await }
             }));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                axum::serve(listener, app).await.unwrap();
-            });
-            let client = RemoteClient::new(RemoteServerSpec {
-                name: "legacy".into(),
-                base_url: format!("http://{addr}"),
-                token: None,
-            })
-            .unwrap();
+            let served = crate::test_server::serve(app).await;
+            let (client, addr) = (&served.client, served.addr);
             let edit = claude_commander_protocol::api::EditSession {
                 title: Some("renamed".into()),
                 program: program.then(|| "codex".into()),
@@ -1521,7 +1523,6 @@ mod session_edit_tests {
                     assert_eq!(calls.lock().unwrap()[1], "set_section");
                 }
             }
-            server.abort();
         }
     }
     /// An old server only offers a keep-alive *toggle*, so the fallback must
@@ -1535,13 +1536,7 @@ mod session_edit_tests {
         for (flip_on_rename, flip_after_read) in [(true, false), (false, true)] {
             let sid = SessionId::new();
             let keep_alive = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let detail = serde_json::json!({
-                "id":sid.as_uuid().to_string(), "session_id":sid, "title":"task", "branch":"task",
-                "status":"running", "program":"claude", "project_id":claude_commander_protocol::session::ProjectId::new(),
-                "project_name":"repo", "pr_number":null, "pr_url":null, "pr_state":"open", "pr_draft":false,
-                "pr_labels":[], "review_decision":null, "pr_reviewers":[], "created_at":"2026-01-01T00:00:00Z",
-                "agent_state":"idle", "diff_stat":null, "pane_content":null
-            });
+            let detail = legacy_detail_json(sid, None);
             let (on_rename, on_detail, on_toggle) =
                 (keep_alive.clone(), keep_alive.clone(), keep_alive.clone());
             let app = Router::new()
@@ -1570,17 +1565,8 @@ mod session_edit_tests {
                     "/api/sessions/{id}/keep-alive",
                     post(move || async move { Json(!on_toggle.fetch_xor(true, Ordering::SeqCst)) }),
                 );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                axum::serve(listener, app).await.unwrap();
-            });
-            let client = RemoteClient::new(RemoteServerSpec {
-                name: "legacy".into(),
-                base_url: format!("http://{addr}"),
-                token: None,
-            })
-            .unwrap();
+            let served = crate::test_server::serve(app).await;
+            let client = &served.client;
             let edit = claude_commander_protocol::api::EditSession {
                 title: Some("renamed".into()),
                 keep_alive: Some(true),
@@ -1600,7 +1586,6 @@ mod session_edit_tests {
                     outcome.warnings
                 );
             }
-            server.abort();
         }
     }
 
@@ -1615,13 +1600,7 @@ mod session_edit_tests {
             let expected_id = sid.as_uuid().to_string();
             let resets = Arc::new(AtomicUsize::new(0));
             let recorded = resets.clone();
-            let detail = serde_json::json!({
-                "id":expected_id, "session_id":sid, "title":"task", "branch":"task", "status":"running",
-                "program":"claude", "pending_program":pending, "project_id":claude_commander_protocol::session::ProjectId::new(),
-                "project_name":"repo", "pr_number":null, "pr_url":null, "pr_state":"open", "pr_draft":false,
-                "pr_labels":[], "review_decision":null, "pr_reviewers":[], "created_at":"2026-01-01T00:00:00Z",
-                "agent_state":"idle", "diff_stat":null, "pane_content":null
-            });
+            let detail = legacy_detail_json(sid, pending);
             let app = Router::new()
                 .route(
                     "/api/sessions/{id}/detail",
@@ -1638,24 +1617,14 @@ mod session_edit_tests {
                         async { StatusCode::NO_CONTENT }
                     }),
                 );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                axum::serve(listener, app).await.unwrap();
-            });
-            let client = RemoteClient::new(RemoteServerSpec {
-                name: "legacy".into(),
-                base_url: format!("http://{addr}"),
-                token: None,
-            })
-            .unwrap();
+            let served = crate::test_server::serve(app).await;
+            let client = &served.client;
             let result = client.recover_session_fresh(sid).await;
             assert_eq!(result.is_ok(), pending.is_none());
             assert_eq!(
                 resets.load(Ordering::SeqCst),
                 usize::from(pending.is_none())
             );
-            server.abort();
         }
     }
 }
