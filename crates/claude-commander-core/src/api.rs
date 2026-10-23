@@ -285,19 +285,35 @@ impl CommanderService {
             edit(current)?;
             Ok((old.0, old.1, current.clone()))
         })?;
+        let hostname_changed = new_config.gitlab_hostname != old_hostname;
+        self.apply_code_host_change(old_provider, hostname_changed, &new_config)
+            .await
+    }
+
+    /// React to a committed config whose code host may have changed; callers
+    /// hold `review_provider_lock`. Any provider or hostname change drops the
+    /// cached `glab` probe and wakes the PR poller; a provider change also
+    /// bumps the provider epoch and invalidates all review metadata.
+    async fn apply_code_host_change(
+        &self,
+        old_provider: CodeHostProvider,
+        hostname_changed: bool,
+        new_config: &Config,
+    ) -> Result<()> {
         let provider_changed = new_config.code_host_provider != old_provider;
-        if provider_changed || new_config.gitlab_hostname != old_hostname {
-            *self
-                .glab_available
-                .lock()
-                .expect("glab availability poisoned") = None;
-            if provider_changed {
-                self.review_provider_epoch
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.invalidate_review_metadata(&new_config).await?;
-            }
-            self.pr_refresh.notify_one();
+        if !(provider_changed || hostname_changed) {
+            return Ok(());
         }
+        *self
+            .glab_available
+            .lock()
+            .expect("glab availability poisoned") = None;
+        if provider_changed {
+            self.review_provider_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.invalidate_review_metadata(new_config).await?;
+        }
+        self.pr_refresh.notify_one();
         Ok(())
     }
 
@@ -508,16 +524,12 @@ impl CommanderService {
         let _guard = self.review_provider_lock.lock().await;
         let old_provider = self.config_store.read().code_host_provider;
         let reloaded = self.config_store.reload_if_changed()?;
-        let new_config = self.config_store.read().clone();
-        if reloaded && new_config.code_host_provider != old_provider {
-            self.review_provider_epoch
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            *self
-                .glab_available
-                .lock()
-                .expect("glab availability poisoned") = None;
-            self.invalidate_review_metadata(&new_config).await?;
-            self.pr_refresh.notify_one();
+        if reloaded {
+            let new_config = self.config_store.read().clone();
+            // Reload reacts to a provider change only: a hostname-only hand
+            // edit leaves the cached `glab` probe in place.
+            self.apply_code_host_change(old_provider, false, &new_config)
+                .await?;
         }
         Ok(reloaded)
     }
