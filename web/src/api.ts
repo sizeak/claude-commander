@@ -1,3 +1,4 @@
+import { CHANGE_WAIT_SECS } from "./generated/constants.ts";
 // The commander HTTP API, typed over the shapes generated from
 // claude-commander-protocol (src/generated). This is the one place that knows
 // about the bearer header and what a 401 means; nothing else calls fetch.
@@ -178,7 +179,7 @@ export class Api {
     method: Method,
     path: string,
     body?: unknown,
-    timeout: "read" | "long" = method === "GET" ? "read" : "long",
+    timeout: "read" | "long" | "changes" = method === "GET" ? "read" : "long",
   ): Promise<T> {
     const sent = this.auth.token;
     const headers: Record<string, string> = { Accept: "application/json", ...this.auth.headers() };
@@ -187,7 +188,12 @@ export class Api {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    const ms = timeout === "read" ? this.readTimeoutMs : this.writeTimeoutMs;
+    const ms =
+      timeout === "read"
+        ? this.readTimeoutMs
+        : timeout === "changes"
+          ? (CHANGE_WAIT_SECS + 10) * 1000
+          : this.writeTimeoutMs;
     // A write that timed out may well still be running server-side (a create
     // fetching the remote): say so, or the natural retry makes a duplicate.
     const expiredMessage =
@@ -215,6 +221,15 @@ export class Api {
   }
 
   // ---- workspace -----------------------------------------------------------
+
+  changes(since?: number): Promise<number> {
+    return this.request(
+      "GET",
+      since === undefined ? "/changes" : `/changes?since=${since}`,
+      undefined,
+      "changes",
+    );
+  }
 
   workspace = () => this.request<Snapshot>("GET", "/workspace");
   agentStates = () => this.request<AgentStatesSnapshot>("GET", "/agent-states");
