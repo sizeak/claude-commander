@@ -467,6 +467,26 @@ impl RemoteClient {
         self.get_json_opt(url).await
     }
 
+    pub async fn preview_part(
+        &self,
+        id: Option<SessionId>,
+        project: Option<ProjectId>,
+        lines: Option<usize>,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> ClientResult<PreviewData> {
+        let mut url = match (id, project) {
+            (Some(id), _) => self.session_url(id, &["preview"]),
+            (_, Some(id)) => self.project_url(id, &["preview"]),
+            _ => return Err(ClientError::InvalidRequest("preview needs a target".into())),
+        };
+        url.query_pairs_mut().append_pair("part", part.as_str());
+        if let Some(lines) = lines {
+            url.query_pairs_mut()
+                .append_pair("lines", &lines.to_string());
+        }
+        self.get_json(url).await
+    }
+
     /// Preview payload for a session (`GET /api/sessions/{id}/preview?lines=`).
     pub async fn session_preview(
         &self,

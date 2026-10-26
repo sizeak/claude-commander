@@ -144,24 +144,26 @@ fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
 /// agent-states fetch falls back to empty. Returns `false` only when the event
 /// channel has closed, so a feed loop knows to stop.
 async fn fetch_and_send_backend_change(
+    sequence: Arc<std::sync::atomic::AtomicU64>,
     backend_id: usize,
     backend: Arc<dyn CommanderBackend>,
     tx: tokio::sync::mpsc::Sender<AppEvent>,
 ) -> bool {
-    let snapshot = match backend.snapshot().await {
+    let revision = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let (snapshot, states) = tokio::join!(backend.snapshot(), backend.agent_states(false));
+    let snapshot = match snapshot {
         Ok(s) => s,
         Err(e) => {
             debug!("Snapshot refresh for backend {backend_id} failed: {e}");
             return true;
         }
     };
-    let states = backend.agent_states(false).await.unwrap_or_else(|_| {
-        claude_commander_core::api::AgentStatesSnapshot {
-            states: Default::default(),
-            commander_running: false,
-        }
+    let states = states.unwrap_or_else(|_| claude_commander_core::api::AgentStatesSnapshot {
+        states: Default::default(),
+        commander_running: false,
     });
     tx.send(AppEvent::StateUpdate(StateUpdate::BackendChanged {
+        revision,
         backend_id,
         snapshot: Box::new(snapshot),
         states: Box::new(states),
@@ -1570,6 +1572,45 @@ pub enum ConfirmAction {
     },
 }
 
+/// A session a backend refresh should act on once it appears (select it, or
+/// hydrate its LFS), with `settles_at`: the first refresh revision issued after
+/// the intent was recorded. A change-feed fetch that took its revision earlier
+/// can land later carrying a snapshot without the session, so only a snapshot
+/// at or past `settles_at` that still lacks it proves the session is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingSession {
+    pub session: SessionRef,
+    pub settles_at: u64,
+}
+
+impl PendingSession {
+    /// Whether a `BackendChanged` fold of `snapshot` at `revision` from
+    /// `backend_id` resolves this intent: `Some(true)` when the session is
+    /// present, `Some(false)` when a post-intent snapshot lacks it, `None` to
+    /// keep waiting (another backend, or a snapshot fetched too early).
+    fn settle(
+        &self,
+        backend_id: usize,
+        revision: u64,
+        snapshot: &claude_commander_core::api::Snapshot,
+    ) -> Option<bool> {
+        if self.session.backend.0 != backend_id {
+            return None;
+        }
+        if snapshot
+            .sessions
+            .iter()
+            .any(|s| s.session_id == self.session.id)
+        {
+            Some(true)
+        } else if revision >= self.settles_at {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
 /// Application UI state
 pub struct AppUiState {
     /// Active view. List modes (`ProjectGrouped`/`SectionGrouped`/
@@ -1673,6 +1714,16 @@ pub struct AppUiState {
     /// When the last background preview/shell capture was spawned (None = not
     /// in flight). Guards `spawn_preview_update` against double-spawns.
     pub preview_update_spawned_at: Option<Instant>,
+    pub preview_task: Option<tokio::task::JoinHandle<()>>,
+    pub last_preview_refresh: Instant,
+    pub last_ui_maintenance: Instant,
+    pub last_animation: Instant,
+    pub pending_selection: Option<PendingSession>,
+    /// Created sessions awaiting their first snapshot to start LFS hydration.
+    /// A set, so creates landing before an earlier one's refresh each keep it.
+    pub pending_created: Vec<PendingSession>,
+    pub last_recording: bool,
+    pub pending_project: Option<(BackendId, ProjectId)>,
     /// Right-pane rect from the last render frame, for wheel hit-testing.
     /// `None` in board view (no right pane) and before the first frame.
     pub right_pane_rect: Option<Rect>,
@@ -1766,9 +1817,9 @@ pub struct AppUiState {
     /// Whether the `gh` CLI is available
     pub gh_available: bool,
     /// When the last enriched-PR fetch was spawned (None = not in flight).
-    /// Guards `spawn_info_fetch` against double-spawns: `update_selection` now
-    /// runs it every tick (via `refresh_list_items`), so without this an open
-    /// Info modal would re-spawn a duplicate `gh` fetch each tick until the
+    /// Guards `spawn_info_fetch` against double-spawns: `update_selection`
+    /// calls it and runs on every selection/list refresh, so without this an open
+    /// Info modal would re-spawn a duplicate `gh` fetch on each input or refresh until the
     /// first resolves. Mirrors `preview_update_spawned_at`'s 5s safety window.
     pub enriched_pr_fetch_spawned_at: Option<Instant>,
     /// Whether a review-diff refresh re-compose is currently in flight, so the
@@ -1871,6 +1922,14 @@ impl Default for AppUiState {
             info_state: PreviewState::anchored_top(),
             left_pane_pct: DEFAULT_LEFT_PANE_PCT,
             preview_update_spawned_at: None,
+            preview_task: None,
+            last_preview_refresh: Instant::now(),
+            last_ui_maintenance: Instant::now(),
+            last_animation: Instant::now(),
+            pending_selection: None,
+            pending_created: Vec::new(),
+            last_recording: false,
+            pending_project: None,
             right_pane_rect: None,
             last_pane_view: None,
             status_message: None, // (message, expiry)
@@ -2449,6 +2508,16 @@ impl App {
         self.backends.iter().find(|h| h.id == id)
     }
 
+    /// A [`PendingSession`] for `session` that only a refresh issued from now on
+    /// can discard; `None` when its backend is unknown.
+    pub(super) fn pending_session(&self, session: SessionRef) -> Option<PendingSession> {
+        let sequence = &self.backend(session.backend)?.refresh_sequence;
+        Some(PendingSession {
+            session,
+            settles_at: sequence.load(std::sync::atomic::Ordering::Relaxed) + 1,
+        })
+    }
+
     /// The backend trait object for `id`, cloneable into a spawned task. Falls
     /// back to the local backend when the id is unknown (e.g. its server was
     /// just removed) so callers never panic on a stale id.
@@ -2500,11 +2569,18 @@ impl App {
     /// its connection state) untouched, so a degraded remote keeps its last
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
+        let Some(handle) = self.backend(id) else {
+            return;
+        };
+        let revision = handle
+            .refresh_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         let backend = self.backend_arc(id);
-        let snapshot = backend.snapshot().await;
-        let states = backend.agent_states(false).await;
+        let (snapshot, states) = tokio::join!(backend.snapshot(), backend.agent_states(false));
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
+                handle.view_revision = revision;
                 handle.view.snapshot = snapshot;
                 // Local: derive connection from the snapshot's tmux health;
                 // remote: leave it to the connection-watch task (returns None).
@@ -2515,6 +2591,7 @@ impl App {
                 }
             }
             if let Ok(states) = states {
+                handle.agent_states_revision = revision;
                 handle.view.agent_states = states;
             }
         }
@@ -2833,12 +2910,19 @@ impl App {
 
         {
             let backend_id = handle.id.0;
+            let sequence = handle.refresh_sequence.clone();
             let backend = handle.backend.clone();
             let mut feed = backend.change_feed();
             let tx = self.event_loop.sender();
             tasks.push(tokio::spawn(async move {
                 while feed.changed().await {
-                    if !fetch_and_send_backend_change(backend_id, backend.clone(), tx.clone()).await
+                    if !fetch_and_send_backend_change(
+                        sequence.clone(),
+                        backend_id,
+                        backend.clone(),
+                        tx.clone(),
+                    )
+                    .await
                     {
                         break;
                     }
@@ -2858,7 +2942,78 @@ impl App {
     pub(super) fn spawn_backend_view_refresh(&self, id: BackendId) {
         let backend = self.backend_arc(id);
         let tx = self.event_loop.sender();
-        tokio::spawn(fetch_and_send_backend_change(id.0, backend, tx));
+        if let Some(handle) = self.backends.iter().find(|h| h.id == id) {
+            tokio::spawn(fetch_and_send_backend_change(
+                handle.refresh_sequence.clone(),
+                id.0,
+                backend,
+                tx,
+            ));
+        }
+    }
+
+    /// Refresh the sessions actually viewed during an attach, including switcher visits.
+    pub(super) async fn refresh_after_attach(
+        &mut self,
+        attached_backend: BackendId,
+        viewed: &HashSet<String>,
+    ) {
+        let viewed_ids: HashSet<SessionId> = self
+            .view_for(attached_backend)
+            .snapshot
+            .sessions
+            .iter()
+            .filter(|s| {
+                viewed
+                    .iter()
+                    .any(|n| s.tmux_session_name == n.strip_suffix("-sh").unwrap_or(n))
+            })
+            .map(|s| s.session_id)
+            .collect();
+        if !viewed_ids.is_empty() {
+            // The service loop runs during the attach and may have
+            // flagged a watched session unread when it went idle.
+            // Clear unread for everything we actually saw — the
+            // operator watched those turns finish.
+            let backend = self.backend_arc(attached_backend);
+            if let Some(handle) = self.backends.iter_mut().find(|h| h.id == attached_backend) {
+                let sequence = handle.refresh_sequence.clone();
+                let tx = self.event_loop.sender();
+                // Keep the fresh service read: it advances the shared unread
+                // baseline too. Only its wait moves off the first-frame path.
+                let task = tokio::spawn(async move {
+                    for id in &viewed_ids {
+                        let _ = backend.mark_read(*id).await;
+                    }
+                    match backend.agent_states(true).await {
+                        Ok(fresh) => {
+                            let states = fresh
+                                .states
+                                .into_iter()
+                                .filter(|(id, _)| viewed_ids.contains(id))
+                                .collect();
+                            // The fresh read has updated the service cache. Older
+                            // cache reads still in flight must not overwrite it.
+                            let revision =
+                                sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(
+                                    StateUpdate::ViewedAgentStatesUpdated {
+                                        backend_id: attached_backend.0,
+                                        revision,
+                                        states,
+                                    },
+                                ))
+                                .await;
+                        }
+                        Err(e) => debug!("Post-attach agent-state refresh failed: {e}"),
+                    }
+                });
+                handle.feed_tasks.retain(|task| !task.is_finished());
+                handle.feed_tasks.push(task);
+            }
+            self.refresh_list_items().await;
+        }
     }
 
     /// Run the application
@@ -3335,68 +3490,13 @@ impl App {
 
                         // Flush stdin again after detach to discard stale input,
                         // then restart the input reader (also draining any
-                        // AgentStatesUpdated queued while attached).
+                        // backend updates queued while attached).
                         claude_commander_core::tmux::flush_stdin();
                         info!("Returned from attach, restarting input reader");
                         self.event_loop.restart_input();
 
-                        // Refresh agent state for just the sessions we viewed, via
-                        // the *attached* session's backend, applying the fresh
-                        // states directly. We do NOT clear the whole map: that
-                        // would blank every spinner until the next poll.
-                        // `agent_states(true)` also advances the service loop's
-                        // shared baseline to these observed states, so the loop
-                        // won't re-flag a just-finished session on its next tick.
                         let attached_backend = self.attach_target_backend(&current);
-                        let viewed_ids: HashSet<SessionId> = self
-                            .view_for(attached_backend)
-                            .snapshot
-                            .sessions
-                            .iter()
-                            .filter(|s| {
-                                viewed.iter().any(|n| {
-                                    s.tmux_session_name == n.strip_suffix("-sh").unwrap_or(n)
-                                })
-                            })
-                            .map(|s| s.session_id)
-                            .collect();
-                        if !viewed_ids.is_empty() {
-                            // The service loop runs during the attach and may have
-                            // flagged a watched session unread when it went idle.
-                            // Clear unread for everything we actually saw — the
-                            // operator watched those turns finish.
-                            let backend = self.backend_arc(attached_backend);
-                            for id in &viewed_ids {
-                                let _ = backend.mark_read(*id).await;
-                            }
-                            if let Ok(fresh) = backend.agent_states(true).await {
-                                let refreshed: BTreeMap<SessionId, AgentState> = fresh
-                                    .states
-                                    .into_iter()
-                                    .filter(|(id, _)| viewed_ids.contains(id))
-                                    .collect();
-                                // Fold into the attached backend's cached view —
-                                // the tree reads agent state per-backend from there.
-                                if let Some(handle) =
-                                    self.backends.iter_mut().find(|h| h.id == attached_backend)
-                                {
-                                    state::apply_viewed_session_refresh(
-                                        &mut handle.view.agent_states.states,
-                                        refreshed.clone(),
-                                    );
-                                }
-                                // The local rendered map also feeds local-only
-                                // consumers (commander chip, review-transition
-                                // detection), so keep it in sync for a local attach.
-                                if attached_backend == LOCAL_BACKEND_ID {
-                                    state::apply_viewed_session_refresh(
-                                        &mut self.ui_state.agent_states,
-                                        refreshed,
-                                    );
-                                }
-                            }
-                            self.refresh_list_items().await;
-                        }
+                        self.refresh_after_attach(attached_backend, &viewed).await;
 
                         // Focus the session the user just left so the tree lands
                         // on it (important after the in-session switcher).

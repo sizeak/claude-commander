@@ -449,18 +449,11 @@ async fn test_session_manager_restart() {
     let worktrees_dir = TempDir::new().unwrap();
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
-        // This test bypasses `create_isolated_config_store`, so pin the tmux
-        // socket dir directly to keep it off the developer's real server.
-        tmux_tmpdir: Some(isolated_tmux_tmpdir(&state_temp_dir)),
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project and create session (prepare + finalize)
@@ -1611,15 +1604,16 @@ async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "hibernation must use a private tmux server, including on wake"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path, None).await.unwrap();
@@ -1711,15 +1705,16 @@ async fn test_manual_kill_marks_session_for_resume_on_wake() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "manual kill must use a private tmux server, including on wake"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path, None).await.unwrap();
@@ -1896,15 +1891,16 @@ async fn test_fresh_restart_clears_hibernation_marker() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "fresh restart must use a private tmux server"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path, None).await.unwrap();

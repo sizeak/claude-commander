@@ -3943,6 +3943,7 @@ async fn older_server_snapshot_annotates_heading_but_placeholder_does_not() {
 
     // Land the older snapshot (first real snapshot arrives via BackendChanged).
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -3967,6 +3968,7 @@ async fn stale_server_toast_fires_once_and_never_for_local() {
 
     // First fold of the older snapshot: the one-time toast fires.
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap.clone()),
         states: agent_states_box(),
@@ -3984,6 +3986,7 @@ async fn stale_server_toast_fires_once_and_never_for_local() {
     // A second fold must NOT re-fire the toast.
     app.ui_state.status_message = None;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4014,6 +4017,7 @@ async fn version_toast_does_not_clobber_a_live_status_message() {
         std::time::Instant::now() + std::time::Duration::from_secs(30),
     ));
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4057,6 +4061,7 @@ async fn two_stale_servers_each_get_their_own_toast() {
 
     // Fold buildbox (id 1): its toast fires; ci is still on its placeholder.
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap.clone()),
         states: agent_states_box(),
@@ -4076,6 +4081,7 @@ async fn two_stale_servers_each_get_their_own_toast() {
     // Free the slot, then fold ci (id 2): it gets its own toast.
     app.ui_state.status_message = None;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(2).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4204,6 +4210,7 @@ async fn pull_blocked_badges_union_remote_backend_snapshot() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -4240,6 +4247,7 @@ async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
     };
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(0).0,
         snapshot: Box::new(degraded_snap),
         states: states(),
@@ -4255,6 +4263,7 @@ async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(0).0,
         snapshot: Box::new(empty_snapshot()),
         states: states(),
@@ -4293,6 +4302,7 @@ async fn remote_connection_stays_watch_owned_across_snapshot_fold() {
     .await;
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -6138,7 +6148,13 @@ async fn fold_backend_states(
 ) {
     app.backend_mut_for_test(id).view.agent_states.states = old_states;
     let snapshot = app.view_for(id).snapshot.clone();
+    let revision = app
+        .backend_mut_for_test(id)
+        .refresh_sequence
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision,
         backend_id: id.0,
         snapshot: Box::new(snapshot),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -6632,6 +6648,14 @@ async fn remote_session_created_selects_row_and_reconciles_owning_backend() {
     })
     .await;
 
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("creation refresh should complete");
     assert_eq!(
         remote_mock(&app, BackendId(1)).reconciled_sessions(),
         vec![new_id],
@@ -6775,6 +6799,7 @@ async fn pending_comment_markers_union_every_backend_view() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -7743,6 +7768,14 @@ async fn apply_section_move_keeps_moved_session_selected() {
     })
     .await;
 
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("section move refresh should finish");
     let pos = app
         .ui_state
         .board_state
@@ -8430,8 +8463,10 @@ async fn preview_ready_applies_only_to_the_still_selected_session() {
         selected,
     ));
 
+    let token = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(token);
     app.handle_state_update(StateUpdate::PreviewReady {
-        spawned_at: Instant::now(),
+        spawned_at: token,
         session_id: Some(selected),
         project_id: None,
         preview_content: "live output".to_string(),
@@ -11477,6 +11512,20 @@ mod workspaces {
             None,
         )
         .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !app
+                .local_view()
+                .snapshot
+                .projects
+                .iter()
+                .any(|p| p.name == "scanned")
+            {
+                let event = app.event_loop.next().await.unwrap();
+                app.process_event(event).await;
+            }
+        })
+        .await
+        .expect("scan completion should refresh the project list");
         let scanned = app
             .local_view()
             .snapshot
@@ -12585,4 +12634,506 @@ mod workspaces {
             "help must say workspaces have themes and where to edit them: {text}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_dictation_tick_invalidates_the_frame() {
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::Board;
+    app.conversation
+        .dictations
+        .sender()
+        .send(DictationOutcome::NothingHeard)
+        .expect("mailbox open");
+
+    assert!(app.process_event(AppEvent::Tick).await);
+    assert_eq!(toast(&app), "✗ Nothing heard");
+}
+
+#[tokio::test]
+async fn an_idle_tick_does_not_invalidate_the_frame() {
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::Board;
+    assert!(!app.process_event(AppEvent::Tick).await);
+}
+
+#[tokio::test]
+async fn superseded_preview_for_the_same_selection_cannot_overwrite_a_newer_resource() {
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.right_pane_view = RightPaneView::Shell;
+    app.ui_state.preview_content = "current pane".into();
+    app.ui_state.shell_content = "current shell".into();
+    let new_token = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(new_token);
+    app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: new_token - Duration::from_millis(1),
+        session_id: Some(sid),
+        project_id: None,
+        preview_content: "obsolete pane".into(),
+        shell_content: "obsolete shell".into(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(app.ui_state.preview_content, "current pane");
+    assert_eq!(app.ui_state.shell_content, "current shell");
+    assert_eq!(app.ui_state.preview_update_spawned_at, Some(new_token));
+}
+
+#[tokio::test]
+async fn a_removed_backends_create_completion_is_ignored() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Error {
+        message: "current modal".into(),
+    };
+    app.handle_state_update(StateUpdate::SessionCreated {
+        session_id: SessionId::new(),
+        backend_id: 999,
+    })
+    .await;
+    assert!(matches!(&app.ui_state.modal, Modal::Error { message } if message == "current modal"));
+    assert!(app.ui_state.pending_selection.is_none());
+}
+
+#[tokio::test]
+async fn attach_return_renders_before_slow_fresh_agent_detection() {
+    let (mut app, sid) = app_with_remote_session().await;
+    let name = app.view_for(BackendId(1)).snapshot.sessions[0]
+        .tmux_session_name
+        .clone();
+    let viewed = HashSet::from([name]);
+    let gate = remote_mock(&app, BackendId(1)).block_fresh_agent_states();
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states
+        .insert(sid, AgentState::Working);
+    remote_mock(&app, BackendId(1)).set_agent_states(
+        claude_commander_core::api::AgentStatesSnapshot {
+            states: BTreeMap::from([(sid, AgentState::Idle)]),
+            commander_running: false,
+        },
+    );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        app.refresh_after_attach(BackendId(1), &viewed),
+    )
+    .await
+    .expect("attach return must allow a board frame while fresh detection is blocked");
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states.get(&sid),
+        Some(&AgentState::Working)
+    );
+
+    gate.notify_one();
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    app.process_event(event).await;
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states.get(&sid),
+        Some(&AgentState::Idle)
+    );
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .agent_states_calls()
+            .contains(&true)
+    );
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .read_marked_sessions()
+            .contains(&sid)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_marks_switcher_visits_and_preserves_other_backends() {
+    let (mut snapshot, first, _) = snapshot_with_one_session();
+    let mut second = snapshot.sessions[0].clone();
+    second.session_id = SessionId::new();
+    second.tmux_session_name = "cc-second".into();
+    let second_id = second.session_id;
+    snapshot.sessions.push(second);
+    let mut untouched = snapshot.sessions[0].clone();
+    untouched.session_id = SessionId::new();
+    untouched.tmux_session_name = "cc-unviewed".into();
+    let untouched_id = untouched.session_id;
+    snapshot.sessions.push(untouched);
+    let first_name = snapshot.sessions[0].tmux_session_name.clone();
+    let (other_snapshot, other_sid, _) = snapshot_with_one_session();
+    let mut app =
+        build_app_with_mock_remotes(vec![("buildbox", snapshot), ("other", other_snapshot)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.refresh_backend_view(BackendId(2)).await;
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states = BTreeMap::from([
+        (first, AgentState::Working),
+        (second_id, AgentState::Working),
+        (untouched_id, AgentState::Working),
+    ]);
+    app.backend_mut_for_test(BackendId(2))
+        .view
+        .agent_states
+        .states = BTreeMap::from([(other_sid, AgentState::Working)]);
+    app.ui_state
+        .agent_states
+        .insert(other_sid, AgentState::Idle);
+    remote_mock(&app, BackendId(1)).set_agent_states(
+        claude_commander_core::api::AgentStatesSnapshot {
+            states: BTreeMap::from([
+                (first, AgentState::Idle),
+                (second_id, AgentState::Idle),
+                (untouched_id, AgentState::Idle),
+            ]),
+            commander_running: false,
+        },
+    );
+    app.refresh_after_attach(
+        BackendId(1),
+        &HashSet::from([first_name, "cc-second-sh".into(), "commander".into()]),
+    )
+    .await;
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    app.process_event(event).await;
+    let marked = remote_mock(&app, BackendId(1)).read_marked_sessions();
+    assert_eq!(marked.len(), 2);
+    assert!(marked.contains(&first) && marked.contains(&second_id));
+    assert!(
+        remote_mock(&app, BackendId(2))
+            .read_marked_sessions()
+            .is_empty()
+    );
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states,
+        BTreeMap::from([
+            (first, AgentState::Idle),
+            (second_id, AgentState::Idle),
+            (untouched_id, AgentState::Working),
+        ])
+    );
+    assert_eq!(
+        app.view_for(BackendId(2))
+            .agent_states
+            .states
+            .get(&other_sid),
+        Some(&AgentState::Working)
+    );
+    assert_eq!(
+        app.ui_state.agent_states.get(&other_sid),
+        Some(&AgentState::Idle)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_local_merge_and_stale_events() {
+    let mut app = make_test_app();
+    let (mut snapshot, viewed, _) = snapshot_with_one_session();
+    snapshot.sessions[0].unread = true;
+    app.backend_mut_for_test(LOCAL_BACKEND_ID).view.snapshot = snapshot.clone();
+    let unviewed = SessionId::new();
+    let old = BTreeMap::from([
+        (viewed, AgentState::Working),
+        (unviewed, AgentState::Working),
+    ]);
+    app.ui_state.agent_states = old.clone();
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .agent_states
+        .states = old;
+    app.process_event(AppEvent::StateUpdate(
+        StateUpdate::ViewedAgentStatesUpdated {
+            backend_id: LOCAL_BACKEND_ID.0,
+            revision: 2,
+            states: BTreeMap::from([(viewed, AgentState::Idle)]),
+        },
+    ))
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states,
+        app.view_for(LOCAL_BACKEND_ID).agent_states.states
+    );
+    assert_eq!(
+        app.ui_state.agent_states.get(&unviewed),
+        Some(&AgentState::Working)
+    );
+    // The mark-read snapshot request started before the fresh read finished.
+    // Its workspace fields are still valid, even though its agent states are old.
+    snapshot.sessions[0].unread = false;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(!app.view_for(LOCAL_BACKEND_ID).snapshot.sessions[0].unread);
+    assert_eq!(app.backend(LOCAL_BACKEND_ID).unwrap().view_revision, 1);
+    assert_eq!(
+        app.backend(LOCAL_BACKEND_ID).unwrap().agent_states_revision,
+        2
+    );
+    app.handle_state_update(StateUpdate::ViewedAgentStatesUpdated {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        states: BTreeMap::from([(viewed, AgentState::Working)]),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states.get(&viewed),
+        Some(&AgentState::Idle)
+    );
+    app.handle_state_update(StateUpdate::ViewedAgentStatesUpdated {
+        backend_id: 999,
+        revision: 3,
+        states: BTreeMap::new(),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states.get(&viewed),
+        Some(&AgentState::Idle)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
+    let (mut app, sid) = app_with_remote_session().await;
+    let name = app.view_for(BackendId(1)).snapshot.sessions[0]
+        .tmux_session_name
+        .clone();
+    let states = BTreeMap::from([(sid, AgentState::Working)]);
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states = states.clone();
+    let calls = remote_mock(&app, BackendId(1)).agent_states_calls().len();
+    app.refresh_after_attach(BackendId(1), &HashSet::from(["commander".into()]))
+        .await;
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).agent_states_calls().len(),
+        calls
+    );
+    remote_mock(&app, BackendId(1)).set_failing(true);
+    app.refresh_after_attach(BackendId(1), &HashSet::from([name]))
+        .await;
+    // Await the owned refresh task instead of sleeping to guess completion.
+    app.backend_mut_for_test(BackendId(1))
+        .feed_tasks
+        .pop()
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(app.view_for(BackendId(1)).agent_states.states, states);
+    assert!(app.event_loop.try_next().is_none());
+}
+
+#[tokio::test]
+async fn late_background_error_preserves_a_new_modal() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.ui_state.modal = Modal::Error {
+        message: "newer dialog".into(),
+    };
+    app.handle_state_update(StateUpdate::ActionFinished {
+        backend_id: 1,
+        message: Err("background error".into()),
+    })
+    .await;
+    assert!(matches!(&app.ui_state.modal, Modal::Error { message } if message == "newer dialog"));
+    assert_eq!(
+        app.ui_state.status_message.as_ref().unwrap().0,
+        "background error"
+    );
+}
+
+#[tokio::test]
+async fn failed_pending_selection_is_discarded_without_lfs() {
+    let (mut app, _) = app_with_remote_session().await;
+    let id = SessionId::new();
+    app.ui_state.pending_selection = app.pending_session(SessionRef::new(BackendId(1), id));
+    let view = app.view_for(BackendId(1));
+    let snapshot = Box::new(view.snapshot.clone());
+    let states = Box::new(view.agent_states.clone());
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: 1,
+        revision: u64::MAX,
+        snapshot,
+        states,
+    })
+    .await;
+    assert!(app.ui_state.pending_selection.is_none());
+    assert!(app.ui_state.lfs_pull_in_flight.is_empty());
+}
+
+#[tokio::test]
+async fn conversation_stream_and_external_recording_request_redraw() {
+    let (mut app, _) = app_with_remote_session().await;
+    app.conversation
+        .recording
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(app.process_event(AppEvent::Tick).await);
+    app.conversation
+        .recording
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert!(app.process_event(AppEvent::Tick).await);
+}
+
+#[tokio::test]
+async fn selecting_a_mutated_session_does_not_start_lfs() {
+    let mut app = make_test_app();
+    let (mut snapshot, sid, _) = snapshot_with_one_session();
+    let dir = tempfile::TempDir::new().unwrap();
+    snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
+    app.config.skip_lfs_smudge = true;
+    app.ui_state.pending_selection = app.pending_session(SessionRef::local(sid));
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.lfs_pull_in_flight.is_empty());
+}
+
+#[tokio::test]
+async fn create_lfs_intent_survives_an_older_snapshot() {
+    let mut app = make_test_app();
+    let (mut snapshot, sid, _) = snapshot_with_one_session();
+    let dir = tempfile::TempDir::new().unwrap();
+    snapshot.sessions[0].worktree_path = dir.path().to_string_lossy().into_owned();
+    app.config.skip_lfs_smudge = true;
+    // Revision 1 was fetched before the create; the post-create refresh is 2.
+    let pending = PendingSession {
+        session: SessionRef::local(sid),
+        settles_at: 2,
+    };
+    app.ui_state.pending_created = vec![pending];
+    let mut old = snapshot.clone();
+    old.sessions.clear();
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(old),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(app.ui_state.pending_created, vec![pending]);
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 2,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.pending_created.is_empty());
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&sid));
+}
+
+#[tokio::test]
+async fn created_session_selection_survives_a_snapshot_fetched_before_the_create() {
+    // A change-feed fetch that took its revision BEFORE the create committed but
+    // lands AFTER `SessionCreated` passes the revision fence while carrying a
+    // snapshot without the new session. That must not discard the pending
+    // selection: the post-create refresh is what should select the new row.
+    let (mut app, _) = app_with_remote_session().await;
+    let stale_revision = app
+        .backend_mut_for_test(BackendId(1))
+        .refresh_sequence
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    let stale = app.view_for(BackendId(1)).snapshot.clone();
+    let new_id = remote_mock(&app, BackendId(1))
+        .create_session(claude_commander_core::api::CreateSessionOpts {
+            project_path: std::path::PathBuf::from("/tmp/rp"),
+            title: "new".to_string(),
+            program: None,
+            initial_prompt: None,
+            model: None,
+            effort: None,
+            mode: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        })
+        .await
+        .unwrap();
+    app.handle_state_update(StateUpdate::SessionCreated {
+        session_id: new_id,
+        backend_id: BackendId(1).0,
+    })
+    .await;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: 1,
+        revision: stale_revision,
+        snapshot: Box::new(stale),
+        states: agent_states_box(),
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("creation refresh should complete");
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(new_id),
+        "the post-create refresh must select the new session"
+    );
+}
+
+#[tokio::test]
+async fn two_creates_before_the_first_refresh_both_hydrate_lfs() {
+    // Two `SessionCreated` events landing before either session's refresh must
+    // each keep their LFS intent; one snapshot containing both hydrates both.
+    let mut app = make_test_app();
+    app.config.skip_lfs_smudge = true;
+    let (mut snapshot, first, _) = snapshot_with_one_session();
+    let mut second_session = snapshot.sessions[0].clone();
+    let second = SessionId::new();
+    second_session.session_id = second;
+    snapshot.sessions.push(second_session);
+    let dirs = [
+        tempfile::TempDir::new().unwrap(),
+        tempfile::TempDir::new().unwrap(),
+    ];
+    for (session, dir) in snapshot.sessions.iter_mut().zip(&dirs) {
+        session.worktree_path = dir.path().to_string_lossy().into_owned();
+    }
+    for id in [first, second] {
+        app.handle_state_update(StateUpdate::SessionCreated {
+            session_id: id,
+            backend_id: LOCAL_BACKEND_ID.0,
+        })
+        .await;
+    }
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: u64::MAX,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&first));
+    assert!(app.ui_state.lfs_pull_in_flight.contains(&second));
+    assert!(app.ui_state.pending_created.is_empty());
+}
+
+#[tokio::test]
+async fn refreshing_an_unknown_backend_is_a_no_op() {
+    // A refresh can race the removal of its server; an unknown id must not panic.
+    let mut app = make_test_app();
+    app.refresh_backend_view(BackendId(999)).await;
 }

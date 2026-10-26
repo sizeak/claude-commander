@@ -170,6 +170,20 @@ impl CommanderBackend for RemoteBackend {
         };
         result.map_err(into_backend_error)
     }
+    async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> BResult<PreviewData> {
+        let (id, project, lines) = match target {
+            PreviewTarget::Session { id, lines } => (Some(id), None, lines),
+            PreviewTarget::Project(id) => (None, Some(id), None),
+        };
+        self.client
+            .preview_part(id, project, lines, part)
+            .await
+            .map_err(into_backend_error)
+    }
 
     async fn branch_diff(&self, id: SessionId) -> BResult<String> {
         self.client

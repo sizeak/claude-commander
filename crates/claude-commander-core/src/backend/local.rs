@@ -233,6 +233,13 @@ impl CommanderBackend for LocalBackend {
     async fn preview(&self, target: PreviewTarget) -> BResult<PreviewData> {
         Ok(self.service.preview(target).await?)
     }
+    async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> BResult<PreviewData> {
+        Ok(self.service.preview_part(target, part).await?)
+    }
 
     async fn branch_diff(&self, id: SessionId) -> BResult<String> {
         Ok(self.service.branch_diff(&id).await?)

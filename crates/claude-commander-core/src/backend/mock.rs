@@ -77,6 +77,8 @@ pub struct MockBackend {
     /// When set, [`Self::mark_read`] awaits this gate before recording — lets a
     /// test hold the call open to prove the caller doesn't block on it.
     mark_read_gate: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    fresh_states_gate: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    agent_states_calls: Mutex<Vec<bool>>,
     /// Sessions passed to [`Self::refresh_review_if_changed`], for routing asserts.
     review_refreshed: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::list_comments`], for routing asserts.
@@ -157,6 +159,8 @@ impl MockBackend {
             pr_refresh_calls: Mutex::new(0),
             read_marked: Mutex::new(Vec::new()),
             mark_read_gate: Mutex::new(None),
+            fresh_states_gate: Mutex::new(None),
+            agent_states_calls: Mutex::new(Vec::new()),
             review_refreshed: Mutex::new(Vec::new()),
             listed_comments: Mutex::new(Vec::new()),
             created_comments: Mutex::new(Vec::new()),
@@ -255,6 +259,23 @@ impl MockBackend {
         let gate = std::sync::Arc::new(tokio::sync::Notify::new());
         *self.mark_read_gate.lock().unwrap() = Some(gate.clone());
         gate
+    }
+
+    /// Set the agent-state response independently of the snapshot/change feed.
+    pub fn set_agent_states(&self, states: AgentStatesSnapshot) {
+        *self.states.lock().unwrap() = states;
+    }
+
+    /// Hold fresh agent detection until the test releases the returned gate.
+    pub fn block_fresh_agent_states(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.fresh_states_gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    /// Record whether callers requested cache reads or fresh detection.
+    pub fn agent_states_calls(&self) -> Vec<bool> {
+        self.agent_states_calls.lock().unwrap().clone()
     }
 
     /// Sessions passed to [`Self::refresh_review_if_changed`], in call order.
@@ -392,7 +413,12 @@ impl CommanderBackend for MockBackend {
         Ok(self.snapshot.lock().unwrap().clone())
     }
 
-    async fn agent_states(&self, _fresh: bool) -> BResult<AgentStatesSnapshot> {
+    async fn agent_states(&self, fresh: bool) -> BResult<AgentStatesSnapshot> {
+        self.agent_states_calls.lock().unwrap().push(fresh);
+        let gate = self.fresh_states_gate.lock().unwrap().clone();
+        if fresh && let Some(gate) = gate {
+            gate.notified().await;
+        }
         self.guard()?;
         Ok(self.states.lock().unwrap().clone())
     }
