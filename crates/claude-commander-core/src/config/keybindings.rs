@@ -265,7 +265,7 @@ impl BindableAction {
             Self::CascadeAbandon => "Abandon paused cascade merge",
             Self::PushStack => "Push stack to remote (base → leaf)",
             Self::NewProject => "New project (add git repo)",
-            Self::CloneRepository => "Clone a GitHub repository…",
+            Self::CloneRepository => "Clone a hosted repository…",
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
             Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",

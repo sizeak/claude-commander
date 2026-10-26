@@ -21,6 +21,9 @@ use claude_commander_protocol::api::{
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::{
+    CodeHost, CodeHostProvider, HostedRepository, RepositoryListing,
+};
 use claude_commander_protocol::session::{ProjectId, SessionId};
 use claude_commander_protocol::workspace::{
     DeleteWorkspaceRequest, RenameWorkspaceRequest, SetProjectWorkspace, SetWorkspacesRequest,
@@ -57,6 +60,7 @@ use crate::spec::{RemoteServerSpec, SecretString};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Overall per-request ceiling (a slow branch-diff still fits comfortably).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const _: () = assert!(REQUEST_TIMEOUT.as_secs() > claude_commander_protocol::CHANGE_WAIT_SECS);
 /// Tighter per-request bound for interactive review reads/writes (list/create/
 /// delete comment, toggle-reviewed): these are quick store/file operations, so
 /// a user who fires one and waits shouldn't sit through the 30s
@@ -396,13 +400,26 @@ impl RemoteClient {
     /// whether observable state moved. Any HTTP/transport failure propagates so
     /// the poller can go degraded.
     pub async fn poll_hashes(&self) -> ClientResult<u64> {
-        let workspace = self.get_bytes(self.endpoint(&["workspace"])).await?;
-        let agent_states = self.get_bytes(self.endpoint(&["agent-states"])).await?;
+        let (workspace, agent_states) = tokio::try_join!(
+            self.get_bytes(self.endpoint(&["workspace"])),
+            self.get_bytes(self.endpoint(&["agent-states"])),
+        )?;
         let mut hasher = Xxh3::new();
         hasher.update(&workspace);
         hasher.update(b"\x00");
         hasher.update(&agent_states);
         Ok(hasher.digest())
+    }
+
+    /// Wait for a server generation. A 404 means an older server: the poller
+    /// continues using its configured fallback cadence.
+    pub async fn wait_for_change(&self, since: Option<u64>) -> ClientResult<u64> {
+        let mut url = self.endpoint(&["changes"]);
+        if let Some(since) = since {
+            url.query_pairs_mut()
+                .append_pair("since", &since.to_string());
+        }
+        self.get_json(url).await
     }
 
     // -- Per-route methods --
@@ -465,6 +482,26 @@ impl RemoteClient {
                 .append_pair("lines", &lines.to_string());
         }
         self.get_json_opt(url).await
+    }
+
+    pub async fn preview_part(
+        &self,
+        id: Option<SessionId>,
+        project: Option<ProjectId>,
+        lines: Option<usize>,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> ClientResult<PreviewData> {
+        let mut url = match (id, project) {
+            (Some(id), _) => self.session_url(id, &["preview"]),
+            (_, Some(id)) => self.project_url(id, &["preview"]),
+            _ => return Err(ClientError::InvalidRequest("preview needs a target".into())),
+        };
+        url.query_pairs_mut().append_pair("part", part.as_str());
+        if let Some(lines) = lines {
+            url.query_pairs_mut()
+                .append_pair("lines", &lines.to_string());
+        }
+        self.get_json(url).await
     }
 
     /// Preview payload for a session (`GET /api/sessions/{id}/preview?lines=`).
@@ -719,12 +756,34 @@ impl RemoteClient {
         self.post_json(url, &body).await
     }
 
-    // -- GitHub repos / repository clone --
+    // -- Hosted repositories / repository clone --
+
+    /// Provider-neutral listing. Falls back to the legacy GitHub endpoint only
+    /// when an older server answers 404; all other failures retain their meaning.
+    pub async fn repositories(&self) -> ClientResult<RepositoryListing> {
+        match self
+            .get_json_within(self.endpoint(&["repositories"]), REPO_LIST_TIMEOUT)
+            .await
+        {
+            Ok(listing) => Ok(listing),
+            Err(ClientError::NotFound) => {
+                let repos = self.github_repos().await?;
+                Ok(RepositoryListing {
+                    host: CodeHost {
+                        provider: CodeHostProvider::Github,
+                        hostname: None,
+                    },
+                    repositories: repos.into_iter().map(HostedRepository::from).collect(),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
 
     /// `GET /github/repos` — every repo the server-side `gh` user can clone, for
     /// the repo picker.
     ///
-    /// The list is the server's to produce: `gh` runs where the repositories will
+    /// The list is the server's to produce: `gh` runs where repositories will
     /// be checked out, so a phone with no `gh` and no GitHub credentials still gets
     /// a picker. An absent `gh` surfaces as [`ClientError::Unavailable`] (the
     /// server's 503 for a missing backing tool, as with tmux), which a frontend can
@@ -921,7 +980,80 @@ fn diff_side_param(side: DiffSide) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn explicit_reads_bypass_recent_poll_payloads() {
+        use std::sync::atomic::Ordering;
+        let server = crate::test_server::Server::start(true).await;
+        server.client.poll_hashes().await.unwrap();
+        server.client.snapshot().await.unwrap();
+        server.client.agent_states(false).await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
+        assert_eq!(server.data.agents.load(Ordering::SeqCst), 2);
+    }
+
     use super::*;
+
+    async fn test_client_with_responses(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (RemoteClient, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = vec![0; 4096];
+                let read = socket.read(&mut buffer).await.unwrap();
+                requests.push(String::from_utf8_lossy(&buffer[..read]).into_owned());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let client = RemoteClient::new(RemoteServerSpec {
+            name: "test".into(),
+            base_url: format!("http://{addr}"),
+            token: None,
+        })
+        .unwrap();
+        (client, task)
+    }
+
+    #[tokio::test]
+    async fn repositories_falls_back_to_legacy_github_route_only_on_404() {
+        let legacy = r#"[{"full_name":"owner/repo","owner":"owner","name":"repo","description":null,"private":false,"fork":false,"archived":false,"default_branch":"main","clone_url":"https://github.com/owner/repo.git","ssh_url":"git@github.com:owner/repo.git","pushed_at":null}]"#;
+        let (client, requests) = test_client_with_responses(vec![
+            ("404 Not Found", r#"{"error":{"message":"missing"}}"#),
+            ("200 OK", legacy),
+        ])
+        .await;
+        let listing = client.repositories().await.unwrap();
+        assert_eq!(listing.host.provider, CodeHostProvider::Github);
+        assert_eq!(listing.repositories[0].full_name, "owner/repo");
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("GET /api/repositories "));
+        assert!(requests[1].starts_with("GET /api/github/repos "));
+    }
+
+    #[tokio::test]
+    async fn repositories_does_not_fallback_on_server_error() {
+        let (client, requests) = test_client_with_responses(vec![(
+            "500 Internal Server Error",
+            r#"{"error":{"message":"boom"}}"#,
+        )])
+        .await;
+        assert!(matches!(
+            client.repositories().await,
+            Err(ClientError::Server(_))
+        ));
+        assert_eq!(requests.await.unwrap().len(), 1);
+    }
 
     /// The connect budget must outlast a link that is merely *waking* — the
     /// phone client's normal case. On the RFC 6298 / Linux schedule cited on

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::TS;
 
-use crate::{api, comment, config, connection, diff, github, pr, session, workspace, ws};
+use crate::{api, comment, config, connection, diff, github, hosting, pr, session, workspace, ws};
 
 /// Set to regenerate the committed bindings instead of checking them.
 const REGENERATE_ENV: &str = "CC_TS_REGENERATE";
@@ -109,7 +109,13 @@ fn export_into(dir: &Path) {
         diff::FileDiff,
         diff::ParsedDiff,
         github::GithubRepo,
-        github::CloneSource,
+        hosting::CloneSource,
+        hosting::CodeHostProvider,
+        hosting::CodeHost,
+        hosting::HostedRepository,
+        hosting::RepositoryListing,
+        hosting::RepositoryVisibility,
+        api::CodeHostStatus,
         github::CloneRequest,
         github::CloneJobId,
         github::CloneStatus,
@@ -150,6 +156,9 @@ fn constants_ts() -> String {
     format!(
         "{GENERATED_HEADER}import type {{ SessionId }} from \"./SessionId\";\n\
          \n\
+         /** Server change-wait budget in seconds. */\n\
+         export const CHANGE_WAIT_SECS = {change_wait};\n\
+         \n\
          /** `ServerControl.error` message for a rejected auth token (`ws::WS_ERR_AUTH`). */\n\
          export const WS_ERR_AUTH = {auth};\n\
          \n\
@@ -162,6 +171,7 @@ fn constants_ts() -> String {
          * rendering per-session rows.\n \
          */\n\
          export const COMMANDER_SENTINEL_ID: SessionId = {sentinel};\n",
+        change_wait = crate::CHANGE_WAIT_SECS,
         auth = ts_string(ws::WS_ERR_AUTH),
         no_session = ts_string(ws::WS_ERR_NO_SESSION),
     )

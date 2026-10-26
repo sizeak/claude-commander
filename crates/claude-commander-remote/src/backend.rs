@@ -30,6 +30,7 @@ use claude_commander_core::backend::{
 use claude_commander_core::comment::{ApplyOutcome, Comment};
 use claude_commander_core::session::{ProjectId, ScanResult, SessionId};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 use claude_commander_protocol::ws::AttachKind as WsAttachKind;
 use uuid::Uuid;
@@ -169,6 +170,20 @@ impl CommanderBackend for RemoteBackend {
             PreviewTarget::Project(id) => self.client.project_preview(id).await,
         };
         result.map_err(into_backend_error)
+    }
+    async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> BResult<PreviewData> {
+        let (id, project, lines) = match target {
+            PreviewTarget::Session { id, lines } => (Some(id), None, lines),
+            PreviewTarget::Project(id) => (None, Some(id), None),
+        };
+        self.client
+            .preview_part(id, project, lines, part)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn branch_diff(&self, id: SessionId) -> BResult<String> {
@@ -372,6 +387,10 @@ impl CommanderBackend for RemoteBackend {
         self.client.github_repos().await.map_err(into_backend_error)
     }
 
+    async fn list_repositories(&self) -> BResult<RepositoryListing> {
+        self.client.repositories().await.map_err(into_backend_error)
+    }
+
     async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
         // The 202 body *is* a `CloneJob`, so there is nothing to rebuild here —
         // the trait's return shape was chosen to match it. `req.source` is never
@@ -522,7 +541,8 @@ mod tests {
     use claude_commander_core::session::{Project, WorktreeSession};
     use claude_commander_core::telemetry::FrontendInfo;
     use claude_commander_core::tmux::TmuxExecutor;
-    use claude_commander_protocol::github::{CloneSource, CloneStatus};
+    use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::hosting::CloneSource;
     use claude_commander_server::{AppState, AuthConfig};
     use claude_commander_test_support::{
         create_test_repo, spawn_server, test_state, tmux_available,

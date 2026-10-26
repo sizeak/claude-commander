@@ -5,6 +5,7 @@
 
 import '../frb_generated.dart';
 import 'mirrors.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
@@ -335,6 +336,11 @@ Future<ScanResultDto> scanDirectory({
 /// "install gh on the server" rather than as a generic failure.
 Future<List<GithubRepo>> githubRepos({required String handle}) =>
     RustLib.instance.api.crateApiSimpleGithubRepos(handle: handle);
+
+/// Provider-neutral repository listing, including the selected host identity
+/// even when no repositories are returned.
+Future<RepositoryListing> repositories({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleRepositories(handle: handle);
 
 /// Start a clone, returning the created job (the route answers 202 with the whole
 /// job, so the id, the destination and the first status arrive together).

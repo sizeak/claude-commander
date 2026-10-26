@@ -5,6 +5,7 @@
 
 import '../frb_generated.dart';
 import 'mirrors.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 /// Merge every server's workspaces into the one list the app shows, in the

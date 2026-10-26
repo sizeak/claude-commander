@@ -924,6 +924,11 @@ button.ghost {
 .rv-line.context .rv-content::before {
   content: " ";
 }
+.rv-chunk {
+  /* Contain comment margins, so a chunk's measured height is all of its
+     space and can stand in for its rows when it is rebuilt unmounted. */
+  display: flow-root;
+}
 .rv-binary {
   padding: 12px;
   color: var(--fg-dim);

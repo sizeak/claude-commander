@@ -4,6 +4,7 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
@@ -165,11 +166,16 @@ class CloneRequestDto {
 class CloneSourceDto {
   final CloneSourceKind kind;
   final String value;
+  final String? hostname;
 
-  const CloneSourceDto({required this.kind, required this.value});
+  const CloneSourceDto({
+    required this.kind,
+    required this.value,
+    this.hostname,
+  });
 
   @override
-  int get hashCode => kind.hashCode ^ value.hashCode;
+  int get hashCode => kind.hashCode ^ value.hashCode ^ hostname.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -177,12 +183,13 @@ class CloneSourceDto {
       other is CloneSourceDto &&
           runtimeType == other.runtimeType &&
           kind == other.kind &&
-          value == other.value;
+          value == other.value &&
+          hostname == other.hostname;
 }
 
 /// Which kind of [`CloneSourceDto`] this is (flattens the data-carrying
 /// [`CloneSource`]).
-enum CloneSourceKind { github, url }
+enum CloneSourceKind { github, gitlab, url }
 
 /// How a clone is going. Only the fields belonging to `kind` are populated.
 class CloneStatusDto {
@@ -239,6 +246,51 @@ class CloneStatusDto {
 /// already a git repo decides whether the sensible offer is "add that checkout as
 /// a project" or "pick another name".
 enum CloneStatusKind { running, succeeded, failed, destinationExists }
+
+class CodeHost {
+  final CodeHostProvider provider;
+  final String? hostname;
+
+  const CodeHost({required this.provider, this.hostname});
+
+  @override
+  int get hashCode => provider.hashCode ^ hostname.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CodeHost &&
+          runtimeType == other.runtimeType &&
+          provider == other.provider &&
+          hostname == other.hostname;
+}
+
+enum CodeHostProvider { github, gitlab }
+
+class CodeHostStatus {
+  final CodeHostProvider provider;
+  final String? hostname;
+  final bool cliAvailable;
+
+  const CodeHostStatus({
+    required this.provider,
+    this.hostname,
+    required this.cliAvailable,
+  });
+
+  @override
+  int get hashCode =>
+      provider.hashCode ^ hostname.hashCode ^ cliAvailable.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CodeHostStatus &&
+          runtimeType == other.runtimeType &&
+          provider == other.provider &&
+          hostname == other.hostname &&
+          cliAvailable == other.cliAvailable;
+}
 
 /// A backend's connection health, streamed over `connection_feed`.
 class ConnectionStateDto {
@@ -377,6 +429,65 @@ class GithubRepo {
           cloneUrl == other.cloneUrl &&
           sshUrl == other.sshUrl &&
           pushedAt == other.pushedAt;
+}
+
+class HostedRepository {
+  final String fullName;
+  final String namespace;
+  final String name;
+  final String? description;
+  final RepositoryVisibility visibility;
+  final bool fork;
+  final bool archived;
+  final String? defaultBranch;
+  final String cloneUrl;
+  final String sshUrl;
+  final DateTime? activityAt;
+
+  const HostedRepository({
+    required this.fullName,
+    required this.namespace,
+    required this.name,
+    this.description,
+    required this.visibility,
+    required this.fork,
+    required this.archived,
+    this.defaultBranch,
+    required this.cloneUrl,
+    required this.sshUrl,
+    this.activityAt,
+  });
+
+  @override
+  int get hashCode =>
+      fullName.hashCode ^
+      namespace.hashCode ^
+      name.hashCode ^
+      description.hashCode ^
+      visibility.hashCode ^
+      fork.hashCode ^
+      archived.hashCode ^
+      defaultBranch.hashCode ^
+      cloneUrl.hashCode ^
+      sshUrl.hashCode ^
+      activityAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is HostedRepository &&
+          runtimeType == other.runtimeType &&
+          fullName == other.fullName &&
+          namespace == other.namespace &&
+          name == other.name &&
+          description == other.description &&
+          visibility == other.visibility &&
+          fork == other.fork &&
+          archived == other.archived &&
+          defaultBranch == other.defaultBranch &&
+          cloneUrl == other.cloneUrl &&
+          sshUrl == other.sshUrl &&
+          activityAt == other.activityAt;
 }
 
 enum OperationKind { cascade, pushStack }
@@ -608,21 +719,47 @@ class PullStatusDto {
 /// [`PullStatus`]); `blocked_reason` is populated only for `Blocked`.
 enum PullStatusKind { advanced, upToDate, blocked, softFail }
 
+class RepositoryListing {
+  final CodeHost host;
+  final List<HostedRepository> repositories;
+
+  const RepositoryListing({required this.host, required this.repositories});
+
+  @override
+  int get hashCode => host.hashCode ^ repositories.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RepositoryListing &&
+          runtimeType == other.runtimeType &&
+          host == other.host &&
+          repositories == other.repositories;
+}
+
+enum RepositoryVisibility { public, internal, private }
+
 enum ReviewDecision { reviewRequired, approved, changesRequested }
 
 class ServerStatus {
   final bool ghAvailable;
+  final CodeHostStatus codeHost;
   final bool tmuxOk;
   final String version;
 
   const ServerStatus({
     required this.ghAvailable,
+    required this.codeHost,
     required this.tmuxOk,
     required this.version,
   });
 
   @override
-  int get hashCode => ghAvailable.hashCode ^ tmuxOk.hashCode ^ version.hashCode;
+  int get hashCode =>
+      ghAvailable.hashCode ^
+      codeHost.hashCode ^
+      tmuxOk.hashCode ^
+      version.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -630,6 +767,7 @@ class ServerStatus {
       other is ServerStatus &&
           runtimeType == other.runtimeType &&
           ghAvailable == other.ghAvailable &&
+          codeHost == other.codeHost &&
           tmuxOk == other.tmuxOk &&
           version == other.version;
 }

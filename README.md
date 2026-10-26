@@ -8,7 +8,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 
 - **Async-first architecture** - Non-blocking tmux and git operations
 - **Hierarchical session model** - Projects contain worktree sessions
-- **Add a project from GitHub** - Add a project by picking one of your GitHub repos, or by URL, and it's cloned in ready to go
+- **Add a hosted project** - Pick from GitHub or GitLab (including self-managed GitLab), or clone any Git URL
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Kanban board UI** - Full-screen board with sections as columns and sessions as project-coloured cards
 - **Live preview pane** - In the list views, a right-hand pane with Preview / Info / Shell tabs: Preview and Shell tail the selected session's agent and shell output as it happens, Info shows its metadata and PR detail (`Tab` cycles, `<`/`>` resizes)
@@ -25,6 +25,13 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Rust/Cargo** - Required to build from source ([install via rustup](https://rustup.rs/))
 - **tmux** - Required for session management
 - **git** - For worktree operations
+- **gh or glab** - Optional, for repository discovery, hosted clone, and pull-request/merge-request integration on the selected code host
+
+Claude Commander uses one global code-host provider at a time. GitHub is the
+default; choose GitLab in Settings → Pull Requests & Sync, or set
+`code_host_provider = "gitlab"`. A self-managed GitLab can be selected with a
+validated hostname such as `gitlab_hostname = "gitlab.example.com"`. See
+[Configuration](docs/configuration.md) for the limitation and full options.
 
 ## Installation
 
@@ -187,9 +194,9 @@ Indicators are shown in priority order — for example, a running session with u
 
 A `*` after a session's title means it has pending [review comments](docs/usage.md#reviewing--commenting-on-changes) that haven't been applied to the agent yet.
 
-### PR Badges
+### Pull Request / Merge Request Badges
 
-When a session has a GitHub PR, a badge appears next to the session name. The badge color indicates the PR state:
+When a session has a GitHub pull request or GitLab merge request, a badge appears next to the session name. The badge color indicates its state:
 
 | Color | Meaning |
 |-------|---------|
