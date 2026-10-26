@@ -57,6 +57,7 @@ use crate::spec::{RemoteServerSpec, SecretString};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Overall per-request ceiling (a slow branch-diff still fits comfortably).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const _: () = assert!(REQUEST_TIMEOUT.as_secs() > claude_commander_protocol::CHANGE_WAIT_SECS);
 /// Tighter per-request bound for interactive review reads/writes (list/create/
 /// delete comment, toggle-reviewed): these are quick store/file operations, so
 /// a user who fires one and waits shouldn't sit through the 30s
@@ -396,13 +397,26 @@ impl RemoteClient {
     /// whether observable state moved. Any HTTP/transport failure propagates so
     /// the poller can go degraded.
     pub async fn poll_hashes(&self) -> ClientResult<u64> {
-        let workspace = self.get_bytes(self.endpoint(&["workspace"])).await?;
-        let agent_states = self.get_bytes(self.endpoint(&["agent-states"])).await?;
+        let (workspace, agent_states) = tokio::try_join!(
+            self.get_bytes(self.endpoint(&["workspace"])),
+            self.get_bytes(self.endpoint(&["agent-states"])),
+        )?;
         let mut hasher = Xxh3::new();
         hasher.update(&workspace);
         hasher.update(b"\x00");
         hasher.update(&agent_states);
         Ok(hasher.digest())
+    }
+
+    /// Wait for a server generation. A 404 means an older server: the poller
+    /// continues using its configured fallback cadence.
+    pub async fn wait_for_change(&self, since: Option<u64>) -> ClientResult<u64> {
+        let mut url = self.endpoint(&["changes"]);
+        if let Some(since) = since {
+            url.query_pairs_mut()
+                .append_pair("since", &since.to_string());
+        }
+        self.get_json(url).await
     }
 
     // -- Per-route methods --
@@ -921,6 +935,17 @@ fn diff_side_param(side: DiffSide) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn explicit_reads_bypass_recent_poll_payloads() {
+        use std::sync::atomic::Ordering;
+        let server = crate::test_server::Server::start(true).await;
+        server.client.poll_hashes().await.unwrap();
+        server.client.snapshot().await.unwrap();
+        server.client.agent_states(false).await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
+        assert_eq!(server.data.agents.load(Ordering::SeqCst), 2);
+    }
+
     use super::*;
 
     /// The connect budget must outlast a link that is merely *waking* — the
