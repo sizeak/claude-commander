@@ -23,7 +23,10 @@ use crate::api::{
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
 use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneRequest, CloneSource, CloneStatus, GithubRepo, redact_credentials,
+    CloneJob, CloneJobId, CloneRequest, CloneStatus, GithubRepo, redact_credentials,
+};
+use claude_commander_protocol::hosting::{
+    CloneSource, CodeHost, CodeHostProvider, RepositoryListing,
 };
 use claude_commander_protocol::workspace::{SetWorkspacesRequest, WorkspaceDef};
 
@@ -66,9 +69,11 @@ pub struct MockBackend {
     /// Kept separate from `restarted` so a test can tell a fresh (no-resume)
     /// restart from a resuming one — the whole point of the Reset command.
     reset: Mutex<Vec<SessionId>>,
+    recovered: Mutex<Vec<SessionId>>,
     /// `(session, program)` pairs passed to [`Self::change_program`], for
     /// call-recording asserts.
     program_changes: Mutex<Vec<(SessionId, String)>>,
+    session_edits: Mutex<Vec<(SessionId, claude_commander_protocol::api::EditSession)>>,
     base_changes: Mutex<Vec<(SessionId, Option<SessionId>)>>,
     /// Count of [`Self::request_pr_refresh`] calls, for call-recording asserts.
     pr_refresh_calls: Mutex<usize>,
@@ -77,6 +82,8 @@ pub struct MockBackend {
     /// When set, [`Self::mark_read`] awaits this gate before recording — lets a
     /// test hold the call open to prove the caller doesn't block on it.
     mark_read_gate: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    fresh_states_gate: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    agent_states_calls: Mutex<Vec<bool>>,
     /// Sessions passed to [`Self::refresh_review_if_changed`], for routing asserts.
     review_refreshed: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::list_comments`], for routing asserts.
@@ -96,6 +103,7 @@ pub struct MockBackend {
     /// Repo list served by [`Self::list_github_repos`], set by
     /// [`Self::set_github_repos`].
     github_repos: Mutex<Vec<GithubRepo>>,
+    repository_listing: Mutex<RepositoryListing>,
     /// Requests passed to [`Self::start_clone`], for call-recording asserts.
     clone_requests: Mutex<Vec<CloneRequest>>,
     /// Jobs [`Self::start_clone`] has issued, served back by
@@ -152,11 +160,15 @@ impl MockBackend {
             reconciled: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
             reset: Mutex::new(Vec::new()),
+            recovered: Mutex::new(Vec::new()),
             program_changes: Mutex::new(Vec::new()),
+            session_edits: Mutex::new(Vec::new()),
             base_changes: Mutex::new(Vec::new()),
             pr_refresh_calls: Mutex::new(0),
             read_marked: Mutex::new(Vec::new()),
             mark_read_gate: Mutex::new(None),
+            fresh_states_gate: Mutex::new(None),
+            agent_states_calls: Mutex::new(Vec::new()),
             review_refreshed: Mutex::new(Vec::new()),
             listed_comments: Mutex::new(Vec::new()),
             created_comments: Mutex::new(Vec::new()),
@@ -165,6 +177,13 @@ impl MockBackend {
             fetched_blobs: Mutex::new(Vec::new()),
             open_editor: Mutex::new(false),
             github_repos: Mutex::new(Vec::new()),
+            repository_listing: Mutex::new(RepositoryListing {
+                host: CodeHost {
+                    provider: CodeHostProvider::Github,
+                    hostname: None,
+                },
+                repositories: Vec::new(),
+            }),
             clone_requests: Mutex::new(Vec::new()),
             clone_jobs: Mutex::new(Vec::new()),
             added_projects: Mutex::new(Vec::new()),
@@ -223,6 +242,11 @@ impl MockBackend {
         self.base_changes.lock().unwrap().clone()
     }
 
+    /// Settings patches passed to [`Self::edit_session`], in call order.
+    pub fn session_edits(&self) -> Vec<(SessionId, claude_commander_protocol::api::EditSession)> {
+        self.session_edits.lock().unwrap().clone()
+    }
+
     /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
     pub fn program_changes(&self) -> Vec<(SessionId, String)> {
         self.program_changes.lock().unwrap().clone()
@@ -236,6 +260,11 @@ impl MockBackend {
     /// Sessions passed to [`Self::restart_session_fresh`], in call order.
     pub fn reset_sessions(&self) -> Vec<SessionId> {
         self.reset.lock().unwrap().clone()
+    }
+
+    /// Sessions automatically recovered without applying pending settings.
+    pub fn recovered_sessions(&self) -> Vec<SessionId> {
+        self.recovered.lock().unwrap().clone()
     }
 
     /// How many times [`Self::request_pr_refresh`] has been called.
@@ -255,6 +284,23 @@ impl MockBackend {
         let gate = std::sync::Arc::new(tokio::sync::Notify::new());
         *self.mark_read_gate.lock().unwrap() = Some(gate.clone());
         gate
+    }
+
+    /// Set the agent-state response independently of the snapshot/change feed.
+    pub fn set_agent_states(&self, states: AgentStatesSnapshot) {
+        *self.states.lock().unwrap() = states;
+    }
+
+    /// Hold fresh agent detection until the test releases the returned gate.
+    pub fn block_fresh_agent_states(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.fresh_states_gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    /// Record whether callers requested cache reads or fresh detection.
+    pub fn agent_states_calls(&self) -> Vec<bool> {
+        self.agent_states_calls.lock().unwrap().clone()
     }
 
     /// Sessions passed to [`Self::refresh_review_if_changed`], in call order.
@@ -290,6 +336,10 @@ impl MockBackend {
     /// Set the repo list served by [`Self::list_github_repos`].
     pub fn set_github_repos(&self, repos: Vec<GithubRepo>) {
         *self.github_repos.lock().unwrap() = repos;
+    }
+
+    pub fn set_repository_listing(&self, listing: RepositoryListing) {
+        *self.repository_listing.lock().unwrap() = listing;
     }
 
     /// Requests passed to [`Self::start_clone`], in call order.
@@ -392,7 +442,12 @@ impl CommanderBackend for MockBackend {
         Ok(self.snapshot.lock().unwrap().clone())
     }
 
-    async fn agent_states(&self, _fresh: bool) -> BResult<AgentStatesSnapshot> {
+    async fn agent_states(&self, fresh: bool) -> BResult<AgentStatesSnapshot> {
+        self.agent_states_calls.lock().unwrap().push(fresh);
+        let gate = self.fresh_states_gate.lock().unwrap().clone();
+        if fresh && let Some(gate) = gate {
+            gate.notified().await;
+        }
         self.guard()?;
         Ok(self.states.lock().unwrap().clone())
     }
@@ -480,10 +535,26 @@ impl CommanderBackend for MockBackend {
         Ok(())
     }
 
+    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()> {
+        self.guard()?;
+        self.recovered.lock().unwrap().push(id);
+        Ok(())
+    }
+
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
         self.guard()?;
         self.deleted.lock().unwrap().push(id);
         Ok(())
+    }
+
+    async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome> {
+        self.guard()?;
+        self.session_edits.lock().unwrap().push((id, edit));
+        Ok(Default::default())
     }
 
     async fn rename_session(&self, _id: SessionId, _title: String) -> BResult<()> {
@@ -647,6 +718,11 @@ impl CommanderBackend for MockBackend {
         Ok(self.github_repos.lock().unwrap().clone())
     }
 
+    async fn list_repositories(&self) -> BResult<RepositoryListing> {
+        self.guard()?;
+        Ok(self.repository_listing.lock().unwrap().clone())
+    }
+
     async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
         self.guard()?;
         // The label goes through the protocol's redaction like a real backend's:
@@ -654,6 +730,7 @@ impl CommanderBackend for MockBackend {
         // would make it the one path in the codebase where that is fine to do.
         let source_label = redact_credentials(match &req.source {
             CloneSource::Github { full_name } => full_name,
+            CloneSource::Gitlab { full_name, .. } => full_name,
             CloneSource::Url { url } => url,
         });
         let job = CloneJob {
