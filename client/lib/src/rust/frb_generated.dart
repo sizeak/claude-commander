@@ -11,14 +11,11 @@ import 'api/review.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
 import 'api/workspace.dart';
-
 import 'dart:async';
 import 'dart:convert';
-
 import 'frb_generated.dart';
 import 'frb_generated.io.dart'
     if (dart.library.js_interop) 'frb_generated.web.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
@@ -77,7 +74,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1320545105;
+  int get rustContentHash => -1488706849;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -362,6 +359,13 @@ abstract class RustLibApi extends BaseApi {
     required String query,
   });
 
+  Future<bool> crateApiReviewSetFileReviewed({
+    required String handle,
+    required String sessionId,
+    required String displayPath,
+    required bool reviewed,
+  });
+
   Future<void> crateApiSimpleSetPrograms({
     required String handle,
     required List<ProgramInfo> programs,
@@ -402,12 +406,6 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiTerminalTerminalSendInput({
     required String attachId,
     required List<int> bytes,
-  });
-
-  Future<bool> crateApiReviewToggleFileReviewed({
-    required String handle,
-    required String sessionId,
-    required String displayPath,
   });
 
   Future<bool> crateApiSimpleToggleKeepAlive({
@@ -2347,6 +2345,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<bool> crateApiReviewSetFileReviewed({
+    required String handle,
+    required String sessionId,
+    required String displayPath,
+    required bool reviewed,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(handle, serializer);
+          sse_encode_String(sessionId, serializer);
+          sse_encode_String(displayPath, serializer);
+          sse_encode_bool(reviewed, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 56,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiReviewSetFileReviewedConstMeta,
+        argValues: [handle, sessionId, displayPath, reviewed],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReviewSetFileReviewedConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_file_reviewed",
+        argNames: ["handle", "sessionId", "displayPath", "reviewed"],
+      );
+
+  @override
   Future<void> crateApiSimpleSetPrograms({
     required String handle,
     required List<ProgramInfo> programs,
@@ -2360,7 +2397,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 56,
+            funcId: 57,
             port: port_,
           );
         },
@@ -2396,7 +2433,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 57,
+            funcId: 58,
             port: port_,
           );
         },
@@ -2433,7 +2470,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 58,
+            funcId: 59,
             port: port_,
           );
         },
@@ -2470,7 +2507,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 59,
+            funcId: 60,
             port: port_,
           );
         },
@@ -2501,7 +2538,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 60,
+            funcId: 61,
             port: port_,
           );
         },
@@ -2533,7 +2570,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 61,
+            funcId: 62,
             port: port_,
           );
         },
@@ -2563,7 +2600,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 62,
+            funcId: 63,
             port: port_,
           );
         },
@@ -2597,7 +2634,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 63,
+            funcId: 64,
             port: port_,
           );
         },
@@ -2632,7 +2669,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 64,
+            funcId: 65,
             port: port_,
           );
         },
@@ -2651,43 +2688,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "terminal_send_input",
         argNames: ["attachId", "bytes"],
-      );
-
-  @override
-  Future<bool> crateApiReviewToggleFileReviewed({
-    required String handle,
-    required String sessionId,
-    required String displayPath,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(handle, serializer);
-          sse_encode_String(sessionId, serializer);
-          sse_encode_String(displayPath, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 65,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_bool,
-          decodeErrorData: sse_decode_AnyhowException,
-        ),
-        constMeta: kCrateApiReviewToggleFileReviewedConstMeta,
-        argValues: [handle, sessionId, displayPath],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiReviewToggleFileReviewedConstMeta =>
-      const TaskConstMeta(
-        debugName: "toggle_file_reviewed",
-        argNames: ["handle", "sessionId", "displayPath"],
       );
 
   @override

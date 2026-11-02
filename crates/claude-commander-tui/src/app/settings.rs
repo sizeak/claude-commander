@@ -1878,7 +1878,7 @@ impl App {
     /// A rejected or unsaved write leaves the service's config untouched, so
     /// on failure the cache is reset to it — discarding the edit — and the
     /// user told, never only a log line.
-    fn persist_config(&mut self) {
+    pub(super) fn persist_config(&mut self) {
         let Err(e) = self.service.update_config(self.config.clone()) else {
             return;
         };
