@@ -164,6 +164,9 @@ impl App {
                     self.ui_state.last_preview_refresh = Instant::now();
                     self.spawn_preview_update();
                 }
+                if self.ui_state.tick_count.is_multiple_of(30) {
+                    self.spawn_reviewed_marks_poll(self.ui_state.tick_count / 30);
+                }
                 if self.ui_state.last_ui_maintenance.elapsed() >= Duration::from_secs(1) {
                     self.ui_state.last_ui_maintenance = Instant::now();
                     if self.check_config_reload() {
