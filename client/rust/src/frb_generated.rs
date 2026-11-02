@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1419928108;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 697495277;
 
 // Section: executor
 
@@ -2232,6 +2232,49 @@ fn wire__crate__api__query__session_score_impl(
         },
     )
 }
+fn wire__crate__api__review__set_file_reviewed_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_file_reviewed",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_handle = <String>::sse_decode(&mut deserializer);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_display_path = <String>::sse_decode(&mut deserializer);
+            let api_reviewed = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::review::set_file_reviewed(
+                            api_handle,
+                            api_session_id,
+                            api_display_path,
+                            api_reviewed,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__simple__set_programs_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2561,47 +2604,6 @@ fn wire__crate__api__terminal__terminal_send_input_impl(
                     })?;
                     Ok(output_ok)
                 })())
-            }
-        },
-    )
-}
-fn wire__crate__api__review__toggle_file_reviewed_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "toggle_file_reviewed",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_handle = <String>::sse_decode(&mut deserializer);
-            let api_session_id = <String>::sse_decode(&mut deserializer);
-            let api_display_path = <String>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
-                    (move || {
-                        let output_ok = crate::api::review::toggle_file_reviewed(
-                            api_handle,
-                            api_session_id,
-                            api_display_path,
-                        )?;
-                        Ok(output_ok)
-                    })(),
-                )
             }
         },
     )
@@ -4657,21 +4659,19 @@ fn pde_ffi_dispatcher_primary_impl(
         54 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
         55 => wire__crate__api__simple__scan_directory_impl(port, ptr, rust_vec_len, data_len),
         57 => wire__crate__api__simple__session_preview_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__simple__set_programs_impl(port, ptr, rust_vec_len, data_len),
-        60 => {
+        59 => wire__crate__api__review__set_file_reviewed_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__simple__set_programs_impl(port, ptr, rust_vec_len, data_len),
+        61 => {
             wire__crate__api__simple__set_project_workspace_impl(port, ptr, rust_vec_len, data_len)
         }
-        61 => wire__crate__api__simple__set_section_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__simple__set_workspaces_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__simple__snapshot_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__simple__start_clone_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
-        67 => {
-            wire__crate__api__terminal__terminal_send_input_impl(port, ptr, rust_vec_len, data_len)
-        }
+        62 => wire__crate__api__simple__set_section_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__simple__set_workspaces_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__simple__snapshot_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__simple__start_clone_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
         68 => {
-            wire__crate__api__review__toggle_file_reviewed_impl(port, ptr, rust_vec_len, data_len)
+            wire__crate__api__terminal__terminal_send_input_impl(port, ptr, rust_vec_len, data_len)
         }
         69 => wire__crate__api__simple__toggle_keep_alive_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),

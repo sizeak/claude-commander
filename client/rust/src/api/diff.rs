@@ -228,6 +228,7 @@ pub struct DiffLayoutDto {
 /// Two recently-used raw reviews, bounded by bytes as well as entry count.
 /// Mode flips and gap expansion reuse parsing; layout remains per-call.
 type ParsedFiles = std::sync::Arc<Vec<FileDiff<'static>>>;
+#[flutter_rust_bridge::frb(ignore)]
 #[derive(Default)]
 struct ParseCache {
     entries: std::collections::VecDeque<(String, ParsedFiles)>,
