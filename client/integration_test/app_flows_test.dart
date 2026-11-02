@@ -222,9 +222,12 @@ void main() {
       find.widgetWithText(TextFormField, 'Title'),
       'e2e-journey',
     );
-    await tester.enterText(
+    // e2e.sh configures this shell as the default program. Once create-options
+    // arrives, the page uses the alias dropdown instead of its fallback field.
+    await waitFor(tester, find.text('E2E shell'));
+    expect(
       find.widgetWithText(TextFormField, 'Program (optional)'),
-      'bash',
+      findsNothing,
     );
     await tester.tap(find.widgetWithText(FilledButton, 'Create session'));
     // Wait for the actual session row to render — not the create page's Title
