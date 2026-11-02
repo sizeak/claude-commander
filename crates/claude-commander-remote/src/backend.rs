@@ -29,7 +29,9 @@ use claude_commander_core::backend::{
 };
 use claude_commander_core::comment::{ApplyOutcome, Comment};
 use claude_commander_core::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 use claude_commander_protocol::ws::AttachKind as WsAttachKind;
 use uuid::Uuid;
@@ -170,6 +172,20 @@ impl CommanderBackend for RemoteBackend {
         };
         result.map_err(into_backend_error)
     }
+    async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> BResult<PreviewData> {
+        let (id, project, lines) = match target {
+            PreviewTarget::Session { id, lines } => (Some(id), None, lines),
+            PreviewTarget::Project(id) => (None, Some(id), None),
+        };
+        self.client
+            .preview_part(id, project, lines, part)
+            .await
+            .map_err(into_backend_error)
+    }
 
     async fn branch_diff(&self, id: SessionId) -> BResult<String> {
         self.client
@@ -236,9 +252,27 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
+    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()> {
+        self.client
+            .recover_session_fresh(id)
+            .await
+            .map_err(into_backend_error)
+    }
+
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
         self.client
             .delete_session(id)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome> {
+        self.client
+            .edit_session(id, edit)
             .await
             .map_err(into_backend_error)
     }
@@ -372,6 +406,10 @@ impl CommanderBackend for RemoteBackend {
         self.client.github_repos().await.map_err(into_backend_error)
     }
 
+    async fn list_repositories(&self) -> BResult<RepositoryListing> {
+        self.client.repositories().await.map_err(into_backend_error)
+    }
+
     async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
         // The 202 body *is* a `CloneJob`, so there is nothing to rebuild here —
         // the trait's return shape was chosen to match it. `req.source` is never
@@ -463,9 +501,21 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
-    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool> {
+    async fn set_file_reviewed(
+        &self,
+        id: SessionId,
+        display_path: String,
+        reviewed: bool,
+    ) -> BResult<bool> {
         self.client
-            .toggle_file_reviewed(id, display_path)
+            .set_file_reviewed(id, display_path, reviewed)
+            .await
+            .map_err(into_backend_error)
+    }
+
+    async fn reviewed_marks(&self, id: SessionId) -> BResult<Vec<ReviewedFileMark>> {
+        self.client
+            .reviewed_marks(id)
             .await
             .map_err(into_backend_error)
     }
@@ -522,7 +572,8 @@ mod tests {
     use claude_commander_core::session::{Project, WorktreeSession};
     use claude_commander_core::telemetry::FrontendInfo;
     use claude_commander_core::tmux::TmuxExecutor;
-    use claude_commander_protocol::github::{CloneSource, CloneStatus};
+    use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::hosting::CloneSource;
     use claude_commander_server::{AppState, AuthConfig};
     use claude_commander_test_support::{
         create_test_repo, spawn_server, test_state, tmux_available,

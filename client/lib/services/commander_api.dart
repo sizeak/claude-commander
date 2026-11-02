@@ -108,6 +108,11 @@ abstract class CommanderApi {
 
   Future<void> deleteSession({required String handle, required String id});
 
+  Future<String?> editSession({
+    required String handle,
+    required String id,
+    required String patchJson,
+  });
   Future<void> renameSession({
     required String handle,
     required String id,
@@ -254,6 +259,10 @@ abstract class CommanderApi {
   /// screen.
   Future<List<GithubRepo>> githubRepos({required String handle});
 
+  /// Repositories from the server's selected code host. The envelope retains
+  /// provider and hostname even when the list is empty.
+  Future<RepositoryListing> repositories({required String handle});
+
   /// Start a clone. The returned job's status is **not** terminal — every
   /// outcome arrives through [cloneJob], so the caller polls from here.
   Future<CloneJobDto> startClone({
@@ -330,10 +339,11 @@ abstract class CommanderApi {
     required String sessionId,
   });
 
-  Future<bool> toggleFileReviewed({
+  Future<bool> setFileReviewed({
     required String handle,
     required String sessionId,
     required String displayPath,
+    required bool reviewed,
   });
 
   Future<Uint8List> fetchBlob({
@@ -550,6 +560,12 @@ class RustCommanderApi implements CommanderApi {
       simple.deleteSession(handle: handle, id: id);
 
   @override
+  Future<String?> editSession({
+    required String handle,
+    required String id,
+    required String patchJson,
+  }) => simple.editSession(handle: handle, id: id, patchJson: patchJson);
+  @override
   Future<void> renameSession({
     required String handle,
     required String id,
@@ -690,6 +706,10 @@ class RustCommanderApi implements CommanderApi {
       simple.githubRepos(handle: handle);
 
   @override
+  Future<RepositoryListing> repositories({required String handle}) =>
+      simple.repositories(handle: handle);
+
+  @override
   Future<CloneJobDto> startClone({
     required String handle,
     required CloneRequestDto request,
@@ -785,14 +805,16 @@ class RustCommanderApi implements CommanderApi {
   }) => review.applyComments(handle: handle, sessionId: sessionId);
 
   @override
-  Future<bool> toggleFileReviewed({
+  Future<bool> setFileReviewed({
     required String handle,
     required String sessionId,
     required String displayPath,
-  }) => review.toggleFileReviewed(
+    required bool reviewed,
+  }) => review.setFileReviewed(
     handle: handle,
     sessionId: sessionId,
     displayPath: displayPath,
+    reviewed: reviewed,
   );
 
   @override

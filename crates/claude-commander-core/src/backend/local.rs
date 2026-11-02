@@ -21,7 +21,9 @@ use crate::api::{
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, ScanResult, SessionId};
 use crate::tmux::HeadlessAttach;
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 use super::error::BResult;
@@ -233,6 +235,13 @@ impl CommanderBackend for LocalBackend {
     async fn preview(&self, target: PreviewTarget) -> BResult<PreviewData> {
         Ok(self.service.preview(target).await?)
     }
+    async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> BResult<PreviewData> {
+        Ok(self.service.preview_part(target, part).await?)
+    }
 
     async fn branch_diff(&self, id: SessionId) -> BResult<String> {
         Ok(self.service.branch_diff(&id).await?)
@@ -287,9 +296,22 @@ impl CommanderBackend for LocalBackend {
         Ok(run_local(move || async move { svc.restart_session_fresh(&id).await }).await?)
     }
 
+    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()> {
+        Ok(self.service.recover_session_fresh(&id).await?)
+    }
+
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
         let svc = self.service.clone();
         Ok(run_local(move || async move { svc.delete_session(&id).await }).await?)
+    }
+
+    async fn edit_session(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome> {
+        let svc = self.service.clone();
+        Ok(run_local(move || async move { svc.edit_session(&id, edit).await }).await?)
     }
 
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()> {
@@ -394,6 +416,10 @@ impl CommanderBackend for LocalBackend {
         Ok(self.service.list_github_repos().await?)
     }
 
+    async fn list_repositories(&self) -> BResult<RepositoryListing> {
+        Ok(self.service.list_repositories().await?)
+    }
+
     async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
         Ok(self.service.start_clone(req).await?)
     }
@@ -460,11 +486,20 @@ impl CommanderBackend for LocalBackend {
         Ok(self.service.apply_comments(&id).await?)
     }
 
-    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool> {
+    async fn set_file_reviewed(
+        &self,
+        id: SessionId,
+        display_path: String,
+        reviewed: bool,
+    ) -> BResult<bool> {
         Ok(self
             .service
-            .toggle_file_reviewed_by_path(&id, &display_path)
+            .set_file_reviewed_by_path(&id, &display_path, reviewed)
             .await?)
+    }
+
+    async fn reviewed_marks(&self, id: SessionId) -> BResult<Vec<ReviewedFileMark>> {
+        Ok(self.service.reviewed_marks(&id).await?)
     }
 
     async fn fetch_diff_blob(
@@ -539,7 +574,8 @@ mod tests {
     use crate::config::{Config, ConfigStore, StateStore};
     use crate::session::{Project, WorktreeSession};
     use crate::telemetry::FrontendInfo;
-    use claude_commander_protocol::github::{CloneSource, CloneStatus};
+    use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::hosting::CloneSource;
     use std::sync::Arc;
 
     /// Build a hermetic backend over `TempDir`-backed stores: telemetry off,

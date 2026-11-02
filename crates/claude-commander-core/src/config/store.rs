@@ -203,7 +203,7 @@ impl StateStore {
 
         // Run the entire lock-read-modify-write cycle on a blocking thread
         // because flock() is a blocking syscall
-        let (result, new_state, mtime) = tokio::task::spawn_blocking(move || {
+        let (result, new_state, mtime, changed) = tokio::task::spawn_blocking(move || {
             let lock_file = open_lock_file(&lock_path)?;
             let _lock = Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_, e)| {
                 crate::error::Error::Config(ConfigError::SaveFailed(format!(
@@ -213,24 +213,35 @@ impl StateStore {
             })?;
 
             let mut disk_state = read_state_from_disk(&state_path)?;
+            let before = serde_json::to_vec(&disk_state)
+                .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
             let result = f(&mut disk_state);
             disk_state.version = env!("CARGO_PKG_VERSION").to_string();
-            atomic_write(&state_path, &disk_state)?;
+            let changed = !state_path.exists()
+                || before
+                    != serde_json::to_vec(&disk_state)
+                        .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+            if changed {
+                atomic_write(&state_path, &disk_state)?;
+            }
 
             let mtime = std::fs::metadata(&state_path)
                 .and_then(|m| m.modified())
                 .ok();
 
             // _lock dropped here → flock released
-            Ok::<_, crate::error::Error>((result, disk_state, mtime))
+            Ok::<_, crate::error::Error>((result, disk_state, mtime, changed))
         })
         .await
         .map_err(|e| ConfigError::SaveFailed(format!("Blocking task panicked: {}", e)))??;
 
         // Update in-memory cache
         *self.state.write().await = new_state;
+        let external_change = *self.last_mtime.read().await != mtime;
         *self.last_mtime.write().await = mtime;
-        self.bump_generation();
+        if changed || external_change {
+            self.bump_generation();
+        }
 
         Ok(result)
     }
@@ -247,7 +258,7 @@ impl StateStore {
         let state_path = self.state_path.clone();
         let lock_path = self.lock_path.clone();
 
-        let (result, new_state, mtime) =
+        let (result, new_state, mtime, changed) =
             tokio::task::spawn_blocking(move || -> std::result::Result<_, crate::error::Error> {
                 let lock_file = open_lock_file(&lock_path)?;
                 let _lock = Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_, e)| {
@@ -260,23 +271,34 @@ impl StateStore {
                 let mut disk_state = read_state_from_disk(&state_path)?;
 
                 // Apply the closure — if it fails, bail without writing
+                let before = serde_json::to_vec(&disk_state)
+                    .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
                 let result = f(&mut disk_state)?;
 
                 disk_state.version = env!("CARGO_PKG_VERSION").to_string();
-                atomic_write(&state_path, &disk_state)?;
+                let changed = !state_path.exists()
+                    || before
+                        != serde_json::to_vec(&disk_state)
+                            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+                if changed {
+                    atomic_write(&state_path, &disk_state)?;
+                }
 
                 let mtime = std::fs::metadata(&state_path)
                     .and_then(|m| m.modified())
                     .ok();
 
-                Ok((result, disk_state, mtime))
+                Ok((result, disk_state, mtime, changed))
             })
             .await
             .map_err(|e| ConfigError::SaveFailed(format!("Blocking task panicked: {}", e)))??;
 
         *self.state.write().await = new_state;
+        let external_change = *self.last_mtime.read().await != mtime;
         *self.last_mtime.write().await = mtime;
-        self.bump_generation();
+        if changed || external_change {
+            self.bump_generation();
+        }
 
         Ok(result)
     }
@@ -421,6 +443,27 @@ mod tests {
     fn create_test_store(temp_dir: &TempDir) -> StateStore {
         let state_path = temp_dir.path().join("state.json");
         StateStore::with_path(AppState::new(), state_path)
+    }
+
+    #[tokio::test]
+    async fn no_op_mutation_does_not_write_or_notify() {
+        let dir = TempDir::new().unwrap();
+        let store = create_test_store(&dir);
+        store.mutate(|s| s.seen_help = true).await.unwrap();
+        let generation = store.generation();
+        let before = std::fs::metadata(dir.path().join("state.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        store.mutate(|s| s.seen_help = true).await.unwrap();
+        assert_eq!(store.generation(), generation);
+        assert_eq!(
+            std::fs::metadata(dir.path().join("state.json"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -623,7 +666,7 @@ mod tests {
         assert_eq!(*rx.borrow_and_update(), 1);
 
         // A second mutation bumps again.
-        store.mutate(|_| {}).await.unwrap();
+        store.mutate(|state| state.seen_help = true).await.unwrap();
         assert_eq!(store.generation(), 2);
     }
 

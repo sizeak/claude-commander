@@ -40,12 +40,62 @@ pub async fn create_options(State(state): State<AppState>) -> Json<CreateOptions
     Json(state.service.create_options())
 }
 
+/// Stateless projections of the same pure editor used by the native frontends.
+pub async fn session_editor_model(
+    crate::extract::SafeJson(input): crate::extract::SafeJson<
+        claude_commander_protocol::session_editor::SessionEditorInput,
+    >,
+) -> Json<claude_commander_protocol::session_editor::SessionEditorModel> {
+    Json(claude_commander_viewmodel::session_editor::model(
+        &input.session,
+        &input.peers,
+        input.main_branch.as_deref(),
+        input.options.as_ref(),
+    ))
+}
+
+pub async fn plan_session_edit(
+    crate::extract::SafeJson(input): crate::extract::SafeJson<
+        claude_commander_protocol::session_editor::PlanSessionEdit,
+    >,
+) -> Result<Json<claude_commander_protocol::session_editor::SessionEditorPlan>, ApiError> {
+    claude_commander_viewmodel::session_editor::plan(&input.model, input.draft)
+        .map(Json)
+        .map_err(|message| {
+            ApiError(claude_commander_core::error::SessionError::InvalidProgram(message).into())
+        })
+}
+
 /// `POST /pr-refresh` → `request_pr_refresh` → 202. Wakes the server's
 /// background PR-status loop; the refreshed state arrives via a later
 /// `/workspace` poll.
 pub async fn pr_refresh(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     state.service.request_pr_refresh()?;
     Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangesQuery {
+    pub since: Option<u64>,
+}
+
+/// Bootstrap a generation, or wait for observable changes without transferring
+/// another full workspace. Subscribe before comparing to avoid lost wakeups.
+pub async fn changes(
+    State(state): State<AppState>,
+    Query(query): Query<ChangesQuery>,
+) -> Json<u64> {
+    let mut feed = state.service.store().subscribe();
+    let current = *feed.borrow_and_update();
+    if query.since == Some(current) {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(claude_commander_protocol::CHANGE_WAIT_SECS),
+            feed.changed(),
+        )
+        .await;
+    }
+    let generation = *feed.borrow();
+    Json(generation)
 }
 
 #[cfg(test)]

@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+#[path = "cases/edit_session.rs"]
+mod edit_session_cases;
+
 use claude_commander_core::SessionStatus;
 use claude_commander_core::commander::{self, COMMANDER_TMUX_NAME};
 use claude_commander_core::config::{AppState, Config, ConfigStore, StateStore};
@@ -449,18 +452,11 @@ async fn test_session_manager_restart() {
     let worktrees_dir = TempDir::new().unwrap();
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
-        // This test bypasses `create_isolated_config_store`, so pin the tmux
-        // socket dir directly to keep it off the developer's real server.
-        tmux_tmpdir: Some(isolated_tmux_tmpdir(&state_temp_dir)),
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project and create session (prepare + finalize)
@@ -1611,15 +1607,16 @@ async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "hibernation must use a private tmux server, including on wake"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path, None).await.unwrap();
@@ -1711,15 +1708,16 @@ async fn test_manual_kill_marks_session_for_resume_on_wake() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "manual kill must use a private tmux server, including on wake"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path, None).await.unwrap();
@@ -1896,15 +1894,16 @@ async fn test_fresh_restart_clears_hibernation_marker() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "fresh restart must use a private tmux server"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path, None).await.unwrap();
@@ -2400,4 +2399,34 @@ async fn headless_attach_detaches_a_lingering_wide_client() {
     wide_child.kill().await;
     narrow_child.kill().await;
     tmux_iso(sock, &["kill-server"]).await;
+}
+
+/// Recreating a server's only session straight after killing it races the
+/// server's shutdown: `kill-session` returns as soon as the session is gone,
+/// while the server is still exiting, and a `new-session` that connects in that
+/// window fails with "server exited unexpectedly". Every kill-then-recreate
+/// path (fresh restart, change program, restart) hits it whenever the pane is
+/// the last on its server — always so on CI's empty server. Looped because a
+/// single attempt only loses the race some of the time.
+#[tokio::test]
+async fn recreating_the_only_session_survives_server_shutdown() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let socket_temp = TempDir::new().unwrap();
+    let tmux = TmuxExecutor::new().with_tmux_tmpdir(Some(isolated_tmux_tmpdir(&socket_temp)));
+    let cwd = TempDir::new().unwrap();
+
+    tmux.create_session("only", cwd.path(), Some("sleep 60"))
+        .await
+        .unwrap();
+    for attempt in 0..20 {
+        tmux.kill_session("only").await.unwrap();
+        tmux.create_session("only", cwd.path(), Some("sleep 60"))
+            .await
+            .unwrap_or_else(|e| panic!("recreate #{attempt} failed: {e}"));
+    }
+    tmux.kill_session("only").await.unwrap();
 }

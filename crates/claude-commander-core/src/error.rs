@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use claude_commander_protocol::hosting::CodeHostProvider;
 use thiserror::Error;
 
 use crate::session::SessionId;
@@ -87,6 +88,15 @@ pub enum SessionError {
 
     #[error("File not in the current review diff: {0}")]
     FileNotInDiff(String),
+
+    /// Some named files of a review-diff selection can't be used: `missing`
+    /// aren't in the diff, `changed` were edited since their `@hash` was read.
+    /// Both are reported so a caller can fix every problem in one pass.
+    #[error("{}", file_selection_message(missing, changed))]
+    FileSelectionRejected {
+        missing: Vec<String>,
+        changed: Vec<String>,
+    },
 
     #[error("Invalid pasted image: {0}")]
     InvalidImage(String),
@@ -203,43 +213,48 @@ pub enum GitError {
     #[error("Invalid reference: {0}")]
     InvalidRef(String),
 
-    /// The `gh` CLI is not installed or not runnable.
+    /// The selected code-host CLI is not installed or not runnable.
     ///
     /// Distinct from `OperationFailed` on purpose: the repo picker renders this
     /// as its own state ("install the GitHub CLI to browse your repos") rather
     /// than as a generic failure, and it is the one gh outcome a user can fix
     /// without seeing gh's own stderr.
-    #[error("GitHub CLI (gh) is not installed or not runnable")]
-    GhUnavailable,
+    #[error("{} CLI ({}) is not installed or not runnable", .provider.display_name(), .provider.cli_name())]
+    CodeHostCliUnavailable { provider: CodeHostProvider },
 
     /// A clone ran past its time budget and was killed.
     ///
-    /// Distinct from `OperationFailed` for the same reason as `GhUnavailable`:
+    /// Distinct from `OperationFailed` for the same reason as
+    /// [`Self::CodeHostCliUnavailable`]:
     /// it is actionable (a huge repo on a slow link wants a larger
     /// `clone_timeout_secs`), and the process was killed, so there is no
     /// subprocess stderr worth surfacing.
     #[error("clone timed out after {secs}s")]
     CloneTimedOut { secs: u64 },
 
-    /// A GitHub repo listing ran past its time budget and was killed.
+    /// A hosted-repository listing ran past its time budget and was killed.
     ///
-    /// **Deliberately not folded into `GhUnavailable`.** That variant means "gh
-    /// is missing or unauthenticated", and the picker answers it with "install /
-    /// log in to the GitHub CLI" — advice that is actively wrong for a user whose
-    /// working `gh` merely took too long over a large account. Nor is it
+    /// **Deliberately not folded into CLI unavailability.** That condition means
+    /// the selected executable is missing or not runnable — advice that is
+    /// actively wrong for a user whose working CLI merely took too long over a
+    /// large account. Nor is it
     /// `OperationFailed`: the process was killed, so there is no subprocess
     /// stderr to pass on, and the actionable answer is a larger
     /// `repo_list_timeout_secs`. Same reasoning as [`Self::CloneTimedOut`],
     /// separate variant because the two carry different budgets and different
     /// remedies.
-    #[error("listing GitHub repos timed out after {secs}s")]
-    RepoListTimedOut { secs: u64 },
+    #[error("listing {} repositories timed out after {secs}s", .provider.display_name())]
+    RepoListTimedOut {
+        provider: CodeHostProvider,
+        secs: u64,
+    },
 
     /// A clone source or destination name was refused by the
     /// [`claude_commander_protocol::github`] validators.
     ///
-    /// Distinct from `OperationFailed` for the same reason as `GhUnavailable` and
-    /// `CloneTimedOut`, plus one more that only applies here: nothing failed. The
+    /// Distinct from `OperationFailed` for the same reason as
+    /// [`Self::CodeHostCliUnavailable`] and `CloneTimedOut`, plus one more that
+    /// only applies here: nothing failed. The
     /// *request* is malformed, so a caller mapping errors onto a transport needs
     /// to answer "you sent something unusable" rather than "the server broke" —
     /// the server maps this to a 400 and every other `GitError` to a 500. A
@@ -250,6 +265,10 @@ pub enum GitError {
     /// credentialed source cannot be quoted back through this variant.
     #[error("{0}")]
     CloneSourceRejected(String),
+
+    /// A configured or wire-provided code-host hostname failed validation.
+    #[error("invalid code-host hostname: {0}")]
+    CodeHostHostnameRejected(String),
 }
 
 /// Configuration errors
@@ -313,6 +332,25 @@ impl From<gix::discover::Error> for GitError {
     }
 }
 
+/// [`SessionError::FileSelectionRejected`]'s message: one clause per
+/// non-empty list.
+fn file_selection_message(missing: &[String], changed: &[String]) -> String {
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        parts.push(format!(
+            "Not in the current review diff: {}",
+            missing.join(", ")
+        ));
+    }
+    if !changed.is_empty() {
+        parts.push(format!(
+            "Changed since its hash was read (re-read its diff): {}",
+            changed.join(", ")
+        ));
+    }
+    parts.join("; ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +393,10 @@ mod tests {
             SessionError::TmuxSessionNotFound("sess".to_string()),
             SessionError::CommanderDisabled,
             SessionError::FileNotInDiff("src/main.rs".to_string()),
+            SessionError::FileSelectionRejected {
+                missing: vec!["a.rs".to_string()],
+                changed: vec![],
+            },
         ];
         for err in variants {
             assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);

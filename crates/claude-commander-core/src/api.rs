@@ -9,8 +9,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneRequest, CloneSource, GithubRepo, validate_clone_url,
-    validate_dest_name, validate_repo_slug,
+    CloneJob, CloneJobId, CloneRequest, GithubRepo, validate_clone_url, validate_dest_name,
+    validate_repo_slug,
+};
+use claude_commander_protocol::hosting::{
+    CloneSource, CodeHost, CodeHostProvider, RepositoryListing, validate_gitlab_hostname,
+    validate_hosted_repo_slug,
 };
 use claude_commander_protocol::workspace::{
     SetWorkspacesRequest, WorkspaceRejection, validate_set_workspaces, validate_workspace_label,
@@ -26,15 +30,15 @@ use crate::comment::{
     decide_send, reanchor_comments,
 };
 use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
-use crate::error::{GitError, Result, SessionError};
+use crate::error::{ConfigError, GitError, Result, SessionError};
 use crate::git::{
-    CloneJobs, CloneOutcome, ComposedDiff, FileDiff, GitBackend, PrCheckResult,
+    CloneJobs, CloneOutcome, ComposedDiff, GitBackend, ParsedDiff, PrCheckResult,
     clone_source_rejected, compose_review_diff, compute_branch_diff, diff_stat_summary,
     effective_pr_state, enrich_binary_sizes, is_gh_available, list_repos, list_worktrees_at,
     parse_unified_diff, prefer_remote_branch, read_base_blob, read_worktree_file, ref_exists_cli,
     run_clone,
 };
-use crate::reviewed::ReviewedStore;
+use crate::reviewed::{FileSelection, ReviewedStore, SetReviewedOutcome};
 use crate::session::workspace;
 use crate::session::{
     AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionLookup, SessionManager,
@@ -44,6 +48,8 @@ use crate::session::{
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::term_caps::ColorMode;
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
+use claude_commander_protocol::api::ReviewedFileMark;
+use claude_commander_viewmodel::review::DiffHashes;
 
 /// High-level service that wraps `SessionManager`, state stores, and agent
 /// detection into a single entry point. Both the CLI and TUI route through
@@ -69,6 +75,8 @@ pub struct CommanderService {
     /// Cached `gh --version` availability. Computed once (fork/exec is not free)
     /// and reused for every `snapshot`.
     gh_available: Arc<tokio::sync::OnceCell<bool>>,
+    /// Cached `glab version` availability, independent of the compatibility gh probe.
+    glab_available: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     /// Shared agent-state detector with a short TTL cache, reused across
     /// non-`fresh` [`Self::agent_states`] calls so repeated polls don't
     /// re-capture every pane. A `fresh` call bypasses it with a zero-TTL
@@ -91,6 +99,11 @@ pub struct CommanderService {
     last_pr_check: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     /// Signals the PR-status loop to run an immediate check (manual refresh).
     pr_refresh: Arc<tokio::sync::Notify>,
+    /// Serializes provider transitions with application of review-poll results.
+    /// A poll that began under the old provider must either finish before its
+    /// metadata is cleared or observe the new provider and be discarded.
+    review_provider_lock: Arc<tokio::sync::Mutex<()>>,
+    review_provider_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Idempotency guard for [`Self::spawn_background_tasks`]: the loops spawn
     /// once per service, even if both a local TUI and an embedded caller ask.
     background_started: Arc<std::sync::atomic::AtomicBool>,
@@ -150,6 +163,9 @@ impl CommanderService {
             manager.tmux.clone(),
             AGENT_STATE_CACHE_TTL,
         )));
+        let notification_store = store.clone();
+        let clone_jobs =
+            CloneJobs::with_notifier(Arc::new(move || notification_store.notify_change()));
         Self {
             manager,
             store,
@@ -160,6 +176,7 @@ impl CommanderService {
             operations: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             next_op_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             gh_available: Arc::new(tokio::sync::OnceCell::new()),
+            glab_available: Arc::new(std::sync::Mutex::new(None)),
             agent_detector,
             agent_states_cache: Arc::new(tokio::sync::RwLock::new(AgentStatesSnapshot {
                 states: BTreeMap::new(),
@@ -169,9 +186,11 @@ impl CommanderService {
             pull_status: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             last_pr_check: Arc::new(std::sync::Mutex::new(None)),
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
+            review_provider_lock: Arc::new(tokio::sync::Mutex::new(())),
+            review_provider_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
-            clone_jobs: CloneJobs::new(),
+            clone_jobs,
         }
     }
 
@@ -221,8 +240,83 @@ impl CommanderService {
 
     /// Overwrite the persisted config (updates mtime so the hot-reload watcher
     /// won't re-read our own write).
+    ///
+    /// Rejects a config whose provider differs from the stored one: provider
+    /// changes must go through [`update_code_host_config`](Self::update_code_host_config)
+    /// so review metadata is invalidated. The comparison runs inside `try_mutate`,
+    /// against the value being replaced, so a whole-config write built from a
+    /// cache that predates a concurrent switch cannot revert it.
     pub fn update_config(&self, config: Config) -> Result<()> {
-        self.config_store.mutate(|c| *c = config)
+        self.config_store.try_mutate(|current| {
+            if config.code_host_provider != current.code_host_provider {
+                return Err(ConfigError::InvalidValue {
+                    key: "code_host_provider".into(),
+                    reason: "provider changes must use update_code_host_config".into(),
+                }
+                .into());
+            }
+            *current = config;
+            Ok(())
+        })
+    }
+
+    /// Persist a config whose code-host provider changed and invalidate all
+    /// review metadata before the new provider can consume it. The shared lock
+    /// also fences in-flight poll results from the previous provider.
+    pub async fn update_code_host_config(&self, config: Config) -> Result<()> {
+        self.edit_code_host_config(move |current| {
+            *current = config.clone();
+            Ok(())
+        })
+        .await
+    }
+
+    /// Apply edits to the latest config under the provider fence. This avoids
+    /// losing concurrent fields when a partial PATCH waits for a provider switch.
+    pub async fn edit_code_host_config(
+        &self,
+        edit: impl Fn(&mut Config) -> Result<()> + Send,
+    ) -> Result<()> {
+        let _guard = self.review_provider_lock.lock().await;
+        // Persist first, then invalidate, under the same lock — the order
+        // `reload_config` uses. `try_mutate` commits nothing unless both the
+        // edit and the save succeed, so a rejected or unsaved edit leaves the
+        // provider pollers read unchanged and invalidates nothing.
+        let (old_provider, old_hostname, new_config) = self.config_store.try_mutate(|current| {
+            let old = (current.code_host_provider, current.gitlab_hostname.clone());
+            edit(current)?;
+            Ok((old.0, old.1, current.clone()))
+        })?;
+        let hostname_changed = new_config.gitlab_hostname != old_hostname;
+        self.apply_code_host_change(old_provider, hostname_changed, &new_config)
+            .await
+    }
+
+    /// React to a committed config whose code host may have changed; callers
+    /// hold `review_provider_lock`. Any provider or hostname change drops the
+    /// cached `glab` probe and wakes the PR poller; a provider change also
+    /// bumps the provider epoch and invalidates all review metadata.
+    async fn apply_code_host_change(
+        &self,
+        old_provider: CodeHostProvider,
+        hostname_changed: bool,
+        new_config: &Config,
+    ) -> Result<()> {
+        let provider_changed = new_config.code_host_provider != old_provider;
+        if !(provider_changed || hostname_changed) {
+            return Ok(());
+        }
+        *self
+            .glab_available
+            .lock()
+            .expect("glab availability poisoned") = None;
+        if provider_changed {
+            self.review_provider_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.invalidate_review_metadata(new_config).await?;
+        }
+        self.pr_refresh.notify_one();
+        Ok(())
     }
 
     /// Rename a configured section, migrating every session that refers to it
@@ -242,7 +336,7 @@ impl CommanderService {
         if new == old {
             return Ok(false);
         }
-        let renamed = self.config_store.mutate(|c| {
+        let renamed = self.config_store.mutate_if(|c| {
             let Some(idx) = c.sections.iter().position(|s| s.name == old) else {
                 return false;
             };
@@ -275,6 +369,45 @@ impl CommanderService {
     pub fn set_programs(&self, programs: Vec<ProgramEntry>) -> Result<()> {
         self.telemetry.feature("programs.set");
         self.config_store.mutate(|c| c.programs = programs)
+    }
+
+    /// Add a program entry for each recognised harness installed on this host
+    /// (found on `PATH`) that the program list doesn't already cover, and
+    /// persist the result; returns the entries added. See
+    /// [`Config::add_installed_programs`] for what "covered" means — in short,
+    /// it only ever appends, never overwrites or removes.
+    ///
+    /// Run once at startup by the long-lived frontends that launch sessions —
+    /// the TUI and the server — against their own `PATH`. That is the host the
+    /// sessions run on, but not necessarily the environment they launch in: a
+    /// tmux server started earlier keeps its own `PATH`, so a harness installed
+    /// since can still be missing inside the pane. Not run by one-shot CLI
+    /// commands.
+    pub fn discover_programs(&self) -> Result<Vec<ProgramEntry>> {
+        self.discover_programs_on(&std::env::var_os("PATH").unwrap_or_default())
+    }
+
+    /// [`Self::discover_programs`] against an explicit `PATH`-style list.
+    pub fn discover_programs_on(&self, path: &std::ffi::OsStr) -> Result<Vec<ProgramEntry>> {
+        let installed = AgentKind::installed_on(path);
+        // Check before mutating: `mutate` always rewrites the file, and the
+        // common startup — everything already listed — should not.
+        if self
+            .config_store
+            .read()
+            .clone()
+            .add_installed_programs(&installed)
+            .is_empty()
+        {
+            return Ok(Vec::new());
+        }
+        let added = self
+            .config_store
+            .mutate(|c| c.add_installed_programs(&installed))?;
+        for entry in &added {
+            info!("Discovered {} on PATH; added it to programs", entry.label);
+        }
+        Ok(added)
     }
 
     // -- Workspaces --
@@ -335,15 +468,13 @@ impl CommanderService {
     /// workspace. The theme moves even then: it is local config, and the TUI
     /// keeps themes for workspaces that live only on a remote server.
     pub async fn rename_workspace(&self, from: &str, to: &str) -> Result<bool> {
-        let renamed_def = self
-            .config_store
-            .mutate(|c| {
-                let renamed = workspace::rename_workspace_def(c, from, to)?;
-                // `to` is valid and unclaimed once the def rename accepted it.
-                workspace::rename_workspace_theme(c, from, to.trim());
-                Ok(renamed)
-            })?
-            .map_err(|e| workspace::workspace_rejected(to, e))?;
+        let renamed_def = self.config_store.try_mutate(|c| {
+            let renamed = workspace::rename_workspace_def(c, from, to)
+                .map_err(|e| workspace::workspace_rejected(to, e))?;
+            // `to` is valid and unclaimed once the def rename accepted it.
+            workspace::rename_workspace_theme(c, from, to.trim());
+            Ok(renamed)
+        })?;
         let to = claude_commander_protocol::workspace::validate_workspace_name(to)
             .map_err(|e| workspace::workspace_rejected(to, e))?;
         let (from_owned, to_tag) = (from.to_string(), to.clone());
@@ -369,9 +500,12 @@ impl CommanderService {
     /// Returns `false` when there was no definition or tag to delete (a theme
     /// alone is still dropped). Main itself has no name and cannot be deleted.
     pub async fn delete_workspace(&self, name: &str) -> Result<bool> {
-        let removed_def = self.config_store.mutate(|c| {
-            workspace::delete_workspace_theme(c, name);
-            workspace::delete_workspace_def(c, name)
+        let mut removed_def = false;
+        self.config_store.mutate_if(|c| {
+            let startup = c.startup_workspace.clone();
+            let removed_theme = workspace::delete_workspace_theme(c, name);
+            removed_def = workspace::delete_workspace_def(c, name);
+            removed_theme || removed_def || c.startup_workspace != startup
         })?;
         let owned = name.to_string();
         let moved = self
@@ -427,8 +561,31 @@ impl CommanderService {
     }
 
     /// Reload config from disk if the file changed since the last read.
-    pub fn reload_config(&self) -> Result<bool> {
-        self.config_store.reload_if_changed()
+    pub async fn reload_config(&self) -> Result<bool> {
+        let _guard = self.review_provider_lock.lock().await;
+        let old_provider = self.config_store.read().code_host_provider;
+        let reloaded = self.config_store.reload_if_changed()?;
+        if reloaded {
+            let new_config = self.config_store.read().clone();
+            // Reload reacts to a provider change only: a hostname-only hand
+            // edit leaves the cached `glab` probe in place.
+            self.apply_code_host_change(old_provider, false, &new_config)
+                .await?;
+        }
+        Ok(reloaded)
+    }
+
+    async fn invalidate_review_metadata(&self, config: &Config) -> Result<()> {
+        let sections = crate::session::effective_sections(&config.sections).into_owned();
+        let now = Utc::now();
+        self.store
+            .mutate(move |state| {
+                for session in state.sessions.values_mut() {
+                    session.clear_review_metadata();
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await
     }
 
     /// Whether a pending config change requires an app restart to take effect.
@@ -483,6 +640,24 @@ impl CommanderService {
         self.telemetry.feature("github.list_repos");
         let timeout = Duration::from_secs(self.config_store.read().repo_list_timeout_secs);
         list_repos(timeout).await
+    }
+
+    /// List repositories using one provider/hostname snapshot from live config.
+    pub async fn list_repositories(&self) -> Result<RepositoryListing> {
+        self.telemetry.feature("repository.list");
+        let (host, timeout) = {
+            let config = self.config_store.read();
+            (
+                CodeHost {
+                    provider: config.code_host_provider,
+                    hostname: (config.code_host_provider == CodeHostProvider::Gitlab)
+                        .then(|| config.gitlab_hostname.clone())
+                        .flatten(),
+                },
+                Duration::from_secs(config.repo_list_timeout_secs),
+            )
+        };
+        crate::git::hosting::list_repositories(host, timeout).await
     }
 
     /// Start cloning a repository into the projects directory, returning the
@@ -868,6 +1043,9 @@ impl CommanderService {
 
     pub async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId> {
         self.telemetry.feature("session.create");
+        // One provider governs this entire create, including a stacked
+        // session's eventual launch prompt after the awaited setup steps.
+        let code_host_provider = self.config_store.read().code_host_provider;
         self.manager.check_tmux().await?;
 
         let base_program = opts
@@ -932,7 +1110,12 @@ impl CommanderService {
                 .link_stack_parent_by_branch(&session_id, opts.base_branch.as_deref())
                 .await?;
             self.manager
-                .finalize_session(&session_id, opts.initial_prompt, opts.base_branch)
+                .finalize_session_for_provider(
+                    &session_id,
+                    opts.initial_prompt,
+                    opts.base_branch,
+                    code_host_provider,
+                )
                 .await?;
             Ok::<(), crate::Error>(())
         }
@@ -1292,6 +1475,54 @@ impl CommanderService {
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
+        let (provider, epoch) = self.review_provider_snapshot().await;
+        self.apply_pr_results_at_epoch(provider, epoch, results)
+            .await
+            .map(|_| ())
+    }
+
+    async fn review_provider_snapshot(&self) -> (CodeHostProvider, u64) {
+        let _guard = self.review_provider_lock.lock().await;
+        (
+            self.config_store.read().code_host_provider,
+            self.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    async fn apply_pr_results_for_provider(
+        &self,
+        provider: CodeHostProvider,
+        results: Vec<(SessionId, PrCheckResult)>,
+    ) -> Result<()> {
+        let epoch = self
+            .review_provider_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.apply_pr_results_at_epoch(provider, epoch, results)
+            .await
+            .map(|_| ())
+    }
+
+    /// Apply results only while their provider snapshot is still current. The
+    /// provider-transition lock spans both the check and persisted mutation, so
+    /// a switch cannot clear the cache and then be overwritten by an older
+    /// in-flight sweep.
+    async fn apply_pr_results_at_epoch(
+        &self,
+        provider: CodeHostProvider,
+        epoch: u64,
+        results: Vec<(SessionId, PrCheckResult)>,
+    ) -> Result<bool> {
+        let _guard = self.review_provider_lock.lock().await;
+        if self.config_store.read().code_host_provider != provider
+            || self
+                .review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != epoch
+        {
+            return Ok(false);
+        }
         let sections =
             crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
@@ -1314,15 +1545,7 @@ impl CommanderService {
                             session.pr_base_branch = info.base_ref_name.clone();
                         }
                         PrCheckResult::NotFound => {
-                            session.pr_number = None;
-                            session.pr_url = None;
-                            session.pr_state = None;
-                            session.pr_draft = false;
-                            session.pr_labels.clear();
-                            session.pr_merged = false;
-                            session.review_decision = None;
-                            session.pr_reviewers.clear();
-                            session.pr_base_branch = None;
+                            session.clear_review_metadata();
                         }
                         PrCheckResult::FetchFailed => {}
                     }
@@ -1350,7 +1573,7 @@ impl CommanderService {
                 .configure_status_bar(tmux_name, info)
                 .await;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Mark a batch of sessions unread (agent-finished transitions detected by
@@ -1425,7 +1648,16 @@ impl CommanderService {
 
     pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.telemetry.feature("session.delete");
-        self.manager.delete_session(id).await
+        let _guard = self.review_provider_lock.lock().await;
+        let plan = self.manager.prepare_delete_session(id).await?;
+        drop(_guard);
+        self.manager.finish_delete_session(plan).await;
+        // Best-effort: the session is already gone, so a leftover marks file
+        // is litter, not a failure to report.
+        if let Err(e) = self.reviewed.remove(*id).await {
+            tracing::warn!("Failed to remove reviewed marks for {id}: {e}");
+        }
+        Ok(())
     }
 
     /// Set a session's keep-alive flag (opt-out of auto-hibernation).
@@ -1450,8 +1682,9 @@ impl CommanderService {
         self.telemetry.feature("review.open");
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
+        let composed_at = Utc::now();
         let composed = compose_review_diff(&worktree_path, &base).await?;
-        self.snapshot_from_raw(session_id, &worktree_path, base, composed)
+        self.snapshot_from_raw(session_id, &worktree_path, base, composed, composed_at)
             .await
     }
 
@@ -1468,12 +1701,13 @@ impl CommanderService {
     ) -> Result<Option<ReviewSnapshot>> {
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
+        let composed_at = Utc::now();
         let composed = compose_review_diff(&worktree_path, &base).await?;
         if xxhash_rust::xxh3::xxh3_64(composed.raw.as_bytes()) == prev_hash {
             return Ok(None);
         }
         Ok(Some(
-            self.snapshot_from_raw(session_id, &worktree_path, base, composed)
+            self.snapshot_from_raw(session_id, &worktree_path, base, composed, composed_at)
                 .await?,
         ))
     }
@@ -1493,13 +1727,15 @@ impl CommanderService {
     /// Build a [`ReviewSnapshot`] from an already-composed unified diff: hash it
     /// for staleness detection, parse it, then drop orphaned comments, re-anchor
     /// the rest, and prune stale reviewed marks against the parsed diff
-    /// (persisting any changes).
+    /// (persisting any changes). `composed_at` is when the composition began:
+    /// marks set after it can't be judged against this diff.
     async fn snapshot_from_raw(
         &self,
         session_id: &SessionId,
         worktree_path: &Path,
         base: String,
         composed: ComposedDiff,
+        composed_at: DateTime<Utc>,
     ) -> Result<ReviewSnapshot> {
         let content_hash = xxhash_rust::xxh3::xxh3_64(composed.raw.as_bytes());
         let mut diff = parse_unified_diff(&composed.raw);
@@ -1530,11 +1766,33 @@ impl CommanderService {
         // simply omits it would silently throw away review progress (a stacked
         // base that only exists remotely degrades on *every* open, so this is a
         // persistent state, not a transient one).
+        //
+        // Read-modify-write under the store's lock, so a mark the CLI sets
+        // meanwhile is neither overwritten nor (being newer than `composed_at`)
+        // pruned against a diff that predates it.
+        // The common open/refresh has nothing to prune, so it reads without
+        // the lock and takes it only to prune (re-checking under it).
+        let hashes = DiffHashes::of(&diff);
         let mut marks = self.reviewed.load(*session_id).await?;
-        if can_prune && crate::reviewed::prune_invalidated(&mut marks, &diff) {
-            self.reviewed.save(*session_id, &marks).await?;
+        if can_prune && crate::reviewed::has_invalidated(&marks, &hashes, composed_at) {
+            let hashes = hashes.clone();
+            marks = self
+                .reviewed
+                .update(*session_id, move |marks| {
+                    let pruned = crate::reviewed::prune_invalidated(marks, &hashes, composed_at);
+                    (marks.clone(), pruned)
+                })
+                .await?;
         }
-        let reviewed = marks.into_iter().map(|m| m.file).collect();
+        // Only a mark pinned to the content shown reads as reviewed — on a
+        // degraded diff too, where nothing is pruned but a mark for edited
+        // content still mustn't show (so this view agrees with `review files`).
+        // In store order, so the snapshot is deterministic.
+        let reviewed = marks
+            .into_iter()
+            .filter(|m| hashes.holds(&m.file, &m.hash))
+            .map(|m| m.file)
+            .collect();
 
         Ok(ReviewSnapshot {
             base,
@@ -1573,24 +1831,11 @@ impl CommanderService {
         }
     }
 
-    /// Toggle the reviewed mark for one file of a session's review diff.
-    /// The hash is computed from the `FileDiff` the caller is displaying, so
-    /// the mark records exactly what the user saw (not a possibly-newer
-    /// working tree). Returns the new reviewed state.
-    pub async fn toggle_file_reviewed(
-        &self,
-        session_id: &SessionId,
-        file: &FileDiff,
-    ) -> Result<bool> {
-        self.telemetry.feature("review.toggle_reviewed");
-        let mut marks = self.reviewed.load(*session_id).await?;
-        let now_reviewed = crate::reviewed::toggle(&mut marks, file);
-        self.reviewed.save(*session_id, &marks).await?;
-        Ok(now_reviewed)
-    }
-
-    /// Toggle a file's reviewed mark by display path: resolve the file in the
-    /// **current** review diff and toggle against that. Keeps the wire API down
+    /// Toggle a file's reviewed mark by display path — only for a request
+    /// that doesn't say which state it wants (a client predating
+    /// [`ToggleReviewed::reviewed`]); every in-tree frontend uses
+    /// [`Self::set_file_reviewed_by_path`]. Resolves the file in the
+    /// **current** review diff and toggles against that. Keeps the wire API down
     /// to a path (no `FileDiff` echo for remote clients to cache) and makes it
     /// impossible to record a mark against a stale copy of the file — the hash
     /// always reflects the diff as it exists now. `FileNotInDiff` when the path
@@ -1600,15 +1845,140 @@ impl CommanderService {
         session_id: &SessionId,
         display_path: &str,
     ) -> Result<bool> {
-        let (worktree_path, review_base) = self.review_target(session_id).await?;
-        let base = review_base.git_ref(&worktree_path).await;
-        let diff = parse_unified_diff(&compose_review_diff(&worktree_path, &base).await?.raw);
+        self.telemetry.feature("review.toggle_reviewed");
+        let target = self.current_mark_for(session_id, display_path).await?;
+        self.reviewed
+            .update(*session_id, move |marks| {
+                (crate::reviewed::toggle(marks, &target), true)
+            })
+            .await
+    }
+
+    /// Set (`reviewed`) or clear one file's mark by display path, against the
+    /// current diff — the direction-explicit counterpart of
+    /// [`Self::toggle_file_reviewed_by_path`] for a view that knows which way
+    /// the user meant (see [`ToggleReviewed::reviewed`]). Returns the new state.
+    pub async fn set_file_reviewed_by_path(
+        &self,
+        session_id: &SessionId,
+        display_path: &str,
+        reviewed: bool,
+    ) -> Result<bool> {
+        // Same metric as the toggle: this is the TUI's `m`.
+        self.telemetry.feature("review.toggle_reviewed");
+        let target = self.current_mark_for(session_id, display_path).await?;
+        self.reviewed
+            .update(*session_id, move |marks| {
+                (reviewed, crate::reviewed::set(marks, &target, reviewed))
+            })
+            .await
+    }
+
+    /// The mark pinning `display_path` to its content in the **current**
+    /// review diff; `FileNotInDiff` when it isn't there.
+    async fn current_mark_for(
+        &self,
+        session_id: &SessionId,
+        display_path: &str,
+    ) -> Result<ReviewedFileMark> {
+        // Only the one file is hashed, not the whole diff.
+        let diff = self.current_review_diff(session_id).await?;
         let file = diff
             .files
             .iter()
             .find(|f| f.display_path() == display_path)
             .ok_or_else(|| SessionError::FileNotInDiff(display_path.to_string()))?;
-        self.toggle_file_reviewed(session_id, file).await
+        Ok(ReviewedFileMark {
+            file: display_path.to_string(),
+            hash: claude_commander_viewmodel::review::hash_hex(file),
+        })
+    }
+
+    /// Parse the session's review diff as it exists now, for operations that
+    /// resolve files by path (so a mark is always pinned to current content).
+    async fn current_review_diff(&self, session_id: &SessionId) -> Result<ParsedDiff> {
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
+        let base = review_base.git_ref(&worktree_path).await;
+        Ok(parse_unified_diff(
+            &compose_review_diff(&worktree_path, &base).await?.raw,
+        ))
+    }
+
+    /// Set (or clear) the reviewed mark on several files of a session's review
+    /// diff at once, resolved against the current diff (see
+    /// [`crate::reviewed::resolve_selection`]). Idempotent — the bulk
+    /// counterpart of [`Self::toggle_file_reviewed_by_path`] for callers (the
+    /// CLI, an agent) that must be safe to re-run. All-or-nothing: a path not
+    /// in the diff, or one whose `@hash` no longer matches, fails the call
+    /// (`FileSelectionRejected`, naming every such file) and nothing is
+    /// written.
+    pub async fn set_files_reviewed(
+        &self,
+        session_id: &SessionId,
+        selection: &FileSelection,
+        reviewed: bool,
+    ) -> Result<SetReviewedOutcome> {
+        self.telemetry.feature("review.set_reviewed");
+        let diff = self.current_review_diff(session_id).await?;
+        let hashes = DiffHashes::of(&diff);
+        let targets: Vec<ReviewedFileMark> =
+            crate::reviewed::resolve_selection(&diff, &hashes, selection)?
+                .into_iter()
+                .filter_map(|f| hashes.mark_for(f.display_path()))
+                .collect();
+        self.reviewed
+            .update(*session_id, move |marks| {
+                let mut outcome = SetReviewedOutcome::default();
+                for target in targets {
+                    if crate::reviewed::set(marks, &target, reviewed) {
+                        outcome.changed.push(target.file);
+                    } else {
+                        outcome.unchanged.push(target.file);
+                    }
+                }
+                let changed = !outcome.changed.is_empty();
+                (outcome, changed)
+            })
+            .await
+    }
+
+    /// Read a session's review diff and which of its files are reviewed,
+    /// **without** the side effects of [`Self::open_review`] (no comment
+    /// re-anchoring or pruning, no store writes, no telemetry): the `review`
+    /// CLI reads concurrently with an open frontend, and a stale whole-file
+    /// save from a read would clobber that frontend's edits. Reviewed state is
+    /// hash-checked against this diff (`live_paths`), so a file edited since it
+    /// was marked reads as unreviewed even when pruning would be unsound.
+    pub async fn peek_review(&self, session_id: &SessionId) -> Result<ReviewPeek> {
+        // `current_review_diff` already checked the session exists.
+        let diff = self.current_review_diff(session_id).await?;
+        let hashes = DiffHashes::of(&diff);
+        let marks = self.reviewed.load(*session_id).await?;
+        let reviewed = claude_commander_viewmodel::review::live_paths(
+            marks.iter().map(|m| (m.file.as_str(), m.hash.as_str())),
+            &hashes,
+        );
+        Ok(ReviewPeek {
+            diff,
+            hashes,
+            reviewed,
+        })
+    }
+
+    /// A session's stored reviewed marks, unpruned. Cheap (one small file
+    /// read, no compose), so an open review view can poll it to pick up marks
+    /// set elsewhere; see `claude_commander_viewmodel::review::fold_marks` for the filtering a
+    /// caller must apply. `NotFound` for an unknown session, so a poller can
+    /// tell a deleted session from one with no marks.
+    pub async fn reviewed_marks(&self, session_id: &SessionId) -> Result<Vec<ReviewedFileMark>> {
+        self.review_target(session_id).await?;
+        Ok(self
+            .reviewed
+            .load(*session_id)
+            .await?
+            .iter()
+            .map(ReviewedFileMark::from)
+            .collect())
     }
 
     /// List a session's stored comments (without re-anchoring).
@@ -1786,6 +2156,7 @@ impl CommanderService {
     /// run (or when project auto-pull is disabled).
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let gh_available = self.gh_available().await;
+        let code_host = self.code_host_status().await;
         let tmux_ok = self.cached_tmux_ok().await;
         let pending = self.sessions_with_pending_comments().await?;
 
@@ -1822,6 +2193,7 @@ impl CommanderService {
             operations: self.operations_snapshot(),
             server: ServerStatus {
                 gh_available,
+                code_host,
                 tmux_ok,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
@@ -1883,13 +2255,27 @@ impl CommanderService {
     /// or a project. Lifts the TUI's `fetch_preview_data`; the TUI keeps its own
     /// copy until Phase C deletes it.
     pub async fn preview(&self, target: PreviewTarget) -> Result<PreviewData> {
+        self.preview_part(target, claude_commander_protocol::preview::PreviewPart::All)
+            .await
+    }
+
+    pub async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
         match target {
-            PreviewTarget::Session { id, lines } => self.session_preview(&id, lines).await,
-            PreviewTarget::Project(id) => self.project_preview(&id).await,
+            PreviewTarget::Session { id, lines } => self.session_preview(&id, lines, part).await,
+            PreviewTarget::Project(id) => self.project_preview(&id, part).await,
         }
     }
 
-    async fn session_preview(&self, sid: &SessionId, lines: Option<usize>) -> Result<PreviewData> {
+    async fn session_preview(
+        &self,
+        sid: &SessionId,
+        lines: Option<usize>,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
         let (is_creating, tmux_name) = {
             let state = self.store.read().await;
             match state.get_session(sid) {
@@ -1911,41 +2297,89 @@ impl CommanderService {
             });
         }
 
-        // An explicit line count captures the pane directly; otherwise use the
-        // manager's cached content (matches the TUI preview).
-        let pane = match lines {
-            Some(n) => capture_pane(&self.manager.tmux, &tmux_name, Some(n)).await?,
-            None => self.manager.get_content(sid).await.ok().map(|c| c.content),
-        };
-        let diff = self.manager.get_diff(sid).await.ok();
-        let shell = self
-            .manager
-            .get_shell_content(sid)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.content);
+        use claude_commander_protocol::preview::PreviewPart;
+        let (pane, diff, shell) = tokio::join!(
+            async {
+                if !matches!(part, PreviewPart::All | PreviewPart::Pane) {
+                    return Ok(None);
+                }
+                match lines {
+                    Some(n) => capture_pane(&self.manager.tmux, &tmux_name, Some(n)).await,
+                    None => Ok(self.manager.get_content(sid).await.ok().map(|c| c.content)),
+                }
+            },
+            async {
+                if part == PreviewPart::Stats {
+                    self.manager.get_diff_stats(sid).await.ok()
+                } else if matches!(part, PreviewPart::All | PreviewPart::Diff) {
+                    self.manager.get_diff(sid).await.ok()
+                } else {
+                    None
+                }
+            },
+            async {
+                if matches!(part, PreviewPart::All | PreviewPart::Shell) {
+                    self.manager
+                        .get_shell_content(sid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.content)
+                } else {
+                    None
+                }
+            },
+        );
+        let pane = pane?;
         Ok(PreviewData {
             pane,
-            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_text: if part == PreviewPart::Stats {
+                String::new()
+            } else {
+                diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default()
+            },
             diff_stat: diff.as_ref().map(|d| d.summary()),
             stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
         })
     }
 
-    async fn project_preview(&self, pid: &ProjectId) -> Result<PreviewData> {
-        let diff = self.manager.get_project_diff(pid).await.ok();
-        let shell = self
-            .manager
-            .get_project_shell_content(pid)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.content);
+    async fn project_preview(
+        &self,
+        pid: &ProjectId,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
+        use claude_commander_protocol::preview::PreviewPart;
+        let (diff, shell) = tokio::join!(
+            async {
+                if part == PreviewPart::Stats {
+                    self.manager.get_project_diff_stats(pid).await.ok()
+                } else if matches!(part, PreviewPart::All | PreviewPart::Diff) {
+                    self.manager.get_project_diff(pid).await.ok()
+                } else {
+                    None
+                }
+            },
+            async {
+                if matches!(part, PreviewPart::All | PreviewPart::Shell) {
+                    self.manager
+                        .get_project_shell_content(pid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.content)
+                } else {
+                    None
+                }
+            },
+        );
         Ok(PreviewData {
             pane: None,
-            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_text: if part == PreviewPart::Stats {
+                String::new()
+            } else {
+                diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default()
+            },
             diff_stat: diff.as_ref().map(|d| d.summary()),
             stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
@@ -2011,6 +2445,7 @@ impl CommanderService {
             .mutate(move |state| {
                 if let Some(s) = state.get_session_mut(&sid) {
                     s.program = prog;
+                    s.pending_program = None;
                 }
             })
             .await?;
@@ -2018,6 +2453,103 @@ impl CommanderService {
         // the previous harness's conversation belongs to a different CLI and
         // can't be resumed by the new one.
         self.manager.restart_session_fresh(id).await
+    }
+
+    /// Recover an exited agent without applying deferred settings.
+    pub async fn recover_session_fresh(&self, id: &SessionId) -> Result<()> {
+        self.manager.recover_session_fresh(id).await
+    }
+
+    /// Save session settings, optionally restarting fresh when the program changes.
+    /// A pending program never changes live-agent detection or stops the existing pane.
+    pub async fn edit_session(
+        &self,
+        id: &SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> Result<claude_commander_protocol::api::EditSessionOutcome> {
+        let title = edit.title.map(|v| v.trim().to_string());
+        if title.as_ref().is_some_and(|v| v.is_empty()) {
+            return Err(SessionError::InvalidName {
+                name: String::new(),
+                reason: "session name cannot be empty".into(),
+            }
+            .into());
+        }
+        let program = edit.program.map(|v| v.trim().to_string());
+        if program.as_ref().is_some_and(|v| v.is_empty()) {
+            return Err(SessionError::InvalidProgram("program cannot be empty".into()).into());
+        }
+        // Like `set_session_base`: the lock covers the mutation only, so it is
+        // scoped to this block. The provider is captured under it, and the
+        // retarget and restart below can each take seconds.
+        let (provider, base, pending) = {
+            let _guard = self.review_provider_lock.lock().await;
+            let provider = self.config_store.read().code_host_provider;
+            let sections =
+                crate::session::effective_sections(&self.config_store.read().sections).into_owned();
+            let sid = *id;
+            let (base, pending) = self
+                .store
+                .try_mutate(move |state| {
+                    if state.get_session(&sid).is_none() {
+                        return Err(SessionError::NotFound(sid).into());
+                    }
+                    let base = edit
+                        .base
+                        .map(|base| {
+                            state
+                                .set_session_base(&sid, base.parent_session_id)
+                                .map_err(crate::Error::from)
+                        })
+                        .transpose()?;
+                    let session = state
+                        .get_session_mut(&sid)
+                        .ok_or(SessionError::NotFound(sid))?;
+                    if let Some(title) = title {
+                        session.title = title;
+                    }
+                    if let Some(program) = program {
+                        session.pending_program = (program != session.program).then_some(program);
+                    }
+                    if let Some(keep_alive) = edit.keep_alive {
+                        session.keep_alive = keep_alive;
+                    }
+                    if let Some(section) = edit.section
+                        && section != session.section_override
+                    {
+                        match section {
+                            Some(name) => {
+                                session.section_override = Some(name);
+                                apply_assignment(session, &sections, chrono::Utc::now());
+                            }
+                            None => {
+                                clear_override_and_reassign(session, &sections, chrono::Utc::now());
+                            }
+                        }
+                    }
+                    Ok::<_, crate::Error>((base, session.pending_program.is_some()))
+                })
+                .await?;
+            (provider, base, pending)
+        };
+        self.telemetry.feature("session.edit");
+        let mut outcome = claude_commander_protocol::api::EditSessionOutcome::default();
+        if let Some((plan, retarget)) = base {
+            let base = self.finish_base_change(provider, plan, retarget).await;
+            if let PrRetarget::Failed { message, .. } = &base.pr {
+                outcome.warnings.push(format!(
+                    "Session saved, but PR target update failed: {message}"
+                ));
+            }
+            outcome.base = Some(base);
+        }
+        if edit.restart && pending {
+            match self.manager.restart_session_fresh(id).await {
+                Ok(()) => outcome.restarted = true,
+                Err(error) => outcome.warnings.push(format!("Session saved, but restart failed: {error}. The program change remains pending; retry restart.")),
+            }
+        }
+        Ok(outcome)
     }
 
     /// Move a session to a section (`Some(name)`) or clear its manual override
@@ -2066,29 +2598,46 @@ impl CommanderService {
         parent: Option<SessionId>,
     ) -> Result<SetSessionBaseOutcome> {
         self.telemetry.feature("session.set_base");
-        let session_id = *id;
-        let (plan, pr_retarget) = self
-            .store
-            .try_mutate(move |state| {
-                state
-                    .set_session_base(&session_id, parent)
-                    // An unknown session id is a 404 everywhere else in the API;
-                    // don't let it fall through the rejection's 400/409 mapping.
-                    .map_err(|e| match e {
-                        crate::session::SetBaseRejection::SessionNotFound => {
-                            SessionError::NotFound(session_id).into()
-                        }
-                        other => crate::Error::from(other),
-                    })
-            })
-            .await?;
+        // The lock covers the mutation only; the retarget below can take seconds.
+        let (provider, plan, pr_retarget) = {
+            let _guard = self.review_provider_lock.lock().await;
+            // Keep one provider for the whole operation even if config hot-reloads
+            // while the state mutation is in flight.
+            let provider = self.config_store.read().code_host_provider;
+            let session_id = *id;
+            let (plan, pr_retarget) = self
+                .store
+                .try_mutate(move |state| {
+                    state
+                        .set_session_base(&session_id, parent)
+                        // An unknown session id is a 404 everywhere else in the API;
+                        // don't let it fall through the rejection's 400/409 mapping.
+                        .map_err(|e| match e {
+                            crate::session::SetBaseRejection::SessionNotFound => {
+                                SessionError::NotFound(session_id).into()
+                            }
+                            other => crate::Error::from(other),
+                        })
+                })
+                .await?;
+            (provider, plan, pr_retarget)
+        };
+        Ok(self.finish_base_change(provider, plan, pr_retarget).await)
+    }
 
+    async fn finish_base_change(
+        &self,
+        provider: claude_commander_protocol::hosting::CodeHostProvider,
+        plan: crate::config::storage::SetBasePlan,
+        pr_retarget: Option<crate::config::storage::PrBaseRetarget>,
+    ) -> SetSessionBaseOutcome {
         // Durable half, best-effort. The local mirror already re-stacked the
         // tree, but only this makes it survive the next PR sync — so a failure
         // is reported rather than logged.
         let pr = match pr_retarget {
             None => PrRetarget::NoPr,
-            Some(r) => match crate::git::try_retarget_pr_base(
+            Some(r) => match crate::git::hosting::try_retarget_review_base(
+                provider,
                 &r.repo_path,
                 r.pr_number,
                 &r.new_base_branch,
@@ -2105,11 +2654,11 @@ impl CommanderService {
             },
         };
 
-        Ok(SetSessionBaseOutcome {
+        SetSessionBaseOutcome {
             new_base_branch: plan.new_base_branch,
             old_base_branch: plan.old_base_branch,
             pr,
-        })
+        }
     }
 
     /// Stamp a session's `last_attached_at` to now, for MRU ordering in the
@@ -2271,7 +2820,7 @@ impl CommanderService {
         had_states
     }
 
-    /// Refresh and persist PR metadata before returning, without a background loop.
+    /// Refresh and persist PR/MR metadata before returning, without a background loop.
     /// `None` refreshes all eligible sessions; `Some` restricts the host query to one.
     pub async fn refresh_pr_status(&self, session: Option<&SessionId>) -> Result<usize> {
         if let Some(id) = session {
@@ -2282,19 +2831,23 @@ impl CommanderService {
     }
 
     async fn fetch_pr_status(&self, session: Option<&SessionId>) -> Result<usize> {
+        let (provider, epoch) = self.review_provider_snapshot().await;
         let targets = self.pr_refresh_targets(session).await?;
         if targets.is_empty() {
             return Ok(0);
         }
-        if !self.gh_available().await {
-            return Err(crate::error::GitError::GhUnavailable.into());
+        if !self.code_host_cli_available(provider).await {
+            return Err(crate::error::GitError::CodeHostCliUnavailable { provider }.into());
         }
         let results: Vec<(SessionId, PrCheckResult)> =
             futures::stream::iter(targets.into_iter().map(
                 |(id, branch, repo_path, created_at)| async move {
                     (
                         id,
-                        crate::git::check_pr_for_branch(&repo_path, &branch, created_at).await,
+                        crate::git::hosting::check_review_for_branch(
+                            provider, &repo_path, &branch, created_at,
+                        )
+                        .await,
                     )
                 },
             ))
@@ -2306,10 +2859,18 @@ impl CommanderService {
             .filter(|(_, result)| matches!(result, PrCheckResult::FetchFailed))
             .count();
         let count = results.len();
-        self.apply_pr_results(results).await?;
+        if !self
+            .apply_pr_results_at_epoch(provider, epoch, results)
+            .await?
+        {
+            return Err(crate::error::GitError::OperationFailed(
+                "Code-host settings changed during refresh; retry the command".into(),
+            )
+            .into());
+        }
         if failed > 0 {
             return Err(crate::error::GitError::OperationFailed(format!(
-                "PR metadata refresh failed for {failed} of {count} sessions; check gh authentication and connectivity",
+                "PR/MR metadata refresh failed for {failed} of {count} sessions; check code-host CLI authentication and connectivity",
             )).into());
         }
         Ok(count)
@@ -2467,12 +3028,17 @@ impl CommanderService {
                 // Wake the change-feed only when observable state actually
                 // changed (fresh states, or the commander flipped), so a steady
                 // row of idle agents doesn't trigger a snapshot re-fetch every
-                // tick. Persisting unread already bumps the feed; otherwise wake
-                // it explicitly. The cache is updated first so the snapshot the
-                // wake triggers reads the fresh states.
+                // tick. Persisting unread is not enough on its own: marking an
+                // already-unread session is a no-op mutate that skips the
+                // generation bump (pinned by
+                // `mark_unread_on_an_already_unread_session_does_not_bump_generation`),
+                // so wake the feed explicitly whenever states changed. The
+                // cache is updated first so the snapshot the wake triggers
+                // reads the fresh states.
                 if !unread_ids.is_empty() {
                     let _ = service.mark_unread(unread_ids).await;
-                } else if states_changed || commander_flipped {
+                }
+                if states_changed || commander_flipped {
                     store.notify_change();
                 }
             }
@@ -2517,7 +3083,7 @@ impl CommanderService {
             .collect())
     }
 
-    /// Fan out `gh pr list` across all sessions on a fixed cadence (and on
+    /// Query the selected code host across all sessions on a fixed cadence (and on
     /// [`Self::request_pr_refresh`]), then persist results via
     /// [`Self::apply_pr_results`]. When `interval_secs` is 0 the periodic tick is
     /// disabled but a manual refresh still runs.
@@ -2548,13 +3114,9 @@ impl CommanderService {
                     }
                     *lc = Some(now);
                 }
-                // Adopt any branch renames before polling, so this same tick
-                // queries GitHub with the corrected `--head` name.
+                // Adopt branch renames before fetching review metadata on this tick.
                 if let Err(e) = service.reconcile_session_branches().await {
                     debug!("reconcile_session_branches failed: {e}");
-                }
-                if !service.gh_available().await {
-                    continue;
                 }
                 if let Err(e) = service.fetch_pr_status(None).await {
                     debug!("PR metadata refresh failed: {e}");
@@ -2627,20 +3189,75 @@ impl CommanderService {
     /// Reload the state file on a fixed cadence, waking the change-feed when
     /// another instance mutated it. No-op loop when `interval_ms` is 0.
     fn spawn_state_sync_loop(&self, interval_ms: u64) -> tokio::task::JoinHandle<()> {
-        let store = self.store.clone();
+        let service = self.clone();
         tokio::spawn(async move {
             if interval_ms == 0 {
                 return;
             }
+            let data_dir = service.store.data_dir();
+            let mut watcher = tokio::task::spawn_blocking(move || {
+                crate::file_events::FileEvents::state(&data_dir)
+            })
+            .await
+            .ok()
+            .and_then(|result| result.ok());
+            let mut retry_at = std::time::Instant::now() + Duration::from_secs(30);
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
-                match store.reload_if_changed().await {
-                    Ok(_) => {}
-                    Err(e) => debug!("State sync check failed: {e}"),
+                if watcher.is_none() && std::time::Instant::now() >= retry_at {
+                    let data_dir = service.store.data_dir();
+                    watcher = tokio::task::spawn_blocking(move || {
+                        crate::file_events::FileEvents::state(&data_dir)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
+                }
+                let event = tokio::select! {
+                    _ = interval.tick() => false,
+                    _ = async {
+                        match &mut watcher {
+                            Some(watcher) => { watcher.changed().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => true,
+                };
+                if event {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Drain the coalesced batch, including events during the delay.
+                    if let Some(watcher) = &mut watcher {
+                        watcher.take_changed();
+                    }
+                }
+                let review_changed = watcher.as_ref().is_some_and(|w| w.take_review_changed());
+                service.reconcile_state_files(review_changed).await;
+                if watcher.as_ref().is_some_and(|w| !w.healthy()) {
+                    watcher = None;
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
                 }
             }
         })
+    }
+
+    async fn reconcile_state_files(&self, review_changed: bool) {
+        if review_changed {
+            self.comments.invalidate_pending().await;
+        }
+        let reloaded = match self.store.reload_if_changed().await {
+            Ok(changed) => changed,
+            Err(e) => {
+                debug!("State sync check failed: {e}");
+                false
+            }
+        };
+        // reload_if_changed notifies for external state writes. Healthy events
+        // for our own state writes need no second wakeup; uncertain/rescan
+        // events still conservatively invalidate review consumers.
+        if review_changed && !reloaded {
+            self.store.notify_change();
+        }
     }
 
     // -- Internal helpers for the workspace surface --
@@ -2651,6 +3268,48 @@ impl CommanderService {
             .gh_available
             .get_or_init(|| async { is_gh_available().await })
             .await
+    }
+
+    async fn code_host_status(&self) -> claude_commander_protocol::api::CodeHostStatus {
+        let (provider, hostname) = {
+            let config = self.config_store.read();
+            (
+                config.code_host_provider,
+                (config.code_host_provider == CodeHostProvider::Gitlab)
+                    .then(|| config.gitlab_hostname.clone())
+                    .flatten(),
+            )
+        };
+        let cli_available = self.code_host_cli_available(provider).await;
+        claude_commander_protocol::api::CodeHostStatus {
+            provider,
+            hostname,
+            cli_available,
+        }
+    }
+
+    async fn code_host_cli_available(&self, provider: CodeHostProvider) -> bool {
+        match provider {
+            CodeHostProvider::Github => self.gh_available().await,
+            CodeHostProvider::Gitlab => {
+                let cached = *self
+                    .glab_available
+                    .lock()
+                    .expect("glab availability poisoned");
+                if let Some((at, available)) = cached
+                    && at.elapsed() < Duration::from_secs(if available { 30 } else { 5 })
+                {
+                    return available;
+                }
+                let available = crate::git::hosting::gitlab::is_available().await;
+                *self
+                    .glab_available
+                    .lock()
+                    .expect("glab availability poisoned") =
+                    Some((std::time::Instant::now(), available));
+                available
+            }
+        }
     }
 
     /// Error with `NotFound` when a session id doesn't exist, so mutations can
@@ -2749,6 +3408,16 @@ impl CommanderService {
             .cloned()
             .collect()
     }
+}
+
+/// [`CommanderService::peek_review`]'s result: the current review diff, its
+/// per-file hashes, and the display paths of its files whose reviewed mark
+/// holds against it.
+#[derive(Debug, Clone)]
+pub struct ReviewPeek {
+    pub diff: ParsedDiff,
+    pub hashes: DiffHashes,
+    pub reviewed: std::collections::HashSet<String>,
 }
 
 /// What a [`CommanderService::preview`] call targets: a session (with an
@@ -3084,20 +3753,20 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         .into());
     }
     // An initial prompt is passed as a positional argument, which only
-    // harnesses that accept one (claude, codex, omp) understand.
+    // harnesses that accept one (claude, codex, omp, muse-code) understand.
     if opts.initial_prompt.is_some() && !kind.accepts_positional_prompt() {
         return Err(SessionError::InvalidProgram(format!(
             "--initial-prompt is only supported for programs that accept a \
-             positional prompt, e.g. claude, codex, or omp (got {:?})",
+             positional prompt, e.g. claude, codex, omp, or muse-code (got {:?})",
             resolved_program
         ))
         .into());
     }
-    // `--model` is understood by Claude, Codex, OpenCode, and omp.
+    // `--model` is understood by every recognised harness.
     if opts.model.is_some() && !kind.supports_model_flag() {
         return Err(SessionError::InvalidProgram(format!(
             "--model is only supported for programs that accept it, e.g. \
-             claude, codex, opencode, or omp (got {:?})",
+             claude, codex, opencode, omp, or muse-code (got {:?})",
             resolved_program
         ))
         .into());
@@ -3183,6 +3852,7 @@ pub(crate) fn session_info_from_session(
         branch: session.branch.clone(),
         status: session.status,
         program: session.program.clone(),
+        pending_program: session.pending_program.clone(),
         project_id: session.project_id,
         project_name: project_name.to_string(),
         pr_number: session.pr_number,
@@ -3276,6 +3946,7 @@ pub fn snapshot_from_state(state: &AppState) -> Snapshot {
         operations: Vec::new(),
         server: ServerStatus {
             gh_available: false,
+            code_host: Default::default(),
             tmux_ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
@@ -3340,6 +4011,21 @@ fn clone_dir_name(req: &CloneRequest) -> Result<String> {
                 .map_or(full_name.as_str(), |(_, name)| name)
                 .to_string()
         }
+        CloneSource::Gitlab {
+            full_name,
+            hostname,
+        } => {
+            validate_hosted_repo_slug(CodeHostProvider::Gitlab, full_name)
+                .map_err(clone_source_rejected)?;
+            if let Some(hostname) = hostname {
+                validate_gitlab_hostname(hostname).map_err(clone_source_rejected)?;
+            }
+            full_name
+                .rsplit('/')
+                .next()
+                .expect("validated slug")
+                .to_string()
+        }
         CloneSource::Url { url } => {
             validate_clone_url(url)
                 .map_err(clone_source_rejected)?
@@ -3362,6 +4048,7 @@ fn clone_dir_name(req: &CloneRequest) -> Result<String> {
 fn clone_source_label(source: &CloneSource) -> &str {
     match source {
         CloneSource::Github { full_name } => full_name,
+        CloneSource::Gitlab { full_name, .. } => full_name,
         CloneSource::Url { url } => url,
     }
 }
@@ -3832,6 +4519,328 @@ mod tests {
     /// `Config::data_dir()`. Writing a comment proves the on-disk path is the
     /// injected one (test-isolation regression).
     #[tokio::test]
+    async fn provider_transition_preserves_a_concurrent_synchronous_setting() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let state_guard = svc.store().read().await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let svc = svc.clone();
+            let entered = entered.clone();
+            async move {
+                svc.edit_code_host_config(move |config| {
+                    config.code_host_provider = CodeHostProvider::Gitlab;
+                    entered.notify_one();
+                    Ok(())
+                })
+                .await
+            }
+        });
+        entered.notified().await;
+        let mut config = svc.read_config();
+        config.ui_refresh_fps = 23;
+        svc.update_config(config).unwrap();
+        drop(state_guard);
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.read_config().ui_refresh_fps, 23);
+    }
+
+    /// A whole-config write built from a cache that predates a provider switch
+    /// must be rejected without reverting the switch. The comparison runs
+    /// inside the store's `try_mutate`, against the value it is about to replace.
+    #[tokio::test]
+    async fn stale_provider_update_is_rejected_without_reverting_the_switch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let mut stale = svc.read_config();
+        svc.edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        stale.ui_refresh_fps = 23;
+        assert!(svc.update_config(stale).is_err());
+        let config = svc.read_config();
+        assert_eq!(config.code_host_provider, CodeHostProvider::Gitlab);
+        assert_ne!(config.ui_refresh_fps, 23);
+    }
+
+    async fn seed_review_metadata(svc: &CommanderService) -> SessionId {
+        let (_, sid) = seed_project_session(svc).await;
+        svc.store()
+            .mutate(move |state| {
+                state.sessions.get_mut(&sid).unwrap().pr_number = Some(7);
+            })
+            .await
+            .unwrap();
+        sid
+    }
+
+    /// The edit is applied once, inside the persist, and invalidation follows
+    /// it. Applying it a second time to a pre-read snapshot (and invalidating
+    /// on that) wiped review metadata and bumped the epoch even when the
+    /// persisted application then failed and the provider never changed.
+    #[tokio::test]
+    async fn provider_edit_is_applied_once_and_invalidation_follows_the_persist() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_review_metadata(&svc).await;
+        // Succeeds on its first application and fails on any later one, as a
+        // validating merge would when the latest config differs from the
+        // snapshot it was first tried against.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        svc.edit_code_host_config(|config| {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0 {
+                return Err(ConfigError::InvalidValue {
+                    key: "code_host_provider".into(),
+                    reason: "rejected".into(),
+                }
+                .into());
+            }
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.store().read().await.sessions[&sid].pr_number, None);
+        assert_eq!(
+            svc.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    /// An edit rejected by its own validation changes nothing: no metadata
+    /// wipe, no epoch bump.
+    #[tokio::test]
+    async fn rejected_provider_edit_does_not_invalidate_review_metadata() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_review_metadata(&svc).await;
+        let result = svc
+            .edit_code_host_config(|config| {
+                config.code_host_provider = CodeHostProvider::Gitlab;
+                Err(ConfigError::InvalidValue {
+                    key: "gitlab_hostname".into(),
+                    reason: "rejected".into(),
+                }
+                .into())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Github
+        );
+        assert_eq!(svc.store().read().await.sessions[&sid].pr_number, Some(7));
+        assert_eq!(
+            svc.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    /// When the config write fails nothing changes: the edit is applied to a
+    /// copy that is only committed once saved, so the provider pollers read
+    /// stays put and review metadata is left alone.
+    #[tokio::test]
+    async fn persist_failure_changes_neither_provider_nor_review_metadata() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_review_metadata(&svc).await;
+        // A directory where the config file belongs makes the write fail.
+        std::fs::create_dir_all(dir.path().join("config.toml")).unwrap();
+        let result = svc
+            .edit_code_host_config(|config| {
+                config.code_host_provider = CodeHostProvider::Gitlab;
+                Ok(())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Github
+        );
+        assert_eq!(svc.store().read().await.sessions[&sid].pr_number, Some(7));
+        assert_eq!(
+            svc.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    /// Persist the service's config, then overwrite the file the way a hand
+    /// edit would, with a later mtime and a changed `ui_refresh_fps`. Returns
+    /// the edited file's bytes and mtime.
+    fn external_config_edit(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+    ) -> (Vec<u8>, std::time::SystemTime) {
+        let path = dir.path().join("config.toml");
+        svc.update_config(svc.read_config()).unwrap();
+        // Filesystem mtime granularity: make the external write observable.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut edited = svc.read_config();
+        edited.ui_refresh_fps = 41;
+        std::fs::write(&path, toml::to_string_pretty(&edited).unwrap()).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        (std::fs::read(&path).unwrap(), meta.modified().unwrap())
+    }
+
+    /// Assert the config file still holds the external edit, and that the
+    /// hot-reload then picks it up — a rejected write must not have recorded
+    /// a new mtime that hides it.
+    async fn assert_external_edit_survives(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+        (bytes, mtime): (Vec<u8>, std::time::SystemTime),
+    ) {
+        let path = dir.path().join("config.toml");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "config.toml rewritten"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        assert_ne!(svc.read_config().ui_refresh_fps, 41);
+        assert!(svc.reload_config().await.unwrap(), "external edit lost");
+        assert_eq!(svc.read_config().ui_refresh_fps, 41);
+    }
+
+    #[tokio::test]
+    async fn rejected_update_config_leaves_config_file_and_memory_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let external = external_config_edit(&svc, &dir);
+        let before = svc.read_config();
+        let mut stale = before.clone();
+        stale.code_host_provider = CodeHostProvider::Gitlab;
+        stale.rounded_borders = !before.rounded_borders;
+        assert!(svc.update_config(stale).is_err());
+        assert_eq!(svc.read_config().rounded_borders, before.rounded_borders);
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            before.code_host_provider
+        );
+        assert_external_edit_survives(&svc, &dir, external).await;
+    }
+
+    /// A refused section rename, a rejected workspace rename and a workspace
+    /// delete with nothing to delete change no config, so none may rewrite
+    /// `config.toml` and hide a pending hand edit from the hot-reload.
+    #[tokio::test]
+    async fn refused_section_and_workspace_edits_leave_config_file_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service_with_config(&dir, config_with_section("Parking"));
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        let external = external_config_edit(&svc, &dir);
+
+        assert!(!svc.rename_section("Nonexistent", "Waiting").await.unwrap());
+        assert!(!svc.rename_section("Parking", "   ").await.unwrap());
+        assert!(svc.rename_workspace("Work", "Play").await.is_err());
+        assert!(!svc.delete_workspace("Nope").await.unwrap());
+
+        assert_external_edit_survives(&svc, &dir, external).await;
+    }
+
+    #[tokio::test]
+    async fn rejected_code_host_edit_leaves_config_file_and_memory_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let external = external_config_edit(&svc, &dir);
+        let before = svc.read_config();
+        let result = svc
+            .edit_code_host_config(|config| {
+                // Half-applied before the rejection: none of it may stick.
+                config.rounded_borders = !config.rounded_borders;
+                config.code_host_provider = CodeHostProvider::Gitlab;
+                Err(ConfigError::InvalidValue {
+                    key: "gitlab_hostname".into(),
+                    reason: "rejected".into(),
+                }
+                .into())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(svc.read_config().rounded_borders, before.rounded_borders);
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            before.code_host_provider
+        );
+        assert_external_edit_survives(&svc, &dir, external).await;
+    }
+
+    #[tokio::test]
+    async fn unrelated_config_edit_keeps_cli_probe_and_skips_pr_refresh() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        *svc.glab_available.lock().unwrap() = Some((std::time::Instant::now(), false));
+        svc.edit_code_host_config(|config| {
+            config.ui_refresh_fps = 23;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(svc.glab_available.lock().unwrap().is_some());
+        assert!(
+            futures::FutureExt::now_or_never(svc.pr_refresh.notified()).is_none(),
+            "an edit that leaves the code host alone must not wake the PR poll"
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_hostname_edit_resets_cli_probe_and_wakes_pr_refresh() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        *svc.glab_available.lock().unwrap() = Some((std::time::Instant::now(), false));
+        svc.edit_code_host_config(|config| {
+            config.gitlab_hostname = Some("gitlab.example.com".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(svc.glab_available.lock().unwrap().is_none());
+        assert!(futures::FutureExt::now_or_never(svc.pr_refresh.notified()).is_some());
+    }
+
+    #[tokio::test]
+    async fn partial_config_edit_reads_latest_provider() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        svc.edit_code_host_config(|config| {
+            config.ui_refresh_fps = 23;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.read_config().ui_refresh_fps, 23);
+    }
+
+    #[tokio::test]
     async fn comment_writes_stay_under_injected_data_dir() {
         let dir = tempfile::TempDir::new().unwrap();
         // Built through the shared helper rather than by hand, so this test
@@ -3932,6 +4941,65 @@ mod tests {
                 "core test services must not clone into the real ~/Projects (got {projects_dir:?})"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn state_sync_does_not_notify_again_for_our_own_state_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_project_session(&svc).await;
+        let generation = svc.store().generation();
+        // Exercise a classified state-only event directly. Assumption, untested
+        // on macOS: notify's FSEvents backend can flag Rescan at startup
+        // (notify 8.2.0 src/fsevent.rs:116-117, MUST_SCAN_SUBDIRS).
+        svc.reconcile_state_files(false).await;
+        assert_eq!(svc.store().generation(), generation);
+    }
+
+    /// The same regression through a live `FileEvents::state` watcher: our own
+    /// `mutate` must be classified as a state-only event, and processing it as
+    /// the sync loop does must not wake the change feed a second time.
+    #[tokio::test]
+    async fn own_state_write_under_a_live_state_watcher_notifies_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_project_session(&svc).await;
+        let mut watcher = crate::file_events::FileEvents::state(&svc.store().data_dir()).unwrap();
+
+        svc.store()
+            .mutate(|state| {
+                state.add_project(Project::new("other", PathBuf::from("/tmp/other"), "main"))
+            })
+            .await
+            .unwrap();
+        let generation = svc.store().generation();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), watcher.changed())
+                .await
+                .unwrap(),
+            "the watcher must observe our own state write"
+        );
+        // Mirror `spawn_state_sync_loop`'s handling of a watcher event.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        watcher.take_changed();
+        // A Rescan marks the watch failed, which deliberately takes the
+        // conservative path. Assumption, untested on macOS: notify's FSEvents
+        // backend can flag one (notify 8.2.0 src/fsevent.rs:116-117,
+        // MUST_SCAN_SUBDIRS); inotify only does on overflow.
+        if cfg!(target_os = "linux") {
+            assert!(watcher.healthy());
+        }
+        if !watcher.healthy() {
+            return;
+        }
+        let review_changed = watcher.take_review_changed();
+        assert!(!review_changed, "a state.json write is not a review change");
+        svc.reconcile_state_files(review_changed).await;
+        assert_eq!(
+            svc.store().generation(),
+            generation,
+            "our own write must not be notified again"
+        );
     }
 
     /// Seed one project with one session and return their ids.
@@ -4202,11 +5270,171 @@ mod tests {
             snapshot.diff.files.is_empty(),
             "precondition: the degraded diff should be empty here"
         );
+        assert!(
+            snapshot.reviewed.is_empty(),
+            "a file the diff doesn't show can't read as reviewed"
+        );
         assert_eq!(
-            snapshot.reviewed,
-            ["changed.txt"],
+            svc.reviewed_marks(&sid).await.unwrap().len(),
+            1,
             "a degraded diff must not prune reviewed marks"
         );
+    }
+
+    /// Opening a review with nothing to prune is a plain read: it takes no
+    /// lock (so it never waits on a concurrent `review mark`) and leaves no
+    /// lock file behind. `ReviewedStore::remove` (which `delete_session` calls)
+    /// clears the marks file.
+    #[tokio::test]
+    async fn open_review_reads_marks_without_locking_and_delete_cleans_up() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+        let reviewed_dir = svc.store().data_dir().join("reviewed");
+
+        svc.open_review(&sid).await.unwrap();
+        assert!(
+            !reviewed_dir
+                .join(format!("{}.lock", sid.as_uuid()))
+                .exists(),
+            "an open with nothing to prune must not lock"
+        );
+
+        svc.set_files_reviewed(&sid, &FileSelection::All, true)
+            .await
+            .unwrap();
+        let marks_file = reviewed_dir.join(format!("{}.json", sid.as_uuid()));
+        assert!(marks_file.exists(), "precondition: marks were written");
+        svc.reviewed.remove(sid).await.unwrap();
+        assert!(!marks_file.exists());
+    }
+
+    /// The bulk setter is idempotent (re-running never flips a mark back, which
+    /// a toggle would) and reports what it changed.
+    #[tokio::test]
+    async fn set_files_reviewed_is_idempotent_and_reports_changes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+        let paths = FileSelection::Paths(vec!["changed.txt".to_string()]);
+
+        let first = svc.set_files_reviewed(&sid, &paths, true).await.unwrap();
+        assert_eq!(first.changed, ["changed.txt"]);
+        let again = svc.set_files_reviewed(&sid, &paths, true).await.unwrap();
+        assert!(again.changed.is_empty());
+        assert_eq!(again.unchanged, ["changed.txt"]);
+        assert_eq!(
+            svc.open_review(&sid).await.unwrap().reviewed,
+            ["changed.txt"]
+        );
+        assert_eq!(
+            svc.reviewed_marks(&sid)
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.file.as_str())
+                .collect::<Vec<_>>(),
+            ["changed.txt"]
+        );
+
+        let cleared = svc
+            .set_files_reviewed(&sid, &FileSelection::All, false)
+            .await
+            .unwrap();
+        assert_eq!(cleared.changed, ["changed.txt"]);
+        assert!(svc.open_review(&sid).await.unwrap().reviewed.is_empty());
+    }
+
+    /// `review files` hands out a hash per file; marking with a hash the file
+    /// no longer has (it was edited after being read) is refused, writes
+    /// nothing, and `peek_review` reports the file as not reviewed.
+    #[tokio::test]
+    async fn set_files_reviewed_refuses_a_stale_hash_and_peek_is_hash_checked() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, repo) = seed_review_repo(&svc, &dir).await;
+        let read_hash = claude_commander_viewmodel::review::hash_hex(
+            &svc.peek_review(&sid).await.unwrap().diff.files[0],
+        );
+
+        std::fs::write(repo.join("changed.txt"), "three\n").unwrap();
+        let err = svc
+            .set_files_reviewed(
+                &sid,
+                &FileSelection::Paths(vec![format!("changed.txt@{read_hash}")]),
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Changed since"), "{err}");
+        assert!(svc.reviewed_marks(&sid).await.unwrap().is_empty());
+
+        // Marked, then edited again: the store still holds the mark, but a
+        // read must not call the file reviewed.
+        svc.set_files_reviewed(&sid, &FileSelection::All, true)
+            .await
+            .unwrap();
+        std::fs::write(repo.join("changed.txt"), "four\n").unwrap();
+        assert!(svc.peek_review(&sid).await.unwrap().reviewed.is_empty());
+    }
+
+    /// A view showing an older copy of a file than the one the CLI just
+    /// marked shows it unreviewed; the user pressing "mark" there must keep
+    /// the mark, where a toggle would have cleared it.
+    #[tokio::test]
+    async fn set_file_reviewed_by_path_keeps_a_mark_set_elsewhere() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+        svc.set_files_reviewed(&sid, &FileSelection::All, true)
+            .await
+            .unwrap();
+
+        assert!(
+            svc.set_file_reviewed_by_path(&sid, "changed.txt", true)
+                .await
+                .unwrap()
+        );
+        assert_eq!(svc.reviewed_marks(&sid).await.unwrap().len(), 1);
+        assert!(
+            !svc.set_file_reviewed_by_path(&sid, "changed.txt", false)
+                .await
+                .unwrap()
+        );
+        assert!(svc.reviewed_marks(&sid).await.unwrap().is_empty());
+    }
+
+    /// The marks route a review view polls must tell a deleted session from
+    /// one with no marks; an empty list would read as "everything unmarked".
+    #[tokio::test]
+    async fn reviewed_marks_for_an_unknown_session_is_not_found() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let err = svc.reviewed_marks(&SessionId::new()).await.unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Session(SessionError::NotFound(_))),
+            "{err}"
+        );
+    }
+
+    /// A bulk set naming a path outside the diff writes nothing — a typo must
+    /// not leave a half-applied batch behind — and the error names the path.
+    #[tokio::test]
+    async fn set_files_reviewed_with_an_unknown_path_writes_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+
+        let err = svc
+            .set_files_reviewed(
+                &sid,
+                &FileSelection::Paths(vec!["changed.txt".into(), "nope.txt".into()]),
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("nope.txt"), "{err}");
+        assert!(svc.reviewed_marks(&sid).await.unwrap().is_empty());
     }
 
     /// Apply must not silently delete. When a file leaves the diff between the
@@ -4607,6 +5835,21 @@ mod tests {
         assert!(state.get_session(&sid).unwrap().unread);
     }
 
+    /// Pins the premise behind the agent-state loop's unconditional
+    /// `notify_change`: re-marking an already-unread session is a no-op
+    /// mutate, which does not bump the generation, so `mark_unread` alone
+    /// cannot be relied on to wake the change feed.
+    #[tokio::test]
+    async fn mark_unread_on_an_already_unread_session_does_not_bump_generation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.mark_unread(vec![sid]).await.unwrap();
+        let generation = svc.store().generation();
+        svc.mark_unread(vec![sid]).await.unwrap();
+        assert_eq!(svc.store().generation(), generation);
+    }
+
     #[tokio::test]
     async fn apply_pr_results_sets_and_clears_pr_fields() {
         use crate::git::{PrCheckResult, PrInfo};
@@ -4642,6 +5885,79 @@ mod tests {
         let s = state.get_session(&sid).unwrap();
         assert!(s.pr_number.is_none());
         assert!(s.pr_base_branch.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_change_clears_reviews_and_rejects_old_in_flight_results() {
+        use crate::git::{PrCheckResult, PrInfo, PrState};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        let review = |number| {
+            PrCheckResult::Found(PrInfo {
+                number,
+                url: format!("https://github.example/pr/{number}"),
+                state: PrState::Open,
+                is_draft: true,
+                labels: vec!["review".into()],
+                review_decision: Some(crate::git::ReviewDecision::Approved),
+                reviewers: vec!["alice".into()],
+                base_ref_name: Some("parent".into()),
+            })
+        };
+
+        svc.apply_pr_results_for_provider(CodeHostProvider::Github, vec![(sid, review(42))])
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_number,
+            Some(42)
+        );
+
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Gitlab;
+        svc.update_code_host_config(config).await.unwrap();
+
+        // Simulate the GitHub sweep that was already in flight when the user
+        // switched. It must not repopulate fields after invalidation.
+        svc.apply_pr_results_for_provider(CodeHostProvider::Github, vec![(sid, review(99))])
+            .await
+            .unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert!(session.pr_number.is_none());
+        assert!(session.pr_url.is_none());
+        assert!(session.pr_state.is_none());
+        assert!(!session.pr_draft);
+        assert!(session.pr_labels.is_empty());
+        assert!(!session.pr_merged);
+        assert!(session.review_decision.is_none());
+        assert!(session.pr_reviewers.is_empty());
+        assert!(session.pr_base_branch.is_none());
+        drop(state);
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Github;
+        svc.update_code_host_config(config).await.unwrap();
+        assert!(
+            !svc.apply_pr_results_at_epoch(CodeHostProvider::Github, 0, vec![(sid, review(101))])
+                .await
+                .unwrap()
+        );
+        assert!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_number
+                .is_none()
+        );
     }
 
     /// Run `git` in `dir`, panicking on failure. Signing is forced off by
@@ -5343,6 +6659,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_session_patch_preserves_settings_changed_since_dialog_opened() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        svc.set_section(&sid, Some("Concurrent".into()))
+            .await
+            .unwrap();
+        svc.toggle_keep_alive(&sid).await.unwrap();
+        let edit = serde_json::from_value(serde_json::json!({"title":"renamed"})).unwrap();
+        svc.edit_session(&sid, edit).await.unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "renamed");
+        assert_eq!(session.section_override.as_deref(), Some("Concurrent"));
+        assert!(session.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn edit_session_invalid_base_rolls_back_all_local_settings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        let edit = serde_json::from_value(serde_json::json!({
+            "title":"renamed", "program":"codex", "keep_alive":true,
+            "base":{"parent_session_id":sid}
+        }))
+        .unwrap();
+        assert!(svc.edit_session(&sid, edit).await.is_err());
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "task");
+        assert!(!session.keep_alive);
+        assert!(session.pending_program.is_none());
+        assert!(session.stack_parent_session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_session_restart_failure_reports_saved_settings_and_pending_program() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        // A NUL argument forces subprocess launch to fail before tmux runs.
+        svc.store()
+            .mutate(move |state| {
+                state.get_session_mut(&sid).unwrap().tmux_session_name =
+                    format!("invalid-{sid}\0name");
+            })
+            .await
+            .unwrap();
+        let edit = serde_json::from_value(serde_json::json!({
+            "title":"saved", "program":"codex", "restart":true
+        }))
+        .unwrap();
+        let outcome = svc.edit_session(&sid, edit).await.unwrap();
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| w.contains("restart failed"))
+        );
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "saved");
+        assert_eq!(session.pending_program.as_deref(), Some("codex"));
+    }
+
+    #[tokio::test]
+    async fn edit_session_defers_program_without_touching_running_agent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        let before = svc.store().read().await.get_session(&sid).unwrap().clone();
+        let edit = claude_commander_protocol::api::EditSession {
+            title: Some(" renamed ".into()),
+            program: Some("codex".into()),
+            section: Some(Some("Review".into())),
+            keep_alive: Some(true),
+            base: None,
+            restart: false,
+        };
+        svc.edit_session(&sid, edit).await.unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "renamed");
+        assert_eq!(session.program, before.program);
+        assert_eq!(session.pending_program.as_deref(), Some("codex"));
+        assert_eq!(session.status, before.status);
+        assert!(session.keep_alive);
+        assert_eq!(session.section_override.as_deref(), Some("Review"));
+        assert_eq!(
+            session_info_from_session(session, "repo").program,
+            before.program
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_session_validates_before_changing_anything() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        let edit = claude_commander_protocol::api::EditSession {
+            title: Some("new name".into()),
+            program: Some("  ".into()),
+            section: None,
+            keep_alive: Some(true),
+            base: None,
+            restart: false,
+        };
+        assert!(svc.edit_session(&sid, edit).await.is_err());
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.title, "task");
+        assert!(!session.keep_alive);
+        assert!(session.pending_program.is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_session_can_cancel_a_pending_program_change() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        let original = svc
+            .store()
+            .read()
+            .await
+            .get_session(&sid)
+            .unwrap()
+            .program
+            .clone();
+        let mut edit = claude_commander_protocol::api::EditSession {
+            title: Some("task".into()),
+            program: Some("codex".into()),
+            section: None,
+            keep_alive: Some(false),
+            base: None,
+            restart: false,
+        };
+        svc.edit_session(&sid, edit.clone()).await.unwrap();
+        let persisted: crate::config::AppState =
+            serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).unwrap()).unwrap();
+        assert_eq!(
+            persisted
+                .get_session(&sid)
+                .unwrap()
+                .pending_program
+                .as_deref(),
+            Some("codex")
+        );
+        edit.program = Some(original.clone());
+        // Returning to the running program does not need a restart, even if requested.
+        edit.restart = true;
+        svc.edit_session(&sid, edit).await.unwrap();
+        let state = svc.store().read().await;
+        assert_eq!(state.get_session(&sid).unwrap().program, original);
+        assert!(state.get_session(&sid).unwrap().pending_program.is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_session_preserves_automatic_section_when_override_is_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            sections: vec![crate::session::SectionConfig {
+                name: "Later".into(),
+                has_pr: Some(true),
+                ..Default::default()
+            }],
+            ..Config::default()
+        };
+        let svc = service_with_config(&dir, config);
+        let (_, sid) = seed_project_session(&svc).await;
+        let entered = chrono::Utc::now() - chrono::Duration::days(1);
+        svc.store()
+            .mutate(move |state| {
+                let session = state.get_session_mut(&sid).unwrap();
+                session.current_section = Some("Later".into());
+                session.entered_section_at = entered;
+            })
+            .await
+            .unwrap();
+        let program = svc
+            .store()
+            .read()
+            .await
+            .get_session(&sid)
+            .unwrap()
+            .program
+            .clone();
+        svc.edit_session(
+            &sid,
+            claude_commander_protocol::api::EditSession {
+                title: Some("renamed".into()),
+                program: Some(program),
+                section: None,
+                keep_alive: Some(false),
+                base: None,
+                restart: false,
+            },
+        )
+        .await
+        .unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert_eq!(session.current_section.as_deref(), Some("Later"));
+        assert_eq!(session.entered_section_at, entered);
+    }
+
+    #[tokio::test]
     async fn rename_session_updates_title() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
@@ -5695,6 +7218,18 @@ mod tests {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 let dir = tempfile::TempDir::new_in(root).unwrap();
                 let svc = service(&dir);
+                let gitlab = std::env::var("CC_TEST_PR_REFRESH_PROVIDER").unwrap() == "gitlab";
+                let (number, url) = if gitlab {
+                    let mut config = svc.read_config();
+                    config.code_host_provider = CodeHostProvider::Gitlab;
+                    svc.update_code_host_config(config).await.unwrap();
+                    (
+                        84,
+                        "https://gitlab.example/example/repo/-/merge_requests/84",
+                    )
+                } else {
+                    (42, "https://github.com/example/repo/pull/42")
+                };
                 let project = Project::new("repo", dir.path().to_path_buf(), "main");
                 let first = WorktreeSession::new(
                     project.id,
@@ -5722,11 +7257,14 @@ mod tests {
                 assert_eq!(svc.refresh_pr_status(Some(&first_id)).await.unwrap(), 1);
                 {
                     let state = svc.store().read().await;
-                    assert_eq!(state.get_session(&first_id).unwrap().pr_number, Some(42));
+                    assert_eq!(
+                        state.get_session(&first_id).unwrap().pr_number,
+                        Some(number)
+                    );
                     assert_eq!(state.get_session(&second_id).unwrap().pr_number, None);
                 }
                 let persisted = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
-                assert!(persisted.contains("https://github.com/example/repo/pull/42"));
+                assert!(persisted.contains(url));
                 assert_eq!(svc.refresh_pr_status(None).await.unwrap(), 2);
                 assert_eq!(
                     svc.store()
@@ -5735,7 +7273,7 @@ mod tests {
                         .get_session(&second_id)
                         .unwrap()
                         .pr_number,
-                    Some(42)
+                    Some(number)
                 );
                 std::fs::write(std::env::var_os("CC_TEST_PR_REFRESH_FAIL").unwrap(), "fail")
                     .unwrap();
@@ -5747,7 +7285,7 @@ mod tests {
                         .get_session(&first_id)
                         .unwrap()
                         .pr_number,
-                    Some(42)
+                    Some(number)
                 );
             });
             return;
@@ -5765,28 +7303,41 @@ printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","stat
         )
         .unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let glab = dir.path().join("glab");
+        std::fs::write(&glab, r#"#!/bin/sh
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ -f "$CC_TEST_PR_REFRESH_FAIL" ]; then exit 1; fi
+printf '%s' '[{"iid":84,"web_url":"https://gitlab.example/example/repo/-/merge_requests/84","state":"opened","labels":[],"target_branch":"main"}]'
+"#).unwrap();
+        std::fs::set_permissions(&glab, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::join_paths(
             std::iter::once(dir.path().to_path_buf())
                 .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
         )
         .unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "api::tests::pr_refresh_fetches_and_persists_without_background_tasks",
-                "--nocapture",
-            ])
-            .env(CHILD, dir.path())
-            .env("CC_TEST_PR_REFRESH_FAIL", dir.path().join("fail"))
-            .env("PATH", path)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "child test failed: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        for provider in ["github", "gitlab"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "api::tests::pr_refresh_fetches_and_persists_without_background_tasks",
+                    "--nocapture",
+                ])
+                .env(CHILD, dir.path())
+                .env("CC_TEST_PR_REFRESH_PROVIDER", provider)
+                .env(
+                    "CC_TEST_PR_REFRESH_FAIL",
+                    dir.path().join(format!("fail-{provider}")),
+                )
+                .env("PATH", &path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child test failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[tokio::test]
@@ -6032,6 +7583,36 @@ printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","stat
     }
 
     #[tokio::test]
+    async fn agent_states_fresh_advances_shared_unread_baseline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            commander_enabled: false,
+            ..Config::default()
+        };
+        let svc = service_with_config(&dir, config);
+        let sid = SessionId::new();
+        svc.agent_states_cache
+            .write()
+            .await
+            .states
+            .insert(sid, AgentState::Working);
+        let idle = BTreeMap::from([(sid, AgentState::Idle)]);
+        assert_eq!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle),
+            vec![sid]
+        );
+        // There are no active sessions; the fresh scan clears the old baseline
+        // without any tmux queries. This is also the cache read by the poll loop.
+        let fresh = svc.agent_states(true).await;
+        assert_eq!(svc.agent_states_cache.read().await.states, fresh.states);
+        assert!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle)
+                .is_empty()
+        );
+        assert_eq!(svc.agent_states(false).await.states, fresh.states);
+    }
+
+    #[tokio::test]
     async fn agent_states_unprimed_reports_commander_running_honestly() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
@@ -6081,6 +7662,50 @@ printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","stat
             gen_after,
             "no redundant wake on an already-empty cache"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_programs_persists_installed_harnesses() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = tempfile::TempDir::new().unwrap();
+        let muse = bin.path().join("muse-code");
+        std::fs::write(&muse, "").unwrap();
+        std::fs::set_permissions(&muse, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let svc = service_with_config(
+            &dir,
+            Config {
+                programs: vec![ProgramEntry {
+                    label: "Claude".to_string(),
+                    command: "claude".to_string(),
+                }],
+                ..Config::default()
+            },
+        );
+
+        let added = svc.discover_programs_on(bin.path().as_os_str()).unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].command, "muse-code");
+        let commands = |svc: &CommanderService| -> Vec<String> {
+            svc.read_config()
+                .programs
+                .iter()
+                .map(|p| p.command.clone())
+                .collect()
+        };
+        assert_eq!(commands(&svc), ["claude", "muse-code"]);
+        // Persisted, not just held in memory: a fresh read of the file has it.
+        let on_disk = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(on_disk.contains("muse-code"), "{on_disk}");
+
+        // A second startup finds it already listed.
+        assert!(
+            svc.discover_programs_on(bin.path().as_os_str())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(commands(&svc), ["claude", "muse-code"]);
     }
 
     #[tokio::test]

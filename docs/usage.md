@@ -47,6 +47,12 @@ claude-commander attach feature-remote --remote workstation
 # Dump recent terminal output from a session (default 100 lines, max 10000)
 claude-commander log feature-auth --lines 200
 
+# Inspect a session's review diff and mark files reviewed (see "Marking files
+# reviewed from the CLI" below)
+claude-commander review files feature-auth --unreviewed
+claude-commander review diff feature-auth src/auth.rs
+claude-commander review mark feature-auth src/auth.rs src/lib.rs
+
 # Show configuration
 claude-commander config
 
@@ -79,11 +85,11 @@ The branch name in `[brackets]` appears only when the branch differs from what t
 
 ### PR Stacks
 
-When a session's PR targets another session's branch (rather than `main`), the two form a stack. Each stack member is its own card, rendered contiguously in stack order: the base card first, with stacked children drawn as their own cards nested (indented) one level deeper beneath it in bottom-to-top stack order.
+When a session's pull request or merge request targets another session's branch (rather than `main`), the two form a stack. Each stack member is its own card, rendered contiguously in stack order: the base card first, with stacked children drawn as their own cards nested (indented) one level deeper beneath it in bottom-to-top stack order.
 
-Press `t` on any session in a stack to create a new session on top of that stack — regardless of which member you have selected, the new branch is forked from the topmost session. When you launch Claude in the new session it is told to use `gh pr create --base <parent-branch>` so the PR targets the right place automatically.
+Press `t` on any session in a stack to create a new session on top of that stack — regardless of which member you have selected, the new branch is forked from the topmost session. When you launch Claude in the new session it is told to use `gh pr create --base <parent-branch>` for GitHub or `glab mr create --target-branch <parent-branch>` for GitLab, so the review targets the right place automatically.
 
-Stacks are detected from the PR's `baseRefName` returned by the `gh` CLI, so they stay accurate across GitHub's auto-retargeting when a stack member is merged.
+Stacks are detected from the target branch returned by the selected provider's CLI (`gh` or `glab`).
 
 How a stack renders depends on the view (cycle with `v`). In the **project-grouped** and **Section Stacks** list views (the latter is the default when [Session List Sections](configuration.md#session-list-sections) is configured), children are nested under their base and the whole stack stays together under the section chosen by its base (the stack root), so a draft or early-stage session stacked on top never drags the whole stack out of the base's section. In the plain **Sections** list view, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state. On the **board** a stack occupies exactly one column and moves between columns as a unit; the column is chosen by the stack's newest leaf (its section assignment, including any manual `m` move), so a base and its children never split across columns.
 
@@ -91,7 +97,7 @@ How a stack renders depends on the view (cycle with `v`). In the **project-group
 
 When a stack is wired up wrongly — a session stacked on the wrong parent, or stacked when it should sit on `main` — **Set session base** from the command palette re-points it. Pick another session in the same project to stack onto, or the project's main branch to unstack entirely. Sessions stacked on *this* one come along automatically: they are stacked on its branch, which does not move.
 
-The command updates the stack link and, when the session has an open PR, retargets that PR with `gh pr edit --base`. If the `gh` edit fails you are told so explicitly, because the base on GitHub is the source of truth — the next PR sync would otherwise quietly restore the old base.
+The command updates the stack link and, when the session has an open review, retargets it with `gh pr edit --base` or `glab mr update --target-branch`. If the CLI edit fails you are told so explicitly, because the provider is the source of truth — the next review sync would otherwise quietly restore the old base.
 
 **It does not rewrite git history.** The branch still contains its old base's commits, so until you rebase or merge onto the new base yourself, both the PR and the review diff will show them. Retargeting onto a *sibling* rather than an ancestor is the case to watch: the merge base falls back towards `main` and the diff grows to include the old parent's work as well as your own.
 
@@ -105,9 +111,9 @@ Before touching any worktree, the cascade fetches `origin`, verifies no live age
 
 On the first conflict the cascade pauses: the affected session gets a persistent `⏸` glyph (survives a restart of the TUI), and the worktree is left in the usual `git merge` in-progress state so you can resolve it however you like — typically by attaching to the session and asking the live Claude. Once you've committed the resolved merge, **Cascade resume** from the palette picks up where it stopped and propagates the new commit on up the chain. **Cascade abandon** clears the pause without continuing, if you decide to back out.
 
-#### Refresh PR metadata from the CLI
+#### Refresh PR/MR metadata from the CLI
 
-After creating a pull request, refresh its session immediately:
+After creating a pull or merge request, refresh its session immediately:
 
 ```sh
 claude-commander refresh-pr my-session
@@ -120,7 +126,7 @@ for all sessions:
 claude-commander refresh-pr
 ```
 
-The command waits for the fetch and saves the metadata before exiting. The
+The command queries the selected code host (`gh` for GitHub or `glab` for GitLab), waits for the fetch, and saves the metadata before exiting. The
 running session list picks it up through state sync, without waiting for the
 next PR poll. It also works when periodic PR checks are disabled. A missing
 session, unavailable code-host CLI, or failed fetch exits unsuccessfully;
@@ -131,7 +137,14 @@ For agent instructions: “After creating a PR, run
 
 #### Push stack
 
-**Push stack** (palette) runs `git push -u origin <branch>` across every session in the stack, base first then each child up the chain — pushing the base before its children keeps GitHub's PR base refs consistent. Each session shows the spinner glyph while its own push is in flight.
+**Push stack** (palette) runs `git push -u origin <branch>` across every session in the stack, base first then each child up the chain — pushing the base before its children keeps hosted review base refs consistent. Each session shows the spinner glyph while its own push is in flight.
+
+Code-host selection is global in this release. Selecting GitLab disables GitHub
+PR polling for registered GitHub projects; selecting GitHub disables GitLab MR
+polling for registered GitLab projects. Commander does not guess a provider per
+project. Repository-local review commands let the selected CLI resolve the host
+from that checkout, while repository discovery and hosted clone use the optional
+configured GitLab hostname.
 
 Pre-flight is the same as cascade merge: no live agent may be `Working` or `WaitingForInput`, and worktrees must have no uncommitted changes. On the first `git push` failure (rejection, auth, non-fast-forward, etc.) the chain stops and the toast shows git's stderr — no "resume" command is needed since `git push` is idempotent, so fix the root cause and re-run **Push stack** to continue.
 
@@ -165,6 +178,34 @@ the session — the same direct toggle the shell session has with `Ctrl-\`, with
 detaching to the board. `Alt-r` is used rather than `Ctrl-r` so a
 shell's `Ctrl-r` reverse-history-search is never shadowed; the toggle is wired
 up for Claude sessions only.
+
+### Marking files reviewed from the CLI
+
+`claude-commander review` exposes the review view's per-file "reviewed" marks
+(`m` in the view) so a script or an agent can triage a diff for you — e.g.
+"mark every file whose only change is imports as reviewed":
+
+```bash
+claude-commander review files <session> [--unreviewed] [--json]  # files, +/- counts, reviewed state, hash
+claude-commander review diff  <session> [FILE…] [--unreviewed]   # unified diff, exactly what the view shows; FILE may be PATH@HASH
+claude-commander review mark   <session> FILE… | --all [--json]  # FILE may be PATH@HASH
+claude-commander review unmark <session> FILE… | --all [--json]
+```
+
+Files are named by the path `review files` prints (the old path for a deleted
+file). `mark`/`unmark` are idempotent and all-or-nothing: a path that is not in
+the diff fails the command without marking anything. Giving a file as
+`PATH@HASH`, with the hash from `review files --json`, also refuses the mark
+if the file has changed since — so a script can't pin a mark to content it
+never read while the session's agent is still editing. A refusal lists every
+bad file at once, and `diff` accepts the same `PATH@HASH` form. As with `m`, a
+mark is pinned to the file's current diff and clears itself when that file
+changes again. An open TUI review view picks up marks changed this way within
+about a second for a local session (about five for a remote one), collapsing
+any directory they finish; the web and mobile review views show them on their
+next refresh.
+`files` and `diff` are read-only. The command works on local sessions; for a
+session on a remote server, run it on that server.
 
 ### Pasting images into a remote session
 
@@ -211,7 +252,11 @@ foreground-only colouring on 256- and 16-colour terminals.
   unreviewed file (wrapping); unmarking stays put. Marks persist per session
   across restarts and clear automatically when a file's diff changes or it
   leaves the diff (GitHub "Viewed" semantics), so a re-edited file demands a
-  fresh look. The tree title shows progress (`Files (3/7 reviewed)`).
+  fresh look. A directory whose files are all reviewed folds away — when you
+  mark its last file, when marks set elsewhere (the `review` CLI) arrive, when
+  the view opens, and when a refresh finishes it. A finished directory you
+  expand again stays open across refreshes. The tree title shows progress
+  (`Files (3/7 reviewed)`).
 - **Binary & image files**: image files (PNG, JPEG, GIF, WebP, BMP, …) render
   inline in the diff body using the terminal's graphics protocol (Kitty,
   iTerm2, or Sixel), falling back to Unicode half-blocks on terminals without

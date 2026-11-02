@@ -34,6 +34,9 @@
 //! Keeping them apart is what keeps "is this a wire change?" answerable.
 
 pub mod query;
+pub mod review;
 pub mod workspace;
 
 pub use query::{fuzzy_score, session_score};
+
+pub mod session_editor;
