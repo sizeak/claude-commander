@@ -2526,8 +2526,6 @@ impl CommanderService {
     ) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
         let tmux = self.manager.tmux.clone();
-        let cache = self.agent_states_cache.clone();
-        let primed = self.agent_states_primed.clone();
         let store = self.store.clone();
         tokio::spawn(async move {
             if interval_ms == 0 {
@@ -2537,7 +2535,6 @@ impl CommanderService {
             let mut detector = AgentStateDetector::new(tmux.clone(), cache_ttl);
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
             let mut last_commander_running = false;
-            let sentinel = claude_commander_protocol::session::COMMANDER_SENTINEL_ID;
             loop {
                 interval.tick().await;
                 let sessions: Vec<(SessionId, String, String)> = {
@@ -2580,44 +2577,62 @@ impl CommanderService {
                 }
                 let commander_flipped = commander_running != last_commander_running;
                 last_commander_running = commander_running;
-
-                // Diff against the previous cache to flag agents that just
-                // finished a turn (Working→Idle), skipping the commander
-                // sentinel (it has no `WorktreeSession` to mark).
-                let prev = { cache.read().await.states.clone() };
-                let unread_ids: Vec<SessionId> = detect_unread_transitions(&prev, &states)
-                    .into_iter()
-                    .filter(|id| *id != sentinel)
-                    .collect();
-                let states_changed = states != prev;
-
-                // Only write the cache when something changed: a rebuilt-but-
-                // identical map would serialize identically anyway (BTreeMap,
-                // deterministic key order), but skipping the write keeps the
-                // remote pollers' content-hash diffing honest by construction
-                // and avoids needless lock traffic on all-idle ticks.
-                {
-                    let mut c = cache.write().await;
-                    if states_changed {
-                        c.states = states;
-                    }
-                    c.commander_running = commander_running;
-                }
-                primed.store(true, std::sync::atomic::Ordering::Relaxed);
-
-                // Wake the change-feed only when observable state actually
-                // changed (fresh states, or the commander flipped), so a steady
-                // row of idle agents doesn't trigger a snapshot re-fetch every
-                // tick. Persisting unread already bumps the feed; otherwise wake
-                // it explicitly. The cache is updated first so the snapshot the
-                // wake triggers reads the fresh states.
-                if !unread_ids.is_empty() {
-                    let _ = service.mark_unread(unread_ids).await;
-                } else if states_changed || commander_flipped {
-                    store.notify_change();
-                }
+                service
+                    .publish_agent_states(states, commander_running, commander_flipped)
+                    .await;
             }
         })
+    }
+
+    /// Publish one poll tick's agent states: update the cache, persist unread
+    /// for agents that just finished a turn, and wake the change feed if
+    /// anything observable changed.
+    async fn publish_agent_states(
+        &self,
+        states: BTreeMap<SessionId, AgentState>,
+        commander_running: bool,
+        commander_flipped: bool,
+    ) {
+        // Diff against the previous cache to flag agents that just
+        // finished a turn (Working→Idle), skipping the commander
+        // sentinel (it has no `WorktreeSession` to mark).
+        let prev = { self.agent_states_cache.read().await.states.clone() };
+        let unread_ids: Vec<SessionId> = detect_unread_transitions(&prev, &states)
+            .into_iter()
+            .filter(|id| *id != claude_commander_protocol::session::COMMANDER_SENTINEL_ID)
+            .collect();
+        let states_changed = states != prev;
+
+        // Only write the cache when something changed: a rebuilt-but-
+        // identical map would serialize identically anyway (BTreeMap,
+        // deterministic key order), but skipping the write keeps the
+        // remote pollers' content-hash diffing honest by construction
+        // and avoids needless lock traffic on all-idle ticks.
+        {
+            let mut c = self.agent_states_cache.write().await;
+            if states_changed {
+                c.states = states;
+            }
+            c.commander_running = commander_running;
+        }
+        self.agent_states_primed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Wake the change-feed only when observable state actually
+        // changed (fresh states, or the commander flipped), so a steady
+        // row of idle agents doesn't trigger a snapshot re-fetch every
+        // tick. Persisting unread is not enough on its own: marking an
+        // already-unread session is a no-op mutate that skips the
+        // generation bump, so wake the feed explicitly whenever states changed
+        // (pinned by `finishing_a_turn_on_an_unread_session_wakes_the_feed`). The
+        // cache is updated first so the snapshot the wake triggers
+        // reads the fresh states.
+        if !unread_ids.is_empty() {
+            let _ = self.mark_unread(unread_ids).await;
+        }
+        if states_changed || commander_flipped {
+            self.store.notify_change();
+        }
     }
 
     /// The `(session id, branch, repo path, branch-owned-since)` tuples the PR
@@ -2776,20 +2791,75 @@ impl CommanderService {
     /// Reload the state file on a fixed cadence, waking the change-feed when
     /// another instance mutated it. No-op loop when `interval_ms` is 0.
     fn spawn_state_sync_loop(&self, interval_ms: u64) -> tokio::task::JoinHandle<()> {
-        let store = self.store.clone();
+        let service = self.clone();
         tokio::spawn(async move {
             if interval_ms == 0 {
                 return;
             }
+            let data_dir = service.store.data_dir();
+            let mut watcher = tokio::task::spawn_blocking(move || {
+                crate::file_events::FileEvents::state(&data_dir)
+            })
+            .await
+            .ok()
+            .and_then(|result| result.ok());
+            let mut retry_at = std::time::Instant::now() + Duration::from_secs(30);
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
-                match store.reload_if_changed().await {
-                    Ok(_) => {}
-                    Err(e) => debug!("State sync check failed: {e}"),
+                if watcher.is_none() && std::time::Instant::now() >= retry_at {
+                    let data_dir = service.store.data_dir();
+                    watcher = tokio::task::spawn_blocking(move || {
+                        crate::file_events::FileEvents::state(&data_dir)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
+                }
+                let event = tokio::select! {
+                    _ = interval.tick() => false,
+                    _ = async {
+                        match &mut watcher {
+                            Some(watcher) => { watcher.changed().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => true,
+                };
+                if event {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Drain the coalesced batch, including events during the delay.
+                    if let Some(watcher) = &mut watcher {
+                        watcher.take_changed();
+                    }
+                }
+                let review_changed = watcher.as_ref().is_some_and(|w| w.take_review_changed());
+                service.reconcile_state_files(review_changed).await;
+                if watcher.as_ref().is_some_and(|w| !w.healthy()) {
+                    watcher = None;
+                    retry_at = std::time::Instant::now() + Duration::from_secs(30);
                 }
             }
         })
+    }
+
+    async fn reconcile_state_files(&self, review_changed: bool) {
+        if review_changed {
+            self.comments.invalidate_pending().await;
+        }
+        let reloaded = match self.store.reload_if_changed().await {
+            Ok(changed) => changed,
+            Err(e) => {
+                debug!("State sync check failed: {e}");
+                false
+            }
+        };
+        // reload_if_changed notifies for external state writes. Healthy events
+        // for our own state writes need no second wakeup; uncertain/rescan
+        // events still conservatively invalidate review consumers.
+        if review_changed && !reloaded {
+            self.store.notify_change();
+        }
     }
 
     // -- Internal helpers for the workspace surface --
@@ -4093,6 +4163,65 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn state_sync_does_not_notify_again_for_our_own_state_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_project_session(&svc).await;
+        let generation = svc.store().generation();
+        // Exercise a classified state-only event directly. Assumption, untested
+        // on macOS: notify's FSEvents backend can flag Rescan at startup
+        // (notify 8.2.0 src/fsevent.rs:116-117, MUST_SCAN_SUBDIRS).
+        svc.reconcile_state_files(false).await;
+        assert_eq!(svc.store().generation(), generation);
+    }
+
+    /// The same regression through a live `FileEvents::state` watcher: our own
+    /// `mutate` must be classified as a state-only event, and processing it as
+    /// the sync loop does must not wake the change feed a second time.
+    #[tokio::test]
+    async fn own_state_write_under_a_live_state_watcher_notifies_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        seed_project_session(&svc).await;
+        let mut watcher = crate::file_events::FileEvents::state(&svc.store().data_dir()).unwrap();
+
+        svc.store()
+            .mutate(|state| {
+                state.add_project(Project::new("other", PathBuf::from("/tmp/other"), "main"))
+            })
+            .await
+            .unwrap();
+        let generation = svc.store().generation();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), watcher.changed())
+                .await
+                .unwrap(),
+            "the watcher must observe our own state write"
+        );
+        // Mirror `spawn_state_sync_loop`'s handling of a watcher event.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        watcher.take_changed();
+        // A Rescan marks the watch failed, which deliberately takes the
+        // conservative path. Assumption, untested on macOS: notify's FSEvents
+        // backend can flag one (notify 8.2.0 src/fsevent.rs:116-117,
+        // MUST_SCAN_SUBDIRS); inotify only does on overflow.
+        if cfg!(target_os = "linux") {
+            assert!(watcher.healthy());
+        }
+        if !watcher.healthy() {
+            return;
+        }
+        let review_changed = watcher.take_review_changed();
+        assert!(!review_changed, "a state.json write is not a review change");
+        svc.reconcile_state_files(review_changed).await;
+        assert_eq!(
+            svc.store().generation(),
+            generation,
+            "our own write must not be notified again"
+        );
+    }
+
     /// Seed one project with one session and return their ids.
     async fn seed_project_session(svc: &CommanderService) -> (ProjectId, SessionId) {
         let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
@@ -4924,6 +5053,37 @@ mod tests {
         svc.mark_unread(vec![sid]).await.unwrap();
         let state = svc.store().read().await;
         assert!(state.get_session(&sid).unwrap().unread);
+    }
+
+    /// Pins the premise behind the agent-state loop's unconditional
+    /// `notify_change`: re-marking an already-unread session is a no-op
+    /// mutate, which does not bump the generation, so `mark_unread` alone
+    /// cannot be relied on to wake the change feed.
+    #[tokio::test]
+    async fn mark_unread_on_an_already_unread_session_does_not_bump_generation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.mark_unread(vec![sid]).await.unwrap();
+        let generation = svc.store().generation();
+        svc.mark_unread(vec![sid]).await.unwrap();
+        assert_eq!(svc.store().generation(), generation);
+    }
+
+    #[tokio::test]
+    async fn finishing_a_turn_on_an_unread_session_wakes_the_feed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.mark_unread(vec![sid]).await.unwrap();
+        svc.publish_agent_states(BTreeMap::from([(sid, AgentState::Working)]), false, false)
+            .await;
+        let generation = svc.store().generation();
+
+        // Working→Idle marks the session unread again, which is a no-op.
+        svc.publish_agent_states(BTreeMap::from([(sid, AgentState::Idle)]), false, false)
+            .await;
+        assert_ne!(svc.store().generation(), generation);
     }
 
     #[tokio::test]
