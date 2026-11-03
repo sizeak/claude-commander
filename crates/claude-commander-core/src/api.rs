@@ -152,6 +152,9 @@ impl CommanderService {
             manager.tmux.clone(),
             AGENT_STATE_CACHE_TTL,
         )));
+        let notification_store = store.clone();
+        let clone_jobs =
+            CloneJobs::with_notifier(Arc::new(move || notification_store.notify_change()));
         Self {
             manager,
             store,
@@ -173,7 +176,7 @@ impl CommanderService {
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
-            clone_jobs: CloneJobs::new(),
+            clone_jobs,
         }
     }
 

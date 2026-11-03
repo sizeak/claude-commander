@@ -62,6 +62,24 @@ fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
         .allow_headers([AUTHORIZATION, axum::http::header::CONTENT_TYPE])
 }
 
+/// Include successful config/comment/review writes in the observable generation
+/// even when their persistence store is separate from state.json.
+async fn notify_mutation(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mutation = !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    let response = next.run(request).await;
+    if mutation && response.status().is_success() {
+        state.service.store().notify_change();
+    }
+    response
+}
+
 /// Build the full application router.
 pub fn build_router(state: AppState) -> Router {
     let auth = state.auth.clone();
@@ -71,6 +89,7 @@ pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         // -- workspace surface --
         .route("/workspace", get(snapshot::snapshot))
+        .route("/changes", get(snapshot::changes))
         .route("/agent-states", get(snapshot::agent_states))
         .route("/pr-refresh", post(snapshot::pr_refresh))
         .route("/create-options", get(snapshot::create_options))
@@ -168,6 +187,7 @@ pub fn build_router(state: AppState) -> Router {
         // Bearer auth guards the whole `/api` surface; the CORS layer sits
         // outside auth so browser preflight (OPTIONS, unauthenticated) is
         // answered correctly.
+        .layer(from_fn_with_state(state.clone(), notify_mutation))
         .layer(from_fn_with_state(auth, require_bearer))
         .layer(cors);
 
@@ -207,6 +227,77 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::handlers::test_support::test_state;
+
+    #[tokio::test]
+    async fn changes_bootstraps_and_wakes_after_a_mutation() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let app = super::build_router(state);
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/changes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let generation: u64 = serde_json::from_slice(&bytes).unwrap();
+        let waiter = app.clone();
+        let mut waiting = tokio::spawn(async move {
+            waiter
+                .oneshot(
+                    Request::get(format!("/api/changes?since={generation}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut waiting)
+                .await
+                .is_err(),
+            "unchanged generations must wait instead of returning immediately"
+        );
+        let mutation = app
+            .oneshot(
+                Request::post("/api/pr-refresh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mutation.status(), axum::http::StatusCode::ACCEPTED);
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_ne!(serde_json::from_slice::<u64>(&bytes).unwrap(), generation);
+    }
+
+    #[tokio::test]
+    async fn change_waits_require_authentication() {
+        let dir = TempDir::new().unwrap();
+        let mut state = test_state(&dir);
+        state.auth = std::sync::Arc::new(crate::auth::AuthConfig::Token("test-token".into()));
+        let app = super::build_router(state);
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/changes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(
+                Request::get("/api/changes")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
 
     const ALLOWED: &str = "https://app.example.com";
     const OTHER: &str = "https://evil.example.com";

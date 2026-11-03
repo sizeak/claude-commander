@@ -7,10 +7,9 @@ import '../state/commander_store.dart';
 import '../theme/tokens.dart';
 import '../util/error_text.dart';
 
-/// How often a running clone job is polled. Flat, with no backoff: a job is
-/// already bounded server-side by `clone_timeout_secs`, so there is no runaway
-/// to protect against, and a clone the user is watching should feel live.
-const _pollInterval = Duration(seconds: 1);
+/// Reconciliation timeout while watching a clone. Server change notifications
+/// wake the wait early; this deadline also supports servers without the feed.
+const _changeWaitFallback = Duration(seconds: 1);
 
 /// Prefix characters a client-derived directory name may contain. Deliberately
 /// narrower than the server's `check_dir_name` (which only bars `/`, `\`, `.`,
@@ -321,7 +320,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
       while (true) {
         switch (current.status.kind) {
           case CloneStatusKind.running:
-            await Future<void>.delayed(_pollInterval);
+            await _store.waitForChange(_changeWaitFallback);
             if (!mounted) return _Attempt.done;
             final CloneJobDto? polled;
             try {
@@ -407,7 +406,6 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
     if (register != true) return _Attempt.rename;
     try {
       await _store.ensureProject(dest, workspace: widget.workspace);
-      await _store.refresh();
       if (!mounted) return _Attempt.done;
       Navigator.of(context).pop(true);
     } catch (e) {

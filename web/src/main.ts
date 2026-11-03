@@ -7,7 +7,7 @@
 // address bar), else from localStorage, else the connect screen. A server
 // running without auth needs none; the connect screen only opens on a 401.
 
-import { Api, Auth, act, Unauthorized } from "./api.ts";
+import { Api, ApiError, Auth, act, Unauthorized } from "./api.ts";
 import {
   closeDrawer,
   closeModal,
@@ -161,6 +161,39 @@ async function poll(): Promise<void> {
     if (!(e instanceof Unauthorized)) setConn("error", "disconnected");
   }
 }
+
+// A separate change wait keeps explicit refresh free of the long-poll latency.
+let changesSupported = false;
+function refreshCadence(): void {
+  poller.setIntervalMs(changesSupported && haltState() !== "gone" ? 30_000 : POLL_MS);
+}
+async function watchChanges(): Promise<void> {
+  let generation: number | undefined;
+  for (;;) {
+    if (auth.rejected) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      continue;
+    }
+    try {
+      const next = await api.changes(generation);
+      changesSupported = true;
+      refreshCadence();
+      if (generation !== next) await refreshAll();
+      generation = next;
+    } catch (error) {
+      changesSupported = false;
+      generation = undefined;
+      refreshCadence();
+      await new Promise((resolve) =>
+        setTimeout(resolve, error instanceof ApiError && error.status === 404 ? 30_000 : POLL_MS),
+      );
+    }
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  refreshCadence();
+  if (!document.hidden) refreshAll();
+});
 
 // ---- tree + toolbar ------------------------------------------------------------
 
@@ -319,7 +352,13 @@ function wire(): void {
   wireModals();
   wireContextMenu();
   requestPermissionOnFirstClick();
-  initTerminal(auth, { onAuthRejected: (token) => api.unauthorized(token) });
+  initTerminal(auth, {
+    onAuthRejected: (token) => api.unauthorized(token),
+    onRecoveryChanged: () => {
+      refreshCadence();
+      if (haltState() === "gone") void refreshAll();
+    },
+  });
   initReview(api);
   initSettings(api);
   initForms(api, { refresh: refreshAll, select: selectSession });
@@ -369,6 +408,7 @@ function boot(): void {
   // unreachable server is bounded by the request timeout, then retried). A 401
   // opens the connect screen (Api's onUnauthorized).
   void poller.start();
+  void watchChanges();
 }
 
 boot();

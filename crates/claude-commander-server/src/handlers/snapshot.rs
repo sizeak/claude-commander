@@ -48,6 +48,30 @@ pub async fn pr_refresh(State(state): State<AppState>) -> Result<StatusCode, Api
     Ok(StatusCode::ACCEPTED)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChangesQuery {
+    pub since: Option<u64>,
+}
+
+/// Bootstrap a generation, or wait for observable changes without transferring
+/// another full workspace. Subscribe before comparing to avoid lost wakeups.
+pub async fn changes(
+    State(state): State<AppState>,
+    Query(query): Query<ChangesQuery>,
+) -> Json<u64> {
+    let mut feed = state.service.store().subscribe();
+    let current = *feed.borrow_and_update();
+    if query.since == Some(current) {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(claude_commander_protocol::CHANGE_WAIT_SECS),
+            feed.changed(),
+        )
+        .await;
+    }
+    let generation = *feed.borrow();
+    Json(generation)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{Router, routing::get};
