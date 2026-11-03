@@ -1474,6 +1474,59 @@ fn test_hide_empty_sections_toggle_and_apply() {
     assert!(app.config.hide_empty_sections);
 }
 
+#[tokio::test]
+async fn toggling_hide_empty_sections_rebuilds_the_list() {
+    let mut app = make_test_app();
+    app_on_sections_tab_with_pinned_session(
+        &mut app,
+        vec![
+            claude_commander_core::session::SectionConfig {
+                name: "Alpha".to_string(),
+                ..Default::default()
+            },
+            claude_commander_core::session::SectionConfig {
+                name: "Empty".to_string(),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+    let headers = |app: &App| {
+        app.ui_state
+            .list_items
+            .iter()
+            .filter(|i| matches!(i, SessionListItem::SectionHeader { .. }))
+            .count()
+    };
+    let hidden = headers(&app);
+
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let selected_row = rows
+        .iter()
+        .position(|r| r.field_key == "hide_empty_sections")
+        .unwrap();
+    let state = SettingsState {
+        tab: SettingsTab::General,
+        selected_row,
+        editing: None,
+        rows,
+        sections_state: SectionsState::default(),
+        workspaces_state: WorkspacesState::default(),
+        programs_state: crate::app::ProgramsState::default(),
+        theme_scope: app.default_theme_scope(),
+        search: None,
+    };
+    app.handle_settings_key(key(crossterm::event::KeyCode::Enter), state)
+        .await;
+
+    assert!(!app.config.hide_empty_sections);
+    assert!(
+        headers(&app) > hidden,
+        "empty sections should appear without waiting for another refresh: {:?}",
+        app.ui_state.list_items
+    );
+}
+
 #[test]
 fn test_stt_rows_present_with_defaults() {
     let app = make_test_app();

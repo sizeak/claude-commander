@@ -1914,6 +1914,19 @@ impl App {
     pub(super) async fn handle_settings_key(
         &mut self,
         key: crossterm::event::KeyEvent,
+        state: SettingsState,
+    ) {
+        self.dispatch_settings_key(key, state).await;
+        // Several settings shape the session list (hide empty sections, the
+        // recent-sessions limit, the section set) and nothing else rebuilds it
+        // after the modal's own edits: the tick only does so when config.toml
+        // changed behind our back.
+        self.refresh_list_items().await;
+    }
+
+    async fn dispatch_settings_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
         mut state: SettingsState,
     ) {
         use crossterm::event::KeyCode;
