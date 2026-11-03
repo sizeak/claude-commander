@@ -206,15 +206,19 @@ pub async fn check_review_for_branch(
     let Ok(json) = String::from_utf8(output.stdout) else {
         return PrCheckResult::FetchFailed;
     };
-    parse_merge_request_list(&json, branch_owned_since)
+    parse_merge_request_list(&json, branch, branch_owned_since)
 }
 
-fn parse_merge_request_list(json: &str, owned_since: DateTime<Utc>) -> PrCheckResult {
+fn parse_merge_request_list(json: &str, branch: &str, owned_since: DateTime<Utc>) -> PrCheckResult {
     let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
         return PrCheckResult::FetchFailed;
     };
+    // The query already filters on `source_branch`; checking again means a
+    // query that ever came back unfiltered attaches nothing rather than some
+    // other branch's merge request.
     let candidates = values
         .iter()
+        .filter(|value| value["source_branch"].as_str() == Some(branch))
         .filter(|value| !gitlab_review_settled_before(value, owned_since))
         .collect::<Vec<_>>();
     let Some(first) = candidates.first() else {
@@ -600,13 +604,23 @@ mod tests {
     }
 
     #[test]
+    fn merge_requests_from_other_branches_are_ignored() {
+        let json = r#"[{"source_branch":"other","iid":7,"web_url":"u","state":"opened","labels":[],"reviewers":[],"target_branch":"main"}]"#;
+        assert!(matches!(
+            parse_merge_request_list(json, "feat", Utc::now()),
+            PrCheckResult::NotFound
+        ));
+    }
+
+    #[test]
     fn merge_request_parser_matches_gitlab_fields() {
         let json = r#"[
-          {"iid":1,"web_url":"old","state":"merged","draft":false,"labels":[],"reviewers":[],"target_branch":"main","created_at":"2020-01-01T00:00:00Z","merged_at":"2020-01-02T00:00:00Z"},
-          {"iid":2,"web_url":"new","state":"opened","work_in_progress":true,"labels":["review"],"reviewers":[{"username":"bob"},{"username":"alice"}],"target_branch":"parent","created_at":"2026-01-02T00:00:00Z"}
+          {"source_branch":"feat","iid":1,"web_url":"old","state":"merged","draft":false,"labels":[],"reviewers":[],"target_branch":"main","created_at":"2020-01-01T00:00:00Z","merged_at":"2020-01-02T00:00:00Z"},
+          {"source_branch":"feat","iid":2,"web_url":"new","state":"opened","work_in_progress":true,"labels":["review"],"reviewers":[{"username":"bob"},{"username":"alice"}],"target_branch":"parent","created_at":"2026-01-02T00:00:00Z"}
         ]"#;
         let result = parse_merge_request_list(
             json,
+            "feat",
             DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
@@ -626,14 +640,19 @@ mod tests {
         let owned = Utc::now();
         assert!(
             parse_merge_request_list(
-                r#"[{"iid":4294967296,"web_url":"u","state":"opened"}]"#,
+                r#"[{"source_branch":"feat","iid":4294967296,"web_url":"u","state":"opened"}]"#,
+                "feat",
                 owned
             )
             .is_fetch_failed()
         );
         assert!(
-            parse_merge_request_list(r#"[{"iid":1,"web_url":"u","state":"locked"}]"#, owned)
-                .is_fetch_failed()
+            parse_merge_request_list(
+                r#"[{"source_branch":"feat","iid":1,"web_url":"u","state":"locked"}]"#,
+                "feat",
+                owned
+            )
+            .is_fetch_failed()
         );
     }
 
@@ -643,7 +662,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert!(matches!(
-            parse_merge_request_list("[]", owned),
+            parse_merge_request_list("[]", "feat", owned),
             PrCheckResult::NotFound
         ));
 
@@ -652,10 +671,13 @@ mod tests {
             ("merged", "merged_at", PrState::Merged),
         ] {
             let json = format!(
-                r#"[{{"iid":3,"web_url":"u","state":"{state}","labels":[],"reviewers":[],"target_branch":"main","created_at":"2026-02-01T00:00:00Z","{timestamp_field}":"2026-02-02T00:00:00Z"}}]"#
+                r#"[{{"source_branch":"feat","iid":3,"web_url":"u","state":"{state}","labels":[],"reviewers":[],"target_branch":"main","created_at":"2026-02-01T00:00:00Z","{timestamp_field}":"2026-02-02T00:00:00Z"}}]"#
             );
             assert_eq!(
-                parse_merge_request_list(&json, owned).info().unwrap().state,
+                parse_merge_request_list(&json, "feat", owned)
+                    .info()
+                    .unwrap()
+                    .state,
                 expected
             );
         }
