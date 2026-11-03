@@ -2946,8 +2946,6 @@ impl CommanderService {
     ) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
         let tmux = self.manager.tmux.clone();
-        let cache = self.agent_states_cache.clone();
-        let primed = self.agent_states_primed.clone();
         let store = self.store.clone();
         tokio::spawn(async move {
             if interval_ms == 0 {
@@ -2957,7 +2955,6 @@ impl CommanderService {
             let mut detector = AgentStateDetector::new(tmux.clone(), cache_ttl);
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
             let mut last_commander_running = false;
-            let sentinel = claude_commander_protocol::session::COMMANDER_SENTINEL_ID;
             loop {
                 interval.tick().await;
                 let sessions: Vec<(SessionId, String, String)> = {
@@ -3000,49 +2997,62 @@ impl CommanderService {
                 }
                 let commander_flipped = commander_running != last_commander_running;
                 last_commander_running = commander_running;
-
-                // Diff against the previous cache to flag agents that just
-                // finished a turn (Working→Idle), skipping the commander
-                // sentinel (it has no `WorktreeSession` to mark).
-                let prev = { cache.read().await.states.clone() };
-                let unread_ids: Vec<SessionId> = detect_unread_transitions(&prev, &states)
-                    .into_iter()
-                    .filter(|id| *id != sentinel)
-                    .collect();
-                let states_changed = states != prev;
-
-                // Only write the cache when something changed: a rebuilt-but-
-                // identical map would serialize identically anyway (BTreeMap,
-                // deterministic key order), but skipping the write keeps the
-                // remote pollers' content-hash diffing honest by construction
-                // and avoids needless lock traffic on all-idle ticks.
-                {
-                    let mut c = cache.write().await;
-                    if states_changed {
-                        c.states = states;
-                    }
-                    c.commander_running = commander_running;
-                }
-                primed.store(true, std::sync::atomic::Ordering::Relaxed);
-
-                // Wake the change-feed only when observable state actually
-                // changed (fresh states, or the commander flipped), so a steady
-                // row of idle agents doesn't trigger a snapshot re-fetch every
-                // tick. Persisting unread is not enough on its own: marking an
-                // already-unread session is a no-op mutate that skips the
-                // generation bump (pinned by
-                // `mark_unread_on_an_already_unread_session_does_not_bump_generation`),
-                // so wake the feed explicitly whenever states changed. The
-                // cache is updated first so the snapshot the wake triggers
-                // reads the fresh states.
-                if !unread_ids.is_empty() {
-                    let _ = service.mark_unread(unread_ids).await;
-                }
-                if states_changed || commander_flipped {
-                    store.notify_change();
-                }
+                service
+                    .publish_agent_states(states, commander_running, commander_flipped)
+                    .await;
             }
         })
+    }
+
+    /// Publish one poll tick's agent states: update the cache, persist unread
+    /// for agents that just finished a turn, and wake the change feed if
+    /// anything observable changed.
+    async fn publish_agent_states(
+        &self,
+        states: BTreeMap<SessionId, AgentState>,
+        commander_running: bool,
+        commander_flipped: bool,
+    ) {
+        // Diff against the previous cache to flag agents that just
+        // finished a turn (Working→Idle), skipping the commander
+        // sentinel (it has no `WorktreeSession` to mark).
+        let prev = { self.agent_states_cache.read().await.states.clone() };
+        let unread_ids: Vec<SessionId> = detect_unread_transitions(&prev, &states)
+            .into_iter()
+            .filter(|id| *id != claude_commander_protocol::session::COMMANDER_SENTINEL_ID)
+            .collect();
+        let states_changed = states != prev;
+
+        // Only write the cache when something changed: a rebuilt-but-
+        // identical map would serialize identically anyway (BTreeMap,
+        // deterministic key order), but skipping the write keeps the
+        // remote pollers' content-hash diffing honest by construction
+        // and avoids needless lock traffic on all-idle ticks.
+        {
+            let mut c = self.agent_states_cache.write().await;
+            if states_changed {
+                c.states = states;
+            }
+            c.commander_running = commander_running;
+        }
+        self.agent_states_primed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Wake the change-feed only when observable state actually
+        // changed (fresh states, or the commander flipped), so a steady
+        // row of idle agents doesn't trigger a snapshot re-fetch every
+        // tick. Persisting unread is not enough on its own: marking an
+        // already-unread session is a no-op mutate that skips the
+        // generation bump, so wake the feed explicitly whenever states changed
+        // (pinned by `finishing_a_turn_on_an_unread_session_wakes_the_feed`). The
+        // cache is updated first so the snapshot the wake triggers
+        // reads the fresh states.
+        if !unread_ids.is_empty() {
+            let _ = self.mark_unread(unread_ids).await;
+        }
+        if states_changed || commander_flipped {
+            self.store.notify_change();
+        }
     }
 
     /// The `(session id, branch, repo path, branch-owned-since)` tuples the PR
@@ -5851,6 +5861,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finishing_a_turn_on_an_unread_session_wakes_the_feed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.mark_unread(vec![sid]).await.unwrap();
+        svc.publish_agent_states(BTreeMap::from([(sid, AgentState::Working)]), false, false)
+            .await;
+        let generation = svc.store().generation();
+
+        // Working→Idle marks the session unread again, which is a no-op.
+        svc.publish_agent_states(BTreeMap::from([(sid, AgentState::Idle)]), false, false)
+            .await;
+        assert_ne!(svc.store().generation(), generation);
+    }
+
+    #[tokio::test]
     async fn apply_pr_results_sets_and_clears_pr_fields() {
         use crate::git::{PrCheckResult, PrInfo};
         let dir = tempfile::TempDir::new().unwrap();
@@ -7307,7 +7333,11 @@ printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","stat
         std::fs::write(&glab, r#"#!/bin/sh
 if [ "$1" = "--version" ]; then exit 0; fi
 if [ -f "$CC_TEST_PR_REFRESH_FAIL" ]; then exit 1; fi
-printf '%s' '[{"iid":84,"web_url":"https://gitlab.example/example/repo/-/merge_requests/84","state":"opened","labels":[],"target_branch":"main"}]'
+source_branch=
+for arg in "$@"; do
+  case "$arg" in source_branch=*) source_branch="${arg#source_branch=}" ;; esac
+done
+printf '[{"iid":84,"web_url":"https://gitlab.example/example/repo/-/merge_requests/84","state":"opened","labels":[],"source_branch":"%s","target_branch":"main"}]' "$source_branch"
 "#).unwrap();
         std::fs::set_permissions(&glab, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::join_paths(

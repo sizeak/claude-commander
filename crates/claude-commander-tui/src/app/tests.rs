@@ -6606,12 +6606,21 @@ async fn reset_confirm_takes_the_no_resume_path_and_toasts_reset() {
 fn reset_confirm_message_names_session_and_promises_no_resume() {
     use super::actions::reset_confirm_message;
 
-    let msg = reset_confirm_message(Some("fix-parser"));
+    let msg = reset_confirm_message(Some("fix-parser"), None);
     assert!(msg.contains("\"fix-parser\""), "message: {msg}");
     assert!(msg.contains("no resume"), "message: {msg}");
     assert!(msg.contains("new conversation"), "message: {msg}");
+    assert!(!msg.contains("pending"), "message: {msg}");
     // Falls back to a generic subject rather than an empty quote.
-    assert!(reset_confirm_message(None).contains("this session"));
+    assert!(reset_confirm_message(None, None).contains("this session"));
+}
+
+#[test]
+fn reset_confirmation_warns_about_pending_program() {
+    use super::actions::reset_confirm_message;
+
+    let msg = reset_confirm_message(Some("fix-parser"), Some("codex"));
+    assert!(msg.contains("starts with codex"), "message: {msg}");
 }
 
 #[test]

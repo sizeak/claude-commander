@@ -267,16 +267,21 @@ pub(super) fn restart_confirm_message(
 /// DTO), and "any conversation it would otherwise have resumed" is true of a
 /// hibernated session — whose wake-up resume is exactly what makes hibernation
 /// non-destructive — without needing to know.
-pub(super) fn reset_confirm_message(title: Option<&str>) -> String {
+///
+/// A reset applies a pending program just as a restart does, so it says so.
+pub(super) fn reset_confirm_message(title: Option<&str>, pending_program: Option<&str>) -> String {
     let subject = match title {
         Some(title) => format!("\"{title}\""),
         None => "this session".to_string(),
     };
+    let program = pending_program
+        .map(|program| format!("\nIt starts with {program}, the pending program."))
+        .unwrap_or_default();
     format!(
         "Reset session {subject}?\nThis kills its tmux session and starts a fresh one with \
          no resume, so the agent begins a new conversation — any conversation it would \
          otherwise have resumed (including one preserved by hibernation) is discarded.\nThe \
-         worktree, branch and commits are untouched."
+         worktree, branch and commits are untouched.{program}"
     )
 }
 
@@ -1697,10 +1702,14 @@ impl App {
     /// [`Self::handle_restart_session`].
     pub(super) fn handle_reset_session(&mut self) {
         if let Some(sref) = self.ui_state.selected_session_id {
-            let title = self.session(sref).map(|s| s.title.clone());
+            let session = self.session(sref);
+            let message = reset_confirm_message(
+                session.map(|s| s.title.as_str()),
+                session.and_then(|s| s.pending_program.as_deref()),
+            );
             self.ui_state.modal = Modal::Confirm {
                 title: "Reset Session".to_string(),
-                message: reset_confirm_message(title.as_deref()),
+                message,
                 on_confirm: ConfirmAction::ResetSession {
                     session_id: sref.id,
                 },
