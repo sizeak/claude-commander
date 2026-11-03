@@ -17,6 +17,8 @@ let api: Api;
 let sessionId: SessionId | null = null;
 let snapshot: ReviewSnapshot | null = null;
 let composerEl: HTMLElement | null = null;
+let rowsObserver: IntersectionObserver | null = null;
+const ROWS_PER_CHUNK = 100;
 
 const rv = {
   get view() {
@@ -63,6 +65,8 @@ export async function openReview(s: SessionInfo): Promise<void> {
   sessionId = s.id;
   rv.title.textContent = `Review — ${s.title}`;
   rv.status.textContent = "loading…";
+  rowsObserver?.disconnect();
+  rowsObserver = null;
   clear(rv.body);
   rv.view.classList.remove("hidden");
   try {
@@ -80,6 +84,8 @@ function closeReview(): void {
   rv.view.classList.add("hidden");
   sessionId = null;
   snapshot = null;
+  rowsObserver?.disconnect();
+  rowsObserver = null;
   clear(rv.body);
 }
 
@@ -96,6 +102,16 @@ async function reloadReview(): Promise<void> {
 function renderReview(): void {
   const snap = snapshot;
   if (!snap) return;
+  // A reload (comment add/delete/apply) rebuilds every chunk. Off-screen
+  // chunks are rebuilt unmounted at an estimated height, so restoring the old
+  // scrollTop over estimates would land rows away; carry each chunk's measured
+  // height across instead, and let the observer mount whatever is in view.
+  const top = rv.body.scrollTop;
+  const heights = new Map<string, number>();
+  for (const chunk of rv.body.querySelectorAll<HTMLElement>(".rv-chunk"))
+    heights.set(chunk.dataset.key ?? "", chunk.offsetHeight);
+  rowsObserver?.disconnect();
+  rowsObserver = null;
   clear(rv.body);
   const files = snap.diff?.files ?? [];
   rv.status.textContent = `${files.length} file(s) · ${snap.comments.length} comment(s)`;
@@ -104,10 +120,25 @@ function renderReview(): void {
     return;
   }
   const reviewed = new Set(snap.reviewed ?? []);
-  for (const f of files) rv.body.append(renderFile(f, snap.comments, reviewed));
+  for (const f of files) rv.body.append(renderFile(f, snap.comments, reviewed, heights));
+  rv.body.scrollTop = top;
 }
 
-function renderFile(f: FileDiff, comments: readonly Comment[], reviewed: Set<string>): HTMLElement {
+/** A row chunk whose rows are built only once it scrolls near the viewport. */
+type LazyChunk = HTMLElement & { mountRows?: () => void };
+
+function mountChunk(chunk: LazyChunk): void {
+  chunk.mountRows?.();
+  rowsObserver?.unobserve(chunk);
+  delete chunk.mountRows;
+}
+
+function renderFile(
+  f: FileDiff,
+  comments: readonly Comment[],
+  reviewed: Set<string>,
+  heights: ReadonlyMap<string, number>,
+): HTMLElement {
   const dp = displayPath(f);
   const cb = h("input");
   cb.type = "checkbox";
@@ -138,25 +169,61 @@ function renderFile(f: FileDiff, comments: readonly Comment[], reviewed: Set<str
     return wrap;
   }
 
+  const anchored = new Map<string, Comment[]>();
+  for (const comment of comments) {
+    if (comment.file !== dp) continue;
+    const key = `${comment.side}:${comment.line_range[0]}`;
+    const group = anchored.get(key) ?? [];
+    group.push(comment);
+    anchored.set(key, group);
+  }
+  // Build descriptors cheaply. Mount at most 100 lines per intersecting chunk,
+  // including their comments; once mounted, selection and composers stay live.
+  const rows: (() => HTMLElement)[] = [];
   for (const hunk of f.hunks ?? []) {
-    wrap.append(
+    rows.push(() =>
       h("div", {
         className: "rv-hunk-header",
-        text: `@@ -${hunk.old_start},${hunk.old_lines} +${hunk.new_start},${hunk.new_lines} @@${
-          hunk.header ? ` ${hunk.header}` : ""
-        }`,
+        text: `@@ -${hunk.old_start},${hunk.old_lines} +${hunk.new_start},${hunk.new_lines} @@${hunk.header ? ` ${hunk.header}` : ""}`,
       }),
     );
     for (const line of hunk.lines) {
-      wrap.append(renderLine(dp, line));
+      rows.push(() => renderLine(dp, line));
       const at = lineAnchor(line);
-      if (!at) continue;
-      for (const c of comments) {
-        if (c.file === dp && c.side === at.side && c.line_range[0] === at.lineno) {
-          wrap.append(renderComment(c));
+      if (at)
+        for (const comment of anchored.get(`${at.side}:${at.lineno}`) ?? []) {
+          rows.push(() => renderComment(comment));
         }
-      }
     }
+  }
+  for (let start = 0; start < rows.length; start += ROWS_PER_CHUNK) {
+    const chunkRows = rows.slice(start, start + ROWS_PER_CHUNK);
+    const chunk: LazyChunk = h("div", { className: "rv-chunk" });
+    // Keyed by position so a reload of the same review finds the height this
+    // chunk measured last time; a comment added or deleted shifts only the
+    // rows after it, which the reader has not scrolled past.
+    const key = `${dp}#${start}`;
+    chunk.dataset.key = key;
+    // Until the chunk is visible, hold its last measured height, else an
+    // estimate. Real rows retain wrapping.
+    chunk.style.minHeight = `${heights.get(key) ?? chunkRows.length * 20}px`;
+    const mount = () => {
+      chunk.style.minHeight = "";
+      chunk.replaceChildren(...chunkRows.map((row) => row()));
+    };
+    if (typeof IntersectionObserver === "undefined") mount();
+    else {
+      rowsObserver ??= new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries)
+            if (entry.isIntersecting) mountChunk(entry.target as LazyChunk);
+        },
+        { root: rv.body, rootMargin: "800px" },
+      );
+      chunk.mountRows = mount;
+      rowsObserver.observe(chunk);
+    }
+    wrap.append(chunk);
   }
   return wrap;
 }

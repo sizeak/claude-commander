@@ -89,22 +89,46 @@ class CommanderStore extends ChangeNotifier {
   bool _refreshQueued = false;
   bool _disposed = false;
 
+  SnapshotDto? _indexedSnapshot;
+  final Map<ProjectId, String?> _projectWorkspaces = {};
+  final Map<String, SessionInfo> _sessionsById = {};
+  List<ProjectSessions> _groups = const [];
+  final Map<String?, List<SessionInfo>> _workspaceSessions = {};
+
+  void _ensureIndexes() {
+    if (identical(_indexedSnapshot, _snapshot)) return;
+    _indexedSnapshot = _snapshot;
+    _projectWorkspaces.clear();
+    _sessionsById.clear();
+    _workspaceSessions.clear();
+    final grouped = <ProjectId, List<SessionInfo>>{};
+    for (final project in projects) {
+      _projectWorkspaces[project.id] = project.workspace;
+    }
+    for (final session in sessions) {
+      _sessionsById[session.id] = session;
+      grouped.putIfAbsent(session.projectId, () => []).add(session);
+      _workspaceSessions
+          .putIfAbsent(_projectWorkspaces[session.projectId], () => [])
+          .add(session);
+    }
+    _groups = [
+      for (final project in projects)
+        ProjectSessions(
+          project: project,
+          sessions: grouped[project.id] ?? const [],
+        ),
+    ];
+  }
+
   // --- convenience getters the pages render from ---------------------------
 
   List<SessionInfo> get sessions => _snapshot?.sessions ?? const [];
 
   /// Sessions grouped under their project, in the snapshot's project order.
   List<ProjectSessions> get sessionsByProject {
-    final ws = _snapshot;
-    if (ws == null) return const [];
-    final byProject = <ProjectId, List<SessionInfo>>{};
-    for (final s in ws.sessions) {
-      byProject.putIfAbsent(s.projectId, () => []).add(s);
-    }
-    return [
-      for (final p in ws.projects)
-        ProjectSessions(project: p, sessions: byProject[p.id] ?? const []),
-    ];
+    _ensureIndexes();
+    return _groups;
   }
 
   List<OperationStatusDto> get operations => _snapshot?.operations ?? const [];
@@ -130,10 +154,8 @@ class CommanderStore extends ChangeNotifier {
   /// a project this snapshot does not know, which reads as Main like it does in
   /// `viewmodel::workspace::project_workspace`.
   String? workspaceOfProject(ProjectId projectId) {
-    for (final p in projects) {
-      if (p.id == projectId) return p.workspace;
-    }
-    return null;
+    _ensureIndexes();
+    return _projectWorkspaces[projectId];
   }
 
   /// The workspace a session belongs to (its project's), or null for Main.
@@ -147,10 +169,10 @@ class CommanderStore extends ChangeNotifier {
   ];
 
   /// The sessions in [workspace] (null = Main), in snapshot order.
-  List<SessionInfo> sessionsIn(String? workspace) => [
-    for (final s in sessions)
-      if (workspaceOfSession(s) == workspace) s,
-  ];
+  List<SessionInfo> sessionsIn(String? workspace) {
+    _ensureIndexes();
+    return _workspaceSessions[workspace] ?? const [];
+  }
 
   /// [sessionsByProject] limited to the projects in [workspace].
   List<ProjectSessions> sessionsByProjectIn(String? workspace) => [
@@ -165,10 +187,8 @@ class CommanderStore extends ChangeNotifier {
   /// The live [SessionInfo] for an id from the latest snapshot, or null if the
   /// session is no longer present (deleted/stopped-and-removed).
   SessionInfo? sessionById(String id) {
-    for (final s in sessions) {
-      if (s.id == id) return s;
-    }
-    return null;
+    _ensureIndexes();
+    return _sessionsById[id];
   }
 
   // --- lifecycle ----------------------------------------------------------
