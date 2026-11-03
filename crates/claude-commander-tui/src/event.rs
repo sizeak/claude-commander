@@ -5,6 +5,7 @@
 //! - Application state updates
 //! - Render ticks
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -892,6 +893,9 @@ pub struct EventLoop {
     tx: mpsc::Sender<AppEvent>,
     /// Receiver for events
     rx: mpsc::Receiver<AppEvent>,
+    /// Events [`Self::restart_input`] pulled off `rx` but did not discard:
+    /// served by [`Self::next`] and [`Self::try_next`] before `rx`.
+    held: VecDeque<AppEvent>,
     /// The terminal reader while one exists: running, or asked to stop but not
     /// yet gone. `None` while an attach (or the editor) owns the terminal.
     input_reader: Option<InputReader>,
@@ -909,6 +913,7 @@ impl EventLoop {
         Self {
             tx,
             rx,
+            held: VecDeque::new(),
             input_reader: None,
             stop_grace: INPUT_STOP_GRACE,
             tick_rate: None,
@@ -1025,21 +1030,37 @@ impl EventLoop {
 
     /// Restart the terminal reader after an attach (or the editor) returns.
     pub fn restart_input(&mut self) {
-        // Drain any stale events from the channel
-        while self.rx.try_recv().is_ok() {}
-
+        self.drop_stale_input();
         self.start_input_reader();
         debug!("Input reader restarted");
     }
 
+    /// Discard the input and ticks queued while something else owned the
+    /// terminal, keeping everything else in order.
+    ///
+    /// Only input is stale after an attach: a background task's result
+    /// (`ActionFinished`, `ProjectAdded`, `ReviewedMarksPolled`, …) is the one
+    /// report of work that finished meanwhile, and some of them also clear an
+    /// in-flight flag that nothing else resets.
+    fn drop_stale_input(&mut self) {
+        while let Ok(event) = self.rx.try_recv() {
+            if !matches!(event, AppEvent::Input(_) | AppEvent::Tick) {
+                self.held.push_back(event);
+            }
+        }
+    }
+
     /// Receive the next event
     pub async fn next(&mut self) -> Option<AppEvent> {
-        self.rx.recv().await
+        match self.held.pop_front() {
+            Some(event) => Some(event),
+            None => self.rx.recv().await,
+        }
     }
 
     /// Try to receive an event without blocking
     pub fn try_next(&mut self) -> Option<AppEvent> {
-        self.rx.try_recv().ok()
+        self.held.pop_front().or_else(|| self.rx.try_recv().ok())
     }
 
     /// Post a state update
@@ -1646,6 +1667,37 @@ mod input_reader_tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Condvar, Mutex};
+
+    #[tokio::test]
+    async fn restarting_input_drops_stale_input_but_keeps_background_results() {
+        let mut events = EventLoop::new();
+        let tx = events.sender();
+        tx.send(AppEvent::Input(InputEvent::Resize(80, 24)))
+            .await
+            .unwrap();
+        tx.send(AppEvent::StateUpdate(StateUpdate::ActionFinished {
+            backend_id: 0,
+            message: Err("scan failed".into()),
+        }))
+        .await
+        .unwrap();
+        tx.send(AppEvent::Tick).await.unwrap();
+        tx.send(AppEvent::Quit).await.unwrap();
+
+        events.drop_stale_input();
+        tx.send(AppEvent::Tick).await.unwrap();
+
+        assert!(matches!(
+            events.try_next(),
+            Some(AppEvent::StateUpdate(StateUpdate::ActionFinished { .. }))
+        ));
+        assert!(matches!(events.next().await, Some(AppEvent::Quit)));
+        assert!(
+            matches!(events.try_next(), Some(AppEvent::Tick)),
+            "arrived after the drain"
+        );
+        assert!(events.try_next().is_none());
+    }
 
     use tokio::sync::Notify;
 
