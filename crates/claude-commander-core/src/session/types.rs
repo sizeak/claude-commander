@@ -430,9 +430,11 @@ impl WorktreeSession {
             return false;
         }
         // Advanced on every accepted check, even one whose PR data is
-        // unchanged, so each successful poll now rewrites state.json and bumps
-        // the change-feed generation (`StateStore::mutate` skips the write only
-        // when the serialised state is identical). That cost is required: if
+        // unchanged, so each successful poll rewrites state.json
+        // (`StateStore::mutate` skips the write only when the serialised state
+        // is identical). It does so silently: the field is left out of
+        // `AppState::client_visible`, so a stamp-only write wakes no
+        // change-feed subscriber. The write itself is required: if
         // an unchanged result left the stamp where it was, a check that
         // started before this one but lands after it would still compare as
         // newer than the stored stamp and overwrite this result with older

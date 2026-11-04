@@ -34,6 +34,11 @@ pub struct StateStore {
     state: Arc<RwLock<AppState>>,
     /// Modification time of the state file at last read/write (for change detection)
     last_mtime: Arc<RwLock<Option<SystemTime>>>,
+    /// [`AppState::client_visible`] of the cached `state`, kept beside it so
+    /// [`Self::install`] compares against it instead of re-serialising the
+    /// cache under its write lock. `None` = not known yet (computed on demand);
+    /// only ever touched while holding `state`'s write lock.
+    visible: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
     /// Monotonic change counter, bumped after every successful mutation (and on
     /// a reload that picked up an external change). Consumers subscribe via
     /// [`Self::subscribe`] and re-read state on each bump — this is the local
@@ -64,6 +69,7 @@ impl StateStore {
             lock_path,
             state: Arc::new(RwLock::new(app_state)),
             last_mtime: Arc::new(RwLock::new(mtime)),
+            visible: Arc::default(),
             generation: Arc::new(watch::Sender::new(0)),
         })
     }
@@ -76,6 +82,7 @@ impl StateStore {
             lock_path,
             state: Arc::new(RwLock::new(app_state)),
             last_mtime: Arc::new(RwLock::new(None)),
+            visible: Arc::default(),
             generation: Arc::new(watch::Sender::new(0)),
         }
     }
@@ -183,6 +190,8 @@ impl StateStore {
         // fine to skip.
         if let Ok(mut guard) = self.state.try_write() {
             guard.install_id = Some(effective.clone());
+            // The cached view no longer matches; recompute it on next install.
+            *lock_visible(&self.visible) = None;
         }
         Ok(effective)
         // _lock dropped here → flock released
@@ -307,12 +316,19 @@ impl StateStore {
     /// disk, returning whether its client-visible view differs from what the
     /// cache held. The comparison runs under the cache's write lock, against
     /// the value actually being replaced, so a concurrent install cannot make
-    /// it compare against a stale view and miss a change.
+    /// it compare against a stale view and miss a change. The cache's own view
+    /// is the one stored by the previous install, so nothing is serialised
+    /// under the lock except on the first install.
     async fn install(&self, loaded: Loaded) -> serde_json::Result<bool> {
         let changed = {
             let mut cache = self.state.write().await;
-            let changed = cache.client_visible()? != loaded.visible;
+            let mut visible = lock_visible(&self.visible);
+            let changed = match visible.as_ref() {
+                Some(current) => *current != loaded.visible,
+                None => cache.client_visible()? != loaded.visible,
+            };
             *cache = loaded.state;
+            *visible = Some(loaded.visible);
             changed
         };
         *self.last_mtime.write().await = loaded.mtime;
@@ -339,6 +355,15 @@ impl Loaded {
             state,
         })
     }
+}
+
+fn lock_visible(
+    visible: &std::sync::Mutex<Option<serde_json::Value>>,
+) -> std::sync::MutexGuard<'_, Option<serde_json::Value>> {
+    // A poisoned view is only a cache: recover it rather than propagate.
+    visible
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn save_failed(e: serde_json::Error) -> ConfigError {
@@ -425,6 +450,7 @@ impl Clone for StateStore {
             lock_path: self.lock_path.clone(),
             state: self.state.clone(),
             last_mtime: self.last_mtime.clone(),
+            visible: self.visible.clone(),
             generation: self.generation.clone(),
         }
     }
