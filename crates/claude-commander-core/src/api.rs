@@ -163,6 +163,16 @@ impl CommanderService {
             manager.tmux.clone(),
             AGENT_STATE_CACHE_TTL,
         )));
+        // Config lives outside `state.json`, so a config edit — from whichever
+        // frontend made it — wakes the change feed through this hook rather
+        // than through each caller. Weak, so a store that outlives this
+        // service does not keep its state store alive.
+        let feed = Arc::downgrade(&store);
+        config_store.add_change_listener(Arc::new(move || {
+            if let Some(store) = feed.upgrade() {
+                store.notify_change();
+            }
+        }));
         let notification_store = store.clone();
         let clone_jobs =
             CloneJobs::with_notifier(Arc::new(move || notification_store.notify_change()));
@@ -4792,6 +4802,69 @@ mod tests {
             before.code_host_provider
         );
         assert_external_edit_survives(&svc, &dir, external).await;
+    }
+
+    /// A config edit made through the service — the path the TUI's settings
+    /// modal takes (`update_config`) — must wake the change feed, so a browser
+    /// or remote client long-polling `/changes` against a `--serve` TUI sees
+    /// it at once rather than on its fallback poll. Config lives outside
+    /// `state.json`, so nothing else bumps the generation.
+    #[tokio::test]
+    async fn update_config_wakes_the_change_feed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let feed = svc.store().subscribe();
+        let before = svc.store().generation();
+        let mut config = svc.read_config();
+        config.rounded_borders = !config.rounded_borders;
+        svc.update_config(config).unwrap();
+        assert!(svc.store().generation() > before);
+        assert!(feed.has_changed().unwrap(), "subscriber not woken");
+    }
+
+    /// Workspace definitions are config-only (no `state.json` write), so
+    /// they too must wake the feed through the config store.
+    #[tokio::test]
+    async fn set_workspace_defs_wakes_the_change_feed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let before = svc.store().generation();
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![claude_commander_protocol::workspace::WorkspaceDef::named(
+                "Work",
+            )],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        assert!(svc.store().generation() > before);
+    }
+
+    /// Only a committed change wakes the feed: a rejected edit and a no-op
+    /// `mutate_if` write nothing, so they must not make every client refetch.
+    #[tokio::test]
+    async fn uncommitted_config_edits_leave_the_change_feed_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let before = svc.store().generation();
+        let mut stale = svc.read_config();
+        stale.code_host_provider = CodeHostProvider::Gitlab;
+        assert!(svc.update_config(stale).is_err());
+        assert!(!svc.config_store.mutate_if(|_| false).unwrap());
+        assert_eq!(svc.store().generation(), before);
+    }
+
+    /// A hand edit of `config.toml` picked up by the hot-reload is observable
+    /// config too, exactly as `StateStore` bumps on an external `state.json`
+    /// change it reloads.
+    #[tokio::test]
+    async fn reloading_an_external_config_edit_wakes_the_change_feed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let _ = external_config_edit(&svc, &dir);
+        let before = svc.store().generation();
+        assert!(svc.reload_config().await.unwrap());
+        assert!(svc.store().generation() > before);
     }
 
     #[tokio::test]

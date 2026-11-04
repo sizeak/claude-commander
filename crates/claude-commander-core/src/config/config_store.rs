@@ -5,7 +5,7 @@
 //! detect external changes (e.g. the user editing `config.toml` by hand).
 
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use tracing::debug;
@@ -86,7 +86,17 @@ pub struct ConfigStore {
     last_mtime: RwLock<Option<SystemTime>>,
     /// Snapshot of restart-required fields captured at construction time.
     init_snapshot: InitSnapshot,
+    /// Called after every change to the in-memory config — a committed edit
+    /// or a hot-reload that picked up a hand edit. [`crate::api::CommanderService`]
+    /// registers one that wakes the state store's change feed, so a config
+    /// edit from *any* frontend (the TUI's settings modal, a workspace edit, a
+    /// server route) reaches every long-polling client at once. Config lives
+    /// outside `state.json`, so without this nothing else would bump it.
+    listeners: Mutex<Vec<ChangeListener>>,
 }
+
+/// A callback run after the in-memory config changes.
+pub type ChangeListener = Arc<dyn Fn() + Send + Sync>;
 
 impl ConfigStore {
     /// Create a new ConfigStore from an already-loaded Config.
@@ -101,6 +111,7 @@ impl ConfigStore {
             config_path,
             last_mtime: RwLock::new(mtime),
             init_snapshot,
+            listeners: Mutex::default(),
         })
     }
 
@@ -115,6 +126,31 @@ impl ConfigStore {
             config_path,
             last_mtime: RwLock::new(mtime),
             init_snapshot,
+            listeners: Mutex::default(),
+        }
+    }
+
+    /// Register `listener` to run after every change to the in-memory config:
+    /// a committed [`mutate`](Self::mutate)-family edit, or a
+    /// [`reload_if_changed`](Self::reload_if_changed) that picked one up. A
+    /// refused or no-op edit runs nothing. Listeners run after the config lock
+    /// is released, so one may read the config.
+    pub fn add_change_listener(&self, listener: ChangeListener) {
+        self.listeners
+            .lock()
+            .expect("listener lock poisoned")
+            .push(listener);
+    }
+
+    fn notify_listeners(&self) {
+        // Clone out so a listener never runs under the listener lock.
+        let listeners = self
+            .listeners
+            .lock()
+            .expect("listener lock poisoned")
+            .clone();
+        for listener in listeners {
+            listener();
         }
     }
 
@@ -180,6 +216,8 @@ impl ConfigStore {
         if commit {
             self.save_to_disk(&edited)?;
             *config = edited;
+            drop(config);
+            self.notify_listeners();
         }
         Ok(result)
     }
@@ -232,6 +270,7 @@ impl ConfigStore {
             .ok();
         *self.config.write().expect("config lock poisoned") = new_config;
         *self.last_mtime.write().expect("mtime lock poisoned") = reloaded_mtime;
+        self.notify_listeners();
 
         Ok(true)
     }
