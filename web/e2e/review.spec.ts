@@ -223,6 +223,17 @@ test.describe("review view", () => {
       .locator(".rv-line.addition", { hasText: "self.reap_expired();" })
       .evaluate((n) => getComputedStyle(n, "::before").content);
     expect(gutter).toMatch(/^"\s+\d+"$/);
+    // The code column starts where comments and the composer are indented to
+    // (`.rv-comment`'s left margin), so a comment lines up under its code.
+    // `*`'s border-box does not reach a pseudo-element, so this pins it.
+    const codeIndent = await file
+      .locator(".rv-line.addition", { hasText: "self.reap_expired();" })
+      .evaluate((row) => {
+        const content = row.querySelector(".rv-content");
+        if (!content) throw new Error("row has no .rv-content");
+        return content.getBoundingClientRect().left - row.getBoundingClientRect().left;
+      });
+    expect(codeIndent).toBe(84);
     await expect(page.locator("#review-status")).toContainText("1 file(s)");
 
     await page.locator("#review-close").click();
