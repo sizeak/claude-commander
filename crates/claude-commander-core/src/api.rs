@@ -6029,6 +6029,66 @@ mod tests {
         assert_eq!(s.pr_checked_at, Some(next_poll));
     }
 
+    /// A poll that changes nothing but `pr_checked_at` must still persist the
+    /// stamp (the cross-process race guard reads it from disk) but must not wake
+    /// the change-feed: the stamp is not client-visible, and every successful
+    /// poll advances it, so bumping would wake every client every poll.
+    #[tokio::test]
+    async fn stamp_only_pr_poll_persists_without_waking_the_change_feed() {
+        use crate::git::{PrCheckResult, PrInfo};
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        let (provider, epoch) = svc.review_provider_snapshot().await;
+        let found = PrCheckResult::Found(PrInfo {
+            number: 42,
+            url: "https://example/pr/42".to_string(),
+            state: crate::git::PrState::Open,
+            is_draft: false,
+            labels: vec![],
+            review_decision: None,
+            reviewers: vec![],
+            base_ref_name: Some("main".to_string()),
+        });
+        let first = Utc::now() - chrono::Duration::seconds(5);
+        let second = first + chrono::Duration::seconds(1);
+        let third = second + chrono::Duration::seconds(1);
+        let fourth = third + chrono::Duration::seconds(1);
+        let on_disk = || {
+            crate::config::AppState::load_from(&dir.path().join("state.json"))
+                .unwrap()
+                .get_session(&sid)
+                .unwrap()
+                .pr_checked_at
+        };
+
+        // Each pair: the first apply is a real data change, the repeat is not.
+        for (result, initial, repeat) in [
+            (found, first, second),
+            (PrCheckResult::NotFound, third, fourth),
+        ] {
+            let before = svc.store().generation();
+            svc.apply_pr_results_at_epoch(provider, epoch, initial, vec![(sid, result.clone())])
+                .await
+                .unwrap();
+            assert!(
+                svc.store().generation() > before,
+                "a real PR data change must wake the change-feed"
+            );
+
+            let before = svc.store().generation();
+            svc.apply_pr_results_at_epoch(provider, epoch, repeat, vec![(sid, result)])
+                .await
+                .unwrap();
+            assert_eq!(on_disk(), Some(repeat), "the newer stamp must reach disk");
+            assert_eq!(
+                svc.store().generation(),
+                before,
+                "a stamp-only poll woke the change-feed"
+            );
+        }
+    }
+
     /// `FetchFailed` carries no data, so it must not advance the stamp — else a
     /// failed newer check would make an older *successful* one look stale.
     #[tokio::test]

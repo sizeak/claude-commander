@@ -181,6 +181,10 @@ pub struct WorktreeSession {
     /// flight when `claude-commander refresh-pr` ran cannot overwrite the
     /// fresher data the refresh persisted. `None` = never checked (or written
     /// by a binary that predates the field), which any check may overwrite.
+    ///
+    /// Persisted but not client-visible (no wire DTO carries it), so a write
+    /// that changes only this stamp does not wake the change-feed — see
+    /// `AppState::client_visible`.
     #[serde(default)]
     pub pr_checked_at: Option<DateTime<Utc>>,
     /// Fallback parent link for PR-stack grouping, set when the session is
