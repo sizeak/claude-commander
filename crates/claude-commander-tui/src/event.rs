@@ -1058,6 +1058,21 @@ impl EventLoop {
         }
     }
 
+    /// Put `events` back at the front of the queue, in order, ahead of
+    /// anything already held or still on the channel.
+    ///
+    /// For a nested loop that reads this queue but cannot act on some of what
+    /// it reads — the in-session switcher, which must not apply a background
+    /// result under an open palette — so those events reach the main loop
+    /// instead of being lost. Like [`Self::drop_stale_input`], it exists because
+    /// a task's result is the one report of its work, and some results clear an
+    /// in-flight flag that nothing else resets.
+    pub fn requeue(&mut self, events: impl IntoIterator<Item = AppEvent>) {
+        let mut events: VecDeque<AppEvent> = events.into_iter().collect();
+        events.append(&mut self.held);
+        self.held = events;
+    }
+
     /// Receive the next event
     pub async fn next(&mut self) -> Option<AppEvent> {
         match self.held.pop_front() {
@@ -1722,6 +1737,40 @@ mod input_reader_tests {
             matches!(events.try_next(), Some(AppEvent::Tick)),
             "arrived after the drain"
         );
+        assert!(events.try_next().is_none());
+    }
+
+    #[tokio::test]
+    async fn requeued_events_come_back_first_and_in_order() {
+        let mut events = EventLoop::new();
+        let tx = events.sender();
+        tx.send(AppEvent::Tick).await.unwrap();
+        events.drop_stale_input(); // nothing to hold: the Tick is stale
+        tx.send(AppEvent::Quit).await.unwrap();
+        events.drop_stale_input(); // holds the Quit
+        events.requeue([
+            AppEvent::StateUpdate(StateUpdate::LfsPullFinished {
+                session_id: SessionId::new(),
+            }),
+            AppEvent::StateUpdate(StateUpdate::Error {
+                message: "second".into(),
+            }),
+        ]);
+        tx.send(AppEvent::Tick).await.unwrap();
+
+        assert!(matches!(
+            events.try_next(),
+            Some(AppEvent::StateUpdate(StateUpdate::LfsPullFinished { .. }))
+        ));
+        assert!(matches!(
+            events.try_next(),
+            Some(AppEvent::StateUpdate(StateUpdate::Error { .. }))
+        ));
+        assert!(
+            matches!(events.try_next(), Some(AppEvent::Quit)),
+            "already-held events keep their place behind the requeued ones"
+        );
+        assert!(matches!(events.next().await, Some(AppEvent::Tick)));
         assert!(events.try_next().is_none());
     }
 
