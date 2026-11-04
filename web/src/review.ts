@@ -17,8 +17,13 @@ let api: Api;
 let sessionId: SessionId | null = null;
 let snapshot: ReviewSnapshot | null = null;
 let composerEl: HTMLElement | null = null;
-let rowsObserver: IntersectionObserver | null = null;
 const ROWS_PER_CHUNK = 100;
+/**
+ * The diff line each row shows, for the one delegated click handler on the
+ * review body: every row is built eagerly, so a closure and listener per row
+ * would cost memory for each line of a large diff whether or not it is clicked.
+ */
+const rowLines = new WeakMap<Element, DiffLine>();
 
 const rv = {
   get view() {
@@ -40,6 +45,12 @@ export function initReview(a: Api): void {
   byId("review-close").addEventListener("click", closeReview);
   byId("review-refresh").addEventListener("click", reloadReview);
   byId("review-apply").addEventListener("click", applyComments);
+  rv.body.addEventListener("click", (e) => {
+    const row = (e.target as Element).closest?.(".rv-line");
+    const line = row && rowLines.get(row);
+    const file = row?.closest<HTMLElement>(".rv-file")?.dataset.path;
+    if (row && line && file !== undefined) openComposer(row as HTMLElement, file, line);
+  });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !rv.view.classList.contains("hidden")) closeReview();
   });
@@ -65,8 +76,6 @@ export async function openReview(s: SessionInfo): Promise<void> {
   sessionId = s.id;
   rv.title.textContent = `Review — ${s.title}`;
   rv.status.textContent = "loading…";
-  rowsObserver?.disconnect();
-  rowsObserver = null;
   clear(rv.body);
   rv.view.classList.remove("hidden");
   try {
@@ -84,8 +93,6 @@ function closeReview(): void {
   rv.view.classList.add("hidden");
   sessionId = null;
   snapshot = null;
-  rowsObserver?.disconnect();
-  rowsObserver = null;
   clear(rv.body);
 }
 
@@ -102,16 +109,14 @@ async function reloadReview(): Promise<void> {
 function renderReview(): void {
   const snap = snapshot;
   if (!snap) return;
-  // A reload (comment add/delete/apply) rebuilds every chunk. Off-screen
-  // chunks are rebuilt unmounted at an estimated height, so restoring the old
-  // scrollTop over estimates would land rows away; carry each chunk's measured
-  // height across instead, and let the observer mount whatever is in view.
-  const top = rv.body.scrollTop;
+  // A reload (comment add/delete/apply) rebuilds every chunk, and a new
+  // element has no remembered size: an offscreen chunk would lay out at its
+  // estimate, and restoring the old scrollTop over estimates would land rows
+  // away. Carry each chunk's measured height across instead.
+  const top = rv.body.scrollTop - dropComposer();
   const heights = new Map<string, number>();
   for (const chunk of rv.body.querySelectorAll<HTMLElement>(".rv-chunk"))
     heights.set(chunk.dataset.key ?? "", chunk.offsetHeight);
-  rowsObserver?.disconnect();
-  rowsObserver = null;
   clear(rv.body);
   const files = snap.diff?.files ?? [];
   rv.status.textContent = `${files.length} file(s) · ${snap.comments.length} comment(s)`;
@@ -124,13 +129,30 @@ function renderReview(): void {
   rv.body.scrollTop = top;
 }
 
-/** A row chunk whose rows are built only once it scrolls near the viewport. */
-type LazyChunk = HTMLElement & { mountRows?: () => void };
-
-function mountChunk(chunk: LazyChunk): void {
-  chunk.mountRows?.();
-  rowsObserver?.unobserve(chunk);
-  delete chunk.mountRows;
+/**
+ * Detaches the open composer, which a rebuild discards, so the chunk heights
+ * measured next are the rebuilt chunks' own: counting its space would hold the
+ * rebuilt chunk too tall until it is next rendered, then shift everything
+ * below it. Returns how much of that space lay above the viewport, which the
+ * restored scrollTop must give up to keep the reader's rows in place.
+ *
+ * The chunk is forced to render first: while its rendering is skipped
+ * (offscreen, with neither focus nor selection in it), size containment
+ * answers its height with the remembered stand-in, which still counts the
+ * composer and does not shrink when it goes, so the delta would read 0.
+ * Rendering it costs one chunk's layout, and its remembered size is its real
+ * one, so nothing around it moves. The rebuild discards the chunk anyway.
+ */
+function dropComposer(): number {
+  const box = composerEl;
+  composerEl = null;
+  const chunk = box?.closest<HTMLElement>(".rv-chunk");
+  if (!box || !chunk) return 0;
+  chunk.style.contentVisibility = "visible";
+  const above = rv.body.getBoundingClientRect().top - box.getBoundingClientRect().top;
+  const before = chunk.offsetHeight;
+  box.remove();
+  return Math.max(0, Math.min(before - chunk.offsetHeight, above));
 }
 
 function renderFile(
@@ -163,6 +185,7 @@ function renderFile(
     h("label", { className: "rv-reviewed" }, cb, "reviewed"),
   );
   const wrap = h("div", { className: "rv-file" }, header);
+  wrap.dataset.path = dp;
 
   if (f.binary) {
     wrap.append(h("div", { className: "rv-binary", text: "Binary file not shown." }));
@@ -177,70 +200,61 @@ function renderFile(
     group.push(comment);
     anchored.set(key, group);
   }
-  // Build descriptors cheaply. Mount at most 100 lines per intersecting chunk,
-  // including their comments; once mounted, selection and composers stay live.
-  const rows: (() => HTMLElement)[] = [];
+  // Every row is in the DOM, so the browser's own find (Ctrl+F) sees all of
+  // it; chunks are `content-visibility: auto`, so an offscreen chunk skips
+  // style, layout and paint until it is "relevant to the user" (near the
+  // viewport, or holding a selection or find match: css-contain-2
+  // #relevant-to-the-user).
+  // review.spec.ts pins the skipping and a DOM text search reaching a skipped
+  // row; native find-in-page itself cannot be driven headless, so is untested.
+  const rows: HTMLElement[] = [];
   for (const hunk of f.hunks ?? []) {
-    rows.push(() =>
+    rows.push(
       h("div", {
         className: "rv-hunk-header",
         text: `@@ -${hunk.old_start},${hunk.old_lines} +${hunk.new_start},${hunk.new_lines} @@${hunk.header ? ` ${hunk.header}` : ""}`,
       }),
     );
     for (const line of hunk.lines) {
-      rows.push(() => renderLine(dp, line));
+      rows.push(renderLine(line));
       const at = lineAnchor(line);
       if (at)
-        for (const comment of anchored.get(`${at.side}:${at.lineno}`) ?? []) {
-          rows.push(() => renderComment(comment));
-        }
+        for (const comment of anchored.get(`${at.side}:${at.lineno}`) ?? [])
+          rows.push(renderComment(comment));
     }
   }
   for (let start = 0; start < rows.length; start += ROWS_PER_CHUNK) {
     const chunkRows = rows.slice(start, start + ROWS_PER_CHUNK);
-    const chunk: LazyChunk = h("div", { className: "rv-chunk" });
     // Keyed by position so a reload of the same review finds the height this
     // chunk measured last time; a comment added or deleted shifts only the
     // rows after it, which the reader has not scrolled past.
     const key = `${dp}#${start}`;
+    const chunk = h("div", { className: "rv-chunk" }, ...chunkRows);
     chunk.dataset.key = key;
-    // Until the chunk is visible, hold its last measured height, else an
-    // estimate. Real rows retain wrapping.
-    chunk.style.minHeight = `${heights.get(key) ?? chunkRows.length * 20}px`;
-    const mount = () => {
-      chunk.style.minHeight = "";
-      chunk.replaceChildren(...chunkRows.map((row) => row()));
-    };
-    if (typeof IntersectionObserver === "undefined") mount();
-    else {
-      rowsObserver ??= new IntersectionObserver(
-        (entries) => {
-          for (const entry of entries)
-            if (entry.isIntersecting) mountChunk(entry.target as LazyChunk);
-        },
-        { root: rv.body, rootMargin: "800px" },
-      );
-      chunk.mountRows = mount;
-      rowsObserver.observe(chunk);
-    }
+    // Until the chunk is first rendered, stand in its last measured height,
+    // else an estimate; `auto` then remembers its real height.
+    chunk.style.setProperty(
+      "contain-intrinsic-block-size",
+      `auto ${heights.get(key) ?? chunkRows.length * 20}px`,
+    );
     wrap.append(chunk);
   }
   return wrap;
 }
 
-function renderLine(file: string, line: DiffLine): HTMLElement {
+function renderLine(line: DiffLine): HTMLElement {
   const o = line.old_lineno ?? "";
   const n = line.new_lineno ?? "";
   const row = h(
     "div",
     { className: `rv-line ${line.origin}` },
-    h("span", {
-      className: "rv-gutter",
-      text: `${String(o).padStart(4)} ${String(n).padStart(4)}`,
-    }),
     h("span", { className: "rv-content", text: line.content }),
   );
-  row.addEventListener("click", () => openComposer(row, file, line));
+  // The line numbers are drawn by the row's ::before from this attribute, not
+  // held in a span and its text: two fewer nodes on every eagerly built row.
+  // They were never selectable (user-select: none) and are not worth finding.
+  row.dataset.gutter = `${String(o).padStart(4)} ${String(n).padStart(4)}`;
+  rowLines.set(row, line);
   return row;
 }
 
