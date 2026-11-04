@@ -162,6 +162,8 @@ pub async fn delete(
 pub struct PreviewQuery {
     /// Capture this many pane lines directly instead of the cached snapshot.
     pub lines: Option<usize>,
+    #[serde(default)]
+    pub part: claude_commander_protocol::preview::PreviewPart,
 }
 
 /// `GET /sessions/{id}/preview?lines=` → session `preview`.
@@ -174,7 +176,7 @@ pub async fn preview(
     Ok(Json(
         state
             .service
-            .preview(PreviewTarget::Session { id, lines: q.lines })
+            .preview_part(PreviewTarget::Session { id, lines: q.lines }, q.part)
             .await?,
     ))
 }

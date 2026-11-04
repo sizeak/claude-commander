@@ -890,10 +890,13 @@ impl App {
 
     /// Place every dictation the transcript consumer has left in the mailbox.
     /// Called on each render tick, so a hand-off waits at most one tick.
-    pub(super) fn drain_dictations(&mut self) {
+    pub(super) fn drain_dictations(&mut self) -> bool {
+        let mut changed = false;
         while let Ok(outcome) = self.conversation.dictations.rx.try_recv() {
             self.apply_dictation(outcome);
+            changed = true;
         }
+        changed
     }
 
     /// Deliver a dictation that had no attached pane to go to: type it into

@@ -28,6 +28,7 @@ pub mod diff;
 pub mod github;
 pub mod paste;
 pub mod pr;
+pub mod preview;
 pub mod session;
 pub mod workspace;
 pub mod ws;

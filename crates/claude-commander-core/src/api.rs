@@ -2071,13 +2071,27 @@ impl CommanderService {
     /// or a project. Lifts the TUI's `fetch_preview_data`; the TUI keeps its own
     /// copy until Phase C deletes it.
     pub async fn preview(&self, target: PreviewTarget) -> Result<PreviewData> {
+        self.preview_part(target, claude_commander_protocol::preview::PreviewPart::All)
+            .await
+    }
+
+    pub async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
         match target {
-            PreviewTarget::Session { id, lines } => self.session_preview(&id, lines).await,
-            PreviewTarget::Project(id) => self.project_preview(&id).await,
+            PreviewTarget::Session { id, lines } => self.session_preview(&id, lines, part).await,
+            PreviewTarget::Project(id) => self.project_preview(&id, part).await,
         }
     }
 
-    async fn session_preview(&self, sid: &SessionId, lines: Option<usize>) -> Result<PreviewData> {
+    async fn session_preview(
+        &self,
+        sid: &SessionId,
+        lines: Option<usize>,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
         let (is_creating, tmux_name) = {
             let state = self.store.read().await;
             match state.get_session(sid) {
@@ -2099,41 +2113,89 @@ impl CommanderService {
             });
         }
 
-        // An explicit line count captures the pane directly; otherwise use the
-        // manager's cached content (matches the TUI preview).
-        let pane = match lines {
-            Some(n) => capture_pane(&self.manager.tmux, &tmux_name, Some(n)).await?,
-            None => self.manager.get_content(sid).await.ok().map(|c| c.content),
-        };
-        let diff = self.manager.get_diff(sid).await.ok();
-        let shell = self
-            .manager
-            .get_shell_content(sid)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.content);
+        use claude_commander_protocol::preview::PreviewPart;
+        let (pane, diff, shell) = tokio::join!(
+            async {
+                if !matches!(part, PreviewPart::All | PreviewPart::Pane) {
+                    return Ok(None);
+                }
+                match lines {
+                    Some(n) => capture_pane(&self.manager.tmux, &tmux_name, Some(n)).await,
+                    None => Ok(self.manager.get_content(sid).await.ok().map(|c| c.content)),
+                }
+            },
+            async {
+                if part == PreviewPart::Stats {
+                    self.manager.get_diff_stats(sid).await.ok()
+                } else if matches!(part, PreviewPart::All | PreviewPart::Diff) {
+                    self.manager.get_diff(sid).await.ok()
+                } else {
+                    None
+                }
+            },
+            async {
+                if matches!(part, PreviewPart::All | PreviewPart::Shell) {
+                    self.manager
+                        .get_shell_content(sid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.content)
+                } else {
+                    None
+                }
+            },
+        );
+        let pane = pane?;
         Ok(PreviewData {
             pane,
-            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_text: if part == PreviewPart::Stats {
+                String::new()
+            } else {
+                diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default()
+            },
             diff_stat: diff.as_ref().map(|d| d.summary()),
             stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
         })
     }
 
-    async fn project_preview(&self, pid: &ProjectId) -> Result<PreviewData> {
-        let diff = self.manager.get_project_diff(pid).await.ok();
-        let shell = self
-            .manager
-            .get_project_shell_content(pid)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.content);
+    async fn project_preview(
+        &self,
+        pid: &ProjectId,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> Result<PreviewData> {
+        use claude_commander_protocol::preview::PreviewPart;
+        let (diff, shell) = tokio::join!(
+            async {
+                if part == PreviewPart::Stats {
+                    self.manager.get_project_diff_stats(pid).await.ok()
+                } else if matches!(part, PreviewPart::All | PreviewPart::Diff) {
+                    self.manager.get_project_diff(pid).await.ok()
+                } else {
+                    None
+                }
+            },
+            async {
+                if matches!(part, PreviewPart::All | PreviewPart::Shell) {
+                    self.manager
+                        .get_project_shell_content(pid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.content)
+                } else {
+                    None
+                }
+            },
+        );
         Ok(PreviewData {
             pane: None,
-            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_text: if part == PreviewPart::Stats {
+                String::new()
+            } else {
+                diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default()
+            },
             diff_stat: diff.as_ref().map(|d| d.summary()),
             stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
@@ -6370,6 +6432,36 @@ mod tests {
         // reflects the corrected commander_running.
         let after = svc.agent_states(false).await;
         assert!(!after.commander_running);
+    }
+
+    #[tokio::test]
+    async fn agent_states_fresh_advances_shared_unread_baseline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            commander_enabled: false,
+            ..Config::default()
+        };
+        let svc = service_with_config(&dir, config);
+        let sid = SessionId::new();
+        svc.agent_states_cache
+            .write()
+            .await
+            .states
+            .insert(sid, AgentState::Working);
+        let idle = BTreeMap::from([(sid, AgentState::Idle)]);
+        assert_eq!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle),
+            vec![sid]
+        );
+        // There are no active sessions; the fresh scan clears the old baseline
+        // without any tmux queries. This is also the cache read by the poll loop.
+        let fresh = svc.agent_states(true).await;
+        assert_eq!(svc.agent_states_cache.read().await.states, fresh.states);
+        assert!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle)
+                .is_empty()
+        );
+        assert_eq!(svc.agent_states(false).await.states, fresh.states);
     }
 
     #[tokio::test]
