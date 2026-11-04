@@ -582,6 +582,11 @@ impl CommanderService {
             .mutate(move |state| {
                 for session in state.sessions.values_mut() {
                     session.clear_review_metadata();
+                    // The stamp describes the PR fields just emptied, so it
+                    // goes with them: `None` is "never checked". Results from
+                    // the old provider's in-flight checks are already refused
+                    // by the epoch bump, not by this stamp.
+                    session.pr_checked_at = None;
                     crate::session::apply_assignment(session, &sections, now);
                 }
             })
@@ -1469,16 +1474,19 @@ impl CommanderService {
         Ok(())
     }
 
-    /// Persist a batch of PR-check results (from the background PR poll),
-    /// re-run section assignment, then push refreshed status bars to running
+    /// Persist a batch of PR-check results supplied by a caller (the
+    /// [`CommanderBackend`](crate::backend::CommanderBackend) seam), re-run
+    /// section assignment, then push refreshed status bars to running
     /// sessions' tmux panes. `Found` sets the cached PR fields, `NotFound`
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
     ///
-    /// The caller gives no check start time, so the results are stamped as of
-    /// this call: they win over anything already stored, and a check that
-    /// started before now and lands later is dropped (see
-    /// [`WorktreeSession::accept_pr_check`]).
+    /// The service's own PR poll does not come through here: it runs
+    /// `fetch_pr_status` → `apply_pr_results_at_epoch`, which stamps results
+    /// with when the check *started*. This caller gives no
+    /// check start time, so the results are stamped as of this call: they win
+    /// over anything already stored, and a check that started before now and
+    /// lands later is dropped (see [`WorktreeSession::accept_pr_check`]).
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
         let checked_at = Utc::now();
         let (provider, epoch) = self.review_provider_snapshot().await;
@@ -2923,7 +2931,9 @@ impl CommanderService {
     ///
     /// Every loop drives the same observable surface the frontends read: the
     /// agent loop maintains [`Self::agent_states`]' cache and persists unread
-    /// transitions; the PR loop persists results via [`Self::apply_pr_results`];
+    /// transitions; the PR loop persists results via
+    /// `fetch_pr_status` → `apply_pr_results_at_epoch` (stamped with the
+    /// check's start time);
     /// the pull loop feeds [`Snapshot::project_pull`]; the sync loop
     /// reloads the state file. Each wakes the [`StateStore`] change-feed on a
     /// real change (either via a persisted mutation or [`StateStore::notify_change`]),
@@ -3127,8 +3137,11 @@ impl CommanderService {
 
     /// Query the selected code host across all sessions on a fixed cadence (and on
     /// [`Self::request_pr_refresh`]), then persist results via
-    /// [`Self::apply_pr_results`]. When `interval_secs` is 0 the periodic tick is
-    /// disabled but a manual refresh still runs.
+    /// [`Self::fetch_pr_status`] → [`Self::apply_pr_results_at_epoch`], which
+    /// stamps each result with when its check started (unlike
+    /// [`Self::apply_pr_results`], which stamps at call time). When
+    /// `interval_secs` is 0 the periodic tick is disabled but a manual refresh
+    /// still runs.
     fn spawn_pr_status_loop(&self, interval_secs: u64) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
         let notify = self.pr_refresh.clone();
@@ -6058,6 +6071,46 @@ mod tests {
             .filter_map(|e| e.get("feature").and_then(|f| f.as_str()).map(str::to_owned))
             .collect();
         assert_eq!(features, ["pr.refresh_sync"]);
+    }
+
+    /// `pr_checked_at` documents "when the check the PR fields reflect
+    /// started", with `None` meaning "never checked". A provider switch empties
+    /// the PR fields, so it must drop the stamp too, or the stamp describes
+    /// data that is no longer there.
+    #[tokio::test]
+    async fn provider_change_clears_the_pr_check_stamp() {
+        use crate::git::PrCheckResult;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.apply_pr_results_for_provider(
+            CodeHostProvider::Github,
+            vec![(sid, PrCheckResult::NotFound)],
+        )
+        .await
+        .unwrap();
+        let stamp = svc
+            .store()
+            .read()
+            .await
+            .get_session(&sid)
+            .unwrap()
+            .pr_checked_at;
+        assert!(stamp.is_some());
+
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Gitlab;
+        svc.update_code_host_config(config).await.unwrap();
+
+        let stamp = svc
+            .store()
+            .read()
+            .await
+            .get_session(&sid)
+            .unwrap()
+            .pr_checked_at;
+        assert_eq!(stamp, None);
     }
 
     #[tokio::test]

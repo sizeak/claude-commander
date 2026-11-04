@@ -395,10 +395,13 @@ impl AppState {
         // Refuse a settled PR. The load-bearing reason is in this repo and does
         // not depend on GitHub's behaviour: `check_pr_for_branch` polls with
         // `--state all`, so a merged/closed PR still returns `Found`, and
-        // `apply_pr_results` (api.rs) unconditionally re-asserts its
-        // `base_ref_name` over `pr_base_branch` — which outranks the local hint
-        // in both `resolve_stack_parent` and `ReviewBase::of`. So any change we
-        // made here would be undone at the next poll.
+        // every accepted PR check (`apply_pr_results_at_epoch`, api.rs)
+        // re-asserts its `base_ref_name` over `pr_base_branch` — which
+        // outranks the local hint in both `resolve_stack_parent` and
+        // `ReviewBase::of`. Only a failed fetch, a stale-provider sweep or a
+        // check that lost a race to a newer one is skipped, and the next
+        // accepted check re-asserts the field. So any change we made here
+        // would be undone at the next poll.
         // `gh pr edit --base` is also expected to fail on a merged PR, which
         // would leave nothing durable behind; that half is untested here.
         if let Some(state) = session.pr_state {
