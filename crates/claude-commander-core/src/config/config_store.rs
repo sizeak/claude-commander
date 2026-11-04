@@ -93,6 +93,37 @@ pub struct ConfigStore {
     /// server route) reaches every long-polling client at once. Config lives
     /// outside `state.json`, so without this nothing else would bump it.
     listeners: Mutex<Vec<ChangeListener>>,
+    /// Open [`defer_change_listeners`](Self::defer_change_listeners) holds,
+    /// and whether a change arrived while one was open.
+    deferral: Mutex<Deferral>,
+}
+
+/// See [`ConfigStore::defer_change_listeners`]. One lock over both fields,
+/// so a change that lands as the last hold is released is never lost.
+#[derive(Default)]
+struct Deferral {
+    holds: usize,
+    pending: bool,
+}
+
+/// Holds back a [`ConfigStore`]'s change listeners until dropped; see
+/// [`ConfigStore::defer_change_listeners`].
+#[must_use = "listeners are deferred only while the guard is held"]
+pub struct DeferredListeners<'a> {
+    store: &'a ConfigStore,
+}
+
+impl Drop for DeferredListeners<'_> {
+    fn drop(&mut self) {
+        let fire = {
+            let mut deferral = self.store.deferral.lock().expect("deferral lock poisoned");
+            deferral.holds -= 1;
+            deferral.holds == 0 && std::mem::take(&mut deferral.pending)
+        };
+        if fire {
+            self.store.run_listeners();
+        }
+    }
 }
 
 /// A callback run after the in-memory config changes.
@@ -112,6 +143,7 @@ impl ConfigStore {
             last_mtime: RwLock::new(mtime),
             init_snapshot,
             listeners: Mutex::default(),
+            deferral: Mutex::default(),
         })
     }
 
@@ -127,6 +159,7 @@ impl ConfigStore {
             last_mtime: RwLock::new(mtime),
             init_snapshot,
             listeners: Mutex::default(),
+            deferral: Mutex::default(),
         }
     }
 
@@ -142,7 +175,35 @@ impl ConfigStore {
             .push(listener);
     }
 
+    /// Hold every change listener until the returned guard drops, then run
+    /// them once if any change was committed meanwhile — however many there
+    /// were, and even if the caller's later steps fail.
+    ///
+    /// For an edit that writes config *and* `state.json`: without the hold,
+    /// the config commit wakes clients before the state write, and a client
+    /// that refetches in that window reads the new config against the old
+    /// state (a renamed section with its sessions still under the old name).
+    /// The state write wakes them again, so it would only be a flicker, but
+    /// holding the config wake until after the state write removes it. The
+    /// hold is store-wide: an unrelated edit committed meanwhile from another
+    /// task is delayed to the drop, never lost.
+    pub fn defer_change_listeners(&self) -> DeferredListeners<'_> {
+        self.deferral.lock().expect("deferral lock poisoned").holds += 1;
+        DeferredListeners { store: self }
+    }
+
     fn notify_listeners(&self) {
+        {
+            let mut deferral = self.deferral.lock().expect("deferral lock poisoned");
+            if deferral.holds > 0 {
+                deferral.pending = true;
+                return;
+            }
+        }
+        self.run_listeners();
+    }
+
+    fn run_listeners(&self) {
         // Clone out so a listener never runs under the listener lock.
         let listeners = self
             .listeners
@@ -250,7 +311,9 @@ impl ConfigStore {
 
     /// Check if the config file has been modified externally and reload if so.
     ///
-    /// Returns `true` if the in-memory config was updated.
+    /// Returns `true` if the file was reloaded. Change listeners run only when
+    /// the reloaded config differs from the in-memory one: a touched but
+    /// identical file changes nothing a client could observe.
     pub fn reload_if_changed(&self) -> Result<bool> {
         let current_mtime = std::fs::metadata(&self.config_path)
             .and_then(|m| m.modified())
@@ -268,9 +331,16 @@ impl ConfigStore {
         let reloaded_mtime = std::fs::metadata(&self.config_path)
             .and_then(|m| m.modified())
             .ok();
-        *self.config.write().expect("config lock poisoned") = new_config;
+        let changed = {
+            let mut config = self.config.write().expect("config lock poisoned");
+            let changed = !same_config(&config, &new_config);
+            *config = new_config;
+            changed
+        };
         *self.last_mtime.write().expect("mtime lock poisoned") = reloaded_mtime;
-        self.notify_listeners();
+        if changed {
+            self.notify_listeners();
+        }
 
         Ok(true)
     }
@@ -292,6 +362,19 @@ impl ConfigStore {
         // keeps the previous in-memory config, so a bad manual edit can't
         // poison the running TUI.
         Config::load_from_path(&self.config_path)
+    }
+}
+
+/// Whether two configs are the same. `Config` has no `PartialEq` (deriving
+/// one reaches into `KeyBindings`, sections, and the conversation, STT and
+/// telemetry tables), so compare what would be persisted. `toml::Value`
+/// equality ignores table key order, so a `HashMap` field cannot make two
+/// equal configs differ. A serialisation failure counts as "different": a
+/// spurious wake costs a refetch, a missed one hides an edit.
+fn same_config(a: &Config, b: &Config) -> bool {
+    match (toml::Value::try_from(a), toml::Value::try_from(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -776,5 +859,79 @@ mod tests {
         // Self-heals when put back, like every other init-time value.
         store.mutate(|c| c.server.port = 7878).unwrap();
         assert!(!store.restart_required());
+    }
+
+    /// Count how often `store`'s change listeners fire.
+    fn count_wakes(store: &ConfigStore) -> Arc<std::sync::atomic::AtomicUsize> {
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = wakes.clone();
+        store.add_change_listener(Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        wakes
+    }
+
+    /// Bump `path`'s mtime without changing its content.
+    fn touch(path: &std::path::Path) {
+        let later = std::fs::metadata(path).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+
+    /// A touched-but-identical `config.toml` (an editor that saves without a
+    /// change, a `git checkout` that rewrites the same bytes) changes nothing
+    /// observable, so it must not wake every client into a refetch.
+    #[test]
+    fn reloading_an_unchanged_config_runs_no_listeners() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        write_config(&config_path, &Config::default());
+        let store = ConfigStore::with_path(Config::default(), config_path.clone());
+        let wakes = count_wakes(&store);
+
+        touch(&config_path);
+        store.reload_if_changed().unwrap();
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // A real edit still wakes them.
+        let edited = Config {
+            branch_prefix: "edited/".to_string(),
+            ..Config::default()
+        };
+        write_config(&config_path, &edited);
+        touch(&config_path);
+        assert!(store.reload_if_changed().unwrap());
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Edits under a hold run the listeners once, when the last hold drops —
+    /// and an edit made with no hold open still runs them at once.
+    #[test]
+    fn deferred_listeners_run_once_when_the_last_hold_drops() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfigStore::with_path(Config::default(), dir.path().join("config.toml"));
+        let wakes = count_wakes(&store);
+        let count = || wakes.load(std::sync::atomic::Ordering::SeqCst);
+
+        let outer = store.defer_change_listeners();
+        let inner = store.defer_change_listeners();
+        store.mutate(|c| c.ui_refresh_fps = 11).unwrap();
+        store.mutate(|c| c.ui_refresh_fps = 12).unwrap();
+        drop(inner);
+        assert_eq!(count(), 0, "an outer hold is still open");
+        drop(outer);
+        assert_eq!(count(), 1, "coalesced into one wake");
+
+        // Nothing committed under a hold: nothing to run.
+        drop(store.defer_change_listeners());
+        assert_eq!(count(), 1);
+
+        store.mutate(|c| c.ui_refresh_fps = 13).unwrap();
+        assert_eq!(count(), 2);
     }
 }

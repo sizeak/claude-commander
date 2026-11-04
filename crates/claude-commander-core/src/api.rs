@@ -288,6 +288,9 @@ impl CommanderService {
         edit: impl Fn(&mut Config) -> Result<()> + Send,
     ) -> Result<()> {
         let _guard = self.review_provider_lock.lock().await;
+        // Config then state: hold the config wake until the state write is
+        // done, so no client refetches between the two.
+        let _wake_after_state = self.config_store.defer_change_listeners();
         // Persist first, then invalidate, under the same lock — the order
         // `reload_config` uses. `try_mutate` commits nothing unless both the
         // edit and the save succeed, so a rejected or unsaved edit leaves the
@@ -346,6 +349,9 @@ impl CommanderService {
         if new == old {
             return Ok(false);
         }
+        // Config then state: hold the config wake until the state write is
+        // done, so no client refetches between the two.
+        let _wake_after_state = self.config_store.defer_change_listeners();
         let renamed = self.config_store.mutate_if(|c| {
             let Some(idx) = c.sections.iter().position(|s| s.name == old) else {
                 return false;
@@ -478,6 +484,9 @@ impl CommanderService {
     /// workspace. The theme moves even then: it is local config, and the TUI
     /// keeps themes for workspaces that live only on a remote server.
     pub async fn rename_workspace(&self, from: &str, to: &str) -> Result<bool> {
+        // Config then state: hold the config wake until the state write is
+        // done, so no client refetches between the two.
+        let _wake_after_state = self.config_store.defer_change_listeners();
         let renamed_def = self.config_store.try_mutate(|c| {
             let renamed = workspace::rename_workspace_def(c, from, to)
                 .map_err(|e| workspace::workspace_rejected(to, e))?;
@@ -510,6 +519,9 @@ impl CommanderService {
     /// Returns `false` when there was no definition or tag to delete (a theme
     /// alone is still dropped). Main itself has no name and cannot be deleted.
     pub async fn delete_workspace(&self, name: &str) -> Result<bool> {
+        // Config then state: hold the config wake until the state write is
+        // done, so no client refetches between the two.
+        let _wake_after_state = self.config_store.defer_change_listeners();
         let mut removed_def = false;
         self.config_store.mutate_if(|c| {
             let startup = c.startup_workspace.clone();
@@ -4865,6 +4877,112 @@ mod tests {
         let before = svc.store().generation();
         assert!(svc.reload_config().await.unwrap());
         assert!(svc.store().generation() > before);
+    }
+
+    /// Record the change-feed generation each time the config store's
+    /// listeners run. Registered after the service's own listener, so each
+    /// entry already includes the wake that listener made.
+    fn record_config_wakes(svc: &CommanderService) -> Arc<std::sync::Mutex<Vec<u64>>> {
+        let wakes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (log, store) = (wakes.clone(), Arc::downgrade(svc.store()));
+        svc.config_store.add_change_listener(Arc::new(move || {
+            if let Some(store) = store.upgrade() {
+                log.lock().unwrap().push(store.generation());
+            }
+        }));
+        wakes
+    }
+
+    /// The config wake of an edit that also rewrites `state.json` must come
+    /// *after* the state half — exactly one, and the last bump — or a client
+    /// it wakes reads the new config against the old state.
+    fn assert_config_woke_last(svc: &CommanderService, wakes: &std::sync::Mutex<Vec<u64>>) {
+        assert_eq!(*wakes.lock().unwrap(), [svc.store().generation()]);
+    }
+
+    /// A client woken by a section rename's config write must already see its
+    /// sessions under the new name, not stranded under the old one.
+    #[tokio::test]
+    async fn rename_section_wakes_the_feed_only_once_its_sessions_moved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service_with_config(&dir, config_with_section("Parking"));
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.set_section(&sid, Some("Parking".to_string()))
+            .await
+            .unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (log, store) = (seen.clone(), Arc::downgrade(svc.store()));
+        svc.config_store.add_change_listener(Arc::new(move || {
+            let store = store.upgrade().unwrap();
+            let state = futures::executor::block_on(store.read());
+            log.lock()
+                .unwrap()
+                .push(state.get_session(&sid).unwrap().current_section.clone());
+        }));
+        let wakes = record_config_wakes(&svc);
+
+        assert!(svc.rename_section("Parking", "Waiting").await.unwrap());
+
+        assert_eq!(*seen.lock().unwrap(), [Some("Waiting".to_string())]);
+        assert_config_woke_last(&svc, &wakes);
+    }
+
+    #[tokio::test]
+    async fn rename_workspace_wakes_the_feed_only_once_its_projects_moved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        let wakes = record_config_wakes(&svc);
+        assert!(svc.rename_workspace("Work", "Job").await.unwrap());
+        assert_config_woke_last(&svc, &wakes);
+    }
+
+    /// The orphaned-tag path writes config twice around the state write; the
+    /// two coalesce into one wake after both.
+    #[tokio::test]
+    async fn healing_rename_workspace_wakes_the_feed_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.store()
+            .mutate(move |s| s.projects.get_mut(&pid).unwrap().workspace = Some("Lost".into()))
+            .await
+            .unwrap();
+        let wakes = record_config_wakes(&svc);
+        assert!(svc.rename_workspace("Lost", "Found").await.unwrap());
+        assert_config_woke_last(&svc, &wakes);
+    }
+
+    #[tokio::test]
+    async fn delete_workspace_wakes_the_feed_only_once_its_projects_moved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _) = seed_project_session(&svc).await;
+        svc.set_project_workspace(&pid, Some("Work".into()))
+            .await
+            .unwrap();
+        let wakes = record_config_wakes(&svc);
+        assert!(svc.delete_workspace("Work").await.unwrap());
+        assert_config_woke_last(&svc, &wakes);
+    }
+
+    /// A provider switch clears review metadata in `state.json`; clients must
+    /// not be woken to the new provider while the old one's PRs still show.
+    #[tokio::test]
+    async fn provider_switch_wakes_the_feed_only_once_review_metadata_cleared() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let wakes = record_config_wakes(&svc);
+        svc.edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_config_woke_last(&svc, &wakes);
     }
 
     #[tokio::test]
