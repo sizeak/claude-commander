@@ -412,6 +412,10 @@ class CommanderStore extends ChangeNotifier {
   Future<List<GithubRepo>> githubRepos() =>
       _api.githubRepos(handle: _requireHandle);
 
+  /// Provider-neutral repository listing from the connected server.
+  Future<RepositoryListing> repositories() =>
+      _api.repositories(handle: _requireHandle);
+
   /// Start a clone. The returned job's status is not terminal; poll [cloneJob].
   Future<CloneJobDto> startClone(CloneRequestDto request) =>
       _api.startClone(handle: _requireHandle, request: request);

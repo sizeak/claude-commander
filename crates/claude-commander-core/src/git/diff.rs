@@ -1275,6 +1275,17 @@ mod tests {
 
         let tmp = TempDir::new().expect("tempdir");
         let cache: DiffCache<u32> = DiffCache::with_ttl(Duration::from_secs(3600));
+        // Exercise the TTL hit independently of filesystem notifications. Model
+        // an unavailable watcher inside its retry cooldown so the first read
+        // cannot invalidate the sentinel while registering a real watcher.
+        cache.watchers.lock().unwrap().insert(
+            7,
+            RootWatch {
+                watcher: None,
+                attempted_at: Instant::now(),
+                requested_at: Instant::now(),
+            },
+        );
         let sentinel = Arc::new(DiffInfo {
             diff: "sentinel".to_string(),
             files_changed: 42,

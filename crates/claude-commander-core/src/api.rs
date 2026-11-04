@@ -9,8 +9,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneRequest, CloneSource, GithubRepo, validate_clone_url,
-    validate_dest_name, validate_repo_slug,
+    CloneJob, CloneJobId, CloneRequest, GithubRepo, validate_clone_url, validate_dest_name,
+    validate_repo_slug,
+};
+use claude_commander_protocol::hosting::{
+    CloneSource, CodeHost, CodeHostProvider, RepositoryListing, validate_gitlab_hostname,
+    validate_hosted_repo_slug,
 };
 use claude_commander_protocol::workspace::{
     SetWorkspacesRequest, WorkspaceRejection, validate_set_workspaces, validate_workspace_label,
@@ -26,7 +30,7 @@ use crate::comment::{
     decide_send, reanchor_comments,
 };
 use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
-use crate::error::{GitError, Result, SessionError};
+use crate::error::{ConfigError, GitError, Result, SessionError};
 use crate::git::{
     CloneJobs, CloneOutcome, ComposedDiff, GitBackend, ParsedDiff, PrCheckResult,
     clone_source_rejected, compose_review_diff, compute_branch_diff, diff_stat_summary,
@@ -71,6 +75,8 @@ pub struct CommanderService {
     /// Cached `gh --version` availability. Computed once (fork/exec is not free)
     /// and reused for every `snapshot`.
     gh_available: Arc<tokio::sync::OnceCell<bool>>,
+    /// Cached `glab version` availability, independent of the compatibility gh probe.
+    glab_available: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     /// Shared agent-state detector with a short TTL cache, reused across
     /// non-`fresh` [`Self::agent_states`] calls so repeated polls don't
     /// re-capture every pane. A `fresh` call bypasses it with a zero-TTL
@@ -93,6 +99,11 @@ pub struct CommanderService {
     last_pr_check: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     /// Signals the PR-status loop to run an immediate check (manual refresh).
     pr_refresh: Arc<tokio::sync::Notify>,
+    /// Serializes provider transitions with application of review-poll results.
+    /// A poll that began under the old provider must either finish before its
+    /// metadata is cleared or observe the new provider and be discarded.
+    review_provider_lock: Arc<tokio::sync::Mutex<()>>,
+    review_provider_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Idempotency guard for [`Self::spawn_background_tasks`]: the loops spawn
     /// once per service, even if both a local TUI and an embedded caller ask.
     background_started: Arc<std::sync::atomic::AtomicBool>,
@@ -165,6 +176,7 @@ impl CommanderService {
             operations: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             next_op_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             gh_available: Arc::new(tokio::sync::OnceCell::new()),
+            glab_available: Arc::new(std::sync::Mutex::new(None)),
             agent_detector,
             agent_states_cache: Arc::new(tokio::sync::RwLock::new(AgentStatesSnapshot {
                 states: BTreeMap::new(),
@@ -174,6 +186,8 @@ impl CommanderService {
             pull_status: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             last_pr_check: Arc::new(std::sync::Mutex::new(None)),
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
+            review_provider_lock: Arc::new(tokio::sync::Mutex::new(())),
+            review_provider_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
             clone_jobs,
@@ -226,8 +240,83 @@ impl CommanderService {
 
     /// Overwrite the persisted config (updates mtime so the hot-reload watcher
     /// won't re-read our own write).
+    ///
+    /// Rejects a config whose provider differs from the stored one: provider
+    /// changes must go through [`update_code_host_config`](Self::update_code_host_config)
+    /// so review metadata is invalidated. The comparison runs inside `try_mutate`,
+    /// against the value being replaced, so a whole-config write built from a
+    /// cache that predates a concurrent switch cannot revert it.
     pub fn update_config(&self, config: Config) -> Result<()> {
-        self.config_store.mutate(|c| *c = config)
+        self.config_store.try_mutate(|current| {
+            if config.code_host_provider != current.code_host_provider {
+                return Err(ConfigError::InvalidValue {
+                    key: "code_host_provider".into(),
+                    reason: "provider changes must use update_code_host_config".into(),
+                }
+                .into());
+            }
+            *current = config;
+            Ok(())
+        })
+    }
+
+    /// Persist a config whose code-host provider changed and invalidate all
+    /// review metadata before the new provider can consume it. The shared lock
+    /// also fences in-flight poll results from the previous provider.
+    pub async fn update_code_host_config(&self, config: Config) -> Result<()> {
+        self.edit_code_host_config(move |current| {
+            *current = config.clone();
+            Ok(())
+        })
+        .await
+    }
+
+    /// Apply edits to the latest config under the provider fence. This avoids
+    /// losing concurrent fields when a partial PATCH waits for a provider switch.
+    pub async fn edit_code_host_config(
+        &self,
+        edit: impl Fn(&mut Config) -> Result<()> + Send,
+    ) -> Result<()> {
+        let _guard = self.review_provider_lock.lock().await;
+        // Persist first, then invalidate, under the same lock — the order
+        // `reload_config` uses. `try_mutate` commits nothing unless both the
+        // edit and the save succeed, so a rejected or unsaved edit leaves the
+        // provider pollers read unchanged and invalidates nothing.
+        let (old_provider, old_hostname, new_config) = self.config_store.try_mutate(|current| {
+            let old = (current.code_host_provider, current.gitlab_hostname.clone());
+            edit(current)?;
+            Ok((old.0, old.1, current.clone()))
+        })?;
+        let hostname_changed = new_config.gitlab_hostname != old_hostname;
+        self.apply_code_host_change(old_provider, hostname_changed, &new_config)
+            .await
+    }
+
+    /// React to a committed config whose code host may have changed; callers
+    /// hold `review_provider_lock`. Any provider or hostname change drops the
+    /// cached `glab` probe and wakes the PR poller; a provider change also
+    /// bumps the provider epoch and invalidates all review metadata.
+    async fn apply_code_host_change(
+        &self,
+        old_provider: CodeHostProvider,
+        hostname_changed: bool,
+        new_config: &Config,
+    ) -> Result<()> {
+        let provider_changed = new_config.code_host_provider != old_provider;
+        if !(provider_changed || hostname_changed) {
+            return Ok(());
+        }
+        *self
+            .glab_available
+            .lock()
+            .expect("glab availability poisoned") = None;
+        if provider_changed {
+            self.review_provider_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.invalidate_review_metadata(new_config).await?;
+        }
+        self.pr_refresh.notify_one();
+        Ok(())
     }
 
     /// Rename a configured section, migrating every session that refers to it
@@ -247,7 +336,7 @@ impl CommanderService {
         if new == old {
             return Ok(false);
         }
-        let renamed = self.config_store.mutate(|c| {
+        let renamed = self.config_store.mutate_if(|c| {
             let Some(idx) = c.sections.iter().position(|s| s.name == old) else {
                 return false;
             };
@@ -379,15 +468,13 @@ impl CommanderService {
     /// workspace. The theme moves even then: it is local config, and the TUI
     /// keeps themes for workspaces that live only on a remote server.
     pub async fn rename_workspace(&self, from: &str, to: &str) -> Result<bool> {
-        let renamed_def = self
-            .config_store
-            .mutate(|c| {
-                let renamed = workspace::rename_workspace_def(c, from, to)?;
-                // `to` is valid and unclaimed once the def rename accepted it.
-                workspace::rename_workspace_theme(c, from, to.trim());
-                Ok(renamed)
-            })?
-            .map_err(|e| workspace::workspace_rejected(to, e))?;
+        let renamed_def = self.config_store.try_mutate(|c| {
+            let renamed = workspace::rename_workspace_def(c, from, to)
+                .map_err(|e| workspace::workspace_rejected(to, e))?;
+            // `to` is valid and unclaimed once the def rename accepted it.
+            workspace::rename_workspace_theme(c, from, to.trim());
+            Ok(renamed)
+        })?;
         let to = claude_commander_protocol::workspace::validate_workspace_name(to)
             .map_err(|e| workspace::workspace_rejected(to, e))?;
         let (from_owned, to_tag) = (from.to_string(), to.clone());
@@ -413,9 +500,12 @@ impl CommanderService {
     /// Returns `false` when there was no definition or tag to delete (a theme
     /// alone is still dropped). Main itself has no name and cannot be deleted.
     pub async fn delete_workspace(&self, name: &str) -> Result<bool> {
-        let removed_def = self.config_store.mutate(|c| {
-            workspace::delete_workspace_theme(c, name);
-            workspace::delete_workspace_def(c, name)
+        let mut removed_def = false;
+        self.config_store.mutate_if(|c| {
+            let startup = c.startup_workspace.clone();
+            let removed_theme = workspace::delete_workspace_theme(c, name);
+            removed_def = workspace::delete_workspace_def(c, name);
+            removed_theme || removed_def || c.startup_workspace != startup
         })?;
         let owned = name.to_string();
         let moved = self
@@ -471,8 +561,31 @@ impl CommanderService {
     }
 
     /// Reload config from disk if the file changed since the last read.
-    pub fn reload_config(&self) -> Result<bool> {
-        self.config_store.reload_if_changed()
+    pub async fn reload_config(&self) -> Result<bool> {
+        let _guard = self.review_provider_lock.lock().await;
+        let old_provider = self.config_store.read().code_host_provider;
+        let reloaded = self.config_store.reload_if_changed()?;
+        if reloaded {
+            let new_config = self.config_store.read().clone();
+            // Reload reacts to a provider change only: a hostname-only hand
+            // edit leaves the cached `glab` probe in place.
+            self.apply_code_host_change(old_provider, false, &new_config)
+                .await?;
+        }
+        Ok(reloaded)
+    }
+
+    async fn invalidate_review_metadata(&self, config: &Config) -> Result<()> {
+        let sections = crate::session::effective_sections(&config.sections).into_owned();
+        let now = Utc::now();
+        self.store
+            .mutate(move |state| {
+                for session in state.sessions.values_mut() {
+                    session.clear_review_metadata();
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await
     }
 
     /// Whether a pending config change requires an app restart to take effect.
@@ -527,6 +640,24 @@ impl CommanderService {
         self.telemetry.feature("github.list_repos");
         let timeout = Duration::from_secs(self.config_store.read().repo_list_timeout_secs);
         list_repos(timeout).await
+    }
+
+    /// List repositories using one provider/hostname snapshot from live config.
+    pub async fn list_repositories(&self) -> Result<RepositoryListing> {
+        self.telemetry.feature("repository.list");
+        let (host, timeout) = {
+            let config = self.config_store.read();
+            (
+                CodeHost {
+                    provider: config.code_host_provider,
+                    hostname: (config.code_host_provider == CodeHostProvider::Gitlab)
+                        .then(|| config.gitlab_hostname.clone())
+                        .flatten(),
+                },
+                Duration::from_secs(config.repo_list_timeout_secs),
+            )
+        };
+        crate::git::hosting::list_repositories(host, timeout).await
     }
 
     /// Start cloning a repository into the projects directory, returning the
@@ -912,6 +1043,9 @@ impl CommanderService {
 
     pub async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId> {
         self.telemetry.feature("session.create");
+        // One provider governs this entire create, including a stacked
+        // session's eventual launch prompt after the awaited setup steps.
+        let code_host_provider = self.config_store.read().code_host_provider;
         self.manager.check_tmux().await?;
 
         let base_program = opts
@@ -976,7 +1110,12 @@ impl CommanderService {
                 .link_stack_parent_by_branch(&session_id, opts.base_branch.as_deref())
                 .await?;
             self.manager
-                .finalize_session(&session_id, opts.initial_prompt, opts.base_branch)
+                .finalize_session_for_provider(
+                    &session_id,
+                    opts.initial_prompt,
+                    opts.base_branch,
+                    code_host_provider,
+                )
                 .await?;
             Ok::<(), crate::Error>(())
         }
@@ -1336,6 +1475,52 @@ impl CommanderService {
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
+        let (provider, epoch) = self.review_provider_snapshot().await;
+        self.apply_pr_results_at_epoch(provider, epoch, results)
+            .await
+    }
+
+    async fn review_provider_snapshot(&self) -> (CodeHostProvider, u64) {
+        let _guard = self.review_provider_lock.lock().await;
+        (
+            self.config_store.read().code_host_provider,
+            self.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    async fn apply_pr_results_for_provider(
+        &self,
+        provider: CodeHostProvider,
+        results: Vec<(SessionId, PrCheckResult)>,
+    ) -> Result<()> {
+        let epoch = self
+            .review_provider_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.apply_pr_results_at_epoch(provider, epoch, results)
+            .await
+    }
+
+    /// Apply results only while their provider snapshot is still current. The
+    /// provider-transition lock spans both the check and persisted mutation, so
+    /// a switch cannot clear the cache and then be overwritten by an older
+    /// in-flight sweep.
+    async fn apply_pr_results_at_epoch(
+        &self,
+        provider: CodeHostProvider,
+        epoch: u64,
+        results: Vec<(SessionId, PrCheckResult)>,
+    ) -> Result<()> {
+        let _guard = self.review_provider_lock.lock().await;
+        if self.config_store.read().code_host_provider != provider
+            || self
+                .review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != epoch
+        {
+            return Ok(());
+        }
         let sections =
             crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
@@ -1358,15 +1543,7 @@ impl CommanderService {
                             session.pr_base_branch = info.base_ref_name.clone();
                         }
                         PrCheckResult::NotFound => {
-                            session.pr_number = None;
-                            session.pr_url = None;
-                            session.pr_state = None;
-                            session.pr_draft = false;
-                            session.pr_labels.clear();
-                            session.pr_merged = false;
-                            session.review_decision = None;
-                            session.pr_reviewers.clear();
-                            session.pr_base_branch = None;
+                            session.clear_review_metadata();
                         }
                         PrCheckResult::FetchFailed => {}
                     }
@@ -1469,7 +1646,10 @@ impl CommanderService {
 
     pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.telemetry.feature("session.delete");
-        self.manager.delete_session(id).await?;
+        let _guard = self.review_provider_lock.lock().await;
+        let plan = self.manager.prepare_delete_session(id).await?;
+        drop(_guard);
+        self.manager.finish_delete_session(plan).await;
         // Best-effort: the session is already gone, so a leftover marks file
         // is litter, not a failure to report.
         if let Err(e) = self.reviewed.remove(*id).await {
@@ -1974,6 +2154,7 @@ impl CommanderService {
     /// run (or when project auto-pull is disabled).
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let gh_available = self.gh_available().await;
+        let code_host = self.code_host_status().await;
         let tmux_ok = self.cached_tmux_ok().await;
         let pending = self.sessions_with_pending_comments().await?;
 
@@ -2010,6 +2191,7 @@ impl CommanderService {
             operations: self.operations_snapshot(),
             server: ServerStatus {
                 gh_available,
+                code_host,
                 tmux_ok,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
@@ -2316,6 +2498,10 @@ impl CommanderService {
         parent: Option<SessionId>,
     ) -> Result<SetSessionBaseOutcome> {
         self.telemetry.feature("session.set_base");
+        let _guard = self.review_provider_lock.lock().await;
+        // Keep one provider for the whole operation even if config hot-reloads
+        // while the state mutation is in flight.
+        let provider = self.config_store.read().code_host_provider;
         let session_id = *id;
         let (plan, pr_retarget) = self
             .store
@@ -2333,12 +2519,14 @@ impl CommanderService {
             })
             .await?;
 
+        drop(_guard);
         // Durable half, best-effort. The local mirror already re-stacked the
         // tree, but only this makes it survive the next PR sync — so a failure
         // is reported rather than logged.
         let pr = match pr_retarget {
             None => PrRetarget::NoPr,
-            Some(r) => match crate::git::try_retarget_pr_base(
+            Some(r) => match crate::git::hosting::try_retarget_review_base(
+                provider,
                 &r.repo_path,
                 r.pr_number,
                 &r.new_base_branch,
@@ -2760,12 +2948,15 @@ impl CommanderService {
                     }
                     *lc = Some(now);
                 }
+                // One provider snapshot governs this entire sweep, including
+                // every awaited branch query.
+                let (provider, epoch) = service.review_provider_snapshot().await;
                 // Adopt any branch renames before polling, so this same tick
                 // queries GitHub with the corrected `--head` name.
                 if let Err(e) = service.reconcile_session_branches().await {
                     debug!("reconcile_session_branches failed: {e}");
                 }
-                if !service.gh_available().await {
+                if !service.code_host_cli_available(provider).await {
                     continue;
                 }
                 let sessions_to_check = service.pr_poll_targets().await;
@@ -2777,15 +2968,20 @@ impl CommanderService {
                         |(id, branch, repo_path, created_at)| async move {
                             (
                                 id,
-                                crate::git::check_pr_for_branch(&repo_path, &branch, created_at)
-                                    .await,
+                                crate::git::hosting::check_review_for_branch(
+                                    provider, &repo_path, &branch, created_at,
+                                )
+                                .await,
                             )
                         },
                     ))
                     .buffer_unordered(PR_FANOUT_CONCURRENCY)
                     .collect()
                     .await;
-                if let Err(e) = service.apply_pr_results(results).await {
+                if let Err(e) = service
+                    .apply_pr_results_at_epoch(provider, epoch, results)
+                    .await
+                {
                     debug!("apply_pr_results failed: {e}");
                 }
             }
@@ -2935,6 +3131,48 @@ impl CommanderService {
             .gh_available
             .get_or_init(|| async { is_gh_available().await })
             .await
+    }
+
+    async fn code_host_status(&self) -> claude_commander_protocol::api::CodeHostStatus {
+        let (provider, hostname) = {
+            let config = self.config_store.read();
+            (
+                config.code_host_provider,
+                (config.code_host_provider == CodeHostProvider::Gitlab)
+                    .then(|| config.gitlab_hostname.clone())
+                    .flatten(),
+            )
+        };
+        let cli_available = self.code_host_cli_available(provider).await;
+        claude_commander_protocol::api::CodeHostStatus {
+            provider,
+            hostname,
+            cli_available,
+        }
+    }
+
+    async fn code_host_cli_available(&self, provider: CodeHostProvider) -> bool {
+        match provider {
+            CodeHostProvider::Github => self.gh_available().await,
+            CodeHostProvider::Gitlab => {
+                let cached = *self
+                    .glab_available
+                    .lock()
+                    .expect("glab availability poisoned");
+                if let Some((at, available)) = cached
+                    && at.elapsed() < Duration::from_secs(if available { 30 } else { 5 })
+                {
+                    return available;
+                }
+                let available = crate::git::hosting::gitlab::is_available().await;
+                *self
+                    .glab_available
+                    .lock()
+                    .expect("glab availability poisoned") =
+                    Some((std::time::Instant::now(), available));
+                available
+            }
+        }
     }
 
     /// Error with `NotFound` when a session id doesn't exist, so mutations can
@@ -3570,6 +3808,7 @@ pub fn snapshot_from_state(state: &AppState) -> Snapshot {
         operations: Vec::new(),
         server: ServerStatus {
             gh_available: false,
+            code_host: Default::default(),
             tmux_ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
@@ -3634,6 +3873,21 @@ fn clone_dir_name(req: &CloneRequest) -> Result<String> {
                 .map_or(full_name.as_str(), |(_, name)| name)
                 .to_string()
         }
+        CloneSource::Gitlab {
+            full_name,
+            hostname,
+        } => {
+            validate_hosted_repo_slug(CodeHostProvider::Gitlab, full_name)
+                .map_err(clone_source_rejected)?;
+            if let Some(hostname) = hostname {
+                validate_gitlab_hostname(hostname).map_err(clone_source_rejected)?;
+            }
+            full_name
+                .rsplit('/')
+                .next()
+                .expect("validated slug")
+                .to_string()
+        }
         CloneSource::Url { url } => {
             validate_clone_url(url)
                 .map_err(clone_source_rejected)?
@@ -3656,6 +3910,7 @@ fn clone_dir_name(req: &CloneRequest) -> Result<String> {
 fn clone_source_label(source: &CloneSource) -> &str {
     match source {
         CloneSource::Github { full_name } => full_name,
+        CloneSource::Gitlab { full_name, .. } => full_name,
         CloneSource::Url { url } => url,
     }
 }
@@ -4125,6 +4380,328 @@ mod tests {
     /// comment/reviewed stores under that temp data dir — never the real
     /// `Config::data_dir()`. Writing a comment proves the on-disk path is the
     /// injected one (test-isolation regression).
+    #[tokio::test]
+    async fn provider_transition_preserves_a_concurrent_synchronous_setting() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let state_guard = svc.store().read().await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let svc = svc.clone();
+            let entered = entered.clone();
+            async move {
+                svc.edit_code_host_config(move |config| {
+                    config.code_host_provider = CodeHostProvider::Gitlab;
+                    entered.notify_one();
+                    Ok(())
+                })
+                .await
+            }
+        });
+        entered.notified().await;
+        let mut config = svc.read_config();
+        config.ui_refresh_fps = 23;
+        svc.update_config(config).unwrap();
+        drop(state_guard);
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.read_config().ui_refresh_fps, 23);
+    }
+
+    /// A whole-config write built from a cache that predates a provider switch
+    /// must be rejected without reverting the switch. The comparison runs
+    /// inside the store's `try_mutate`, against the value it is about to replace.
+    #[tokio::test]
+    async fn stale_provider_update_is_rejected_without_reverting_the_switch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let mut stale = svc.read_config();
+        svc.edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        stale.ui_refresh_fps = 23;
+        assert!(svc.update_config(stale).is_err());
+        let config = svc.read_config();
+        assert_eq!(config.code_host_provider, CodeHostProvider::Gitlab);
+        assert_ne!(config.ui_refresh_fps, 23);
+    }
+
+    async fn seed_review_metadata(svc: &CommanderService) -> SessionId {
+        let (_, sid) = seed_project_session(svc).await;
+        svc.store()
+            .mutate(move |state| {
+                state.sessions.get_mut(&sid).unwrap().pr_number = Some(7);
+            })
+            .await
+            .unwrap();
+        sid
+    }
+
+    /// The edit is applied once, inside the persist, and invalidation follows
+    /// it. Applying it a second time to a pre-read snapshot (and invalidating
+    /// on that) wiped review metadata and bumped the epoch even when the
+    /// persisted application then failed and the provider never changed.
+    #[tokio::test]
+    async fn provider_edit_is_applied_once_and_invalidation_follows_the_persist() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_review_metadata(&svc).await;
+        // Succeeds on its first application and fails on any later one, as a
+        // validating merge would when the latest config differs from the
+        // snapshot it was first tried against.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        svc.edit_code_host_config(|config| {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0 {
+                return Err(ConfigError::InvalidValue {
+                    key: "code_host_provider".into(),
+                    reason: "rejected".into(),
+                }
+                .into());
+            }
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.store().read().await.sessions[&sid].pr_number, None);
+        assert_eq!(
+            svc.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    /// An edit rejected by its own validation changes nothing: no metadata
+    /// wipe, no epoch bump.
+    #[tokio::test]
+    async fn rejected_provider_edit_does_not_invalidate_review_metadata() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_review_metadata(&svc).await;
+        let result = svc
+            .edit_code_host_config(|config| {
+                config.code_host_provider = CodeHostProvider::Gitlab;
+                Err(ConfigError::InvalidValue {
+                    key: "gitlab_hostname".into(),
+                    reason: "rejected".into(),
+                }
+                .into())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Github
+        );
+        assert_eq!(svc.store().read().await.sessions[&sid].pr_number, Some(7));
+        assert_eq!(
+            svc.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    /// When the config write fails nothing changes: the edit is applied to a
+    /// copy that is only committed once saved, so the provider pollers read
+    /// stays put and review metadata is left alone.
+    #[tokio::test]
+    async fn persist_failure_changes_neither_provider_nor_review_metadata() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let sid = seed_review_metadata(&svc).await;
+        // A directory where the config file belongs makes the write fail.
+        std::fs::create_dir_all(dir.path().join("config.toml")).unwrap();
+        let result = svc
+            .edit_code_host_config(|config| {
+                config.code_host_provider = CodeHostProvider::Gitlab;
+                Ok(())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Github
+        );
+        assert_eq!(svc.store().read().await.sessions[&sid].pr_number, Some(7));
+        assert_eq!(
+            svc.review_provider_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    /// Persist the service's config, then overwrite the file the way a hand
+    /// edit would, with a later mtime and a changed `ui_refresh_fps`. Returns
+    /// the edited file's bytes and mtime.
+    fn external_config_edit(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+    ) -> (Vec<u8>, std::time::SystemTime) {
+        let path = dir.path().join("config.toml");
+        svc.update_config(svc.read_config()).unwrap();
+        // Filesystem mtime granularity: make the external write observable.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut edited = svc.read_config();
+        edited.ui_refresh_fps = 41;
+        std::fs::write(&path, toml::to_string_pretty(&edited).unwrap()).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        (std::fs::read(&path).unwrap(), meta.modified().unwrap())
+    }
+
+    /// Assert the config file still holds the external edit, and that the
+    /// hot-reload then picks it up — a rejected write must not have recorded
+    /// a new mtime that hides it.
+    async fn assert_external_edit_survives(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+        (bytes, mtime): (Vec<u8>, std::time::SystemTime),
+    ) {
+        let path = dir.path().join("config.toml");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "config.toml rewritten"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        assert_ne!(svc.read_config().ui_refresh_fps, 41);
+        assert!(svc.reload_config().await.unwrap(), "external edit lost");
+        assert_eq!(svc.read_config().ui_refresh_fps, 41);
+    }
+
+    #[tokio::test]
+    async fn rejected_update_config_leaves_config_file_and_memory_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let external = external_config_edit(&svc, &dir);
+        let before = svc.read_config();
+        let mut stale = before.clone();
+        stale.code_host_provider = CodeHostProvider::Gitlab;
+        stale.rounded_borders = !before.rounded_borders;
+        assert!(svc.update_config(stale).is_err());
+        assert_eq!(svc.read_config().rounded_borders, before.rounded_borders);
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            before.code_host_provider
+        );
+        assert_external_edit_survives(&svc, &dir, external).await;
+    }
+
+    /// A refused section rename, a rejected workspace rename and a workspace
+    /// delete with nothing to delete change no config, so none may rewrite
+    /// `config.toml` and hide a pending hand edit from the hot-reload.
+    #[tokio::test]
+    async fn refused_section_and_workspace_edits_leave_config_file_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service_with_config(&dir, config_with_section("Parking"));
+        svc.set_workspace_defs(SetWorkspacesRequest {
+            workspaces: vec![WorkspaceDef::named("Work"), WorkspaceDef::named("Play")],
+            main: None,
+            startup_workspace: None,
+        })
+        .unwrap();
+        let external = external_config_edit(&svc, &dir);
+
+        assert!(!svc.rename_section("Nonexistent", "Waiting").await.unwrap());
+        assert!(!svc.rename_section("Parking", "   ").await.unwrap());
+        assert!(svc.rename_workspace("Work", "Play").await.is_err());
+        assert!(!svc.delete_workspace("Nope").await.unwrap());
+
+        assert_external_edit_survives(&svc, &dir, external).await;
+    }
+
+    #[tokio::test]
+    async fn rejected_code_host_edit_leaves_config_file_and_memory_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let external = external_config_edit(&svc, &dir);
+        let before = svc.read_config();
+        let result = svc
+            .edit_code_host_config(|config| {
+                // Half-applied before the rejection: none of it may stick.
+                config.rounded_borders = !config.rounded_borders;
+                config.code_host_provider = CodeHostProvider::Gitlab;
+                Err(ConfigError::InvalidValue {
+                    key: "gitlab_hostname".into(),
+                    reason: "rejected".into(),
+                }
+                .into())
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(svc.read_config().rounded_borders, before.rounded_borders);
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            before.code_host_provider
+        );
+        assert_external_edit_survives(&svc, &dir, external).await;
+    }
+
+    #[tokio::test]
+    async fn unrelated_config_edit_keeps_cli_probe_and_skips_pr_refresh() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        *svc.glab_available.lock().unwrap() = Some((std::time::Instant::now(), false));
+        svc.edit_code_host_config(|config| {
+            config.ui_refresh_fps = 23;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(svc.glab_available.lock().unwrap().is_some());
+        assert!(
+            futures::FutureExt::now_or_never(svc.pr_refresh.notified()).is_none(),
+            "an edit that leaves the code host alone must not wake the PR poll"
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_hostname_edit_resets_cli_probe_and_wakes_pr_refresh() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        *svc.glab_available.lock().unwrap() = Some((std::time::Instant::now(), false));
+        svc.edit_code_host_config(|config| {
+            config.gitlab_hostname = Some("gitlab.example.com".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(svc.glab_available.lock().unwrap().is_none());
+        assert!(futures::FutureExt::now_or_never(svc.pr_refresh.notified()).is_some());
+    }
+
+    #[tokio::test]
+    async fn partial_config_edit_reads_latest_provider() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        svc.edit_code_host_config(|config| {
+            config.ui_refresh_fps = 23;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.read_config().code_host_provider,
+            CodeHostProvider::Gitlab
+        );
+        assert_eq!(svc.read_config().ui_refresh_fps, 23);
+    }
+
     #[tokio::test]
     async fn comment_writes_stay_under_injected_data_dir() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -5186,6 +5763,77 @@ mod tests {
         let s = state.get_session(&sid).unwrap();
         assert!(s.pr_number.is_none());
         assert!(s.pr_base_branch.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_change_clears_reviews_and_rejects_old_in_flight_results() {
+        use crate::git::{PrCheckResult, PrInfo, PrState};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        let review = |number| {
+            PrCheckResult::Found(PrInfo {
+                number,
+                url: format!("https://github.example/pr/{number}"),
+                state: PrState::Open,
+                is_draft: true,
+                labels: vec!["review".into()],
+                review_decision: Some(crate::git::ReviewDecision::Approved),
+                reviewers: vec!["alice".into()],
+                base_ref_name: Some("parent".into()),
+            })
+        };
+
+        svc.apply_pr_results_for_provider(CodeHostProvider::Github, vec![(sid, review(42))])
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_number,
+            Some(42)
+        );
+
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Gitlab;
+        svc.update_code_host_config(config).await.unwrap();
+
+        // Simulate the GitHub sweep that was already in flight when the user
+        // switched. It must not repopulate fields after invalidation.
+        svc.apply_pr_results_for_provider(CodeHostProvider::Github, vec![(sid, review(99))])
+            .await
+            .unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert!(session.pr_number.is_none());
+        assert!(session.pr_url.is_none());
+        assert!(session.pr_state.is_none());
+        assert!(!session.pr_draft);
+        assert!(session.pr_labels.is_empty());
+        assert!(!session.pr_merged);
+        assert!(session.review_decision.is_none());
+        assert!(session.pr_reviewers.is_empty());
+        assert!(session.pr_base_branch.is_none());
+        drop(state);
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Github;
+        svc.update_code_host_config(config).await.unwrap();
+        svc.apply_pr_results_at_epoch(CodeHostProvider::Github, 0, vec![(sid, review(101))])
+            .await
+            .unwrap();
+        assert!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_number
+                .is_none()
+        );
     }
 
     /// Run `git` in `dir`, panicking on failure. Signing is forced off by

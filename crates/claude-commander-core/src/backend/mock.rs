@@ -24,7 +24,10 @@ use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
 use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneRequest, CloneSource, CloneStatus, GithubRepo, redact_credentials,
+    CloneJob, CloneJobId, CloneRequest, CloneStatus, GithubRepo, redact_credentials,
+};
+use claude_commander_protocol::hosting::{
+    CloneSource, CodeHost, CodeHostProvider, RepositoryListing,
 };
 use claude_commander_protocol::workspace::{SetWorkspacesRequest, WorkspaceDef};
 
@@ -101,6 +104,7 @@ pub struct MockBackend {
     /// Repo list served by [`Self::list_github_repos`], set by
     /// [`Self::set_github_repos`].
     github_repos: Mutex<Vec<GithubRepo>>,
+    repository_listing: Mutex<RepositoryListing>,
     /// Requests passed to [`Self::start_clone`], for call-recording asserts.
     clone_requests: Mutex<Vec<CloneRequest>>,
     /// Jobs [`Self::start_clone`] has issued, served back by
@@ -173,6 +177,13 @@ impl MockBackend {
             fetched_blobs: Mutex::new(Vec::new()),
             open_editor: Mutex::new(false),
             github_repos: Mutex::new(Vec::new()),
+            repository_listing: Mutex::new(RepositoryListing {
+                host: CodeHost {
+                    provider: CodeHostProvider::Github,
+                    hostname: None,
+                },
+                repositories: Vec::new(),
+            }),
             clone_requests: Mutex::new(Vec::new()),
             clone_jobs: Mutex::new(Vec::new()),
             added_projects: Mutex::new(Vec::new()),
@@ -321,6 +332,10 @@ impl MockBackend {
     /// Set the repo list served by [`Self::list_github_repos`].
     pub fn set_github_repos(&self, repos: Vec<GithubRepo>) {
         *self.github_repos.lock().unwrap() = repos;
+    }
+
+    pub fn set_repository_listing(&self, listing: RepositoryListing) {
+        *self.repository_listing.lock().unwrap() = listing;
     }
 
     /// Requests passed to [`Self::start_clone`], in call order.
@@ -683,6 +698,11 @@ impl CommanderBackend for MockBackend {
         Ok(self.github_repos.lock().unwrap().clone())
     }
 
+    async fn list_repositories(&self) -> BResult<RepositoryListing> {
+        self.guard()?;
+        Ok(self.repository_listing.lock().unwrap().clone())
+    }
+
     async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
         self.guard()?;
         // The label goes through the protocol's redaction like a real backend's:
@@ -690,6 +710,7 @@ impl CommanderBackend for MockBackend {
         // would make it the one path in the codebase where that is fine to do.
         let source_label = redact_credentials(match &req.source {
             CloneSource::Github { full_name } => full_name,
+            CloneSource::Gitlab { full_name, .. } => full_name,
             CloneSource::Url { url } => url,
         });
         let job = CloneJob {

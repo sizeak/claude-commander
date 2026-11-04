@@ -19,6 +19,7 @@ use claude_commander_protocol::api::{
     BranchInfo, CreateOptions, CreateSessionOpts, ProgramInfo, SessionDetail, SessionInfo,
 };
 use claude_commander_protocol::github::{CloneJobId, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 use claude_commander_protocol::session::{SessionId, SessionStatus};
 
 use crate::api::mirrors::{
@@ -387,6 +388,13 @@ pub fn github_repos(handle: String) -> Result<Vec<GithubRepo>> {
     call(client.github_repos())
 }
 
+/// Provider-neutral repository listing, including the selected host identity
+/// even when no repositories are returned.
+pub fn repositories(handle: String) -> Result<RepositoryListing> {
+    let client = with_client(&handle)?;
+    call(client.repositories())
+}
+
 /// Start a clone, returning the created job (the route answers 202 with the whole
 /// job, so the id, the destination and the first status arrive together).
 ///
@@ -567,6 +575,7 @@ mod tests {
                     value: format!(
                         "https://sizeak:{USERINFO_SECRET}@github.com/sizeak/claude-commander.git"
                     ),
+                    hostname: None,
                 },
                 dest_name: None,
                 workspace: None,

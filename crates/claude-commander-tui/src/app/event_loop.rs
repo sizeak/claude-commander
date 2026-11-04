@@ -186,19 +186,38 @@ impl App {
 
     /// Check if `config.toml` has been modified externally and refresh the local cache.
     pub(super) fn check_config_reload(&mut self) -> bool {
-        match self.service.reload_config() {
+        if self.ui_state.config_reload_in_flight {
+            return false;
+        }
+        self.ui_state.config_reload_in_flight = true;
+        let service = self.service.clone();
+        let tx = self.event_loop.sender();
+        // reload_config takes the provider-transition lock, which review polls,
+        // deletion and retargeting can hold across slow I/O. Awaiting it on a
+        // tick would stop input and rendering even when config is unchanged.
+        tokio::spawn(async move {
+            let result = service.reload_config().await.map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ConfigReloaded {
+                    result,
+                }))
+                .await;
+        });
+        false
+    }
+
+    pub(super) fn apply_config_reload(
+        &mut self,
+        result: std::result::Result<bool, String>,
+    ) -> bool {
+        self.ui_state.config_reload_in_flight = false;
+        match result {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
-                let old_servers = self.config.remote_servers.clone();
-                self.config = self.service.read_config();
+                // Also reconciles the live backends against a changed
+                // remote-server list.
+                self.sync_config_from_service();
                 self.reload_theme();
-
-                // Reconcile the live backends against the new remote-server list
-                // (add/remove/rebuild handles) when it changed.
-                let new_servers = self.config.remote_servers.clone();
-                if old_servers != new_servers {
-                    self.apply_remote_servers_reload(&old_servers, &new_servers);
-                }
                 true
             }
             Ok(false) => false,

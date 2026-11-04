@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::TS;
 
-use crate::{api, comment, config, connection, diff, github, pr, session, workspace, ws};
+use crate::{api, comment, config, connection, diff, github, hosting, pr, session, workspace, ws};
 
 /// Set to regenerate the committed bindings instead of checking them.
 const REGENERATE_ENV: &str = "CC_TS_REGENERATE";
@@ -109,7 +109,13 @@ fn export_into(dir: &Path) {
         diff::FileDiff,
         diff::ParsedDiff,
         github::GithubRepo,
-        github::CloneSource,
+        hosting::CloneSource,
+        hosting::CodeHostProvider,
+        hosting::CodeHost,
+        hosting::HostedRepository,
+        hosting::RepositoryListing,
+        hosting::RepositoryVisibility,
+        api::CodeHostStatus,
         github::CloneRequest,
         github::CloneJobId,
         github::CloneStatus,

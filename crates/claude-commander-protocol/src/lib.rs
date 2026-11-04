@@ -26,6 +26,7 @@ pub mod config;
 pub mod connection;
 pub mod diff;
 pub mod github;
+pub mod hosting;
 pub mod paste;
 pub mod pr;
 pub mod preview;

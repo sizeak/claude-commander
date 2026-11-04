@@ -23,6 +23,7 @@ use crate::session::{ProjectId, ScanResult, SessionId};
 use crate::tmux::HeadlessAttach;
 use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 use super::error::BResult;
@@ -402,6 +403,10 @@ impl CommanderBackend for LocalBackend {
         Ok(self.service.list_github_repos().await?)
     }
 
+    async fn list_repositories(&self) -> BResult<RepositoryListing> {
+        Ok(self.service.list_repositories().await?)
+    }
+
     async fn start_clone(&self, req: CloneRequest) -> BResult<CloneJob> {
         Ok(self.service.start_clone(req).await?)
     }
@@ -556,7 +561,8 @@ mod tests {
     use crate::config::{Config, ConfigStore, StateStore};
     use crate::session::{Project, WorktreeSession};
     use crate::telemetry::FrontendInfo;
-    use claude_commander_protocol::github::{CloneSource, CloneStatus};
+    use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::hosting::CloneSource;
     use std::sync::Arc;
 
     /// Build a hermetic backend over `TempDir`-backed stores: telemetry off,

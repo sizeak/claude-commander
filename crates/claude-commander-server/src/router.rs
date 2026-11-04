@@ -166,6 +166,7 @@ pub fn build_router(state: AppState) -> Router {
         // router and identifies the handler by a message only it produces, so a
         // capture match shows up as a wrong status/body rather than passing
         // quietly.
+        .route("/repositories", get(github::repositories))
         .route("/github/repos", get(github::repos))
         .route("/projects/clone", post(github::clone))
         .route("/projects/clone/{job}", get(github::clone_status))

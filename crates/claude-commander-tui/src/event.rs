@@ -75,6 +75,11 @@ impl RestartKind {
 /// State updates from background tasks
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
+    CodeHostConfigUpdated {
+        result: std::result::Result<(), String>,
+    },
+    /// Periodic config reload completed without holding up input/rendering.
+    ConfigReloaded { result: Result<bool, String> },
     /// Session content updated
     ContentUpdated {
         session_id: SessionId,
@@ -130,6 +135,9 @@ pub enum StateUpdate {
         /// [`StateUpdate::PreviewReady::spawned_at`].
         spawned_at: Instant,
         session_id: SessionId,
+        /// Code host (provider and hostname) the fetch ran against; a result
+        /// from a host that is no longer current is dropped rather than cached.
+        code_host: claude_commander_protocol::hosting::CodeHost,
         info: Option<EnrichedPrInfo>,
     },
     /// AI-generated branch summary ready
@@ -290,11 +298,11 @@ pub enum StateUpdate {
         backend_id: usize,
         result: std::result::Result<(), String>,
     },
-    /// The GitHub repo listing for the open clone picker finished (or failed).
-    /// Spawned off the event loop because `gh api --paginate` has no server-side
+    /// The hosted-repository listing for the open clone picker finished (or failed).
+    /// Spawned off the event loop because a paginated provider API can take
     /// timeout and a large account takes many seconds — blocking here would
     /// freeze the UI for the whole listing.
-    GithubReposLoaded {
+    RepositoriesLoaded {
         /// Backend the listing was requested from; indexes `Vec<BackendHandle>`.
         backend_id: usize,
         /// The picker generation this fetch was spawned under. A late arrival
@@ -303,7 +311,7 @@ pub enum StateUpdate {
         generation: u64,
         /// `Err` carries a *state*, not a dead end: a host without `gh`, or an
         /// unauthenticated one, still leaves the picker's URL path usable.
-        result: std::result::Result<Vec<claude_commander_protocol::github::GithubRepo>, String>,
+        result: std::result::Result<claude_commander_protocol::hosting::RepositoryListing, String>,
     },
     /// A poll of an in-flight clone job came back. Emitted roughly once a second
     /// by the poll task until the job reaches a terminal status; there is no
@@ -321,7 +329,7 @@ pub enum StateUpdate {
         /// `apply_clone_job_update` do), or prefer the job's already-redacted
         /// `source_label`. Nothing Debug-prints a `StateUpdate` today, and that
         /// is load-bearing here.
-        source: claude_commander_protocol::github::CloneSource,
+        source: claude_commander_protocol::hosting::CloneSource,
         /// `Ok(Some(job))` is a poll result (terminal or not); `Ok(None)` means
         /// the job was pruned or never issued (absence, not failure); `Err`
         /// carries a transport/backend error and stops the poll.
@@ -425,7 +433,7 @@ pub enum UserCommand {
     /// Create new project
     NewProject,
     /// Clone a repository into the projects directory and register it as a
-    /// project: opens the GitHub repo picker (palette-only)
+    /// project: opens the hosted-repository picker (palette-only)
     CloneRepository,
     /// Checkout an existing branch into a new worktree session
     CheckoutBranch,

@@ -715,6 +715,7 @@ fn test_info_view_renders_stack_chain() {
         pr_number: None,
         pr_url: None,
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -768,6 +769,7 @@ fn test_info_view_stack_section_renders_above_pr_section() {
         pr_number: Some(7),
         pr_url: Some("https://example.com/pr/7".into()),
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -808,6 +810,7 @@ fn test_info_view_no_stack_section_for_unstacked() {
         pr_number: None,
         pr_url: None,
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -834,6 +837,85 @@ use claude_commander_core::config::{AppState, ConfigStore, StateStore};
 
 fn make_test_app() -> App {
     make_test_app_with_path().0
+}
+
+#[tokio::test]
+async fn config_reload_does_not_wait_for_review_poll_on_ui_task() {
+    let mut app = make_test_app();
+    let service = app.service.clone();
+    let state = service.store().read().await;
+    let poll = service.apply_pr_results(Vec::new());
+    tokio::pin!(poll);
+    // Poll once to acquire the provider mutex. The retained state reader
+    // prevents the review update from finishing and releasing that mutex.
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(poll.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+
+    app.ui_state.last_ui_maintenance = Instant::now() - Duration::from_secs(2);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        app.process_event(AppEvent::Tick),
+    )
+    .await;
+    if result.is_ok() {
+        assert!(app.ui_state.config_reload_in_flight);
+        // More polling opportunities while the provider mutex is busy must
+        // leave a single reload queued, rather than one task per second.
+        for _ in 0..3 {
+            app.check_config_reload();
+        }
+    }
+    drop(state);
+    poll.await.unwrap();
+    assert!(result.is_ok(), "config polling blocked the UI task");
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result: Ok(false) })
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), app.event_loop.next(),)
+            .await
+            .is_err(),
+        "busy ticks queued duplicate reloads"
+    );
+    app.process_event(event).await;
+    assert!(!app.ui_state.config_reload_in_flight);
+}
+
+#[tokio::test]
+async fn config_reload_recovers_from_error_and_applies_external_edits() {
+    let (mut app, path) = make_test_app_with_path();
+    let original_prefix = app.config.branch_prefix.clone();
+    for (contents, expected_prefix) in [
+        ("invalid = [", original_prefix.as_str()),
+        ("branch_prefix = 'reloaded/'", "reloaded/"),
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        app.check_config_reload();
+        assert!(app.ui_state.config_reload_in_flight);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result }) = &event else {
+            panic!("expected config reload completion, got {event:?}");
+        };
+        if contents == "invalid = [" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result, &Ok(true));
+        }
+        app.process_event(event).await;
+        assert!(!app.ui_state.config_reload_in_flight);
+        assert_eq!(app.config.branch_prefix, expected_prefix);
+    }
 }
 
 /// Stand-in for the CLI reference the binary injects into `App::new`. The real
@@ -1034,6 +1116,7 @@ fn server_tab_rejects_a_bad_bind_or_port_without_changing_config() {
 fn submitting_the_token_placeholder_leaves_the_token_alone() {
     let mut app = make_test_app();
     app.config.server.token = Some("sekret".into());
+    persist_seeded_config(&app);
     app.apply_settings_edit(SettingsTab::Server, "server_token", "(set)");
     assert_eq!(app.config.server.token.as_deref(), Some("sekret"));
 
@@ -1047,6 +1130,7 @@ fn submitting_the_token_placeholder_leaves_the_token_alone() {
         .map(|r| r.text_value().to_string())
         .expect("token row");
     app.config.server.token = Some("sekret".into());
+    persist_seeded_config(&app);
     app.apply_settings_edit(SettingsTab::Server, "server_token", &unset_placeholder);
     assert_eq!(
         app.config.server.token.as_deref(),
@@ -1056,6 +1140,7 @@ fn submitting_the_token_placeholder_leaves_the_token_alone() {
 
     // An explicit empty value does clear it.
     app.config.server.token = Some("sekret".into());
+    persist_seeded_config(&app);
     app.apply_settings_edit(SettingsTab::Server, "server_token", "");
     assert!(app.config.server.token.is_none());
 
@@ -1282,6 +1367,24 @@ fn test_apply_repo_list_timeout_rejects_implausibly_short_values() {
             app.config.repo_list_timeout_secs, 600,
             "{rejected} should not have been accepted"
         );
+    }
+}
+
+#[test]
+fn gitlab_hostname_editor_rejects_url_and_credentials_without_persisting_them() {
+    let mut app = make_test_app();
+    assert_eq!(
+        app.parse_gitlab_hostname_setting("https://user:secret@gitlab.example.com/group"),
+        None
+    );
+
+    assert!(app.config.gitlab_hostname.is_none());
+    match &app.ui_state.modal {
+        Modal::Error { message } => {
+            assert!(message.contains("Invalid GitLab hostname"));
+            assert!(!message.contains("secret"));
+        }
+        other => panic!("expected validation error, got {other:?}"),
     }
 }
 
@@ -2353,6 +2456,14 @@ fn render_keybindings_search_box_filters_and_shows_prompt() {
     );
 }
 
+/// Persist fixture edits made directly to `app.config` through the service.
+/// Settings edits re-read the service's config before applying (so a web
+/// `PATCH /config` is never reverted), so a seed held only in the TUI's cache
+/// would be discarded by the next settings key.
+fn persist_seeded_config(app: &App) {
+    app.service.update_config(app.config.clone()).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Programs settings tab
 // ---------------------------------------------------------------------------
@@ -2478,6 +2589,7 @@ async fn programs_tab_rename_rejects_duplicate_and_empty_labels() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Move to the second entry and rename it to a duplicate of the first.
@@ -2769,6 +2881,7 @@ async fn programs_tab_editing_field_label_rejects_duplicate() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Focus the fields pane on the second entry and edit its label to a dup.
@@ -2791,6 +2904,7 @@ async fn programs_tab_esc_cancels_rename_and_edit_without_change() {
 
     let mut app = make_test_app();
     app.config.programs = vec![program_entry("Claude", "claude")];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Rename: type a new label then Esc — nothing changes.
@@ -3205,6 +3319,7 @@ async fn commit_to_missing_backend_does_not_clobber_local_config() {
     let mut app = make_test_app();
     // Local config has its own programs, which must be left untouched.
     app.config.programs = vec![program_entry("Local", "local-cmd")];
+    persist_seeded_config(&app);
     app.open_settings_on_programs(claude_commander_core::backend::LOCAL_BACKEND_ID);
 
     // Simulate a tab that was pointed at a remote server which has since been
@@ -3975,6 +4090,80 @@ fn agent_states_box() -> Box<claude_commander_core::api::AgentStatesSnapshot> {
         states: Default::default(),
         commander_running: false,
     })
+}
+
+#[tokio::test]
+async fn backend_change_invalidates_review_fetch_when_provider_changes() {
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", empty_snapshot())]);
+    let backend = BackendId(1);
+    let session = SessionId::new();
+    app.ui_state.enriched_pr_unavailable = Some(session);
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(Instant::now());
+    let mut snapshot = empty_snapshot();
+    snapshot.server.code_host.provider =
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 1,
+        backend_id: backend.0,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_unavailable, None);
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+#[tokio::test]
+async fn provider_change_preserves_repository_fetch_generation() {
+    let mut snapshot = empty_snapshot();
+    snapshot.server.code_host.provider =
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    snapshot.server.code_host.hostname = Some("gitlab.example.com".into());
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", snapshot)]);
+    let backend = BackendId(1);
+    app.ui_state.repo_picker.backend = backend;
+    app.ui_state.repo_picker.generation = 41;
+    app.refresh_backend_view(backend).await;
+    assert!(app.ui_state.repo_picker.generation > 41);
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert_eq!(
+        app.ui_state.repo_picker.host.hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
+#[tokio::test]
+async fn provider_change_restarts_an_open_repository_picker() {
+    let mut snapshot = empty_snapshot();
+    snapshot.server.code_host.provider =
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", snapshot)]);
+    app.ui_state.repo_picker.backend = BackendId(1);
+    app.ui_state.repo_picker.generation = 41;
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: PaletteMode::RepositoryPicker,
+        query: Input::default(),
+        matches: Vec::new(),
+        selected_idx: 0,
+        scroll: 0,
+        review: None,
+    };
+    app.refresh_backend_view(BackendId(1)).await;
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .expect("provider switch must start a new listing, not leave the picker loading")
+        .unwrap();
+    assert!(matches!(
+        event,
+        AppEvent::StateUpdate(StateUpdate::RepositoriesLoaded {
+            backend_id: 1,
+            generation: 43,
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
@@ -6603,7 +6792,11 @@ fn set_session_base_is_reachable_from_the_command_palette() {
 /// user has to be told the PR and review diff will be wrong until they do.
 #[test]
 fn set_session_base_confirm_message_warns_that_rebasing_is_manual() {
-    let msg = super::actions::set_session_base_confirm_message("my-task", "other-br");
+    let msg = super::actions::set_session_base_confirm_message(
+        claude_commander_protocol::hosting::CodeHostProvider::Github,
+        "my-task",
+        "other-br",
+    );
     assert!(msg.contains("my-task"));
     assert!(msg.contains("other-br"));
     assert!(
@@ -7456,7 +7649,6 @@ async fn spawn_info_fetch_is_noop_while_enriched_fetch_in_flight() {
     // Arrange the conditions under which the fetch would fire: Info modal open,
     // this session selected, `gh` available, and no cached enriched PR yet.
     app.ui_state.selected_session_id = Some(claude_commander_core::backend::SessionRef::local(sid));
-    app.ui_state.gh_available = true;
     app.ui_state.modal = Modal::Info { scroll: 0 };
     app.ui_state.enriched_pr = None;
 
@@ -8851,6 +9043,28 @@ async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
     assert_eq!(app.ui_state.preview_update_spawned_at, None);
 }
 
+/// The default (github.com) code host every test snapshot starts on.
+fn github_host() -> claude_commander_protocol::hosting::CodeHost {
+    claude_commander_protocol::hosting::CodeHost {
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+        hostname: None,
+    }
+}
+
+fn enriched_ready(
+    spawned_at: Instant,
+    session_id: SessionId,
+    code_host: claude_commander_protocol::hosting::CodeHost,
+    info: Option<claude_commander_core::git::EnrichedPrInfo>,
+) -> StateUpdate {
+    StateUpdate::EnrichedPrReady {
+        spawned_at,
+        session_id,
+        code_host,
+        info,
+    }
+}
+
 #[tokio::test]
 async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     // An Info surface used to be a briefly-open modal; the Info *tab* can stay
@@ -8861,12 +9075,10 @@ async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     let mut app = make_test_app();
     app.ui_state.selected_session_id = Some(SessionRef::local(sid));
 
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: Instant::now(),
-        session_id: sid,
-        info: None,
-    })
-    .await;
+    let spawned_at = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
+    app.handle_state_update(enriched_ready(spawned_at, sid, github_host(), None))
+        .await;
     assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
 
     // An explicit PR-status refresh is the retry path.
@@ -8939,6 +9151,29 @@ async fn reopening_the_info_modal_retries_a_failed_enriched_fetch() {
 }
 
 #[tokio::test]
+async fn a_slow_enriched_result_still_applies_after_its_token_was_superseded() {
+    // A `gh`/`glab` call slower than the 5s in-flight backstop gets re-spawned,
+    // which overwrites the token. Discarding the original result then meant a
+    // slow fetch never landed. A superseded result for the selected session and
+    // the current provider must still apply.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    let guard = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
+    app.handle_state_update(enriched_ready(
+        guard - std::time::Duration::from_secs(6),
+        sid,
+        github_host(),
+        None,
+    ))
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, Some(guard));
+}
+
+#[tokio::test]
 async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
     // Same generation-token rule as PreviewReady: a superseded enriched result
     // must not release the guard belonging to the fetch now in flight, or the
@@ -8949,11 +9184,12 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
 
     let guard = Instant::now();
     app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: guard - std::time::Duration::from_millis(1),
-        session_id: sid,
-        info: None,
-    })
+    app.handle_state_update(enriched_ready(
+        guard - std::time::Duration::from_millis(1),
+        sid,
+        github_host(),
+        None,
+    ))
     .await;
     assert_eq!(
         app.ui_state.enriched_pr_fetch_spawned_at,
@@ -8961,22 +9197,75 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
         "a superseded enriched result must leave the live fetch's guard intact"
     );
 
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: guard,
-        session_id: sid,
-        info: None,
-    })
-    .await;
+    app.handle_state_update(enriched_ready(guard, sid, github_host(), None))
+        .await;
     assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+#[tokio::test]
+async fn an_enriched_result_from_a_previous_provider_is_dropped() {
+    // Enriched review data is provider-bound: a GitHub fetch still in flight
+    // when the provider switches to GitLab must not repopulate the caches.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .snapshot
+        .server
+        .code_host
+        .provider = claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+
+    let spawned_at = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
+    app.handle_state_update(enriched_ready(spawned_at, sid, github_host(), None))
+        .await;
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "a result from the previous provider must not update negative caches"
+    );
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
+}
+
+#[tokio::test]
+async fn an_enriched_result_from_a_previous_gitlab_host_is_dropped() {
+    // Switching GitLab hostname keeps the provider, so the host must be part of
+    // the identity a result is checked against.
+    use claude_commander_protocol::hosting::{CodeHost, CodeHostProvider};
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    let code_host = &mut app
+        .backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .snapshot
+        .server
+        .code_host;
+    code_host.provider = CodeHostProvider::Gitlab;
+    code_host.hostname = Some("new.example.com".into());
+
+    app.handle_state_update(enriched_ready(
+        Instant::now(),
+        sid,
+        CodeHost {
+            provider: CodeHostProvider::Gitlab,
+            hostname: Some("old.example.com".into()),
+        },
+        None,
+    ))
+    .await;
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "a result from the previous GitLab host must not update negative caches"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Clone repository: palette command, repo picker, and clone-job progress
 // ---------------------------------------------------------------------------
 
-use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneSource, CloneStatus, GithubRepo,
-};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneStatus, GithubRepo};
+use claude_commander_protocol::hosting::CloneSource;
 
 /// A `GithubRepo` with just the fields the picker reads; the rest are plausible
 /// constants so a test can build a list without restating the whole DTO.
@@ -8999,10 +9288,10 @@ fn github_repo(full_name: &str) -> GithubRepo {
 
 /// The labels of the repo-picker rows the palette would show for `query`.
 fn repo_picker_labels(app: &App, query: &str) -> Vec<String> {
-    app.gather_github_repo_picker_items(query)
+    app.gather_repository_picker_items(query)
         .into_iter()
         .map(|item| match item {
-            QuickSwitchItem::GithubRepo { label, .. } => label,
+            QuickSwitchItem::HostedRepository { label, .. } => label,
             other => panic!("expected a GithubRepo row, got {other:?}"),
         })
         .collect()
@@ -9040,7 +9329,7 @@ async fn repo_picker_filter_narrows_to_matching_repos() {
         matches!(
             app.ui_state.modal,
             Modal::QuickSwitch {
-                mode: PaletteMode::GithubRepoPicker,
+                mode: PaletteMode::RepositoryPicker,
                 ..
             }
         ),
@@ -9048,9 +9337,9 @@ async fn repo_picker_filter_narrows_to_matching_repos() {
     );
 
     app.ui_state.repo_picker.repos = vec![
-        github_repo("sizeak/claude-commander"),
-        github_repo("sizeak/diffgrid"),
-        github_repo("other/commander-docs"),
+        github_repo("sizeak/claude-commander").into(),
+        github_repo("sizeak/diffgrid").into(),
+        github_repo("other/commander-docs").into(),
     ];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
 
@@ -9095,8 +9384,8 @@ async fn repo_picker_marks_repos_already_registered_as_projects() {
 
     app.handle_command(UserCommand::CloneRepository).await;
     app.ui_state.repo_picker.repos = vec![
-        github_repo("sizeak/claude-commander"),
-        github_repo("sizeak/diffgrid"),
+        github_repo("sizeak/claude-commander").into(),
+        github_repo("sizeak/diffgrid").into(),
     ];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
 
@@ -9121,7 +9410,7 @@ async fn a_failed_repo_list_is_shown_as_a_state_and_keeps_the_url_path_usable() 
     app.handle_command(UserCommand::CloneRepository).await;
     let generation = app.ui_state.repo_picker.generation;
 
-    app.handle_state_update(StateUpdate::GithubReposLoaded {
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
         backend_id: claude_commander_core::backend::LOCAL_BACKEND_ID.0,
         generation,
         result: Err("gh: command not found".to_string()),
@@ -9132,7 +9421,7 @@ async fn a_failed_repo_list_is_shown_as_a_state_and_keeps_the_url_path_usable() 
         matches!(
             app.ui_state.modal,
             Modal::QuickSwitch {
-                mode: PaletteMode::GithubRepoPicker,
+                mode: PaletteMode::RepositoryPicker,
                 ..
             }
         ),
@@ -9157,13 +9446,19 @@ async fn a_stale_repo_listing_is_dropped() {
     let mut app = make_test_app();
     app.handle_command(UserCommand::CloneRepository).await;
     let stale = app.ui_state.repo_picker.generation;
-    app.refetch_github_repos();
+    app.refetch_repositories();
     assert_ne!(app.ui_state.repo_picker.generation, stale);
 
-    app.handle_state_update(StateUpdate::GithubReposLoaded {
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
         backend_id: claude_commander_core::backend::LOCAL_BACKEND_ID.0,
         generation: stale,
-        result: Ok(vec![github_repo("stale/repo")]),
+        result: Ok(claude_commander_protocol::hosting::RepositoryListing {
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+                hostname: None,
+            },
+            repositories: vec![github_repo("stale/repo").into()],
+        }),
     })
     .await;
     assert!(
@@ -9174,10 +9469,32 @@ async fn a_stale_repo_listing_is_dropped() {
 }
 
 #[tokio::test]
+async fn gitlab_picker_knows_its_provider_before_an_empty_listing_arrives() {
+    let mut app = make_test_app();
+    app.backends[0].view.snapshot.server.code_host =
+        claude_commander_protocol::api::CodeHostStatus {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+            hostname: Some("gitlab.example.com".into()),
+            cli_available: true,
+        };
+
+    app.handle_command(UserCommand::CloneRepository).await;
+
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert_eq!(
+        app.ui_state.repo_picker.host.hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
+#[tokio::test]
 async fn enter_on_a_repo_opens_an_editable_destination_name_prefilled_with_the_repo_name() {
     let mut app = make_test_app();
     app.handle_command(UserCommand::CloneRepository).await;
-    app.ui_state.repo_picker.repos = vec![github_repo("sizeak/claude-commander")];
+    app.ui_state.repo_picker.repos = vec![github_repo("sizeak/claude-commander").into()];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
     app.refilter_quick_switch();
 
@@ -9204,6 +9521,40 @@ async fn enter_on_a_repo_opens_an_editable_destination_name_prefilled_with_the_r
         }
         other => panic!("expected the destination-name input, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn gitlab_repo_selection_freezes_provider_and_hostname_into_clone_source() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    app.ui_state.repo_picker.host = claude_commander_protocol::hosting::CodeHost {
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+        hostname: Some("gitlab.example.com".into()),
+    };
+    let mut repo: claude_commander_protocol::hosting::HostedRepository =
+        github_repo("group/subgroup/project").into();
+    repo.namespace = "group/subgroup".into();
+    repo.name = "project".into();
+    app.ui_state.repo_picker.repos = vec![repo];
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+    app.refilter_quick_switch();
+
+    app.activate_quick_switch_selection().await;
+
+    let Modal::Input {
+        on_submit: InputAction::CloneDestName { source, .. },
+        ..
+    } = &app.ui_state.modal
+    else {
+        panic!("expected clone destination prompt")
+    };
+    assert_eq!(
+        source,
+        &CloneSource::Gitlab {
+            full_name: "group/subgroup/project".into(),
+            hostname: Some("gitlab.example.com".into()),
+        }
+    );
 }
 
 #[tokio::test]
@@ -9268,7 +9619,7 @@ async fn a_refused_url_is_reported_and_leaves_the_picker_open() {
             matches!(
                 app.ui_state.modal,
                 Modal::QuickSwitch {
-                    mode: PaletteMode::GithubRepoPicker,
+                    mode: PaletteMode::RepositoryPicker,
                     ..
                 }
             ),
@@ -9618,7 +9969,7 @@ fn the_help_modal_documents_the_clone_picker() {
         .join("\n");
     // Listed as a (palette-only) bindable action…
     assert!(
-        text.contains("Clone a GitHub repository"),
+        text.contains("Clone a hosted repository"),
         "help must list the command: {text}"
     );
     // …and the picker's own keys, which are not bindable actions.
@@ -11827,6 +12178,14 @@ mod workspaces {
             .set_modified(later)
             .unwrap();
         app.check_config_reload();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while app.ui_state.config_reload_in_flight {
+                let event = app.event_loop.next().await.unwrap();
+                app.process_event(event).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(app.theme.status_bar_bg, Theme::lcars().status_bar_bg);
     }
 
@@ -12136,6 +12495,7 @@ mod workspaces {
     /// positions and hexes depend on the terminal running the tests).
     fn pin_truecolor(app: &mut App) {
         app.config.theme.preset = Some("truecolor".into());
+        persist_seeded_config(app);
         app.reload_theme();
     }
 
@@ -12366,6 +12726,7 @@ mod workspaces {
         app.config.theme.border_focused = Some(claude_commander_core::config::theme::ColorValue(
             rgb("#010203"),
         ));
+        persist_seeded_config(&app);
         app.reload_theme();
         feed(&mut app, KeyCode::Enter).await;
         let Some(SettingsEditing::OptionPicker { options, .. }) = &settings(&app).editing else {
@@ -12413,6 +12774,7 @@ mod workspaces {
         app.config
             .workspace_themes
             .insert("Work".into(), preset_entry("lcars"));
+        persist_seeded_config(&app);
         app.reload_theme();
         feed(&mut app, KeyCode::Enter).await;
         assert!(app.config.workspace_themes.is_empty());
@@ -12435,6 +12797,7 @@ mod workspaces {
         app.config
             .workspace_themes
             .insert("Work".into(), preset_entry("lcars"));
+        persist_seeded_config(&app);
         assert!(app.workspace_theme_customised(Some("Work")));
         assert!(!app.workspace_theme_customised(None));
         open_workspaces_tab(&mut app);
@@ -12455,10 +12818,7 @@ mod workspaces {
     /// a remote snapshot dropping it.
     async fn lose_work(app: &mut App) {
         app.service.delete_workspace("Work").await.unwrap();
-        // `pin_truecolor` set the usual theme in memory only; keep it.
-        let usual = app.config.theme.clone();
         app.config = app.service.read_config();
-        app.config.theme = usual;
         app.sync_local_view_from_store_for_test().await;
     }
 
@@ -13083,6 +13443,266 @@ async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
     assert!(app.event_loop.try_next().is_none());
 }
 
+/// A GitLab hostname edit goes through the service's code-host path, as a
+/// provider change does, so the cached glab probe is reset and PRs refetched
+/// rather than the hostname only being written to config.
+#[tokio::test]
+async fn gitlab_hostname_edit_runs_through_the_code_host_path() {
+    let (mut app, _) = app_with_remote_session().await;
+    open_general_settings_on(&mut app, "gitlab_hostname");
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let keys = std::iter::once(KeyCode::Enter)
+        .chain(std::iter::repeat_n(KeyCode::Backspace, 32))
+        .chain("gitlab.example.com".chars().map(KeyCode::Char))
+        .chain(std::iter::once(KeyCode::Enter));
+    for code in keys {
+        app.process_event(AppEvent::Input(crate::event::InputEvent::Key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+        )))
+        .await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = app.event_loop.next().await.unwrap();
+            let done = matches!(
+                &event,
+                AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated { result: Ok(()) })
+            );
+            app.process_event(event).await;
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the edit should complete through edit_code_host_config");
+    assert_eq!(
+        app.service.read_config().gitlab_hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+    assert_eq!(
+        app.config.gitlab_hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
+#[tokio::test]
+async fn provider_picker_runs_in_background_and_refreshes_its_display() {
+    let (mut app, _) = app_with_remote_session().await;
+    open_general_settings_on(&mut app, "code_host_provider");
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    for code in [KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
+        app.process_event(AppEvent::Input(crate::event::InputEvent::Key(
+            KeyEvent::new(code, KeyModifiers::NONE),
+        )))
+        .await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = app.event_loop.next().await.unwrap();
+            let done = matches!(
+                &event,
+                AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated { .. })
+            );
+            app.process_event(event).await;
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.config.code_host_provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    let Modal::Settings(state) = &app.ui_state.modal else {
+        panic!("settings should stay open");
+    };
+    let row = state
+        .rows
+        .iter()
+        .find(|r| r.field_key == "code_host_provider")
+        .unwrap();
+    assert!(matches!(&row.kind, SettingsRowKind::Text(value) if value == "GitLab"));
+    app.ui_state.modal = Modal::Error {
+        message: "keep this dialog".into(),
+    };
+    app.handle_state_update(StateUpdate::CodeHostConfigUpdated {
+        result: Err("failed".into()),
+    })
+    .await;
+    assert!(
+        matches!(&app.ui_state.modal, Modal::Error { message } if message == "keep this dialog")
+    );
+}
+
+/// Under `--serve` a web/Flutter `PATCH /config` can switch the provider on the
+/// service this TUI shares, without the hot-reload ever re-reading it (the
+/// shared store's own write updates the tracked mtime). A later TUI settings
+/// edit, sent from the now-stale cached config, must still land — not be
+/// rejected for its stale provider and silently dropped.
+#[tokio::test]
+async fn settings_edit_after_external_provider_switch_is_not_lost() {
+    use claude_commander_protocol::hosting::CodeHostProvider;
+    let mut app = make_test_app();
+    app.service
+        .edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(app.config.code_host_provider, CodeHostProvider::Github);
+    let rounded = !app.config.rounded_borders;
+    open_general_settings_on(&mut app, "rounded_borders");
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
+    let persisted = app.service.read_config();
+    assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
+    assert_eq!(persisted.code_host_provider, CodeHostProvider::Gitlab);
+    assert_eq!(app.config.code_host_provider, CodeHostProvider::Gitlab);
+}
+
+/// A web/Flutter `PATCH /config` that changes the provider *and* other fields
+/// must survive a later TUI toggle of an unrelated setting. Saving the TUI's
+/// whole cached config — even with the service's provider patched in — wrote
+/// back the stale `gitlab_hostname`, silently reverting the web edit (and,
+/// bypassing `edit_code_host_config`, without any probe reset or PR refresh).
+#[tokio::test]
+async fn tui_toggle_after_web_code_host_edit_keeps_the_web_values() {
+    use claude_commander_protocol::hosting::CodeHostProvider;
+    let mut app = make_test_app();
+    app.service
+        .edit_code_host_config(|config| {
+            config.code_host_provider = CodeHostProvider::Gitlab;
+            config.gitlab_hostname = Some("gitlab.example.com".into());
+            config.branch_prefix = "web/".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let rounded = !app.config.rounded_borders;
+    open_general_settings_on(&mut app, "rounded_borders");
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
+    let persisted = app.service.read_config();
+    assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
+    assert_eq!(persisted.code_host_provider, CodeHostProvider::Gitlab);
+    assert_eq!(
+        persisted.gitlab_hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+    assert_eq!(persisted.branch_prefix, "web/");
+    assert_eq!(app.config.gitlab_hostname, persisted.gitlab_hostname);
+}
+
+/// Open the General settings tab with the `field_key` row selected.
+fn open_general_settings_on(app: &mut App, field_key: &str) {
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let selected_row = rows
+        .iter()
+        .position(|r| r.field_key == field_key)
+        .expect("row exists");
+    app.ui_state.modal = Modal::Settings(SettingsState {
+        tab: SettingsTab::General,
+        selected_row,
+        editing: None,
+        rows,
+        sections_state: SectionsState::default(),
+        workspaces_state: WorkspacesState::default(),
+        programs_state: ProgramsState::default(),
+        theme_scope: crate::app::ThemeScope::Usual,
+        search: None,
+    });
+}
+
+/// The hot-reload runs in a spawned task, so the service holds a newly added
+/// remote server before the TUI handles `ConfigReloaded`. A settings key
+/// handled in that gap syncs the cache from the service; the reload must
+/// still connect the server rather than diffing the synced cache against
+/// itself and skipping the reconcile.
+#[tokio::test]
+async fn settings_key_before_config_reloaded_still_connects_a_new_server() {
+    let mut app = make_test_app();
+    assert_eq!(app.backends.len(), 1);
+    let mut reloaded = app.service.read_config();
+    reloaded
+        .remote_servers
+        .push(server_cfg("buildbox", "http://b:7878"));
+    app.service.update_config(reloaded).unwrap();
+
+    open_general_settings_on(&mut app, "rounded_borders");
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Down).await;
+    app.apply_config_reload(Ok(true));
+
+    let names: Vec<String> = app
+        .backends
+        .iter()
+        .map(|h| h.backend.descriptor().name)
+        .collect();
+    assert_eq!(names, vec!["local", "buildbox"]);
+}
+
+/// A code-host edit completing between a hot-reload and its `ConfigReloaded`
+/// event must not hide a server the reload added, as a settings key must not.
+#[tokio::test]
+async fn code_host_update_before_config_reloaded_still_connects_a_new_server() {
+    let mut app = make_test_app();
+    assert_eq!(app.backends.len(), 1);
+    let mut reloaded = app.service.read_config();
+    reloaded
+        .remote_servers
+        .push(server_cfg("buildbox", "http://b:7878"));
+    app.service.update_config(reloaded).unwrap();
+
+    app.handle_state_update(StateUpdate::CodeHostConfigUpdated { result: Ok(()) })
+        .await;
+    app.apply_config_reload(Ok(true));
+
+    let names: Vec<String> = app
+        .backends
+        .iter()
+        .map(|h| h.backend.descriptor().name)
+        .collect();
+    assert_eq!(names, vec!["local", "buildbox"]);
+}
+
+/// A toggle flips the service's current value, not the one the open modal
+/// rendered before another writer (a web `PATCH /config`) changed it.
+#[tokio::test]
+async fn settings_toggle_after_external_change_flips_the_fresh_value() {
+    let mut app = make_test_app();
+    open_general_settings_on(&mut app, "rounded_borders");
+    let external = !app.config.rounded_borders;
+    let mut patched = app.service.read_config();
+    patched.rounded_borders = external;
+    app.service.update_config(patched).unwrap();
+
+    feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
+
+    assert_eq!(app.service.read_config().rounded_borders, !external);
+}
+
+/// A settings save the service rejects is surfaced to the user and the cached
+/// config resynchronised, never only logged.
+#[tokio::test]
+async fn rejected_settings_save_is_surfaced_and_config_reloaded() {
+    let (mut app, config_path) = make_test_app_with_path();
+    // A directory where the config file belongs makes the write fail.
+    let _ = std::fs::remove_file(&config_path);
+    std::fs::create_dir_all(&config_path).unwrap();
+    let rounded = app.config.rounded_borders;
+    app.apply_bool_setting("rounded_borders", !rounded);
+    // The unsaved edit is discarded, matching the service, which kept none of it.
+    assert_eq!(app.config.rounded_borders, rounded);
+    assert_eq!(app.service.read_config().rounded_borders, rounded);
+    let (message, _) = app
+        .ui_state
+        .status_message
+        .as_ref()
+        .expect("a failed save must be visible");
+    assert!(message.contains("Failed to save settings"), "{message}");
+}
+
 #[tokio::test]
 async fn late_background_error_preserves_a_new_modal() {
     let (mut app, _) = app_with_remote_session().await;
@@ -13183,6 +13803,40 @@ async fn create_lfs_intent_survives_an_older_snapshot() {
     .await;
     assert!(app.ui_state.pending_created.is_empty());
     assert!(app.ui_state.lfs_pull_in_flight.contains(&sid));
+}
+
+#[tokio::test]
+async fn reopening_repository_picker_rejects_previous_provider_results() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    let old_generation = app.ui_state.repo_picker.generation;
+    app.ui_state.modal = Modal::None;
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .snapshot
+        .server
+        .code_host
+        .provider = claude_commander_protocol::hosting::CodeHostProvider::Gitlab;
+    app.handle_command(UserCommand::CloneRepository).await;
+    assert_ne!(app.ui_state.repo_picker.generation, old_generation);
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
+        backend_id: LOCAL_BACKEND_ID.0,
+        generation: old_generation,
+        result: Ok(claude_commander_protocol::hosting::RepositoryListing {
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+                hostname: None,
+            },
+            repositories: vec![github_repo("stale/repo").into()],
+        }),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert!(app.ui_state.repo_picker.repos.is_empty());
+    assert!(matches!(app.ui_state.repo_picker.fetch, RepoFetch::Loading));
 }
 
 #[tokio::test]

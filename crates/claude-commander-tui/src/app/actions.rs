@@ -207,12 +207,20 @@ pub(super) fn delete_confirm_message(
 /// diff will show them. Retargeting onto a *sibling* is the sharp case — the
 /// merge base collapses towards main and the diff swells to include the old
 /// parent's work — so the message says what to do rather than merely hedging.
-pub(super) fn set_session_base_confirm_message(title: &str, new_base: &str) -> String {
+pub(super) fn set_session_base_confirm_message(
+    provider: claude_commander_protocol::hosting::CodeHostProvider,
+    title: &str,
+    new_base: &str,
+) -> String {
+    let (review, host) = match provider {
+        claude_commander_protocol::hosting::CodeHostProvider::Github => ("pull request", "GitHub"),
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab => ("merge request", "GitLab"),
+    };
     format!(
         "Set the base of \"{title}\" to \"{new_base}\"?\n\n\
-         This updates the stack link, and retargets the pull request on GitHub if one exists.\n\n\
+         This updates the stack link, and retargets the {review} on {host} if one exists.\n\n\
          Git history is NOT rewritten: the branch still contains its old base's commits, so the \
-         PR and review diff will show them until you rebase or merge onto \"{new_base}\" yourself."
+         review and review diff will show them until you rebase or merge onto \"{new_base}\" yourself."
     )
 }
 
@@ -1490,8 +1498,8 @@ impl App {
         if eff_mode == PaletteMode::RemoteServerPicker {
             return self.gather_remote_server_picker_items(eff_query);
         }
-        if eff_mode == PaletteMode::GithubRepoPicker {
-            return self.gather_github_repo_picker_items(eff_query);
+        if eff_mode == PaletteMode::RepositoryPicker {
+            return self.gather_repository_picker_items(eff_query);
         }
         if eff_mode == PaletteMode::WorkspacePicker {
             return self.gather_workspace_picker_items(eff_query);
@@ -1580,7 +1588,7 @@ impl App {
             PaletteMode::RemoteServerPicker => {
                 Some(self.gather_remote_server_picker_items(eff_query))
             }
-            PaletteMode::GithubRepoPicker => Some(self.gather_github_repo_picker_items(eff_query)),
+            PaletteMode::RepositoryPicker => Some(self.gather_repository_picker_items(eff_query)),
             PaletteMode::WorkspacePicker => Some(self.gather_workspace_picker_items(eff_query)),
             PaletteMode::MoveProjectPicker { project_id } => {
                 Some(self.gather_move_project_items(project_id, eff_query))
@@ -2122,23 +2130,50 @@ impl App {
                     ));
                 }
                 claude_commander_core::api::PrRetarget::Retargeted { pr_number } => {
+                    let provider = self
+                        .view_for(backend_id)
+                        .snapshot
+                        .server
+                        .effective_code_host()
+                        .provider;
+                    let noun = if provider
+                        == claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+                    {
+                        "MR"
+                    } else {
+                        "PR"
+                    };
                     self.ui_state.status_message = Some((
                         format!(
-                            "Base set to {} (PR #{pr_number} retargeted)",
+                            "Base set to {} ({noun} #{pr_number} retargeted)",
                             outcome.new_base_branch
                         ),
                         Instant::now() + Duration::from_secs(5),
                     ));
                 }
                 claude_commander_core::api::PrRetarget::Failed { pr_number, message } => {
+                    let provider = self
+                        .view_for(backend_id)
+                        .snapshot
+                        .server
+                        .effective_code_host()
+                        .provider;
+                    let (noun, host, cli) = match provider {
+                        claude_commander_protocol::hosting::CodeHostProvider::Github => {
+                            ("PR", "GitHub", "gh")
+                        }
+                        claude_commander_protocol::hosting::CodeHostProvider::Gitlab => {
+                            ("MR", "GitLab", "glab")
+                        }
+                    };
                     self.ui_state.modal = Modal::Error {
                         message: format!(
-                            "The base was changed locally, but PR #{pr_number} still targets its \
+                            "The base was changed locally, but {noun} #{pr_number} still targets its \
                              old branch.\n\n\
-                             Set the PR's base to \"{}\" on GitHub — the next PR sync copies \
-                             GitHub's value back over the local one, so leaving it will undo \
+                             Set the {noun}'s base to \"{}\" on {host} — the next review sync copies \
+                             {host}'s value back over the local one, so leaving it will undo \
                              this change.\n\n\
-                             gh said: {message}",
+                             {cli} said: {message}",
                             outcome.new_base_branch
                         ),
                     };
@@ -2193,37 +2228,45 @@ impl App {
             .collect()
     }
 
-    /// Handle "Clone repository" — open the palette in GitHub repo-picker mode
+    /// Handle "Clone repository" — open the provider-neutral repository picker
     /// and kick off the listing in the background.
     ///
     /// The picker opens *immediately*, showing its loading state, because
-    /// `list_github_repos` shells out to `gh api --paginate`: a large account takes
-    /// many seconds, and awaiting it here would freeze the event loop for the whole
-    /// listing. The listing is bounded server-side by `repo_list_timeout_secs`
+    /// Provider API pagination can take many seconds for a large account, and
+    /// awaiting it here would freeze the event loop for the whole listing. The
+    /// listing is bounded server-side by `repo_list_timeout_secs`
     /// (90s by default), so a wedged one reports a timeout rather than spinning
     /// forever — but that bound is far too long to hold the event loop for.
     pub(super) fn handle_clone_repository(&mut self) {
         // Freeze the target backend now: the clone runs on that host's disk, so
         // it must not drift if the tree selection moves while the picker is open.
+        let backend = self.selected_backend_id();
+        let status = self.view_for(backend).snapshot.server.effective_code_host();
+        let generation = self.ui_state.repo_picker.generation;
         self.ui_state.repo_picker = super::RepoPicker {
-            backend: self.selected_backend_id(),
+            backend,
+            generation,
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: status.provider,
+                hostname: status.hostname,
+            },
             ..Default::default()
         };
         self.ui_state.modal = Modal::QuickSwitch {
-            mode: PaletteMode::GithubRepoPicker,
+            mode: PaletteMode::RepositoryPicker,
             query: super::Input::default(),
             matches: Vec::new(),
             selected_idx: 0,
             scroll: 0,
             review: None,
         };
-        self.refetch_github_repos();
+        self.refetch_repositories();
     }
 
     /// (Re)start the repo listing for the open clone picker — the Ctrl-R action,
     /// and the initial fetch. Bumps the generation so an in-flight listing's
     /// response is discarded when it lands.
-    pub(super) fn refetch_github_repos(&mut self) {
+    pub(super) fn refetch_repositories(&mut self) {
         self.ui_state.repo_picker.generation = self.ui_state.repo_picker.generation.wrapping_add(1);
         self.ui_state.repo_picker.fetch = super::RepoFetch::Loading;
         let generation = self.ui_state.repo_picker.generation;
@@ -2231,9 +2274,9 @@ impl App {
         let backend = self.backend_arc(backend_id);
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
-            let result = backend.list_github_repos().await.map_err(|e| e.to_string());
+            let result = backend.list_repositories().await.map_err(|e| e.to_string());
             let _ = tx
-                .send(AppEvent::StateUpdate(StateUpdate::GithubReposLoaded {
+                .send(AppEvent::StateUpdate(StateUpdate::RepositoriesLoaded {
                     backend_id: backend_id.0,
                     generation,
                     result,
@@ -2251,7 +2294,7 @@ impl App {
     /// through [`canonical_repo_slug`] rather than string equality because
     /// `gh repo clone` honours the user's `git_protocol`, so a cloned project's
     /// origin is often `ssh://` while the API reports `https://`.
-    pub(super) fn gather_github_repo_picker_items(
+    pub(super) fn gather_repository_picker_items(
         &self,
         filter_query: &str,
     ) -> Vec<QuickSwitchItem> {
@@ -2275,9 +2318,11 @@ impl App {
             let already =
                 canonical_repo_slug(&repo.clone_url).is_some_and(|slug| registered.contains(&slug));
             let mut label = repo.full_name.clone();
-            if repo.private {
-                label.push_str("  private");
-            }
+            label.push_str(match repo.visibility {
+                claude_commander_protocol::hosting::RepositoryVisibility::Public => "",
+                claude_commander_protocol::hosting::RepositoryVisibility::Internal => "  internal",
+                claude_commander_protocol::hosting::RepositoryVisibility::Private => "  private",
+            });
             if repo.archived {
                 label.push_str("  archived");
             }
@@ -2286,7 +2331,7 @@ impl App {
             }
             scored.push((
                 score,
-                QuickSwitchItem::GithubRepo {
+                QuickSwitchItem::HostedRepository {
                     full_name: repo.full_name.clone(),
                     dir_name: repo.name.clone(),
                     label,
@@ -2309,7 +2354,7 @@ impl App {
     pub(super) fn open_clone_dest_prompt(
         &mut self,
         backend: BackendId,
-        source: claude_commander_protocol::github::CloneSource,
+        source: claude_commander_protocol::hosting::CloneSource,
         label: &str,
         dir_name: &str,
     ) {
@@ -2333,9 +2378,8 @@ impl App {
     /// list" path, taken when no repo row matched. A refused source reports why
     /// and leaves the picker open so the user can correct it.
     pub(super) fn open_clone_url_prompt(&mut self, typed: &str) {
-        use claude_commander_protocol::github::{
-            CloneSource, redact_credentials, validate_clone_url,
-        };
+        use claude_commander_protocol::github::{redact_credentials, validate_clone_url};
+        use claude_commander_protocol::hosting::CloneSource;
         match validate_clone_url(typed) {
             Ok(target) => {
                 // `target.source` is the caller's string; redact before it
@@ -2367,16 +2411,18 @@ impl App {
     pub(super) fn spawn_clone(
         &mut self,
         backend_id: BackendId,
-        source: claude_commander_protocol::github::CloneSource,
+        source: claude_commander_protocol::hosting::CloneSource,
         dest_name: Option<String>,
     ) {
-        use claude_commander_protocol::github::{CloneRequest, CloneSource, redact_credentials};
+        use claude_commander_protocol::github::{CloneRequest, redact_credentials};
+        use claude_commander_protocol::hosting::CloneSource;
 
         // Never build a progress string from the raw source: a `CloneSource::Url`
         // may carry credentials. The backend's own `source_label` is redacted
         // too, but the first toast is shown before any poll result arrives.
         let label = redact_credentials(match &source {
             CloneSource::Github { full_name } => full_name,
+            CloneSource::Gitlab { full_name, .. } => full_name,
             CloneSource::Url { url } => url,
         });
         self.ui_state.status_message = Some((
@@ -2459,7 +2505,7 @@ impl App {
     pub(super) async fn apply_clone_job_update(
         &mut self,
         backend_id: BackendId,
-        source: claude_commander_protocol::github::CloneSource,
+        source: claude_commander_protocol::hosting::CloneSource,
         result: std::result::Result<Option<claude_commander_protocol::github::CloneJob>, String>,
     ) {
         use claude_commander_protocol::github::CloneStatus;

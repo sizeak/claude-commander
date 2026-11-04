@@ -1053,13 +1053,13 @@ impl App {
                 // Ctrl-R re-lists the repo picker. It has to be a *modified* key:
                 // the picker is fuzzy-filterable, so a plain `r` is query text
                 // (see the branch above) and could never mean "refresh".
-                if *mode == PaletteMode::GithubRepoPicker
+                if *mode == PaletteMode::RepositoryPicker
                     && key.code == KeyCode::Char('r')
                     && key
                         .modifiers
                         .contains(crossterm::event::KeyModifiers::CONTROL)
                 {
-                    self.refetch_github_repos();
+                    self.refetch_repositories();
                     return;
                 }
 
@@ -1455,7 +1455,7 @@ impl App {
                 // The workspace pickers use it the same way, as a new name.
                 matches!(
                     mode,
-                    PaletteMode::GithubRepoPicker
+                    PaletteMode::RepositoryPicker
                         | PaletteMode::WorkspacePicker
                         | PaletteMode::MoveProjectPicker { .. }
                 )
@@ -1515,7 +1515,7 @@ impl App {
                     on_confirm: ConfirmAction::RemoveRemoteServer { name },
                 };
             }
-            Some(QuickSwitchItem::GithubRepo {
+            Some(QuickSwitchItem::HostedRepository {
                 full_name,
                 dir_name,
                 ..
@@ -1523,8 +1523,18 @@ impl App {
                 let backend = self.ui_state.repo_picker.backend;
                 self.open_clone_dest_prompt(
                     backend,
-                    claude_commander_protocol::github::CloneSource::Github {
-                        full_name: full_name.clone(),
+                    match self.ui_state.repo_picker.host.provider {
+                        claude_commander_protocol::hosting::CodeHostProvider::Github => {
+                            claude_commander_protocol::hosting::CloneSource::Github {
+                                full_name: full_name.clone(),
+                            }
+                        }
+                        claude_commander_protocol::hosting::CodeHostProvider::Gitlab => {
+                            claude_commander_protocol::hosting::CloneSource::Gitlab {
+                                full_name: full_name.clone(),
+                                hostname: self.ui_state.repo_picker.host.hostname.clone(),
+                            }
+                        }
                     },
                     &full_name,
                     &dir_name,
@@ -1546,7 +1556,15 @@ impl App {
                     .unwrap_or_else(|| "this session".to_string());
                 self.ui_state.modal = Modal::Confirm {
                     title: "Set Session Base".to_string(),
-                    message: super::actions::set_session_base_confirm_message(&title, &base_branch),
+                    message: super::actions::set_session_base_confirm_message(
+                        self.view_for(self.backend_of_session(session_id))
+                            .snapshot
+                            .server
+                            .effective_code_host()
+                            .provider,
+                        &title,
+                        &base_branch,
+                    ),
                     on_confirm: ConfirmAction::SetSessionBase { session_id, target },
                 };
             }
@@ -1580,7 +1598,7 @@ impl App {
             // typed text is a clone URL (validated in `open_clone_url_prompt`,
             // which leaves the picker open and says why if it's refused).
             None => match (mode, unmatched) {
-                (PaletteMode::GithubRepoPicker, Some(typed)) => {
+                (PaletteMode::RepositoryPicker, Some(typed)) => {
                     self.open_clone_url_prompt(&typed);
                 }
                 // A name no workspace matches: create it, then act on it.
