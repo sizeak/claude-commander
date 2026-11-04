@@ -892,7 +892,8 @@ button.ghost {
 .rv-line:hover {
   background: var(--bg-hover);
 }
-.rv-gutter {
+.rv-line::before {
+  content: attr(data-gutter);
   flex-shrink: 0;
   width: 84px;
   padding: 0 8px;
@@ -996,7 +997,7 @@ button.ghost {
 }
 
 @media (max-width: 768px) {
-  .rv-gutter {
+  .rv-line::before {
     width: 54px;
     padding: 0 4px;
   }

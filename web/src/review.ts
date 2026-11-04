@@ -18,6 +18,12 @@ let sessionId: SessionId | null = null;
 let snapshot: ReviewSnapshot | null = null;
 let composerEl: HTMLElement | null = null;
 const ROWS_PER_CHUNK = 100;
+/**
+ * The diff line each row shows, for the one delegated click handler on the
+ * review body: every row is built eagerly, so a closure and listener per row
+ * would cost memory for each line of a large diff whether or not it is clicked.
+ */
+const rowLines = new WeakMap<Element, DiffLine>();
 
 const rv = {
   get view() {
@@ -39,6 +45,12 @@ export function initReview(a: Api): void {
   byId("review-close").addEventListener("click", closeReview);
   byId("review-refresh").addEventListener("click", reloadReview);
   byId("review-apply").addEventListener("click", applyComments);
+  rv.body.addEventListener("click", (e) => {
+    const row = (e.target as Element).closest?.(".rv-line");
+    const line = row && rowLines.get(row);
+    const file = row?.closest<HTMLElement>(".rv-file")?.dataset.path;
+    if (row && line && file !== undefined) openComposer(row as HTMLElement, file, line);
+  });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !rv.view.classList.contains("hidden")) closeReview();
   });
@@ -173,6 +185,7 @@ function renderFile(
     h("label", { className: "rv-reviewed" }, cb, "reviewed"),
   );
   const wrap = h("div", { className: "rv-file" }, header);
+  wrap.dataset.path = dp;
 
   if (f.binary) {
     wrap.append(h("div", { className: "rv-binary", text: "Binary file not shown." }));
@@ -203,7 +216,7 @@ function renderFile(
       }),
     );
     for (const line of hunk.lines) {
-      rows.push(renderLine(dp, line));
+      rows.push(renderLine(line));
       const at = lineAnchor(line);
       if (at)
         for (const comment of anchored.get(`${at.side}:${at.lineno}`) ?? [])
@@ -229,19 +242,19 @@ function renderFile(
   return wrap;
 }
 
-function renderLine(file: string, line: DiffLine): HTMLElement {
+function renderLine(line: DiffLine): HTMLElement {
   const o = line.old_lineno ?? "";
   const n = line.new_lineno ?? "";
   const row = h(
     "div",
     { className: `rv-line ${line.origin}` },
-    h("span", {
-      className: "rv-gutter",
-      text: `${String(o).padStart(4)} ${String(n).padStart(4)}`,
-    }),
     h("span", { className: "rv-content", text: line.content }),
   );
-  row.addEventListener("click", () => openComposer(row, file, line));
+  // The line numbers are drawn by the row's ::before from this attribute, not
+  // held in a span and its text: two fewer nodes on every eagerly built row.
+  // They were never selectable (user-select: none) and are not worth finding.
+  row.dataset.gutter = `${String(o).padStart(4)} ${String(n).padStart(4)}`;
+  rowLines.set(row, line);
   return row;
 }
 

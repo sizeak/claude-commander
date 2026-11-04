@@ -37,14 +37,32 @@ checks bounded *rendering*, not bounded DOM construction: the last row is in the
 DOM without scrolling, yet is not rendered until scrolled near, and
 `window.find` reaches it. These are workload bounds, not wall-clock speed claims.
 
-Eager construction is a trade-off, not a free win. Measured once in the e2e
-Chromium when it was introduced (rebuild via Refresh, synthetic one-file diff),
-the synchronous rebuild was ~50 ms at 5,000 lines and ~450 ms at 50,000, against
-under the 50 ms long-task threshold at both when chunks mounted near the
-viewport; heap at 50,000 lines was ~150 MB against ~25 MB. Scrolling the whole
-diff did less layout than before, since nothing mounts on the way. These are
-point measurements on one machine, not regression bounds; re-measure before
-relying on them.
+Eager construction is a trade-off, not a free win. To keep it cheap, a row is
+two elements and a text node (the line numbers are the row's `::before`, from a data
+attribute) and carries no listener of its own: one delegated click handler on
+the review body looks the row's line up in a `WeakMap`.
+
+Measured in the e2e Chromium (rebuild via Refresh over a synthetic one-file
+diff; median of 7 rebuilds; time from clearing the old rows to the end of the
+synchronous rebuild, and to the next frame; JS heap read straight after the
+rebuild, then again after a forced GC):
+
+| Lines | Build | Rebuild (sync / to next frame) | Heap after rebuild | Heap after GC |
+| --- | --- | --- | --- | --- |
+| 5,000 | lazy chunks (before) | ~2 ms / ~14 ms | ~6 MB | ~5 MB |
+| 5,000 | eager, row listeners and gutter spans | ~36 ms / ~55 ms | ~19 MB | ~9 MB |
+| 5,000 | eager, delegated click and `::before` gutter | ~26 ms / ~43 ms | ~20 MB | ~7 MB |
+| 50,000 | lazy chunks (before) | ~19 ms / ~109 ms | ~24 MB | ~12 MB |
+| 50,000 | eager, row listeners and gutter spans | ~320 ms / ~430 ms | ~150 MB | ~58 MB |
+| 50,000 | eager, delegated click and `::before` gutter | ~270 ms / ~365 ms | ~105 MB | ~39 MB |
+
+So the slimmer rows cut retained memory by about a third, but the rebuild is
+still a long task at 50,000 lines: its cost is creating the nodes at all, and
+about 110 ms of it is removing the previous rows. The time difference between
+the two eager rows is within this machine's run-to-run spread. When eager
+construction was introduced, scrolling the whole diff measured less layout than
+the lazy build, since nothing mounts on the way (not re-measured since). These are point measurements on one machine, not regression bounds;
+re-measure before relying on them.
 
 Run the full pinned checks with:
 

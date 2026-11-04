@@ -218,6 +218,11 @@ test.describe("review view", () => {
     await expect(
       file.locator(".rv-line.addition", { hasText: "self.reap_expired();" }),
     ).toHaveCount(1);
+    // The gutter is the row's ::before: an addition shows only its new number.
+    const gutter = await file
+      .locator(".rv-line.addition", { hasText: "self.reap_expired();" })
+      .evaluate((n) => getComputedStyle(n, "::before").content);
+    expect(gutter).toMatch(/^"\s+\d+"$/);
     await expect(page.locator("#review-status")).toContainText("1 file(s)");
 
     await page.locator("#review-close").click();
