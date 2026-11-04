@@ -31,6 +31,7 @@ pub mod paste;
 pub mod pr;
 pub mod preview;
 pub mod session;
+pub mod session_editor;
 pub mod workspace;
 pub mod ws;
 

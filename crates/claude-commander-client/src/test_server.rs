@@ -12,6 +12,33 @@ use std::sync::{
 };
 use tokio::sync::watch;
 
+/// A client wired to an ad-hoc `app` on a loopback port; the server task is
+/// aborted when this is dropped.
+pub struct Served {
+    pub client: RemoteClient,
+    pub addr: std::net::SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+pub async fn serve(app: Router) -> Served {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = RemoteClient::new(RemoteServerSpec {
+        name: "test".into(),
+        base_url: format!("http://{addr}"),
+        token: None,
+    })
+    .unwrap();
+    Served { client, addr, task }
+}
+
 #[derive(Clone)]
 pub struct Data {
     pub generation: watch::Sender<u64>,

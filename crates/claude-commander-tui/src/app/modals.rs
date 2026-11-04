@@ -307,6 +307,12 @@ impl App {
         }
 
         match &self.ui_state.modal {
+            Modal::EditSession(editor) => {
+                super::edit_session::render(frame, area, editor, false, &self.theme)
+            }
+            Modal::EditSessionRestart(editor) => {
+                super::edit_session::render(frame, area, editor, true, &self.theme)
+            }
             Modal::None => {}
 
             // Full-screen takeovers are rendered directly in `render()`, not here.

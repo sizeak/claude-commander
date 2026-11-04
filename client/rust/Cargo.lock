@@ -658,6 +658,7 @@ dependencies = [
  "clap",
  "claude-commander-core",
  "claude-commander-protocol",
+ "claude-commander-viewmodel",
  "figment",
  "futures",
  "mime_guess",

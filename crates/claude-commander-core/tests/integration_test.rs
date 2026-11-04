@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+#[path = "cases/edit_session.rs"]
+mod edit_session_cases;
+
 use claude_commander_core::SessionStatus;
 use claude_commander_core::commander::{self, COMMANDER_TMUX_NAME};
 use claude_commander_core::config::{AppState, Config, ConfigStore, StateStore};

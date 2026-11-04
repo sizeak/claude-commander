@@ -69,6 +69,7 @@ mod actions;
 mod background;
 mod colour_picker;
 mod conversation;
+mod edit_session;
 mod event_loop;
 mod input;
 mod modals;
@@ -389,6 +390,8 @@ pub(super) fn insert_into_input(input: &mut Input, s: &str) {
 
 #[derive(Debug, Clone)]
 pub enum Modal {
+    EditSession(edit_session::SessionEditor),
+    EditSessionRestart(edit_session::SessionEditor),
     /// No modal open
     None,
     /// Text input modal
@@ -469,9 +472,13 @@ pub enum Modal {
     },
     /// Help modal. `scroll` is the first visible line of `build_help_lines`.
     /// Clamped against the rendered content height in `render_help_modal`.
-    Help { scroll: u16 },
+    Help {
+        scroll: u16,
+    },
     /// Error modal
-    Error { message: String },
+    Error {
+        message: String,
+    },
     /// Settings modal
     Settings(SettingsState),
     /// Quick-switch palette modal — searches sessions and/or commands.
@@ -523,11 +530,16 @@ pub enum Modal {
     /// Full-screen conversation overlay (view onto the headless `claude`
     /// session). View-only state; the session itself lives on `App`, so closing
     /// this leaves the conversation running.
-    Conversation { input: Input, scroll: u16 },
+    Conversation {
+        input: Input,
+        scroll: u16,
+    },
     /// Session Info overlay (metadata, diffstat, PR details, AI summary) for the
     /// selected session. `scroll` is the first visible line of the composed
     /// `InfoView` content, clamped against its height each frame (like `Help`).
-    Info { scroll: u16 },
+    Info {
+        scroll: u16,
+    },
 }
 
 /// A session match in the quick-switch modal
@@ -2022,6 +2034,7 @@ impl AppUiState {
             BindableAction::Select
             | BindableAction::SelectShell
             | BindableAction::DeleteSession
+            | BindableAction::EditSession
             | BindableAction::RenameSession
             | BindableAction::RestartSession
             | BindableAction::ResetSession
@@ -2808,6 +2821,16 @@ impl App {
             .or_else(|| self.backends.iter().find_map(|h| find_in(&h.view)))
     }
 
+    /// Attach-loop recovery must preserve deferred program changes on every backend.
+    async fn recover_ended_session(
+        &self,
+        session: SessionRef,
+    ) -> claude_commander_core::backend::BResult<()> {
+        self.backend_arc(session.backend)
+            .recover_session_fresh(session.id)
+            .await
+    }
+
     /// Open an attach connection for `target`: through the owning backend for a
     /// session pane (which stamps last-attached and revives a dead tmux
     /// session), or via the local name-based path for the commander / project
@@ -3511,11 +3534,7 @@ impl App {
                                         (auto, &current)
                                     {
                                         consecutive_ends += 1;
-                                        match self
-                                            .backend_arc(session.backend)
-                                            .restart_session_fresh(session.id)
-                                            .await
-                                        {
+                                        match self.recover_ended_session(*session).await {
                                             Ok(()) => {
                                                 info!(
                                                     "Auto-restarted session fresh (attempt {consecutive_ends})"

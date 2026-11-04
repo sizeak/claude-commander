@@ -224,7 +224,7 @@ pub(super) fn set_session_base_confirm_message(
     )
 }
 
-/// The Restart-confirmation body. A local session's resume behaviour is
+/// Pending programs always require a fresh start. Otherwise, a local session's resume behaviour is
 /// governed by this client's `resume_session` config, so the message can
 /// promise `/resume` semantics. A remote session's resume behaviour lives in
 /// the server's config, which this client can't read — so it gets neutral
@@ -233,7 +233,14 @@ pub(super) fn restart_confirm_message(
     is_local: bool,
     resume_session: bool,
     title: Option<&str>,
+    pending_program: Option<&str>,
 ) -> String {
+    if let Some(program) = pending_program {
+        let subject = title.map_or_else(|| "this session".into(), |title| format!("\"{title}\""));
+        return format!(
+            "Restart session {subject} with {program}?\nThis stops the current agent and clears the conversation. The pending program starts fresh."
+        );
+    }
     if !is_local {
         let subject = match title {
             Some(title) => format!("\"{title}\""),
@@ -260,16 +267,21 @@ pub(super) fn restart_confirm_message(
 /// DTO), and "any conversation it would otherwise have resumed" is true of a
 /// hibernated session — whose wake-up resume is exactly what makes hibernation
 /// non-destructive — without needing to know.
-pub(super) fn reset_confirm_message(title: Option<&str>) -> String {
+///
+/// A reset applies a pending program just as a restart does, so it says so.
+pub(super) fn reset_confirm_message(title: Option<&str>, pending_program: Option<&str>) -> String {
     let subject = match title {
         Some(title) => format!("\"{title}\""),
         None => "this session".to_string(),
     };
+    let program = pending_program
+        .map(|program| format!("\nIt starts with {program}, the pending program."))
+        .unwrap_or_default();
     format!(
         "Reset session {subject}?\nThis kills its tmux session and starts a fresh one with \
          no resume, so the agent begins a new conversation — any conversation it would \
          otherwise have resumed (including one preserved by hibernation) is discarded.\nThe \
-         worktree, branch and commits are untouched."
+         worktree, branch and commits are untouched.{program}"
     )
 }
 
@@ -1673,6 +1685,8 @@ impl App {
                 sref.backend == LOCAL_BACKEND_ID,
                 self.config.resume_session,
                 title.as_deref(),
+                self.session(sref)
+                    .and_then(|s| s.pending_program.as_deref()),
             );
             self.ui_state.modal = Modal::Confirm {
                 title: "Restart Session".to_string(),
@@ -1688,10 +1702,14 @@ impl App {
     /// [`Self::handle_restart_session`].
     pub(super) fn handle_reset_session(&mut self) {
         if let Some(sref) = self.ui_state.selected_session_id {
-            let title = self.session(sref).map(|s| s.title.clone());
+            let session = self.session(sref);
+            let message = reset_confirm_message(
+                session.map(|s| s.title.as_str()),
+                session.and_then(|s| s.pending_program.as_deref()),
+            );
             self.ui_state.modal = Modal::Confirm {
                 title: "Reset Session".to_string(),
-                message: reset_confirm_message(title.as_deref()),
+                message,
                 on_confirm: ConfirmAction::ResetSession {
                     session_id: sref.id,
                 },

@@ -486,6 +486,16 @@ class FakeCommanderApi implements CommanderApi {
   }
 
   @override
+  Future<String?> editSession({
+    required String handle,
+    required String id,
+    required String patchJson,
+  }) async {
+    _record('editSession', {'id': id, 'patchJson': patchJson});
+    return null;
+  }
+
+  @override
   Future<void> renameSession({
     required String handle,
     required String id,

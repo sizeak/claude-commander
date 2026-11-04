@@ -189,6 +189,7 @@ enum TextField<'a> {
 /// only has one while a comment draft is open.
 fn text_field(modal: &mut Modal) -> Option<TextField<'_>> {
     Some(match modal {
+        Modal::EditSession(editor) if editor.focus == 0 => TextField::Line(&mut editor.name),
         Modal::Input { value, .. } => TextField::Line(value),
         Modal::Conversation { input, .. } => TextField::Line(input),
         Modal::PathInput {
@@ -853,6 +854,13 @@ impl App {
             return;
         }
 
+        if matches!(
+            self.ui_state.modal,
+            Modal::EditSession(_) | Modal::EditSessionRestart(_)
+        ) {
+            self.handle_edit_session_key(key);
+            return;
+        }
         match &mut self.ui_state.modal {
             Modal::Input { .. } => {
                 // All in-modal routing (focus, dropdown expand/collapse, filter
@@ -991,6 +999,7 @@ impl App {
                 _ => {}
             },
 
+            Modal::EditSession(_) | Modal::EditSessionRestart(_) => {}
             Modal::Loading { .. } => {
                 // Non-interactive — swallow all keys while loading
             }
@@ -1822,6 +1831,7 @@ impl App {
             UserCommand::DeleteMergedPrSessions => {
                 self.handle_delete_merged_pr_sessions().await;
             }
+            UserCommand::EditSession => self.handle_edit_session(),
             UserCommand::RenameSession => {
                 self.handle_rename_session().await;
             }

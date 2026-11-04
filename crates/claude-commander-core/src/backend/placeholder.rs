@@ -146,8 +146,19 @@ impl CommanderBackend for PlaceholderBackend {
     async fn restart_session_fresh(&self, _id: SessionId) -> BResult<()> {
         self.unavailable()
     }
+    async fn recover_session_fresh(&self, _id: SessionId) -> BResult<()> {
+        self.unavailable()
+    }
 
     async fn delete_session(&self, _id: SessionId) -> BResult<()> {
+        self.unavailable()
+    }
+
+    async fn edit_session(
+        &self,
+        _id: SessionId,
+        _edit: claude_commander_protocol::api::EditSession,
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome> {
         self.unavailable()
     }
 

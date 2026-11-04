@@ -198,6 +198,14 @@ pub fn delete_session(handle: String, id: String) -> Result<()> {
     call(client.delete_session(parse_session_id(&id)?))
 }
 
+/// Save only the changed fields produced by the shared editor planner.
+pub fn edit_session(handle: String, id: String, patch_json: String) -> Result<Option<String>> {
+    let client = with_client(&handle)?;
+    let edit = serde_json::from_str(&patch_json)?;
+    let outcome = call(client.edit_session(parse_session_id(&id)?, edit))?;
+    Ok((!outcome.warnings.is_empty()).then(|| outcome.warnings.join("\n")))
+}
+
 /// Rename a session's title.
 pub fn rename_session(handle: String, id: String, title: String) -> Result<()> {
     let client = with_client(&handle)?;

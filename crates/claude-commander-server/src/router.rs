@@ -92,6 +92,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/changes", get(snapshot::changes))
         .route("/agent-states", get(snapshot::agent_states))
         .route("/pr-refresh", post(snapshot::pr_refresh))
+        .route(
+            "/session-editor/model",
+            post(snapshot::session_editor_model),
+        )
+        .route("/session-editor/plan", post(snapshot::plan_session_edit))
         .route("/create-options", get(snapshot::create_options))
         .route("/comments/pending", get(review::pending))
         // -- cascade / push-stack --
@@ -105,6 +110,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/{q}/pane", get(sessions::pane))
         .route("/sessions/{id}/kill", post(sessions::kill))
         .route("/sessions/{id}/restart", post(sessions::restart))
+        .route(
+            "/sessions/{id}/recover-fresh",
+            post(sessions::recover_fresh),
+        )
         .route(
             "/sessions/{id}/restart-fresh",
             post(sessions::restart_fresh),

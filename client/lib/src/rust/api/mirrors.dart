@@ -825,6 +825,7 @@ class SessionInfo {
   final String branch;
   final SessionStatus status;
   final String program;
+  final String? pendingProgram;
   final ProjectId projectId;
   final String projectName;
   final int? prNumber;
@@ -854,6 +855,7 @@ class SessionInfo {
     required this.branch,
     required this.status,
     required this.program,
+    this.pendingProgram,
     required this.projectId,
     required this.projectName,
     this.prNumber,
@@ -885,6 +887,7 @@ class SessionInfo {
       branch.hashCode ^
       status.hashCode ^
       program.hashCode ^
+      pendingProgram.hashCode ^
       projectId.hashCode ^
       projectName.hashCode ^
       prNumber.hashCode ^
@@ -918,6 +921,7 @@ class SessionInfo {
           branch == other.branch &&
           status == other.status &&
           program == other.program &&
+          pendingProgram == other.pendingProgram &&
           projectId == other.projectId &&
           projectName == other.projectName &&
           prNumber == other.prNumber &&

@@ -75,6 +75,10 @@ impl RestartKind {
 /// State updates from background tasks
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
+    SessionEditOptionsLoaded {
+        session: claude_commander_core::backend::SessionRef,
+        result: Result<claude_commander_protocol::api::CreateOptions, String>,
+    },
     CodeHostConfigUpdated {
         result: std::result::Result<(), String>,
     },
@@ -441,7 +445,9 @@ pub enum UserCommand {
     DeleteSession,
     /// Delete every session whose PR has merged on GitHub (palette-only)
     DeleteMergedPrSessions,
-    /// Rename the currently selected session (UI title only)
+    /// Edit the selected session settings.
+    EditSession,
+    /// Rename the currently selected session (UI title only).
     RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
@@ -596,6 +602,7 @@ impl UserCommand {
             | UserCommand::NewProject
             | UserCommand::ScanDirectory
             | UserCommand::OpenReviewDiff
+            | UserCommand::EditSession
             | UserCommand::RenameSession
             | UserCommand::RemoveProject
             | UserCommand::CascadeResume
@@ -699,6 +706,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
             BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
+            BindableAction::EditSession => Self::EditSession,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::ResetSession => Self::ResetSession,
@@ -1364,6 +1372,24 @@ mod tests {
         assert!(matches!(
             UserCommand::from_key(key, &b),
             Some(UserCommand::Select)
+        ));
+    }
+
+    #[test]
+    fn shift_e_edits_session_and_bare_e_remains_text_input() {
+        let bindings = kb();
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+            assert!(matches!(
+                UserCommand::from_key(KeyEvent::new(KeyCode::Char('E'), modifiers), &bindings),
+                Some(UserCommand::EditSession)
+            ));
+        }
+        assert!(matches!(
+            UserCommand::from_key(
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                &bindings,
+            ),
+            Some(UserCommand::TextInput('e'))
         ));
     }
 

@@ -304,6 +304,15 @@ class CommanderStore extends ChangeNotifier {
   Future<void> deleteSession(String id) =>
       _mutate(() => _api.deleteSession(handle: _requireHandle, id: id));
 
+  Future<String?> editSession(String id, {required String patchJson}) =>
+      _mutate(
+        () => _api.editSession(
+          handle: _requireHandle,
+          id: id,
+          patchJson: patchJson,
+        ),
+      );
+
   Future<void> renameSession(String id, String title) => _mutate(
     () => _api.renameSession(handle: _requireHandle, id: id, title: title),
   );

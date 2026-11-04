@@ -25,12 +25,12 @@ fn restart_confirm_message_local_promises_resume_remote_stays_neutral() {
     use super::actions::restart_confirm_message;
     // Local sessions: the client's `resume_session` governs the wording, so it
     // can promise `/resume`.
-    assert!(restart_confirm_message(true, true, Some("x")).contains("/resume"));
-    assert!(restart_confirm_message(true, false, Some("x")).contains("/resume"));
+    assert!(restart_confirm_message(true, true, Some("x"), None).contains("/resume"));
+    assert!(restart_confirm_message(true, false, Some("x"), None).contains("/resume"));
     // Remote sessions: resume behaviour lives in the server's config, which the
     // client can't read — so the wording must NOT promise it, and should name
     // the session.
-    let remote = restart_confirm_message(false, true, Some("my-sess"));
+    let remote = restart_confirm_message(false, true, Some("my-sess"), None);
     assert!(
         !remote.contains("/resume"),
         "remote restart must not promise resume semantics: {remote}"
@@ -46,6 +46,24 @@ fn test_delete_confirm_message_falls_back_without_title() {
     let message = delete_confirm_message(None, None);
     assert!(message.contains("this session"));
     assert!(!message.contains('"'));
+}
+
+#[tokio::test]
+async fn restart_confirmation_warns_about_pending_program() {
+    let (mut app, sid) = app_with_remote_session().await;
+    app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), sid));
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .snapshot
+        .sessions[0]
+        .pending_program = Some("codex".into());
+    app.handle_restart_session();
+    let Modal::Confirm { message, .. } = &app.ui_state.modal else {
+        panic!("restart confirmation");
+    };
+    assert!(message.contains("codex"), "{message}");
+    assert!(message.contains("clears the conversation"), "{message}");
+    assert!(!message.contains("/resume"), "{message}");
 }
 
 #[test]
@@ -6641,12 +6659,21 @@ async fn reset_confirm_takes_the_no_resume_path_and_toasts_reset() {
 fn reset_confirm_message_names_session_and_promises_no_resume() {
     use super::actions::reset_confirm_message;
 
-    let msg = reset_confirm_message(Some("fix-parser"));
+    let msg = reset_confirm_message(Some("fix-parser"), None);
     assert!(msg.contains("\"fix-parser\""), "message: {msg}");
     assert!(msg.contains("no resume"), "message: {msg}");
     assert!(msg.contains("new conversation"), "message: {msg}");
+    assert!(!msg.contains("pending"), "message: {msg}");
     // Falls back to a generic subject rather than an empty quote.
-    assert!(reset_confirm_message(None).contains("this session"));
+    assert!(reset_confirm_message(None, None).contains("this session"));
+}
+
+#[test]
+fn reset_confirmation_warns_about_pending_program() {
+    use super::actions::reset_confirm_message;
+
+    let msg = reset_confirm_message(Some("fix-parser"), Some("codex"));
+    assert!(msg.contains("starts with codex"), "message: {msg}");
 }
 
 #[test]
@@ -6766,7 +6793,7 @@ async fn set_session_base_failure_is_reported_not_swallowed() {
 /// — if it stops appearing there it becomes unreachable with no failing test
 /// anywhere else.
 #[test]
-fn set_session_base_is_reachable_from_the_command_palette() {
+fn edit_session_is_reachable_from_the_command_palette() {
     let kb = claude_commander_core::config::KeyBindings::default();
     let mut ui = AppUiState {
         selected_backend_connected: true,
@@ -6774,15 +6801,15 @@ fn set_session_base_is_reachable_from_the_command_palette() {
     };
 
     // Needs a selected session, like every other session-scoped command.
-    assert!(!ui.is_command_available(BindableAction::SetSessionBase));
+    assert!(!ui.is_command_available(BindableAction::EditSession));
     ui.selected_session_id = Some(SessionRef::new(BackendId(1), SessionId::new()));
-    assert!(ui.is_command_available(BindableAction::SetSessionBase));
+    assert!(ui.is_command_available(BindableAction::EditSession));
 
-    let entries = ui.gather_command_entries(&kb, "set session base");
+    let entries = ui.gather_command_entries(&kb, "edit session");
     assert!(
         entries
             .iter()
-            .any(|e| e.action == BindableAction::SetSessionBase),
+            .any(|e| e.action == BindableAction::EditSession),
         "the palette must list the command, got {:?}",
         entries.iter().map(|e| e.label).collect::<Vec<_>>()
     );
@@ -7927,7 +7954,7 @@ fn test_is_command_available_session_scoped_hidden_without_session() {
         BindableAction::Select,
         BindableAction::SelectShell,
         BindableAction::DeleteSession,
-        BindableAction::RenameSession,
+        BindableAction::EditSession,
         BindableAction::RestartSession,
         BindableAction::ToggleKeepAlive,
         BindableAction::OpenInEditor,
@@ -7948,7 +7975,7 @@ fn test_is_command_available_session_scoped_shown_with_session() {
         BindableAction::Select,
         BindableAction::SelectShell,
         BindableAction::DeleteSession,
-        BindableAction::RenameSession,
+        BindableAction::EditSession,
         BindableAction::RestartSession,
         BindableAction::ToggleKeepAlive,
         BindableAction::OpenInEditor,
@@ -8025,7 +8052,7 @@ fn test_gather_command_entries_hides_context_unavailable() {
         entries.iter().map(|e| e.action).collect();
     for hidden in [
         BindableAction::DeleteSession,
-        BindableAction::RenameSession,
+        BindableAction::EditSession,
         BindableAction::RestartSession,
         BindableAction::OpenInEditor,
         BindableAction::OpenPullRequest,
@@ -13443,6 +13470,100 @@ async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
     assert!(app.event_loop.try_next().is_none());
 }
 
+#[tokio::test]
+async fn edit_session_prefills_selected_remote_and_confirms_both_restart_choices() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    for restart in [false, true] {
+        let (mut app, sid) = app_with_remote_session().await;
+        app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), sid));
+        let info = app
+            .session(app.ui_state.selected_session_id.unwrap())
+            .unwrap()
+            .clone();
+        app.handle_edit_session();
+        let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+            panic!("editor");
+        };
+        assert_eq!(editor.name.value(), info.title);
+        assert_eq!(editor.program.value(), info.program);
+        assert_eq!(editor.keep_alive, info.keep_alive);
+        editor.load_options(claude_commander_protocol::api::CreateOptions {
+            default_program: "claude".into(),
+            programs: vec![claude_commander_protocol::api::ProgramInfo {
+                label: "Codex".into(),
+                command: "codex".into(),
+            }],
+            sections: vec![],
+        });
+        editor.program = "codex".into();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_edit_session_key(key(KeyCode::Enter));
+        assert!(matches!(app.ui_state.modal, Modal::EditSessionRestart(_)));
+        assert!(remote_mock(&app, BackendId(1)).session_edits().is_empty());
+        app.handle_edit_session_key(key(KeyCode::Char(if restart { 'y' } else { 'n' })));
+        loop {
+            if let AppEvent::StateUpdate(StateUpdate::SessionMutationApplied {
+                backend_id,
+                session_id,
+            }) = app.event_loop.next().await.unwrap()
+            {
+                assert_eq!(backend_id, 1);
+                assert_eq!(session_id, sid);
+                break;
+            }
+        }
+        let edits = remote_mock(&app, BackendId(1)).session_edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].0, sid);
+        assert_eq!(edits[0].1.program.as_deref(), Some("codex"));
+        assert_eq!(edits[0].1.restart, restart);
+    }
+}
+
+#[tokio::test]
+async fn edit_session_program_field_shows_alias_and_cycles_commands() {
+    use claude_commander_protocol::api::{CreateOptions, ProgramInfo};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    let session = SessionRef::new(BackendId(1), sid);
+    app.ui_state.selected_session_id = Some(session);
+    let original = app.session(session).unwrap().program.clone();
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+        panic!("editor");
+    };
+    editor.load_options(CreateOptions {
+        default_program: original.clone(),
+        programs: vec![
+            ProgramInfo {
+                label: "Current agent alias".into(),
+                command: original,
+            },
+            ProgramInfo {
+                label: "Codex alias".into(),
+                command: "codex --sandbox workspace-write".into(),
+            },
+        ],
+        sections: vec![],
+    });
+    editor.focus = 1;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    assert!(buffer_text(&terminal).contains("Program: Current agent alias"));
+    app.handle_edit_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(text.contains("Program: Codex alias"));
+    assert!(!text.contains("codex --sandbox workspace-write"));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor");
+    };
+    assert_eq!(
+        editor.edit(false).unwrap().program.as_deref(),
+        Some("codex --sandbox workspace-write")
+    );
+}
+
 /// A GitLab hostname edit goes through the service's code-host path, as a
 /// provider change does, so the cached glab probe is reset and PRs refetched
 /// rather than the hostname only being written to config.
@@ -13484,6 +13605,167 @@ async fn gitlab_hostname_edit_runs_through_the_code_host_path() {
         app.config.gitlab_hostname.as_deref(),
         Some("gitlab.example.com")
     );
+}
+
+#[tokio::test]
+async fn edit_session_retains_unconfigured_live_program_with_a_pending_change() {
+    use claude_commander_protocol::api::{CreateOptions, ProgramInfo};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    let session = SessionRef::new(BackendId(1), sid);
+    let mut info = app.session(session).unwrap().clone();
+    info.program = "custom-agent --flag".into();
+    info.pending_program = Some("codex".into());
+    let mut editor = edit_session::SessionEditor::new(session, &info, &[], "main");
+    editor.load_options(CreateOptions {
+        default_program: "codex".into(),
+        programs: vec![ProgramInfo {
+            label: "Codex alias".into(),
+            command: "codex".into(),
+        }],
+        sections: vec![],
+    });
+    assert_eq!(editor.edit(false).unwrap().program.as_deref(), None);
+    editor.focus = 1;
+    app.ui_state.modal = Modal::EditSession(editor);
+    app.handle_edit_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor");
+    };
+    assert_eq!(
+        editor.edit(false).unwrap().program.as_deref(),
+        Some("custom-agent --flag")
+    );
+}
+
+#[tokio::test]
+async fn edit_session_cancel_and_warning_back_preserve_process() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), sid));
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+        panic!("editor");
+    };
+    editor.load_options(claude_commander_protocol::api::CreateOptions {
+        default_program: "claude".into(),
+        programs: vec![claude_commander_protocol::api::ProgramInfo {
+            label: "Codex".into(),
+            command: "codex".into(),
+        }],
+        sections: vec![],
+    });
+    editor.program = "codex".into();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_edit_session_key(key(KeyCode::Enter));
+    app.handle_edit_session_key(key(KeyCode::Esc));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor restored");
+    };
+    assert_eq!(editor.program.value(), "codex");
+    app.handle_edit_session_key(key(KeyCode::Esc));
+    assert!(matches!(app.ui_state.modal, Modal::None));
+    assert!(remote_mock(&app, BackendId(1)).session_edits().is_empty());
+}
+
+#[test]
+fn edit_session_keeps_individual_setting_commands_in_palette() {
+    let state = ui_state_with(Some(SessionId::new()), Some(ProjectId::new()));
+    let entries = state.gather_command_entries(&KeyBindings::default(), "");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.action == BindableAction::EditSession)
+    );
+    for old in [
+        BindableAction::RenameSession,
+        BindableAction::ChangeProgram,
+        BindableAction::MoveToSection,
+        BindableAction::ToggleKeepAlive,
+        BindableAction::SetSessionBase,
+    ] {
+        assert!(entries.iter().any(|e| e.action == old));
+    }
+}
+
+#[tokio::test]
+async fn deferred_program_keeps_live_agent_behavior_and_prefills_pending_editor() {
+    let (mut app, session) = app_with_session_running("claude").await;
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.get_session_mut(&session.id).unwrap().pending_program = Some("omp".into());
+        })
+        .await
+        .unwrap();
+    app.sync_local_view_from_store_for_test().await;
+    let pane = app.pane_info_for(&AttachTarget::Session {
+        session,
+        kind: AttachKind::Agent,
+    });
+    assert_eq!(pane.agent, claude_commander_core::agent::AgentKind::Claude);
+    assert_eq!(
+        pane.agent.submit_key_delay(),
+        Some(Duration::from_millis(250))
+    );
+    app.ui_state.selected_session_id = Some(session);
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor");
+    };
+    assert_eq!(editor.program.value(), "omp");
+}
+
+#[tokio::test]
+async fn session_edit_options_arriving_during_warning_survive_going_back() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    let session = SessionRef::new(BackendId(1), sid);
+    app.ui_state.selected_session_id = Some(session);
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+        panic!("editor");
+    };
+    editor.load_options(claude_commander_protocol::api::CreateOptions {
+        default_program: "claude".into(),
+        programs: vec![claude_commander_protocol::api::ProgramInfo {
+            label: "Codex".into(),
+            command: "codex".into(),
+        }],
+        sections: vec![],
+    });
+    editor.program = "codex".into();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_edit_session_key(key(KeyCode::Enter));
+    app.handle_state_update(StateUpdate::SessionEditOptionsLoaded {
+        session,
+        result: Ok(claude_commander_protocol::api::CreateOptions {
+            default_program: "claude".into(),
+            programs: vec![claude_commander_protocol::api::ProgramInfo {
+                label: "Oh My Pi".into(),
+                command: "omp".into(),
+            }],
+            sections: vec!["Review".into()],
+        }),
+    })
+    .await;
+    app.handle_edit_session_key(key(KeyCode::Esc));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("editor restored");
+    };
+    assert!(editor.programs.iter().any(|p| p.command == "omp"));
+    assert!(editor.sections.contains(&Some("Review".into())));
+}
+
+#[tokio::test]
+async fn automatic_remote_recovery_does_not_route_through_explicit_reset() {
+    let (app, sid) = app_with_remote_session().await;
+    app.recover_ended_session(SessionRef::new(BackendId(1), sid))
+        .await
+        .unwrap();
+    let mock = remote_mock(&app, BackendId(1));
+    assert_eq!(mock.recovered_sessions(), vec![sid]);
+    assert!(mock.reset_sessions().is_empty());
 }
 
 #[tokio::test]
