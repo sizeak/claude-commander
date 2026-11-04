@@ -1542,6 +1542,10 @@ impl CommanderService {
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
+                // Read under the store's lock, so every stamp already stored
+                // (by any process) was taken before it: one beyond this bound
+                // can only come from a clock that ran ahead.
+                let decided_at = chrono::Utc::now();
                 for (session_id, result) in &results {
                     let Some(session) = state.get_session_mut(session_id) else {
                         continue;
@@ -1549,7 +1553,7 @@ impl CommanderService {
                     // A failed fetch carries no data, so it neither writes nor
                     // stamps; anything else applies only if no newer check has.
                     if matches!(result, PrCheckResult::FetchFailed)
-                        || !session.accept_pr_check(checked_at)
+                        || !session.accept_pr_check(checked_at, decided_at)
                     {
                         continue;
                     }
@@ -5955,7 +5959,9 @@ mod tests {
         let cli = service(&dir);
         let (provider, epoch) = server.review_provider_snapshot().await;
 
-        let poll_started = Utc::now();
+        // Stamps are in the past: a stored stamp later than the apply's own
+        // clock reads as a clock that ran ahead, not as a newer check.
+        let poll_started = Utc::now() - chrono::Duration::seconds(3);
         let refresh_started = poll_started + chrono::Duration::seconds(1);
         let found = PrCheckResult::Found(PrInfo {
             number: 42,

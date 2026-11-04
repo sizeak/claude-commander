@@ -410,8 +410,19 @@ impl WorktreeSession {
     /// The stamp is wall-clock (state.json is shared between processes, so a
     /// monotonic clock cannot be compared), which means a backwards clock step
     /// makes checks look stale until the clock passes the stored stamp again.
-    pub(crate) fn accept_pr_check(&mut self, checked_at: DateTime<Utc>) -> bool {
-        if self.pr_checked_at.is_some_and(|stored| stored > checked_at) {
+    /// `now` is the current time, the stamp's sanity bound: no check can have
+    /// started after it, so a stored stamp beyond `now` was written by a clock
+    /// that ran ahead and is ignored, rather than freezing the session's PR
+    /// data until real time catches up.
+    pub(crate) fn accept_pr_check(
+        &mut self,
+        checked_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self
+            .pr_checked_at
+            .is_some_and(|stored| stored > checked_at && stored <= now)
+        {
             return false;
         }
         self.pr_checked_at = Some(checked_at);
@@ -977,17 +988,39 @@ mod tests {
             "claude",
         );
         let t = Utc::now();
-        assert!(session.accept_pr_check(t), "an unchecked session accepts");
-        assert!(session.accept_pr_check(t), "a tie applies");
-        assert!(!session.accept_pr_check(t - chrono::Duration::seconds(1)));
+        assert!(
+            session.accept_pr_check(t, t),
+            "an unchecked session accepts"
+        );
+        assert!(session.accept_pr_check(t, t), "a tie applies");
+        assert!(!session.accept_pr_check(t - chrono::Duration::seconds(1), t));
         assert_eq!(
             session.pr_checked_at,
             Some(t),
             "a dropped check leaves the stamp"
         );
         let later = t + chrono::Duration::seconds(1);
-        assert!(session.accept_pr_check(later));
+        assert!(session.accept_pr_check(later, later));
         assert_eq!(session.pr_checked_at, Some(later));
+    }
+
+    /// A stamp later than the current time was written under a clock that ran
+    /// ahead and has since been corrected. Honouring it would freeze the
+    /// session's PR data until real time caught up, so it counts as stale.
+    #[test]
+    fn accept_pr_check_ignores_a_stored_stamp_from_the_future() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        let now = Utc::now();
+        let ahead = now + chrono::Duration::hours(3);
+        assert!(session.accept_pr_check(ahead, ahead));
+        assert!(session.accept_pr_check(now, now), "a future stamp is stale");
+        assert_eq!(session.pr_checked_at, Some(now));
     }
 
     #[test]
