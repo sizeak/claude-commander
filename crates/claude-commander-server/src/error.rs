@@ -109,6 +109,7 @@ impl ApiError {
             // Bad client input → 400.
             CoreError::Session(SessionError::InvalidName { .. })
             | CoreError::Session(SessionError::InvalidProgram(_))
+            | CoreError::Session(SessionError::InvalidEdit(_))
             | CoreError::Session(SessionError::InvalidImage(_))
             // A refused clone source/destination name is the client's mistake, not
             // a git failure — which is exactly why core gives it its own variant.
@@ -216,6 +217,12 @@ mod tests {
     #[test]
     fn invalid_program_maps_to_400() {
         let err = ApiError(CoreError::Session(SessionError::InvalidProgram("p".into())));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn invalid_edit_maps_to_400() {
+        let err = ApiError(CoreError::Session(SessionError::InvalidEdit("e".into())));
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 

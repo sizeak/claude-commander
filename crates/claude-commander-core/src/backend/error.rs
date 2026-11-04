@@ -87,6 +87,7 @@ impl From<CoreError> for BackendError {
             CoreError::Session(
                 SessionError::InvalidName { .. }
                 | SessionError::InvalidProgram(_)
+                | SessionError::InvalidEdit(_)
                 | SessionError::FileSelectionRejected { .. },
             ) => BackendError::InvalidRequest(err.to_string()),
 
@@ -159,6 +160,11 @@ mod tests {
             BackendError::InvalidRequest(_)
         ));
         let e = CoreError::Session(SessionError::InvalidProgram("vim".into()));
+        assert!(matches!(
+            BackendError::from(e),
+            BackendError::InvalidRequest(_)
+        ));
+        let e = CoreError::Session(SessionError::InvalidEdit("no name".into()));
         assert!(matches!(
             BackendError::from(e),
             BackendError::InvalidRequest(_)

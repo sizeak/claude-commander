@@ -49,6 +49,14 @@ pub enum SessionError {
     #[error("Invalid program: {0}")]
     InvalidProgram(String),
 
+    /// A session-editor draft the planner refused (an empty name, a section,
+    /// base or program that isn't on offer). Deliberately not
+    /// [`InvalidProgram`](Self::InvalidProgram): most of what the planner
+    /// validates has nothing to do with the program, and the message is
+    /// already a user-facing sentence.
+    #[error("Invalid session edit: {0}")]
+    InvalidEdit(String),
+
     #[error("Failed to create session: {0}")]
     CreationFailed(String),
 
@@ -386,6 +394,7 @@ mod tests {
                 reason: "bad".to_string(),
             },
             SessionError::InvalidState(SessionId::new()),
+            SessionError::InvalidEdit("Session name cannot be empty".to_string()),
             SessionError::CreationFailed("fail".to_string()),
             SessionError::PersistenceFailed("fail".to_string()),
             SessionError::ProjectNotFound("proj".to_string()),
