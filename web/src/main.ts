@@ -28,6 +28,7 @@ import { initForms, openNewSession, removeProject } from "./forms.ts";
 import type { ProjectInfo, SessionInfo } from "./generated/index.ts";
 import { NotifyTracker, requestPermissionOnFirstClick, showNotifications } from "./notify.ts";
 import { Poller } from "./poll.ts";
+import { restartConfirmation } from "./restart.ts";
 import { initReview, openReview } from "./review.ts";
 import { initSettings } from "./settings.ts";
 import { agentStateFor, currentSession, humanize, state } from "./state.ts";
@@ -242,13 +243,8 @@ function renderToolbar(): void {
 }
 
 async function restartSession(s: SessionInfo): Promise<void> {
-  if (
-    s.pending_program !== null &&
-    !confirm(
-      `Restart "${s.title}" with "${s.pending_program}"? This switches the program and clears the conversation.`,
-    )
-  )
-    return;
+  const warning = restartConfirmation(s);
+  if (warning !== null && !confirm(warning)) return;
   if (!(await act(api.restartSession(s.id)))) return;
   // The old pane's session ended (a final close); attach to the new one.
   if (state.selectedId === s.id) reattach();

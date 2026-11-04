@@ -211,6 +211,62 @@ void main() {
     expect(api.countOf('restartSession'), 1);
   });
 
+  // A restart is when a deferred program change takes effect, and the switch
+  // discards the conversation — the confirm has to say so, the way the TUI's
+  // `reset_confirm_message` does. Without a pending program it must not.
+  testWidgets('restart warns that a pending program takes over', (
+    tester,
+  ) async {
+    final info = sessionInfo(
+      status: SessionStatus.running,
+      pendingProgram: 'codex',
+    );
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await tester.tap(find.byTooltip('Restart'));
+    await tester.pump();
+    final dialog = find.byType(AlertDialog);
+    expect(dialog, findsOneWidget);
+    expect(
+      find.descendant(of: dialog, matching: find.textContaining('"codex"')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: dialog,
+        matching: find.textContaining('conversation is cleared'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('restart without a pending program names no program', (
+    tester,
+  ) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await tester.tap(find.byTooltip('Restart'));
+    await tester.pump();
+    final dialog = find.byType(AlertDialog);
+    expect(
+      find.descendant(
+        of: dialog,
+        matching: find.text('Restarts the program in this session.'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: dialog,
+        matching: find.textContaining('conversation is cleared'),
+      ),
+      findsNothing,
+    );
+  });
+
   testWidgets('delete confirms, calls deleteSession, and pops', (tester) async {
     final info = sessionInfo(status: SessionStatus.running);
     api.getSessionDetailResponse = sessionDetail(info: info);
