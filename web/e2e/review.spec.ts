@@ -50,32 +50,66 @@ test.describe("review view", () => {
     await expect(page.locator("#review-title")).toHaveText(`Review — ${REVIEW_SESSION}`);
   });
 
-  test("large single-file diffs mount rows only near the viewport", async ({ page }) => {
+  test("large single-file diffs render only the rows near the viewport", async ({ page }) => {
     await openLargeDiff(page);
     await expect(page.locator(".rv-line").first()).toBeVisible();
-    expect(await page.locator(".rv-line").count()).toBeLessThan(1000);
+    const rendered = (text: string) =>
+      page
+        .locator(".rv-line", { hasText: new RegExp(`${text}$`) })
+        .evaluate((n) => n.checkVisibility({ contentVisibilityAuto: true }));
+    expect(await rendered("large-line-0")).toBe(true);
+    expect(await rendered("large-line-4999")).toBe(false);
     await page.locator("#review-body").evaluate((el) => {
       el.scrollTop = el.scrollHeight;
     });
     await expect(page.locator(".rv-line", { hasText: "large-line-4999" })).toBeVisible();
-    expect(await page.locator(".rv-line").count()).toBeLessThan(1500);
+    await expect.poll(() => rendered("large-line-0")).toBe(false);
+  });
+
+  test("a far-offscreen row of a large diff is in the page for the browser's find", async ({
+    page,
+  }) => {
+    await openLargeDiff(page);
+    await expect(page.locator(".rv-line").first()).toBeVisible();
+    // Without scrolling: the last row must already be in the DOM, or Ctrl+F
+    // cannot see it, yet its rendering must be skipped while it is offscreen.
+    const last = page.locator(".rv-line", { hasText: /large-line-4999$/ });
+    await expect(last).toHaveCount(1);
+    expect(await last.evaluate((n) => n.checkVisibility({ contentVisibilityAuto: true }))).toBe(
+      false,
+    );
+    // window.find runs the browser's text search over the DOM; headless
+    // Chromium's window.find selects a match without scrolling to it, so
+    // reveal the selection as find-in-page would and check the row renders.
+    const found = await page.evaluate(() => {
+      const hit = (window as unknown as { find(s: string): boolean }).find("large-line-4999");
+      getSelection()?.anchorNode?.parentElement?.scrollIntoView({ block: "center" });
+      return hit;
+    });
+    expect(found).toBe(true);
+    await expect(last).toBeInViewport();
+    await expect
+      .poll(() => last.evaluate((n) => n.checkVisibility({ contentVisibilityAuto: true })))
+      .toBe(true);
   });
 
   test("a reload keeps a deep scroll position in a large diff", async ({ page }) => {
     await openLargeDiff(page);
-    // Scroll down a page at a time so every chunk above the target is mounted
-    // at its real height, as it is for a reader who scrolled there.
+    // Scroll down a page at a time so every chunk above the target has been
+    // rendered at its real height, as it has for a reader who scrolled there.
     const target = await page.locator("#review-body").evaluate(async (el) => {
       const frame = () => new Promise((r) => requestAnimationFrame(r));
-      const mounted = () =>
-        [...el.querySelectorAll(".rv-line")].some((r) =>
-          r.textContent?.endsWith("large-line-2500"),
+      const rendered = () =>
+        [...el.querySelectorAll(".rv-line")].some(
+          (r) =>
+            r.textContent?.endsWith("large-line-2500") &&
+            r.checkVisibility({ contentVisibilityAuto: true }),
         );
-      while (!mounted()) {
+      do {
         el.scrollTop += el.clientHeight;
         await frame();
         await frame();
-      }
+      } while (!rendered());
       const box = el.getBoundingClientRect();
       const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
       return hit?.closest(".rv-line")?.textContent?.match(/large-line-\d+$/)?.[0] ?? "";
@@ -88,6 +122,42 @@ test.describe("review view", () => {
     await page.locator("#review-refresh").click();
     await expect.poll(() => before?.evaluate((n) => n.isConnected)).toBe(false);
     await expect(row).toBeInViewport();
+  });
+
+  test("a reload with a composer open above the viewport keeps rows in place", async ({ page }) => {
+    await openLargeDiff(page);
+    await page.locator(".rv-line", { hasText: /large-line-10$/ }).click();
+    await expect(page.locator(".rv-composer")).toBeVisible();
+    const body = page.locator("#review-body");
+    const frames = () =>
+      page.evaluate(
+        () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+      );
+    // Deep enough that the composer's chunk is offscreen, and stops rendering.
+    await body.evaluate((el) => {
+      el.scrollTop = 30_000;
+    });
+    await frames();
+    const row = page.locator(".rv-line", { hasText: /large-line-2000$/ });
+    const y = () => row.evaluate((n) => n.getBoundingClientRect().top);
+    const before = await y();
+    const old = await row.elementHandle();
+    await page.locator("#review-refresh").click();
+    await expect.poll(() => old?.evaluate((n) => n.isConnected)).toBe(false);
+    await expect(page.locator(".rv-composer")).toHaveCount(0);
+    expect(await y()).toBeCloseTo(before, 0);
+    // Rendering the composer's chunk again must not change the height it was
+    // rebuilt at: return to the same scrollTop and the row is where it was.
+    const top = await body.evaluate((el) => el.scrollTop);
+    await body.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await frames();
+    await body.evaluate((el, t) => {
+      el.scrollTop = t;
+    }, top);
+    await frames();
+    expect(await y()).toBeCloseTo(before, 0);
   });
 
   test("renders the session's diff against its base", async ({ page }) => {

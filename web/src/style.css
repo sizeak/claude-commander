@@ -926,8 +926,12 @@ button.ghost {
 }
 .rv-chunk {
   /* Contain comment margins, so a chunk's measured height is all of its
-     space and can stand in for its rows when it is rebuilt unmounted. */
+     space and can stand in for its rows when it is rebuilt. */
   display: flow-root;
+  /* Every row is in the DOM for the browser's find; an offscreen chunk skips
+     style, layout and paint until it nears the viewport or find reveals it.
+     Its stand-in height is set per chunk (contain-intrinsic-block-size). */
+  content-visibility: auto;
 }
 .rv-binary {
   padding: 12px;
