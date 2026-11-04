@@ -901,8 +901,10 @@ pub struct EventLoop {
     tx: mpsc::Sender<AppEvent>,
     /// Receiver for events
     rx: mpsc::Receiver<AppEvent>,
-    /// Events [`Self::restart_input`] pulled off `rx` but did not discard:
-    /// served by [`Self::next`] and [`Self::try_next`] before `rx`.
+    /// Events waiting ahead of `rx`, served by [`Self::next`] and
+    /// [`Self::try_next`] before it: those [`Self::restart_input`] pulled off
+    /// `rx` but did not discard, behind any a nested loop handed back through
+    /// [`Self::requeue`].
     held: VecDeque<AppEvent>,
     /// The terminal reader while one exists: running, or asked to stop but not
     /// yet gone. `None` while an attach (or the editor) owns the terminal.
