@@ -582,6 +582,11 @@ impl CommanderService {
             .mutate(move |state| {
                 for session in state.sessions.values_mut() {
                     session.clear_review_metadata();
+                    // The stamp describes the PR fields just emptied, so it
+                    // goes with them: `None` is "never checked". Results from
+                    // the old provider's in-flight checks are already refused
+                    // by the epoch bump, not by this stamp.
+                    session.pr_checked_at = None;
                     crate::session::apply_assignment(session, &sections, now);
                 }
             })
@@ -1469,14 +1474,23 @@ impl CommanderService {
         Ok(())
     }
 
-    /// Persist a batch of PR-check results (from the background PR poll),
-    /// re-run section assignment, then push refreshed status bars to running
+    /// Persist a batch of PR-check results supplied by a caller (the
+    /// [`CommanderBackend`](crate::backend::CommanderBackend) seam), re-run
+    /// section assignment, then push refreshed status bars to running
     /// sessions' tmux panes. `Found` sets the cached PR fields, `NotFound`
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
+    ///
+    /// The service's own PR poll does not come through here: it runs
+    /// `fetch_pr_status` → `apply_pr_results_at_epoch`, which stamps results
+    /// with when the check *started*. This caller gives no
+    /// check start time, so the results are stamped as of this call: they win
+    /// over anything already stored, and a check that started before now and
+    /// lands later is dropped (see [`WorktreeSession::accept_pr_check`]).
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
+        let checked_at = Utc::now();
         let (provider, epoch) = self.review_provider_snapshot().await;
-        self.apply_pr_results_at_epoch(provider, epoch, results)
+        self.apply_pr_results_at_epoch(provider, epoch, checked_at, results)
             .await
             .map(|_| ())
     }
@@ -1499,7 +1513,7 @@ impl CommanderService {
         let epoch = self
             .review_provider_epoch
             .load(std::sync::atomic::Ordering::Relaxed);
-        self.apply_pr_results_at_epoch(provider, epoch, results)
+        self.apply_pr_results_at_epoch(provider, epoch, Utc::now(), results)
             .await
             .map(|_| ())
     }
@@ -1508,10 +1522,18 @@ impl CommanderService {
     /// provider-transition lock spans both the check and persisted mutation, so
     /// a switch cannot clear the cache and then be overwritten by an older
     /// in-flight sweep.
+    ///
+    /// `checked_at` is when the check producing `results` *started*. Per
+    /// session, a result is dropped if a check that started later has already
+    /// been applied — by this process or another sharing state.json, since the
+    /// comparison runs inside the locked read-modify-write — so an in-flight
+    /// background poll cannot clobber a newer `refresh-pr`
+    /// ([`WorktreeSession::accept_pr_check`]).
     async fn apply_pr_results_at_epoch(
         &self,
         provider: CodeHostProvider,
         epoch: u64,
+        checked_at: DateTime<Utc>,
         results: Vec<(SessionId, PrCheckResult)>,
     ) -> Result<bool> {
         let _guard = self.review_provider_lock.lock().await;
@@ -1528,10 +1550,21 @@ impl CommanderService {
         let now = chrono::Utc::now();
         self.store
             .mutate(move |state| {
+                // Read under the store's lock, so every stamp already stored
+                // (by any process) was taken before it: one beyond this bound
+                // can only come from a clock that ran ahead.
+                let decided_at = chrono::Utc::now();
                 for (session_id, result) in &results {
                     let Some(session) = state.get_session_mut(session_id) else {
                         continue;
                     };
+                    // A failed fetch carries no data, so it neither writes nor
+                    // stamps; anything else applies only if no newer check has.
+                    if matches!(result, PrCheckResult::FetchFailed)
+                        || !session.accept_pr_check(checked_at, decided_at)
+                    {
+                        continue;
+                    }
                     match result {
                         PrCheckResult::Found(info) => {
                             session.pr_number = Some(info.number);
@@ -2823,6 +2856,9 @@ impl CommanderService {
     /// Refresh and persist PR/MR metadata before returning, without a background loop.
     /// `None` refreshes all eligible sessions; `Some` restricts the host query to one.
     pub async fn refresh_pr_status(&self, session: Option<&SessionId>) -> Result<usize> {
+        // Distinct from the TUI's `pr.refresh_status`, which only wakes the
+        // background loop (`request_pr_refresh`) rather than calling this.
+        self.telemetry.feature("pr.refresh_sync");
         if let Some(id) = session {
             self.ensure_session_exists(id).await?;
         }
@@ -2831,6 +2867,10 @@ impl CommanderService {
     }
 
     async fn fetch_pr_status(&self, session: Option<&SessionId>) -> Result<usize> {
+        // Stamp the check as it starts, before any host query: whichever of two
+        // overlapping checks started later saw the fresher host state, so it
+        // must win however the two finish (see `apply_pr_results_at_epoch`).
+        let checked_at = Utc::now();
         let (provider, epoch) = self.review_provider_snapshot().await;
         let targets = self.pr_refresh_targets(session).await?;
         if targets.is_empty() {
@@ -2860,7 +2900,7 @@ impl CommanderService {
             .count();
         let count = results.len();
         if !self
-            .apply_pr_results_at_epoch(provider, epoch, results)
+            .apply_pr_results_at_epoch(provider, epoch, checked_at, results)
             .await?
         {
             return Err(crate::error::GitError::OperationFailed(
@@ -2891,7 +2931,9 @@ impl CommanderService {
     ///
     /// Every loop drives the same observable surface the frontends read: the
     /// agent loop maintains [`Self::agent_states`]' cache and persists unread
-    /// transitions; the PR loop persists results via [`Self::apply_pr_results`];
+    /// transitions; the PR loop persists results via
+    /// `fetch_pr_status` → `apply_pr_results_at_epoch` (stamped with the
+    /// check's start time);
     /// the pull loop feeds [`Snapshot::project_pull`]; the sync loop
     /// reloads the state file. Each wakes the [`StateStore`] change-feed on a
     /// real change (either via a persisted mutation or [`StateStore::notify_change`]),
@@ -3095,8 +3137,11 @@ impl CommanderService {
 
     /// Query the selected code host across all sessions on a fixed cadence (and on
     /// [`Self::request_pr_refresh`]), then persist results via
-    /// [`Self::apply_pr_results`]. When `interval_secs` is 0 the periodic tick is
-    /// disabled but a manual refresh still runs.
+    /// [`Self::fetch_pr_status`] → [`Self::apply_pr_results_at_epoch`], which
+    /// stamps each result with when its check started (unlike
+    /// [`Self::apply_pr_results`], which stamps at call time). When
+    /// `interval_secs` is 0 the periodic tick is disabled but a manual refresh
+    /// still runs.
     fn spawn_pr_status_loop(&self, interval_secs: u64) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
         let notify = self.pr_refresh.clone();
@@ -5913,6 +5958,221 @@ mod tests {
         assert!(s.pr_base_branch.is_none());
     }
 
+    /// A background poll that *started* before a `refresh-pr` but lands after it
+    /// must not overwrite the refresh's fresher result. Two services over one
+    /// state file stand in for the server/TUI and the one-shot CLI process: the
+    /// CLI's check (started later) persists PR #42, then the poll's older
+    /// `NotFound` arrives and is dropped instead of clearing it.
+    #[tokio::test]
+    async fn stale_pr_poll_result_does_not_clobber_a_newer_refresh() {
+        use crate::git::{PrCheckResult, PrInfo};
+        let dir = tempfile::TempDir::new().unwrap();
+        let server = service(&dir);
+        let (_pid, sid) = seed_project_session(&server).await;
+        let cli = service(&dir);
+        let (provider, epoch) = server.review_provider_snapshot().await;
+
+        // Stamps are in the past: a stored stamp later than the apply's own
+        // clock reads as a clock that ran ahead, not as a newer check.
+        let poll_started = Utc::now() - chrono::Duration::seconds(3);
+        let refresh_started = poll_started + chrono::Duration::seconds(1);
+        let found = PrCheckResult::Found(PrInfo {
+            number: 42,
+            url: "https://example/pr/42".to_string(),
+            state: crate::git::PrState::Open,
+            is_draft: false,
+            labels: vec![],
+            review_decision: None,
+            reviewers: vec![],
+            base_ref_name: Some("main".to_string()),
+        });
+
+        assert!(
+            cli.apply_pr_results_at_epoch(provider, epoch, refresh_started, vec![(sid, found)])
+                .await
+                .unwrap()
+        );
+        server
+            .apply_pr_results_at_epoch(
+                provider,
+                epoch,
+                poll_started,
+                vec![(sid, PrCheckResult::NotFound)],
+            )
+            .await
+            .unwrap();
+        {
+            let state = server.store().read().await;
+            let s = state.get_session(&sid).unwrap();
+            assert_eq!(
+                s.pr_number,
+                Some(42),
+                "an older poll result clobbered a newer refresh"
+            );
+            assert_eq!(s.pr_checked_at, Some(refresh_started));
+        }
+
+        // A check that started later than the stored one still applies.
+        let next_poll = refresh_started + chrono::Duration::seconds(1);
+        server
+            .apply_pr_results_at_epoch(
+                provider,
+                epoch,
+                next_poll,
+                vec![(sid, PrCheckResult::NotFound)],
+            )
+            .await
+            .unwrap();
+        let state = server.store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert!(s.pr_number.is_none());
+        assert_eq!(s.pr_checked_at, Some(next_poll));
+    }
+
+    /// A poll that changes nothing but `pr_checked_at` must still persist the
+    /// stamp (the cross-process race guard reads it from disk) but must not wake
+    /// the change-feed: the stamp is not client-visible, and every successful
+    /// poll advances it, so bumping would wake every client every poll.
+    #[tokio::test]
+    async fn stamp_only_pr_poll_persists_without_waking_the_change_feed() {
+        use crate::git::{PrCheckResult, PrInfo};
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        let (provider, epoch) = svc.review_provider_snapshot().await;
+        let found = PrCheckResult::Found(PrInfo {
+            number: 42,
+            url: "https://example/pr/42".to_string(),
+            state: crate::git::PrState::Open,
+            is_draft: false,
+            labels: vec![],
+            review_decision: None,
+            reviewers: vec![],
+            base_ref_name: Some("main".to_string()),
+        });
+        let first = Utc::now() - chrono::Duration::seconds(5);
+        let second = first + chrono::Duration::seconds(1);
+        let third = second + chrono::Duration::seconds(1);
+        let fourth = third + chrono::Duration::seconds(1);
+        let on_disk = || {
+            crate::config::AppState::load_from(&dir.path().join("state.json"))
+                .unwrap()
+                .get_session(&sid)
+                .unwrap()
+                .pr_checked_at
+        };
+
+        // Each pair: the first apply is a real data change, the repeat is not.
+        for (result, initial, repeat) in [
+            (found, first, second),
+            (PrCheckResult::NotFound, third, fourth),
+        ] {
+            let before = svc.store().generation();
+            svc.apply_pr_results_at_epoch(provider, epoch, initial, vec![(sid, result.clone())])
+                .await
+                .unwrap();
+            assert!(
+                svc.store().generation() > before,
+                "a real PR data change must wake the change-feed"
+            );
+
+            let before = svc.store().generation();
+            svc.apply_pr_results_at_epoch(provider, epoch, repeat, vec![(sid, result)])
+                .await
+                .unwrap();
+            assert_eq!(on_disk(), Some(repeat), "the newer stamp must reach disk");
+            assert_eq!(
+                svc.store().generation(),
+                before,
+                "a stamp-only poll woke the change-feed"
+            );
+        }
+    }
+
+    /// `FetchFailed` carries no data, so it must not advance the stamp — else a
+    /// failed newer check would make an older *successful* one look stale.
+    #[tokio::test]
+    async fn failed_pr_check_does_not_advance_the_checked_at_stamp() {
+        use crate::git::PrCheckResult;
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        let (provider, epoch) = svc.review_provider_snapshot().await;
+        svc.apply_pr_results_at_epoch(
+            provider,
+            epoch,
+            Utc::now(),
+            vec![(sid, PrCheckResult::FetchFailed)],
+        )
+        .await
+        .unwrap();
+        let state = svc.store().read().await;
+        assert_eq!(state.get_session(&sid).unwrap().pr_checked_at, None);
+    }
+
+    /// `refresh_pr_status` is a domain method, so it records its own feature
+    /// event (covering every frontend), as the other service methods do.
+    #[tokio::test]
+    async fn refresh_pr_status_records_its_feature() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut svc = service(&dir);
+        let sink = Arc::new(crate::telemetry::MemorySink::default());
+        svc.telemetry = Telemetry::with_sink(
+            &FrontendInfo::new("claude-commander", "9.9.9"),
+            "install-test",
+            sink.clone(),
+        );
+        // No sessions: the refresh is a no-op, but it was still invoked.
+        assert_eq!(svc.refresh_pr_status(None).await.unwrap(), 0);
+        svc.telemetry.flush().await;
+        let features: Vec<_> = sink
+            .events()
+            .iter()
+            .filter_map(|e| e.get("feature").and_then(|f| f.as_str()).map(str::to_owned))
+            .collect();
+        assert_eq!(features, ["pr.refresh_sync"]);
+    }
+
+    /// `pr_checked_at` documents "when the check the PR fields reflect
+    /// started", with `None` meaning "never checked". A provider switch empties
+    /// the PR fields, so it must drop the stamp too, or the stamp describes
+    /// data that is no longer there.
+    #[tokio::test]
+    async fn provider_change_clears_the_pr_check_stamp() {
+        use crate::git::PrCheckResult;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.apply_pr_results_for_provider(
+            CodeHostProvider::Github,
+            vec![(sid, PrCheckResult::NotFound)],
+        )
+        .await
+        .unwrap();
+        let stamp = svc
+            .store()
+            .read()
+            .await
+            .get_session(&sid)
+            .unwrap()
+            .pr_checked_at;
+        assert!(stamp.is_some());
+
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Gitlab;
+        svc.update_code_host_config(config).await.unwrap();
+
+        let stamp = svc
+            .store()
+            .read()
+            .await
+            .get_session(&sid)
+            .unwrap()
+            .pr_checked_at;
+        assert_eq!(stamp, None);
+    }
+
     #[tokio::test]
     async fn provider_change_clears_reviews_and_rejects_old_in_flight_results() {
         use crate::git::{PrCheckResult, PrInfo, PrState};
@@ -5971,9 +6231,14 @@ mod tests {
         config.code_host_provider = CodeHostProvider::Github;
         svc.update_code_host_config(config).await.unwrap();
         assert!(
-            !svc.apply_pr_results_at_epoch(CodeHostProvider::Github, 0, vec![(sid, review(101))])
-                .await
-                .unwrap()
+            !svc.apply_pr_results_at_epoch(
+                CodeHostProvider::Github,
+                0,
+                Utc::now(),
+                vec![(sid, review(101))]
+            )
+            .await
+            .unwrap()
         );
         assert!(
             svc.store()
@@ -7368,6 +7633,124 @@ printf '[{"iid":84,"web_url":"https://gitlab.example/example/repo/-/merge_reques
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    /// End-to-end half of the stale-poll fix: `fetch_pr_status` must stamp its
+    /// check when it *starts*, before the host query. A fake `gh` blocks
+    /// mid-query; while it is blocked a newer check lands (PR #99), then the
+    /// in-flight refresh's older PR #42 result arrives and must be dropped.
+    /// Stamping at apply time instead would make the in-flight result look
+    /// newest and overwrite #99.
+    #[cfg(unix)]
+    #[test]
+    fn in_flight_pr_refresh_is_stamped_when_it_starts() {
+        const CHILD: &str = "CC_TEST_PR_STAMP_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            use crate::git::{PrCheckResult, PrInfo};
+            let started = std::path::PathBuf::from(std::env::var_os("CC_TEST_GH_STARTED").unwrap());
+            let release = std::path::PathBuf::from(std::env::var_os("CC_TEST_GH_RELEASE").unwrap());
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let dir = tempfile::TempDir::new_in(root).unwrap();
+                let svc = service(&dir);
+                let project = Project::new("repo", dir.path().to_path_buf(), "main");
+                let session = WorktreeSession::new(
+                    project.id,
+                    "first",
+                    "first",
+                    dir.path().join("first"),
+                    "claude",
+                );
+                let sid = session.id;
+                svc.store()
+                    .mutate(move |state| {
+                        state.add_project(project);
+                        state.add_session(session);
+                    })
+                    .await
+                    .unwrap();
+                let (provider, epoch) = svc.review_provider_snapshot().await;
+
+                let newer = async {
+                    while !started.exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    // The fake gh is now blocked inside the refresh's host query,
+                    // so this check started strictly after the refresh did.
+                    let found = PrCheckResult::Found(PrInfo {
+                        number: 99,
+                        url: "https://github.com/example/repo/pull/99".to_string(),
+                        state: crate::git::PrState::Open,
+                        is_draft: false,
+                        labels: vec![],
+                        review_decision: None,
+                        reviewers: vec![],
+                        base_ref_name: Some("main".to_string()),
+                    });
+                    assert!(
+                        svc.apply_pr_results_at_epoch(
+                            provider,
+                            epoch,
+                            Utc::now(),
+                            vec![(sid, found)]
+                        )
+                        .await
+                        .unwrap()
+                    );
+                    std::fs::write(&release, "go").unwrap();
+                };
+                let (refreshed, ()) = tokio::join!(svc.refresh_pr_status(Some(&sid)), newer);
+                assert_eq!(refreshed.unwrap(), 1);
+                let state = svc.store().read().await;
+                assert_eq!(
+                    state.get_session(&sid).unwrap().pr_number,
+                    Some(99),
+                    "the in-flight refresh's older result overwrote a newer check"
+                );
+            });
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then exit 0; fi
+: > "$CC_TEST_GH_STARTED"
+i=0
+while [ ! -f "$CC_TEST_GH_RELEASE" ]; do
+  i=$((i + 1))
+  if [ "$i" -gt 600 ]; then exit 1; fi
+  sleep 0.05
+done
+printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","state":"OPEN"}]'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "api::tests::in_flight_pr_refresh_is_stamped_when_it_starts",
+                "--nocapture",
+            ])
+            .env(CHILD, dir.path())
+            .env("CC_TEST_GH_STARTED", dir.path().join("started"))
+            .env("CC_TEST_GH_RELEASE", dir.path().join("release"))
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child test failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[tokio::test]

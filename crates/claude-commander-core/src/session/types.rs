@@ -174,6 +174,19 @@ pub struct WorktreeSession {
     /// session's branch), used as the source of truth for stack detection.
     #[serde(default)]
     pub pr_base_branch: Option<String>,
+    /// When the code-host check whose result the PR fields above reflect
+    /// *started*. A check stamps this as it applies, and a result from a check
+    /// that started earlier than the stored stamp is dropped (see
+    /// [`Self::accept_pr_check`]) — so a background poll that was already in
+    /// flight when `claude-commander refresh-pr` ran cannot overwrite the
+    /// fresher data the refresh persisted. `None` = never checked (or written
+    /// by a binary that predates the field), which any check may overwrite.
+    ///
+    /// Persisted but not client-visible (no wire DTO carries it), so a write
+    /// that changes only this stamp does not wake the change-feed — see
+    /// `AppState::client_visible`.
+    #[serde(default)]
+    pub pr_checked_at: Option<DateTime<Utc>>,
     /// Fallback parent link for PR-stack grouping, set when the session is
     /// created via the "add stacked session" hotkey and the PR doesn't yet
     /// exist. Once `pr_base_branch` resolves to an in-project session, that
@@ -263,6 +276,7 @@ impl WorktreeSession {
             review_decision: None,
             pr_reviewers: Vec::new(),
             pr_base_branch: None,
+            pr_checked_at: None,
             stack_parent_session_id: None,
             unread: false,
             section_override: None,
@@ -314,6 +328,7 @@ impl WorktreeSession {
             review_decision: None,
             pr_reviewers: Vec::new(),
             pr_base_branch: None,
+            pr_checked_at: None,
             stack_parent_session_id: None,
             unread: false,
             section_override: None,
@@ -388,6 +403,44 @@ impl WorktreeSession {
         self.review_decision = None;
         self.pr_reviewers.clear();
         self.pr_base_branch = None;
+    }
+
+    /// Whether a PR check that started at `checked_at` may write this session's
+    /// review metadata, stamping it when it may. A check that started before
+    /// the one already applied lost a race (it was in flight while a newer one
+    /// finished), so its result is older than what is stored and is dropped.
+    /// A tie applies: both checks started at once, so neither is staler.
+    ///
+    /// The stamp is wall-clock (state.json is shared between processes, so a
+    /// monotonic clock cannot be compared), which means a backwards clock step
+    /// makes checks look stale until the clock passes the stored stamp again.
+    /// `now` is the current time, the stamp's sanity bound: no check can have
+    /// started after it, so a stored stamp beyond `now` was written by a clock
+    /// that ran ahead and is ignored, rather than freezing the session's PR
+    /// data until real time catches up.
+    pub(crate) fn accept_pr_check(
+        &mut self,
+        checked_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if self
+            .pr_checked_at
+            .is_some_and(|stored| stored > checked_at && stored <= now)
+        {
+            return false;
+        }
+        // Advanced on every accepted check, even one whose PR data is
+        // unchanged, so each successful poll rewrites state.json
+        // (`StateStore::mutate` skips the write only when the serialised state
+        // is identical). It does so silently: the field is left out of
+        // `AppState::client_visible`, so a stamp-only write wakes no
+        // change-feed subscriber. The write itself is required: if
+        // an unchanged result left the stamp where it was, a check that
+        // started before this one but lands after it would still compare as
+        // newer than the stored stamp and overwrite this result with older
+        // host data.
+        self.pr_checked_at = Some(checked_at);
+        true
     }
 
     /// True when the session's PR is merged on GitHub. Honours the legacy
@@ -920,6 +973,68 @@ mod tests {
         assert_eq!(session.program, "claude");
         assert!(session.tmux_session_name.starts_with("cc-"));
         assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    /// `pr_checked_at` is new in state.json, which older binaries also write: a
+    /// record without it loads as "never checked" rather than being rejected.
+    #[test]
+    fn session_without_pr_checked_at_deserializes() {
+        let session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        let mut value = serde_json::to_value(&session).unwrap();
+        value.as_object_mut().unwrap().remove("pr_checked_at");
+        let back: WorktreeSession = serde_json::from_value(value).unwrap();
+        assert!(back.pr_checked_at.is_none());
+    }
+
+    #[test]
+    fn accept_pr_check_drops_only_strictly_older_checks() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        let t = Utc::now();
+        assert!(
+            session.accept_pr_check(t, t),
+            "an unchecked session accepts"
+        );
+        assert!(session.accept_pr_check(t, t), "a tie applies");
+        assert!(!session.accept_pr_check(t - chrono::Duration::seconds(1), t));
+        assert_eq!(
+            session.pr_checked_at,
+            Some(t),
+            "a dropped check leaves the stamp"
+        );
+        let later = t + chrono::Duration::seconds(1);
+        assert!(session.accept_pr_check(later, later));
+        assert_eq!(session.pr_checked_at, Some(later));
+    }
+
+    /// A stamp later than the current time was written under a clock that ran
+    /// ahead and has since been corrected. Honouring it would freeze the
+    /// session's PR data until real time caught up, so it counts as stale.
+    #[test]
+    fn accept_pr_check_ignores_a_stored_stamp_from_the_future() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+        let now = Utc::now();
+        let ahead = now + chrono::Duration::hours(3);
+        assert!(session.accept_pr_check(ahead, ahead));
+        assert!(session.accept_pr_check(now, now), "a future stamp is stale");
+        assert_eq!(session.pr_checked_at, Some(now));
     }
 
     #[test]
