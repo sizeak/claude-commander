@@ -123,12 +123,20 @@ function renderReview(): void {
  * rebuilt chunk too tall until it is next rendered, then shift everything
  * below it. Returns how much of that space lay above the viewport, which the
  * restored scrollTop must give up to keep the reader's rows in place.
+ *
+ * The chunk is forced to render first: while its rendering is skipped
+ * (offscreen, with neither focus nor selection in it), size containment
+ * answers its height with the remembered stand-in, which still counts the
+ * composer and does not shrink when it goes, so the delta would read 0.
+ * Rendering it costs one chunk's layout, and its remembered size is its real
+ * one, so nothing around it moves. The rebuild discards the chunk anyway.
  */
 function dropComposer(): number {
   const box = composerEl;
   composerEl = null;
   const chunk = box?.closest<HTMLElement>(".rv-chunk");
   if (!box || !chunk) return 0;
+  chunk.style.contentVisibility = "visible";
   const above = rv.body.getBoundingClientRect().top - box.getBoundingClientRect().top;
   const before = chunk.offsetHeight;
   box.remove();

@@ -160,6 +160,55 @@ test.describe("review view", () => {
     expect(await y()).toBeCloseTo(before, 0);
   });
 
+  test("a reload with an unfocused composer in a skipped chunk keeps rows in place", async ({
+    page,
+  }) => {
+    await openLargeDiff(page);
+    await page.locator(".rv-line", { hasText: /large-line-10$/ }).click();
+    const composer = page.locator(".rv-composer");
+    await expect(composer).toBeVisible();
+    // With neither focus nor the click's caret in it, as after the reader
+    // clicks elsewhere, nothing holds the composer's chunk relevant, so once
+    // it is offscreen its rendering is skipped: size containment then answers
+    // its height with the stand-in, which does not shrink as the composer goes.
+    await composer.locator("textarea").evaluate((ta) => {
+      (ta as HTMLTextAreaElement).blur();
+      getSelection()?.removeAllRanges();
+    });
+    const body = page.locator("#review-body");
+    const frames = () =>
+      page.evaluate(
+        () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+      );
+    await body.evaluate((el) => {
+      el.scrollTop = 30_000;
+    });
+    await frames();
+    await expect
+      .poll(() => composer.evaluate((n) => n.checkVisibility({ contentVisibilityAuto: true })))
+      .toBe(false);
+    const row = page.locator(".rv-line", { hasText: /large-line-2000$/ });
+    const y = () => row.evaluate((n) => n.getBoundingClientRect().top);
+    const before = await y();
+    const old = await row.elementHandle();
+    await page.locator("#review-refresh").click();
+    await expect.poll(() => old?.evaluate((n) => n.isConnected)).toBe(false);
+    await expect(composer).toHaveCount(0);
+    expect(await y()).toBeCloseTo(before, 0);
+    // And the composer's chunk was rebuilt at its height without the composer:
+    // rendering it again leaves the row where it was.
+    const top = await body.evaluate((el) => el.scrollTop);
+    await body.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await frames();
+    await body.evaluate((el, t) => {
+      el.scrollTop = t;
+    }, top);
+    await frames();
+    expect(await y()).toBeCloseTo(before, 0);
+  });
+
   test("renders the session's diff against its base", async ({ page }) => {
     const file = page.locator(".rv-file").filter({ hasText: REVIEW_FILE });
     await expect(file.locator(".rv-file-path")).toHaveText(REVIEW_FILE);
