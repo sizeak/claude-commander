@@ -103,7 +103,10 @@ impl StateStore {
         self.generation.subscribe()
     }
 
-    /// The current change generation. Bumped on every persisted mutation.
+    /// The current change generation. Bumped on every persisted mutation, on a
+    /// reload that picked up an external `state.json` change, and on every
+    /// [`notify_change`](Self::notify_change) — which includes every committed
+    /// config change, since `config.toml` is a separate store.
     pub fn generation(&self) -> u64 {
         *self.generation.borrow()
     }
@@ -113,12 +116,15 @@ impl StateStore {
         self.generation.send_modify(|g| *g += 1);
     }
 
-    /// Wake the change-feed without mutating persisted state. Used by
-    /// service-owned background loops (agent-state polling, project pulls) to
-    /// signal that *observable* state changed — e.g. an agent flipped
-    /// Working↔Idle, or a project-pull outcome updated — even though nothing in
-    /// `state.json` was written. Consumers re-read the relevant snapshot on the
-    /// bump, exactly as they do after a real mutation.
+    /// Wake the change-feed without mutating persisted state. Used to signal
+    /// that *observable* state changed even though nothing in `state.json` was
+    /// written: by service-owned background loops (agent-state polling,
+    /// project pulls) when e.g. an agent flipped Working↔Idle or a
+    /// project-pull outcome updated; by clone jobs as they progress; and by
+    /// the config-change listener `CommanderService::new` registers on its
+    /// `ConfigStore`, so a committed config edit or a hot-reloaded hand edit
+    /// wakes clients. Consumers re-read the relevant snapshot on the bump,
+    /// exactly as they do after a real mutation.
     pub fn notify_change(&self) {
         self.bump_generation();
     }

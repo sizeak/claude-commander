@@ -62,8 +62,12 @@ fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
         .allow_headers([AUTHORIZATION, axum::http::header::CONTENT_TYPE])
 }
 
-/// Include successful config/comment/review writes in the observable generation
-/// even when their persistence store is separate from state.json.
+/// Include successful comment/review writes in the observable generation even
+/// though their persistence stores are separate from state.json. Config writes
+/// do not depend on this: `ConfigStore` wakes the feed itself (wired in
+/// `CommanderService::new`), so an edit from the TUI's settings modal reaches
+/// clients too. A config write through a route therefore bumps twice, which
+/// costs a client at most one extra refetch.
 async fn notify_mutation(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: axum::extract::Request,
