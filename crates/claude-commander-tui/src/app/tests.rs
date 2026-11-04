@@ -14035,6 +14035,60 @@ async fn conversation_stream_and_external_recording_request_redraw() {
     assert!(app.process_event(AppEvent::Tick).await);
 }
 
+/// A background result that lands while the in-session switcher is up must
+/// reach the main loop afterwards, not be dropped: `LfsPullFinished` is the only
+/// thing that clears `lfs_pull_in_flight`, so losing it leaves the "LFS" marker
+/// stuck for the rest of the run.
+#[tokio::test]
+async fn background_results_during_the_switcher_are_applied_afterwards() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.lfs_pull_in_flight.insert(sid);
+    app.open_quick_switch_with_mode(PaletteMode::Unified).await;
+
+    let tx = app.event_loop.sender();
+    tx.send(AppEvent::StateUpdate(StateUpdate::LfsPullFinished {
+        session_id: sid,
+    }))
+    .await
+    .unwrap();
+    tx.send(AppEvent::Input(InputEvent::Key(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    ))))
+    .await
+    .unwrap();
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    let exit = tokio::time::timeout(
+        Duration::from_secs(5),
+        app.switcher_event_loop(&mut terminal),
+    )
+    .await
+    .expect("Esc closes the overlay");
+    assert!(matches!(
+        exit,
+        super::switcher::OverlayExit::Cancelled { .. }
+    ));
+    assert!(
+        app.ui_state.lfs_pull_in_flight.contains(&sid),
+        "the overlay must not apply results under the palette"
+    );
+
+    // Back in the main loop: drain what is queued, as `run` does.
+    while let Some(event) = app.event_loop.try_next() {
+        app.process_event(event).await;
+    }
+    assert!(
+        app.ui_state.lfs_pull_in_flight.is_empty(),
+        "LfsPullFinished delivered during the switcher was lost"
+    );
+}
+
 #[tokio::test]
 async fn selecting_a_mutated_session_does_not_start_lfs() {
     let mut app = make_test_app();
