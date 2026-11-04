@@ -7516,6 +7516,124 @@ printf '[{"iid":84,"web_url":"https://gitlab.example/example/repo/-/merge_reques
         }
     }
 
+    /// End-to-end half of the stale-poll fix: `fetch_pr_status` must stamp its
+    /// check when it *starts*, before the host query. A fake `gh` blocks
+    /// mid-query; while it is blocked a newer check lands (PR #99), then the
+    /// in-flight refresh's older PR #42 result arrives and must be dropped.
+    /// Stamping at apply time instead would make the in-flight result look
+    /// newest and overwrite #99.
+    #[cfg(unix)]
+    #[test]
+    fn in_flight_pr_refresh_is_stamped_when_it_starts() {
+        const CHILD: &str = "CC_TEST_PR_STAMP_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            use crate::git::{PrCheckResult, PrInfo};
+            let started = std::path::PathBuf::from(std::env::var_os("CC_TEST_GH_STARTED").unwrap());
+            let release = std::path::PathBuf::from(std::env::var_os("CC_TEST_GH_RELEASE").unwrap());
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let dir = tempfile::TempDir::new_in(root).unwrap();
+                let svc = service(&dir);
+                let project = Project::new("repo", dir.path().to_path_buf(), "main");
+                let session = WorktreeSession::new(
+                    project.id,
+                    "first",
+                    "first",
+                    dir.path().join("first"),
+                    "claude",
+                );
+                let sid = session.id;
+                svc.store()
+                    .mutate(move |state| {
+                        state.add_project(project);
+                        state.add_session(session);
+                    })
+                    .await
+                    .unwrap();
+                let (provider, epoch) = svc.review_provider_snapshot().await;
+
+                let newer = async {
+                    while !started.exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    // The fake gh is now blocked inside the refresh's host query,
+                    // so this check started strictly after the refresh did.
+                    let found = PrCheckResult::Found(PrInfo {
+                        number: 99,
+                        url: "https://github.com/example/repo/pull/99".to_string(),
+                        state: crate::git::PrState::Open,
+                        is_draft: false,
+                        labels: vec![],
+                        review_decision: None,
+                        reviewers: vec![],
+                        base_ref_name: Some("main".to_string()),
+                    });
+                    assert!(
+                        svc.apply_pr_results_at_epoch(
+                            provider,
+                            epoch,
+                            Utc::now(),
+                            vec![(sid, found)]
+                        )
+                        .await
+                        .unwrap()
+                    );
+                    std::fs::write(&release, "go").unwrap();
+                };
+                let (refreshed, ()) = tokio::join!(svc.refresh_pr_status(Some(&sid)), newer);
+                assert_eq!(refreshed.unwrap(), 1);
+                let state = svc.store().read().await;
+                assert_eq!(
+                    state.get_session(&sid).unwrap().pr_number,
+                    Some(99),
+                    "the in-flight refresh's older result overwrote a newer check"
+                );
+            });
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then exit 0; fi
+: > "$CC_TEST_GH_STARTED"
+i=0
+while [ ! -f "$CC_TEST_GH_RELEASE" ]; do
+  i=$((i + 1))
+  if [ "$i" -gt 600 ]; then exit 1; fi
+  sleep 0.05
+done
+printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","state":"OPEN"}]'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "api::tests::in_flight_pr_refresh_is_stamped_when_it_starts",
+                "--nocapture",
+            ])
+            .env(CHILD, dir.path())
+            .env("CC_TEST_GH_STARTED", dir.path().join("started"))
+            .env("CC_TEST_GH_RELEASE", dir.path().join("release"))
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child test failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn pr_refresh_targets_select_only_requested_session() {
         let dir = tempfile::TempDir::new().unwrap();
