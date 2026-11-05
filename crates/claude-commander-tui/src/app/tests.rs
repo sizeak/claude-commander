@@ -3560,6 +3560,161 @@ async fn mouse_file_click_kicks_off_image_fetch() {
     );
 }
 
+/// The review view's file list mirrors the main view's session list: a
+/// one-row heading bar over an unbordered list, beside the bordered body. Two
+/// borders meeting at the split made the join busy.
+#[tokio::test]
+async fn review_file_list_has_a_heading_bar_and_no_border() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let state = DiffReviewState::new(
+        SessionId::new(),
+        "t".to_string(),
+        "base".to_string(),
+        claude_commander_core::git::ParsedDiff {
+            files: vec![modified_image_file("logo.png")],
+        },
+        Vec::new(),
+    );
+    app.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let buf = terminal.backend().buffer();
+    let row = |y: u16| -> String { (0..100).map(|x| buf[(x, y)].symbol()).collect() };
+
+    // The file pane is the left 20%.
+    let pane_w = 20usize;
+    let heading: String = row(0).chars().take(pane_w).collect();
+    assert!(
+        heading.starts_with(" Files (1)"),
+        "heading bar names the pane: {heading:?}"
+    );
+    // No border glyph anywhere in the file pane's columns.
+    for y in 0..19 {
+        let cells: String = row(y).chars().take(pane_w).collect();
+        assert!(
+            !cells.contains(['│', '─', '┌', '╭', '└', '╰', '┐', '╮', '┘', '╯']),
+            "row {y} of the file pane has a border glyph: {cells:?}"
+        );
+    }
+    // The single file sits directly under the heading, flush left (no border
+    // column), and the mouse rect agrees.
+    assert!(row(1).contains("logo.png"), "row 1: {:?}", row(1));
+    assert_eq!(
+        app.ui_state.review_file_list_rect,
+        Some(Rect {
+            x: 0,
+            y: 1,
+            width: 20,
+            height: 18,
+        })
+    );
+    // The body keeps its border, starting right at the split.
+    assert!(
+        matches!(buf[(20, 0)].symbol(), "┌" | "╭"),
+        "body border top-left at the split: {:?}",
+        buf[(20, 0)].symbol()
+    );
+}
+
+/// A review of `n` image files (`f00.png`, `f01.png`, …), every one binary, so
+/// the body never takes its text-render path.
+fn image_review_app(n: usize) -> App {
+    let mut app = make_test_app();
+    let state = DiffReviewState::new(
+        SessionId::new(),
+        "t".to_string(),
+        "base".to_string(),
+        claude_commander_core::git::ParsedDiff {
+            files: (0..n)
+                .map(|i| modified_image_file(&format!("f{i:02}.png")))
+                .collect(),
+        },
+        Vec::new(),
+    );
+    app.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+    app
+}
+
+fn file_pane_text(buf: &ratatui::buffer::Buffer) -> String {
+    let w = buf.area.width;
+    (0..buf.area.height)
+        .map(|y| (0..w / 5).map(|x| buf[(x, y)].symbol()).collect::<String>() + "\n")
+        .collect()
+}
+
+/// The file list scrolls against its own drawn height. It used to borrow the
+/// body's, which a binary (image) body never records — so on a short terminal
+/// the cursor walked off the bottom of the list without it scrolling.
+#[tokio::test]
+async fn review_file_list_follows_the_cursor_while_an_image_is_shown() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = image_review_app(30);
+    // 15 rows: heading, 13 list rows, footer — well under the default height.
+    let mut terminal = Terminal::new(TestBackend::new(100, 15)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    for _ in 0..20 {
+        app.handle_input(InputEvent::Key(key(crossterm::event::KeyCode::Char('j'))))
+            .await;
+    }
+    terminal.draw(|f| app.render(f)).unwrap();
+    let pane = file_pane_text(terminal.backend().buffer());
+    assert!(
+        pane.contains("f20.png"),
+        "the cursor's file must stay on screen:\n{pane}"
+    );
+    // ...and on the bottom drawn row, not a row short of it.
+    let bottom: String = pane.lines().nth(13).unwrap().to_string();
+    assert!(bottom.contains("f20.png"), "bottom list row: {bottom:?}");
+}
+
+/// The heading bar belongs to the file pane: the wheel over it scrolls the
+/// file list (not the diff), and a click on it focuses the list.
+#[tokio::test]
+async fn review_file_list_heading_takes_the_panes_mouse_events() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = image_review_app(30);
+    let mut terminal = Terminal::new(TestBackend::new(100, 15)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let mouse = |kind| MouseEvent {
+        kind,
+        column: 3,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    app.handle_input(InputEvent::Mouse(mouse(MouseEventKind::ScrollDown)))
+        .await;
+    terminal.draw(|f| app.render(f)).unwrap();
+    let pane = file_pane_text(terminal.backend().buffer());
+    assert!(
+        !pane.contains("f00.png"),
+        "wheel over the heading scrolls the file list:\n{pane}"
+    );
+
+    // Move focus to the body, then click the heading to bring it back.
+    app.handle_input(InputEvent::Key(key(crossterm::event::KeyCode::Tab)))
+        .await;
+    let focus = |app: &App| match &app.ui_state.modal {
+        Modal::ReviewDiff(s) => s.file_list_focused(),
+        _ => panic!("review closed"),
+    };
+    assert!(!focus(&app), "Tab moves focus to the body");
+    app.handle_input(InputEvent::Mouse(mouse(MouseEventKind::Down(
+        MouseButton::Left,
+    ))))
+    .await;
+    assert!(focus(&app), "clicking the heading focuses the file list");
+}
+
 // --- ProgramPicker (new-session program selection) ---
 
 fn picker(commands: &[&str], selected: usize) -> ProgramPicker {

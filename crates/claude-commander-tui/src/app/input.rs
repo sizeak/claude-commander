@@ -689,6 +689,7 @@ impl App {
                     // positions the diff cursor, depending on which pane it hits.
                     let body = self.ui_state.review_body_rect;
                     let files = self.ui_state.review_file_list_rect;
+                    let file_pane = self.ui_state.review_file_pane_rect;
                     if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
                         let (col, row) = (mouse.column, mouse.row);
                         // A footer button replays the key it labels through the
@@ -707,16 +708,15 @@ impl App {
                         }
                         let mut selected_file = false;
                         if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
-                            let in_files = files.is_some_and(|r| {
-                                col >= r.x
-                                    && col < r.x + r.width
-                                    && row >= r.y
-                                    && row < r.y + r.height
-                            });
-                            if let Some(rect) = files.filter(|_| in_files) {
+                            if let Some(rect) = files.filter(|r| r.contains((col, row).into())) {
                                 self.ui_state.review_last_click = None;
                                 state.click_file_list_at(col, row, rect);
                                 selected_file = true;
+                            } else if file_pane.is_some_and(|r| r.contains((col, row).into())) {
+                                // The pane's heading bar: focus the list, select
+                                // nothing.
+                                self.ui_state.review_last_click = None;
+                                state.focus_file_list();
                             } else if let Some(rect) = body {
                                 // A double-click on the same body row selects that
                                 // line and opens its comment box (like right-click);
@@ -1688,15 +1688,13 @@ impl App {
             .await;
     }
 
-    /// Whether a review-view wheel event landed over the file-list pane (so it
-    /// should scroll the file list rather than the diff body).
+    /// Whether a review-view wheel event landed over the file-list pane,
+    /// heading bar included (so it should scroll the file list rather than the
+    /// diff body).
     fn review_wheel_over_file_list(&self, mouse: &crossterm::event::MouseEvent) -> bool {
-        self.ui_state.review_file_list_rect.is_some_and(|r| {
-            mouse.column >= r.x
-                && mouse.column < r.x + r.width
-                && mouse.row >= r.y
-                && mouse.row < r.y + r.height
-        })
+        self.ui_state
+            .review_file_pane_rect
+            .is_some_and(|r| r.contains((mouse.column, mouse.row).into()))
     }
 
     /// Mouse wheel while a (non-review) modal is open. List modals move the
