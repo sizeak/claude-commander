@@ -1766,10 +1766,14 @@ pub struct AppUiState {
     /// mouse events can map a screen position to a diff line. `None` unless the
     /// review view is open.
     pub review_body_rect: Option<Rect>,
-    /// Inner rect of the review-diff file-list pane, recorded each render frame
-    /// so mouse events can map a screen position to a tree row. `None` unless
-    /// the review view is open.
+    /// Rows area of the review-diff file-list pane (below its heading bar),
+    /// recorded each render frame so mouse events can map a screen position to
+    /// a tree row. `None` unless the review view is open.
     pub review_file_list_rect: Option<Rect>,
+    /// The whole review-diff file-list pane, heading bar included: where the
+    /// wheel scrolls the list and a click focuses it. `None` unless the review
+    /// view is open.
+    pub review_file_pane_rect: Option<Rect>,
     /// Rows-only area of the open list modal (quick-switch, checkout-branch,
     /// or path-input completions), recorded each render frame so mouse clicks
     /// can be mapped to list indices. `None` when no list modal is open.
@@ -1955,6 +1959,7 @@ impl Default for AppUiState {
             version_warned: HashSet::new(),
             review_body_rect: None,
             review_file_list_rect: None,
+            review_file_pane_rect: None,
             modal_list_rect: None,
             action_buttons: Vec::new(),
             review_buttons: Vec::new(),
