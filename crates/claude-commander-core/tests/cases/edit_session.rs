@@ -51,19 +51,6 @@ async fn deferred_program_survives_wake_and_automatic_recreation() {
             );
             assert_eq!(session.pending_program.as_deref(), Some("cat"));
         }
-        manager
-            .restart_session_fresh_by_tmux_name(&name)
-            .await
-            .unwrap();
-        {
-            let state = store.read().await;
-            let session = state.get_session(&id).unwrap();
-            assert_eq!(
-                session.program, "sleep 60",
-                "automatic recreation must not consume a pending change"
-            );
-            assert_eq!(session.pending_program.as_deref(), Some("cat"));
-        }
         manager.restart_session(&id).await.unwrap();
         assert_eq!(store.read().await.get_session(&id).unwrap().program, "cat");
         manager.kill_session(&id, false).await.unwrap();

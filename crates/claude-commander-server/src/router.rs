@@ -115,10 +115,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/{id}/kill", post(sessions::kill))
         .route("/sessions/{id}/restart", post(sessions::restart))
         .route(
-            "/sessions/{id}/recover-fresh",
-            post(sessions::recover_fresh),
-        )
-        .route(
             "/sessions/{id}/restart-fresh",
             post(sessions::restart_fresh),
         )

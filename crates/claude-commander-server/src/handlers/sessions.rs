@@ -149,16 +149,6 @@ pub async fn restart_fresh(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Recover an exited agent without consuming deferred program settings.
-pub async fn recover_fresh(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let id = parse_session_id(&id)?;
-    run_local(move || async move { state.service.recover_session_fresh(&id).await }).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 /// `DELETE /sessions/{id}` → `delete_session` → 204.
 pub async fn delete(
     State(state): State<AppState>,
@@ -305,7 +295,6 @@ mod tests {
             .route("/sessions/{id}/kill", post(super::kill))
             .route("/sessions/{id}/restart", post(super::restart))
             .route("/sessions/{id}/restart-fresh", post(super::restart_fresh))
-            .route("/sessions/{id}/recover-fresh", post(super::recover_fresh))
             .route(
                 "/sessions/{id}",
                 axum::routing::delete(super::delete).patch(super::patch),

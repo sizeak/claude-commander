@@ -122,14 +122,15 @@ fn iterm2_kitty_override(
     is_iterm2.then_some(ProtocolType::Iterm2)
 }
 
-/// Whether an ended attached session should be auto-restarted fresh.
+/// Whether the attach loop should re-attach to a session that ended under it
+/// (see [`App::on_attach_session_ended`]).
 ///
-/// Shell sessions (suffix `-sh`) and the project-less commander are never
-/// auto-restarted: the commander is absent from `state.sessions`, so a
-/// restart-by-name would fail — it is revived lazily by
+/// Shell sessions (suffix `-sh`) and the project-less commander return to the
+/// list instead: the commander is absent from `state.sessions`, so it is
+/// revived lazily by
 /// [`commander::ensure_session`](claude_commander_core::commander::ensure_session) on next
 /// open. A crash-loop guard stops after 3 consecutive ends.
-fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
+fn should_reattach_ended(session_name: &str, consecutive_ends: u8) -> bool {
     !session_name.ends_with("-sh")
         && session_name != claude_commander_core::commander::COMMANDER_TMUX_NAME
         && consecutive_ends < 3
@@ -2826,14 +2827,49 @@ impl App {
             .or_else(|| self.backends.iter().find_map(|h| find_in(&h.view)))
     }
 
-    /// Attach-loop recovery must preserve deferred program changes on every backend.
-    async fn recover_ended_session(
+    /// The attach loop's answer to its session ending under it: `true` to go
+    /// round again and re-attach to the same target, `false` to return to the
+    /// session list.
+    ///
+    /// It re-attaches rather than restarting the agent. A session ends under
+    /// an attach when it is killed, and the common cause is another viewer
+    /// restarting it, which leaves a new agent already running. A restart here
+    /// was a second restart on top of that one, and (being fresh) lost the
+    /// conversation. A session that is really gone needs no restart either:
+    /// the re-attach goes through the backend's `attach`, which recreates a
+    /// missing session or dead pane (`SessionManager::ensure_attachable`).
+    ///
+    /// A session deleted elsewhere ends an attach too, so ask its backend
+    /// whether it still has the session first: re-attaching to a deleted one
+    /// would only fail, as an error modal for an ordinary deletion.
+    pub(super) async fn on_attach_session_ended(
         &self,
-        session: SessionRef,
-    ) -> claude_commander_core::backend::BResult<()> {
-        self.backend_arc(session.backend)
-            .recover_session_fresh(session.id)
-            .await
+        current: &AttachTarget,
+        consecutive_ends: &mut u8,
+    ) -> bool {
+        let AttachTarget::Session { session, .. } = current else {
+            return false;
+        };
+        let eligible = self
+            .attach_target_name(current)
+            .is_some_and(|n| should_reattach_ended(&n, *consecutive_ends));
+        if !eligible {
+            return false;
+        }
+        let still_there = match self.backend_arc(session.backend).snapshot().await {
+            Ok(snapshot) => snapshot.sessions.iter().any(|s| s.session_id == session.id),
+            Err(e) => {
+                warn!("Cannot re-attach an ended session: {e}");
+                false
+            }
+        };
+        if !still_there {
+            info!("Attached session ended and is gone; returning to the list");
+            return false;
+        }
+        *consecutive_ends += 1;
+        info!("Attached session ended; re-attaching (attempt {consecutive_ends})");
+        true
     }
 
     /// Open an attach connection for `target`: through the owning backend for a
@@ -3532,29 +3568,14 @@ impl App {
                                     continue;
                                 }
                                 claude_commander_core::tmux::AttachResult::SessionEnded => {
-                                    let auto = self.attach_target_name(&current).is_some_and(|n| {
-                                        should_auto_restart_ended(&n, consecutive_ends)
-                                    });
-                                    if let (true, AttachTarget::Session { session, .. }) =
-                                        (auto, &current)
+                                    if self
+                                        .on_attach_session_ended(&current, &mut consecutive_ends)
+                                        .await
                                     {
-                                        consecutive_ends += 1;
-                                        match self.recover_ended_session(*session).await {
-                                            Ok(()) => {
-                                                info!(
-                                                    "Auto-restarted session fresh (attempt {consecutive_ends})"
-                                                );
-                                                claude_commander_core::tmux::flush_stdin();
-                                                continue;
-                                            }
-                                            Err(e) => {
-                                                warn!("Failed to auto-restart session: {e}");
-                                                break;
-                                            }
-                                        }
-                                    } else {
-                                        break;
+                                        claude_commander_core::tmux::flush_stdin();
+                                        continue;
                                     }
+                                    break;
                                 }
                                 other => {
                                     // A transport error (e.g. a remote WS drop)

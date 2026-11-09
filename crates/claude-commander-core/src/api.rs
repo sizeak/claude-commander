@@ -2510,11 +2510,6 @@ impl CommanderService {
         self.manager.restart_session_fresh(id).await
     }
 
-    /// Recover an exited agent without applying deferred settings.
-    pub async fn recover_session_fresh(&self, id: &SessionId) -> Result<()> {
-        self.manager.recover_session_fresh(id).await
-    }
-
     /// Save session settings, optionally restarting fresh when the program changes.
     /// A pending program never changes live-agent detection or stops the existing pane.
     pub async fn edit_session(

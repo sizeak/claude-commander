@@ -377,12 +377,18 @@ pub enum AttachKind {
 }
 
 /// Why an [`AttachConnection`] ended, so a driving loop can decide whether to
-/// auto-restart, return to the tree, etc.
+/// re-attach, return to the tree, etc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachEnd {
-    /// The pane's process/session ended (PTY EOF or the child exited non-clean).
+    /// The tmux session was destroyed. A frontend answers this by attaching
+    /// again, which recreates the session, whereas a [`Self::Detached`] client
+    /// stays away so as not to displace the viewer that took over. So report it
+    /// only on positive evidence (the tmux client's own exit line), never from
+    /// a PTY EOF or exit status alone, which a client displaced by another
+    /// viewer's `attach-session -d` produces too. See `tmux::ClientTail`.
     SessionEnded,
-    /// A clean detach — the attach child was killed but the session lives on.
+    /// The attach client went (an explicit detach, tmux's detach key, another
+    /// viewer displacing it) but the session lives on.
     Detached,
     /// The transport failed.
     Error(String),
@@ -624,10 +630,8 @@ pub trait CommanderBackend: Send + Sync {
     async fn kill_session(&self, id: SessionId) -> BResult<()>;
     async fn restart_session(&self, id: SessionId) -> BResult<()>;
     /// Explicitly reset a session, starting a fresh conversation and applying
-    /// any pending program. Automatic recovery uses `recover_session_fresh`.
+    /// any pending program.
     async fn restart_session_fresh(&self, id: SessionId) -> BResult<()>;
-    /// Automatically recover an exited agent, retaining its live and pending programs.
-    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()>;
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
     async fn edit_session(
         &self,

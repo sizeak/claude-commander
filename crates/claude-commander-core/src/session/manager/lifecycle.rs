@@ -547,28 +547,10 @@ impl SessionManager {
                 .tmux_session_name
                 .clone()
         };
-        self.recreate_session_fresh(&tmux_name, true).await
+        self.recreate_session_fresh(&tmux_name).await
     }
 
-    /// Recover an exited agent without resume, preserving pending settings.
-    pub async fn recover_session_fresh(&self, session_id: &SessionId) -> Result<()> {
-        let tmux_name = self
-            .store
-            .read()
-            .await
-            .get_session(session_id)
-            .ok_or(SessionError::NotFound(*session_id))?
-            .tmux_session_name
-            .clone();
-        self.restart_session_fresh_by_tmux_name(&tmux_name).await
-    }
-
-    /// Name-based automatic recovery; deferred programs await an explicit restart.
-    pub async fn restart_session_fresh_by_tmux_name(&self, tmux_name: &str) -> Result<()> {
-        self.recreate_session_fresh(tmux_name, false).await
-    }
-
-    async fn recreate_session_fresh(&self, tmux_name: &str, apply_pending: bool) -> Result<()> {
+    async fn recreate_session_fresh(&self, tmux_name: &str) -> Result<()> {
         let (session_id, worktree_path, title, program, status_bar) = {
             let state = self.store.read().await;
             let session = state
@@ -580,15 +562,11 @@ impl SessionManager {
                 session.id,
                 session.worktree_path.clone(),
                 session.title.clone(),
-                if apply_pending {
-                    session
-                        .pending_program
-                        .as_ref()
-                        .unwrap_or(&session.program)
-                        .clone()
-                } else {
-                    session.program.clone()
-                },
+                session
+                    .pending_program
+                    .as_ref()
+                    .unwrap_or(&session.program)
+                    .clone(),
                 self.status_bar_info(session, &state),
             )
         };
@@ -638,11 +616,9 @@ impl SessionManager {
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
-                    if apply_pending {
-                        session.program = program.clone();
-                        if session.pending_program.as_deref() == Some(program.as_str()) {
-                            session.pending_program = None;
-                        }
+                    session.program = program.clone();
+                    if session.pending_program.as_deref() == Some(program.as_str()) {
+                        session.pending_program = None;
                     }
                     session.set_status(SessionStatus::Running);
                     // The pane is live again, so clear the hibernation marker to

@@ -94,28 +94,28 @@ fn test_centered_rect() {
 }
 
 #[test]
-fn test_should_auto_restart_regular_claude_session() {
-    // A normal Claude session that just ended should be auto-restarted.
-    assert!(should_auto_restart_ended("my-feature", 0));
+fn test_should_reattach_regular_claude_session() {
+    // A normal Claude session that just ended is re-attached.
+    assert!(should_reattach_ended("my-feature", 0));
 }
 
 #[test]
-fn test_should_not_auto_restart_after_repeated_ends() {
+fn test_should_not_reattach_after_repeated_ends() {
     // Crash-loop guard: stop after 3 consecutive ends.
-    assert!(!should_auto_restart_ended("my-feature", 3));
+    assert!(!should_reattach_ended("my-feature", 3));
 }
 
 #[test]
-fn test_should_not_auto_restart_shell_session() {
+fn test_should_not_reattach_shell_session() {
     // Shell sessions (suffix `-sh`) are not Claude sessions.
-    assert!(!should_auto_restart_ended("my-feature-sh", 0));
+    assert!(!should_reattach_ended("my-feature-sh", 0));
 }
 
 #[test]
-fn test_should_not_auto_restart_commander() {
-    // The commander is project-less and absent from `state.sessions`, so a
-    // restart-by-name would fail; it is revived lazily on next open instead.
-    assert!(!should_auto_restart_ended(
+fn test_should_not_reattach_commander() {
+    // The commander is project-less and absent from `state.sessions`; it is
+    // revived lazily on next open instead.
+    assert!(!should_reattach_ended(
         claude_commander_core::commander::COMMANDER_TMUX_NAME,
         0
     ));
@@ -13912,15 +13912,58 @@ async fn session_edit_options_arriving_during_warning_survive_going_back() {
     assert!(editor.sections.contains(&Some("Review".into())));
 }
 
+/// A session that ends under an attach is most often one another viewer just
+/// restarted, so the agent is already running again. The loop must go round
+/// and attach to it, not restart it a second time: that killed the agent the
+/// other viewer had just started and lost its conversation. A session that
+/// is really gone is revived by the attach itself (`ensure_attachable`).
 #[tokio::test]
-async fn automatic_remote_recovery_does_not_route_through_explicit_reset() {
+async fn an_ended_attach_reattaches_without_restarting_the_agent() {
     let (app, sid) = app_with_remote_session().await;
-    app.recover_ended_session(SessionRef::new(BackendId(1), sid))
-        .await
-        .unwrap();
+    let target = AttachTarget::Session {
+        session: SessionRef::new(BackendId(1), sid),
+        kind: AttachKind::Agent,
+    };
+    let mut ends = 0;
+
+    assert!(app.on_attach_session_ended(&target, &mut ends).await);
+
     let mock = remote_mock(&app, BackendId(1));
-    assert_eq!(mock.recovered_sessions(), vec![sid]);
-    assert!(mock.reset_sessions().is_empty());
+    assert!(mock.reset_sessions().is_empty(), "no fresh restart");
+    assert!(mock.restarted_sessions().is_empty(), "no resume restart");
+    assert_eq!(ends, 1);
+}
+
+/// A session deleted elsewhere also ends the attach. Re-attaching would fail
+/// with an error modal for an ordinary deletion (or race the deletion and
+/// recreate its tmux session), so the loop returns to the list instead.
+#[tokio::test]
+async fn an_attach_whose_session_was_deleted_returns_to_the_list() {
+    let (app, sid) = app_with_remote_session().await;
+    remote_mock(&app, BackendId(1)).set_snapshot(claude_commander_core::api::snapshot_from_state(
+        &AppState::default(),
+    ));
+    let target = AttachTarget::Session {
+        session: SessionRef::new(BackendId(1), sid),
+        kind: AttachKind::Agent,
+    };
+    let mut ends = 0;
+
+    assert!(!app.on_attach_session_ended(&target, &mut ends).await);
+}
+
+/// The crash-loop guard still applies: a session that keeps ending as soon
+/// as it is attached sends the operator back to the list.
+#[tokio::test]
+async fn an_attach_that_keeps_ending_returns_to_the_list() {
+    let (app, sid) = app_with_remote_session().await;
+    let target = AttachTarget::Session {
+        session: SessionRef::new(BackendId(1), sid),
+        kind: AttachKind::Agent,
+    };
+    let mut ends = 3;
+
+    assert!(!app.on_attach_session_ended(&target, &mut ends).await);
 }
 
 #[tokio::test]
