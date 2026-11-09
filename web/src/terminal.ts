@@ -246,7 +246,7 @@ export function haltState(): Halt {
 /**
  * Fed the selected session's status from every poll: an attach that ended
  * "gone" re-attaches once the session has a pane again (another tab or the TUI
- * restarted it, or it was only detached).
+ * restarted it). One that ended "detached" waits for a click instead.
  */
 export function onSelectedStatus(status: string | undefined): void {
   if (halt === "gone" && state.selectedId && recovery.onPoll(status)) {
@@ -383,6 +383,12 @@ function openSocket(id: string): void {
         recovery.onGone();
         hooks.onRecoveryChanged?.();
         stickConn("error", next.message);
+        break;
+      case "detached":
+        // Deliberately no `recovery.onGone()`: its probe would re-attach and
+        // displace whoever took the pane. The user clicks to take it back.
+        halt = "detached";
+        stickConn("error", "detached — click the session to re-attach");
         break;
     }
   };

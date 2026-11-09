@@ -252,13 +252,6 @@ impl CommanderBackend for RemoteBackend {
             .map_err(into_backend_error)
     }
 
-    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()> {
-        self.client
-            .recover_session_fresh(id)
-            .await
-            .map_err(into_backend_error)
-    }
-
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
         self.client
             .delete_session(id)

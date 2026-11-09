@@ -587,25 +587,6 @@ impl RemoteClient {
             .await
     }
 
-    pub async fn recover_session_fresh(&self, id: SessionId) -> ClientResult<()> {
-        match self
-            .post_empty_ok(self.session_url(id, &["recover-fresh"]))
-            .await
-        {
-            Err(crate::ClientError::NotFound) => {
-                let detail = self
-                    .session_detail(&id.as_uuid().to_string(), None)
-                    .await?
-                    .ok_or(crate::ClientError::NotFound)?;
-                if detail.info.pending_program.is_some() {
-                    return Err(crate::ClientError::InvalidRequest("Upgrade this server to recover an exited agent without applying its pending program.".into()));
-                }
-                self.restart_session_fresh(id).await
-            }
-            result => result,
-        }
-    }
-
     pub async fn delete_session(&self, id: SessionId) -> ClientResult<()> {
         self.delete_ok(self.session_url(id, &[])).await
     }
@@ -1602,45 +1583,6 @@ mod session_edit_tests {
                     outcome.warnings
                 );
             }
-        }
-    }
-
-    #[tokio::test]
-    async fn old_server_recovery_falls_back_only_without_a_pending_program() {
-        use axum::{
-            extract::Path,
-            routing::{get, post},
-        };
-        for pending in [None, Some("codex")] {
-            let sid = SessionId::new();
-            let expected_id = sid.as_uuid().to_string();
-            let resets = Arc::new(AtomicUsize::new(0));
-            let recorded = resets.clone();
-            let detail = legacy_detail_json(sid, pending);
-            let app = Router::new()
-                .route(
-                    "/api/sessions/{id}/detail",
-                    get(move |Path(id): Path<String>| {
-                        assert_eq!(id, expected_id);
-                        let detail = detail.clone();
-                        async move { Json(detail) }
-                    }),
-                )
-                .route(
-                    "/api/sessions/{id}/restart-fresh",
-                    post(move || {
-                        recorded.fetch_add(1, Ordering::SeqCst);
-                        async { StatusCode::NO_CONTENT }
-                    }),
-                );
-            let served = crate::test_server::serve(app).await;
-            let client = &served.client;
-            let result = client.recover_session_fresh(sid).await;
-            assert_eq!(result.is_ok(), pending.is_none());
-            assert_eq!(
-                resets.load(Ordering::SeqCst),
-                usize::from(pending.is_none())
-            );
         }
     }
 }

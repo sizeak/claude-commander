@@ -340,7 +340,7 @@ backend as you make them.
 
 ### Editing a session
 
-Use **Edit session** in the terminal command palette (`Shift+E`), browser toolbar or session menu, or Flutter session overflow menu. Edit the name, program, section, stack base and keep-alive setting. Program changes can restart fresh immediately or wait for the next restart, leaving the current agent running. A saved change is applied by the next explicit restart, which starts fresh under the new program (no `--resume`, since the previous agent's conversation belongs to a different CLI); waking a hibernated session and automatic recovery of an exited agent keep the current program until then. Stack-base changes update metadata and the PR target without rebasing git history.
+Use **Edit session** in the terminal command palette (`Shift+E`), browser toolbar or session menu, or Flutter session overflow menu. Edit the name, program, section, stack base and keep-alive setting. Program changes can restart fresh immediately or wait for the next restart, leaving the current agent running. A saved change is applied by the next explicit restart, which starts fresh under the new program (no `--resume`, since the previous agent's conversation belongs to a different CLI); waking a hibernated session and re-attaching to one whose agent exited or was killed keep the current program until then. Stack-base changes update metadata and the PR target without rebasing git history.
 
 ## Web UI
 

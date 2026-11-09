@@ -296,10 +296,6 @@ impl CommanderBackend for LocalBackend {
         Ok(run_local(move || async move { svc.restart_session_fresh(&id).await }).await?)
     }
 
-    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()> {
-        Ok(self.service.recover_session_fresh(&id).await?)
-    }
-
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
         let svc = self.service.clone();
         Ok(run_local(move || async move { svc.delete_session(&id).await }).await?)

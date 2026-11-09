@@ -70,7 +70,6 @@ pub struct MockBackend {
     /// Kept separate from `restarted` so a test can tell a fresh (no-resume)
     /// restart from a resuming one — the whole point of the Reset command.
     reset: Mutex<Vec<SessionId>>,
-    recovered: Mutex<Vec<SessionId>>,
     /// `(session, program)` pairs passed to [`Self::change_program`], for
     /// call-recording asserts.
     program_changes: Mutex<Vec<(SessionId, String)>>,
@@ -163,7 +162,6 @@ impl MockBackend {
             reconciled: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
             reset: Mutex::new(Vec::new()),
-            recovered: Mutex::new(Vec::new()),
             program_changes: Mutex::new(Vec::new()),
             session_edits: Mutex::new(Vec::new()),
             base_changes: Mutex::new(Vec::new()),
@@ -266,11 +264,6 @@ impl MockBackend {
         self.reset.lock().unwrap().clone()
     }
 
-    /// Sessions automatically recovered without applying pending settings.
-    pub fn recovered_sessions(&self) -> Vec<SessionId> {
-        self.recovered.lock().unwrap().clone()
-    }
-
     /// How many times [`Self::request_pr_refresh`] has been called.
     pub fn pr_refresh_count(&self) -> usize {
         *self.pr_refresh_calls.lock().unwrap()
@@ -371,6 +364,13 @@ impl MockBackend {
     /// Every workspace mutation received, in call order.
     pub fn workspace_calls(&self) -> Vec<MockWorkspaceCall> {
         self.workspace_calls.lock().unwrap().clone()
+    }
+
+    /// Replace the served snapshot, as a change made elsewhere would (another
+    /// frontend deleting a session, say), and bump the change feed.
+    pub fn set_snapshot(&self, snapshot: Snapshot) {
+        *self.snapshot.lock().unwrap() = snapshot;
+        self.gen_tx.send_modify(|g| *g = g.wrapping_add(1));
     }
 
     /// Record a workspace call, apply `f` to the served snapshot, and bump the
@@ -542,12 +542,6 @@ impl CommanderBackend for MockBackend {
     async fn restart_session_fresh(&self, id: SessionId) -> BResult<()> {
         self.guard()?;
         self.reset.lock().unwrap().push(id);
-        Ok(())
-    }
-
-    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()> {
-        self.guard()?;
-        self.recovered.lock().unwrap().push(id);
         Ok(())
     }
 
