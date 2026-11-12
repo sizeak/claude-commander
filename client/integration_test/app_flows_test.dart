@@ -25,6 +25,7 @@ import 'package:claude_commander_client/src/rust/frb_generated.dart';
 import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:flutter/material.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
+import 'package:claude_commander_client/services/window_service.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -142,6 +143,19 @@ void main() {
       reason: 'dialog "$confirmLabel" dismissed',
     );
   }
+
+  // The bundled engine must be able to dlopen window_manager's native core,
+  // libcnativeapi.so — what linux/CMakeLists.txt's patchelf step is for. When it
+  // cannot, every window call throws and WindowController's failure containment
+  // swallows it, so nothing else here would notice.
+  testWidgets("window_manager's native library loads from the bundle", (
+    tester,
+  ) async {
+    final service = createWindowService()!;
+    await service.initialize();
+    final bounds = await service.getBounds();
+    expect(bounds.width, greaterThan(0));
+  });
 
   testWidgets('full journey: connect, create, terminal + rejoin, review, '
       'lifecycle', (tester) async {

@@ -270,13 +270,15 @@ class NativeWindowService implements WindowService {
 /// make [WindowController] save the grown size, so every launch would open 90px
 /// bigger than the last.
 ///
-/// For [deadline] after the first frame (when the runner shows the window), every
-/// resize that does not match the armed size is answered with the armed bounds
-/// again — every one, not just the first, because that gutter can land after an
-/// earlier map-time configure. A matching resize is inert, so the fix's own echo
-/// does not loop. Full screen and maximized are left alone (they are the
-/// screen's size) without disarming. Once [deadline] has passed it disarms, which
-/// is what keeps it from ever answering a user's resize.
+/// For [deadline] after the first frame (when the runner shows the window),
+/// every resize that leaves the window larger than the armed size in *both*
+/// dimensions is answered with the armed bounds again — every one, not just the
+/// first, because the gutter can land after an earlier map-time configure.
+/// Anything else is left alone even inside the deadline: a resize to the armed
+/// size is the fix's own echo, and one that shrinks or grows a single dimension
+/// is the user dragging an edge, a compositor clamping the window to a smaller
+/// screen, or a tile. Full screen and maximized are left alone (they are the
+/// screen's size) without disarming. Once [deadline] has passed it disarms.
 ///
 /// Pure, so `flutter test` covers it; [NativeWindowService] feeds it each native
 /// resize with the window's state.
@@ -318,11 +320,11 @@ class LaunchBoundsFix {
       return null;
     }
     if (fullScreen || maximized) return null;
-    if (size.width.round() == bounds.width &&
-        size.height.round() == bounds.height) {
-      return null;
-    }
-    return bounds;
+    // Only growth in both dimensions is the drift; see the class doc.
+    final grown =
+        size.width.round() > bounds.width &&
+        size.height.round() > bounds.height;
+    return grown ? bounds : null;
   }
 }
 

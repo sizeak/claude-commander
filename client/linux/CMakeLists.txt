@@ -136,6 +136,12 @@ if(PATCHELF_EXECUTABLE)
       message(FATAL_ERROR \"patchelf --add-rpath failed: \${patchelf_result}\")
     endif()
     " COMPONENT Runtime)
+else()
+  message(WARNING
+    "patchelf not found: the bundled Flutter engine keeps its own RUNPATH, and "
+    "if it has one (nixpkgs' does) native assets such as libcnativeapi.so "
+    "cannot be loaded, so every window call fails silently. Install patchelf "
+    "and delete this build directory (find_program caches the miss).")
 endif()
 
 foreach(bundled_library ${PLUGIN_BUNDLED_LIBRARIES})

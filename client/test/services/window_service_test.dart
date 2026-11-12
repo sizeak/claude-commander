@@ -133,6 +133,18 @@ void main() {
       expect(resize(shown(), size: asked), isNull);
     });
 
+    test('leaves alone any resize that is not growth in both dimensions', () {
+      // The drift it exists for always grows both. Anything else is the user
+      // dragging an edge, a compositor clamping to a smaller screen, or a
+      // tile — not to be fought, even inside the deadline.
+      final fix = shown();
+      expect(resize(fix, size: const Size(800, 600)), isNull, reason: 'clamp');
+      expect(resize(fix, size: const Size(1200, 700)), isNull, reason: 'edge');
+      expect(resize(fix, size: const Size(1000, 760)), isNull, reason: 'edge');
+      expect(resize(fix, size: const Size(1200, 500)), isNull, reason: 'tile');
+      expect(fix.armed, isTrue);
+    });
+
     test('keeps correcting until the deadline, not just once', () {
       // Why every resize, not one: see the LaunchBoundsFix doc.
       final fix = shown();

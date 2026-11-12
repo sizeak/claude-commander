@@ -327,8 +327,9 @@ Six details that are load-bearing rather than incidental:
   window whose title bar is hidden 90px wider and taller than a pre-show
   `bounds` asked for (apparently the gutter its own shadow reserves, added after
   map), and the map's resize events would then save the grown size — so every
-  launch opened bigger than the last. `LaunchBoundsFix` answers any mismatched
-  resize in the first 2s after the first frame with the saved bounds;
+  launch opened bigger than the last. `LaunchBoundsFix` answers a resize that
+  grows both dimensions in the first 2s after the first frame with the saved
+  bounds;
   `integration_test/native_window_test.dart` pins the drift. Launching straight
   into full screen or maximized skips the fix, and whether leaving that state
   restores the exact saved size is untested.
