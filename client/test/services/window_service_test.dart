@@ -57,9 +57,7 @@ void main() {
       );
     });
 
-    // nativeapi has no "unmaximized" event: leaving maximize and leaving
-    // minimize both arrive as one `restored`. Inferring which from the previous event goes wrong whenever an
-    // event was missed, so the window is asked instead.
+    // One `restored` covers both unmaximize and unminimize; see translateWindowEvent.
     test('a restore that leaves the window unmaximized is an unmaximize', () {
       expect(
         translate(const native.WindowRestoredEvent(windowId: _id)),
@@ -136,8 +134,7 @@ void main() {
     });
 
     test('keeps correcting until the deadline, not just once', () {
-      // nativeapi can add its shadow gutter after an earlier map-time
-      // configure; a one-shot fix spent on that first resize would miss it.
+      // Why every resize, not one: see the LaunchBoundsFix doc.
       final fix = shown();
       expect(resize(fix), bounds);
       expect(resize(fix, size: asked), isNull);
@@ -147,10 +144,7 @@ void main() {
     test('expires, so a user resize after launch is never snapped back', () {
       final fix = shown();
       expect(
-        resize(
-          fix,
-          at: LaunchBoundsFix.defaultWindow + const Duration(seconds: 1),
-        ),
+        resize(fix, at: LaunchBoundsFix.deadline + const Duration(seconds: 1)),
         isNull,
       );
       expect(fix.armed, isFalse);
@@ -174,10 +168,7 @@ void main() {
       final fix = LaunchBoundsFix()..arm(bounds);
       expect(resize(fix), bounds);
       expect(
-        resize(
-          fix,
-          at: LaunchBoundsFix.defaultWindow + const Duration(seconds: 1),
-        ),
+        resize(fix, at: LaunchBoundsFix.deadline + const Duration(seconds: 1)),
         isNull,
       );
     });

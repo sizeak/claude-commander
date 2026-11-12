@@ -158,6 +158,7 @@ WindowService? createWindowService() => switch (defaultTargetPlatform) {
 class NativeWindowService implements WindowService {
   final _events = StreamController<WindowEvent>.broadcast();
   native.Window? _window;
+  final _launchBounds = LaunchBoundsFix();
 
   /// The window [initialize] resolved. Throws before then, which
   /// [WindowController]'s failure containment turns into a no-op.
@@ -183,6 +184,8 @@ class NativeWindowService implements WindowService {
         (throw StateError('nativeapi found no window'));
     _window = window;
     window.addListener((event) {
+      // `armed` only spares the FFI reads below once the fix is spent;
+      // `onResize` is the real guard.
       if (event is native.WindowResizedEvent && _launchBounds.armed) {
         final relaunch = _launchBounds.onResize(
           size: event.newSize.toSize(),
@@ -218,23 +221,23 @@ class NativeWindowService implements WindowService {
   Future<WindowBounds> getBounds() async =>
       WindowBounds.fromRect(_target.bounds.toRect());
 
-  final _launchBounds = LaunchBoundsFix();
-
   @override
   Future<void> setBounds(WindowBounds bounds) async {
     final window = _target;
     // Still applied now, so the first frame is near the right size; the
     // re-apply after mapping makes it exact. See [LaunchBoundsFix].
     window.bounds = bounds.rect.toNative();
-    if (!window.isVisible && defaultTargetPlatform == TargetPlatform.linux) {
-      _launchBounds.arm(bounds);
+    if (defaultTargetPlatform != TargetPlatform.linux || window.isVisible) {
+      return;
+    }
+    if (!_launchBounds.armed) {
       // The runner shows the window on the first frame, so that is when the
-      // deadline starts — not at whatever native event happens to come first,
-      // which for a window that got no focus might be the user's own resize.
+      // deadline starts (see [LaunchBoundsFix.markShown]).
       WidgetsBinding.instance.waitUntilFirstFrameRasterized.then(
         (_) => _launchBounds.markShown(DateTime.now()),
       );
     }
+    _launchBounds.arm(bounds);
   }
 
   @override
@@ -267,24 +270,26 @@ class NativeWindowService implements WindowService {
 /// make [WindowController] save the grown size, so every launch would open 90px
 /// bigger than the last.
 ///
-/// For [window] after the first frame (when the runner shows the window), every
+/// For [deadline] after the first frame (when the runner shows the window), every
 /// resize that does not match the armed size is answered with the armed bounds
 /// again — every one, not just the first, because that gutter can land after an
 /// earlier map-time configure. A matching resize is inert, so the fix's own echo
 /// does not loop. Full screen and maximized are left alone (they are the
-/// screen's size) without disarming. Once [window] has passed it disarms, which
+/// screen's size) without disarming. Once [deadline] has passed it disarms, which
 /// is what keeps it from ever answering a user's resize.
 ///
 /// Pure, so `flutter test` covers it; [NativeWindowService] feeds it each native
 /// resize with the window's state.
+///
+/// A workaround, not a fix: neither `hasShadow = false` nor `setFrameless`
+/// avoids the gutter, which nativeapi keeps reserved while its shadow is
+/// disabled. Remove it once a cnativeapi release maps a pre-show `bounds`
+/// exactly — `integration_test/native_window_test.dart` is the check.
 class LaunchBoundsFix {
-  static const defaultWindow = Duration(seconds: 2);
+  static const deadline = Duration(seconds: 2);
 
-  final Duration window;
   WindowBounds? _bounds;
   DateTime? _shownAt;
-
-  LaunchBoundsFix({this.window = defaultWindow});
 
   bool get armed => _bounds != null;
 
@@ -308,7 +313,7 @@ class LaunchBoundsFix {
     final bounds = _bounds;
     if (bounds == null || !visible) return null;
     final shownAt = _shownAt ??= now;
-    if (now.difference(shownAt) > window) {
+    if (now.difference(shownAt) > deadline) {
       _bounds = null;
       return null;
     }
