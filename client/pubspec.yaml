@@ -36,7 +36,7 @@ dependencies:
   cupertino_icons: ^2.0.0
   rust_lib_claude_commander_client:
     path: rust_builder
-  flutter_rust_bridge: 2.11.1
+  flutter_rust_bridge: 2.13.0
   flutter_secure_storage: ^10.3.1
   # Non-secret device preferences (the selected theme). Deliberately not
   # flutter_secure_storage: routing a UI preference through the Android Keystore
