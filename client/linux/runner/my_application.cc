@@ -15,8 +15,8 @@ struct _MyApplication {
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
 // The window's name in the title bar, the taskbar and the alt-tab switcher.
-// `WindowController.windowTitle` on the Dart side must match: the plugin re-sets
-// the window title when it restores a saved frame.
+// `WindowController.windowTitle` on the Dart side must match: it sets the title
+// again at startup, before the window is shown.
 static constexpr char kWindowTitle[] = "Claude Commander";
 
 // Called when first Flutter frame received.

@@ -321,6 +321,27 @@
         # host-only one — so each shell's shim exposes exactly its own targets.
         clientRustupShim = mkRustupShim clientRust;
         clientCiRustupShim = mkRustupShim fenixStable;
+        # Native-assets hooks (cnativeapi's `hook/build.dart`, pulled in by
+        # window_manager 0.6) shell out to `pkg-config gtk+-3.0 x11 xi`, but
+        # Flutter runs every hook in a *filtered* environment: hooks_runner's
+        # `includeHookEnvironmentVariable` (hooks_runner-1.5.0
+        # lib/src/build_runner/build_runner.dart:595-639) passes PATH, HOME,
+        # LIBCLANG_PATH and any `NIX_*` variable, and drops everything else —
+        # including the `PKG_CONFIG_PATH_FOR_TARGET` the shell's pkg-config
+        # wrapper reads. So the hook finds no `.pc` files and the native build,
+        # and with it every `flutter test`, fails. The shellHooks stash the path
+        # under a `NIX_` name that survives the filter, and this pkg-config,
+        # first on PATH, restores it only when the real variable is missing — in
+        # the shell itself it is a pass-through.
+        hookPkgConfig = clientPkgs.writeShellScriptBin "pkg-config" ''
+          if [ -z "''${PKG_CONFIG_PATH_FOR_TARGET:-}" ] && [ -n "''${NIX_HOOK_PKG_CONFIG_PATH_FOR_TARGET:-}" ]; then
+            export PKG_CONFIG_PATH_FOR_TARGET="$NIX_HOOK_PKG_CONFIG_PATH_FOR_TARGET"
+          fi
+          exec ${clientPkgs.pkg-config}/bin/pkg-config "$@"
+        '';
+        hookPkgConfigShellHook = ''
+          export NIX_HOOK_PKG_CONFIG_PATH_FOR_TARGET="''${PKG_CONFIG_PATH_FOR_TARGET:-}"
+        '';
         # Host toolchain plus the Apple targets and none of the Android ones, for
         # the darwin CI job. `clientRust` would work, but its Android SDK/NDK is
         # gigabytes a macOS runner downloads and never opens — and the GitHub
@@ -663,6 +684,7 @@
           # any use to the other — macOS renders through Cocoa and builds via
           # Xcode, which is a host prerequisite rather than a Nix input.
           buildInputs = [
+            hookPkgConfig  # ahead of pkg-config; see its definition
             clientRust
             clientRustupShim
             clientAndroid.androidsdk
@@ -707,6 +729,11 @@
             pcre2
             libepoxy
             libx11
+            # window_manager 0.6 builds nativeapi's C++ core through a native-
+            # assets hook (cnativeapi `hook/build.dart`), which asks pkg-config
+            # for `gtk+-3.0 x11 xi` — on *every* `flutter test`, not only the
+            # desktop build. Without Xi the hook fails and no test runs.
+            libxi
             # flutter_secure_storage_linux links libsecret (needs a running
             # secret service at runtime, e.g. gnome-keyring).
             libsecret
@@ -715,7 +742,7 @@
           # Used by flutter_rust_bridge / bindgen to find libclang.
           LIBCLANG_PATH = "${clientPkgs.llvmPackages.libclang.lib}/lib";
 
-          shellHook = ''
+          shellHook = hookPkgConfigShellHook + ''
             export ANDROID_HOME="${clientAndroidSdkRoot}"
             export ANDROID_SDK_ROOT="${clientAndroidSdkRoot}"
             export ANDROID_NDK_ROOT="${clientAndroidSdkRoot}/ndk/${clientNdkVersion}"
@@ -816,6 +843,7 @@ ${clientPkgs.lib.optionalString clientPkgs.stdenv.hostPlatform.isDarwin clientAp
         devShells.clientCi = clientPkgs.mkShell {
           name = "claude-commander-client-ci";
           buildInputs = [
+            hookPkgConfig  # ahead of pkg-config; see its definition
             # Host-only Rust (no Android targets): cargokit cross-builds the
             # cdylib for the linux desktop target during the e2e bundle build.
             fenixStable
@@ -841,6 +869,7 @@ ${clientPkgs.lib.optionalString clientPkgs.stdenv.hostPlatform.isDarwin clientAp
             pcre2
             libepoxy
             libx11
+            libxi  # nativeapi's hook; see devShells.client
             libsecret
             mesa
             libGL
@@ -851,7 +880,7 @@ ${clientPkgs.lib.optionalString clientPkgs.stdenv.hostPlatform.isDarwin clientAp
           # no GPU present (Mesa llvmpipe).
           LIBGL_ALWAYS_SOFTWARE = "1";
 
-          shellHook = ''
+          shellHook = hookPkgConfigShellHook + ''
             export LD_LIBRARY_PATH="${clientPkgs.lib.makeLibraryPath [ clientPkgs.libGL clientPkgs.mesa clientPkgs.libepoxy ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             flutter config --no-analytics >/dev/null 2>&1 || true
             flutter config --enable-linux-desktop >/dev/null 2>&1 || true

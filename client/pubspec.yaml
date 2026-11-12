@@ -66,7 +66,7 @@ dependencies:
   # only linux/macos/windows, so every call is behind the `WindowService` seam
   # (`services/window_service.dart`) — on Android the plugin is simply absent and
   # an ungated call would throw `MissingPluginException`.
-  window_manager: ^0.5.2
+  window_manager: ^0.6.0
 
 dev_dependencies:
   flutter_test:
