@@ -12,12 +12,11 @@
 //
 // It opens a window on your desktop, maximizes it, takes it full screen and
 // minimizes it last.
-import 'dart:async';
-
 import 'package:claude_commander_client/services/window_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:window_manager/window_manager.dart' as native;
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -37,8 +36,13 @@ void main() {
     // borderless, then hide the title bar. The size must come back as saved,
     // or every launch drifts.
     const saved = WindowBounds(x: 40, y: 40, width: 1000, height: 700);
-    await service.setTitleBarHidden(true);
+    expect(
+      native.WindowManager.instance.getCurrent()!.isVisible,
+      isFalse,
+      reason: 'the launch path under test is the pre-show one',
+    );
     await service.setBounds(saved);
+    await service.setTitleBarHidden(true);
     await tester.pumpWidget(const MaterialApp(home: Scaffold()));
     await _settle(tester);
     final restored = await service.getBounds();

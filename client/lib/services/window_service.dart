@@ -182,7 +182,14 @@ class NativeWindowService implements WindowService {
         (throw StateError('nativeapi found no window'));
     _window = window;
     window.addListener((event) {
-      if (event is native.WindowResizedEvent) _reapplyPendingBounds(window);
+      final relaunch = _launchBounds.onEvent(
+        isResize: event is native.WindowResizedEvent,
+        visible: window.isVisible,
+        fullScreen: window.isFullScreen,
+        maximized: window.isMaximized,
+        now: DateTime.now(),
+      );
+      if (relaunch != null) window.bounds = relaunch.rect.toNative();
       final translated = translateWindowEvent(
         event,
         isMaximized: () => window.isMaximized,
@@ -208,35 +215,17 @@ class NativeWindowService implements WindowService {
   Future<WindowBounds> getBounds() async =>
       WindowBounds.fromRect(_target.bounds.toRect());
 
-  /// Bounds set before the window was first shown, to apply again once it is.
-  ///
-  /// nativeapi 0.5.10 on Linux sizes a not-yet-mapped window wrongly while the
-  /// title bar is hidden: the window maps 90px wider and taller than asked
-  /// (45px a side — the gutter its own hidden-title-bar shadow reserves, counted
-  /// once too often), in either order of `titleBarStyle` and `bounds`, while
-  /// the same call after mapping is exact. Pinned by
-  /// `integration_test/native_window_test.dart`. Left alone it compounds: the
-  /// map's own resize events make [WindowController] save the grown size, so
-  /// every launch would open 90px bigger than the last.
-  WindowBounds? _pendingBounds;
-
-  void _reapplyPendingBounds(native.Window window) {
-    final pending = _pendingBounds;
-    if (pending == null) return;
-    _pendingBounds = null;
-    // A window restored straight into full screen (or maximized by the
-    // desktop) is the screen's size, and resizing it would fight that state.
-    if (window.isFullScreen || window.isMaximized) return;
-    window.bounds = pending.rect.toNative();
-  }
+  final _launchBounds = LaunchBoundsFix();
 
   @override
   Future<void> setBounds(WindowBounds bounds) async {
     final window = _target;
     // Still applied now, so the first frame is near the right size; the
-    // re-apply on the first resize after mapping makes it exact.
+    // re-apply after mapping makes it exact. See [LaunchBoundsFix].
     window.bounds = bounds.rect.toNative();
-    _pendingBounds = window.isVisible ? null : bounds;
+    if (!window.isVisible && defaultTargetPlatform == TargetPlatform.linux) {
+      _launchBounds.arm(bounds);
+    }
   }
 
   @override
@@ -256,6 +245,63 @@ class NativeWindowService implements WindowService {
   Future<void> close() async => _target.close();
 }
 
+/// Re-applies bounds set before the window was first shown, once it has been.
+///
+/// nativeapi 0.5.10 on Linux sizes a not-yet-mapped window wrongly while the
+/// title bar is hidden: it maps 90px wider and taller than asked (45px a side,
+/// the gutter its own hidden-title-bar shadow reserves, counted once too
+/// often), while the same call after mapping is exact. Pinned by
+/// `integration_test/native_window_test.dart`. Left alone it compounds: the
+/// map's own resize events make [WindowController] save the grown size, so
+/// every launch would open 90px bigger than the last.
+///
+/// The fix fires on the first resize *after* the window is visible — a resize
+/// of a realized but unmapped window (X11 can send one) would spend it too
+/// early — and expires [window] after the window is first seen visible. The
+/// expiry is what keeps it from ever answering a user's own resize: a window
+/// that maps at exactly the asked size sends no resize at all, and without a
+/// deadline the fix would wait for, and undo, the user's first drag.
+///
+/// Pure, so `flutter test` covers it; [NativeWindowService] feeds it the
+/// window's state with each native event.
+class LaunchBoundsFix {
+  static const defaultWindow = Duration(seconds: 2);
+
+  final Duration window;
+  WindowBounds? _bounds;
+  DateTime? _shownAt;
+
+  LaunchBoundsFix({this.window = defaultWindow});
+
+  void arm(WindowBounds bounds) {
+    _bounds = bounds;
+    _shownAt = null;
+  }
+
+  /// The bounds to apply now, or null.
+  WindowBounds? onEvent({
+    required bool isResize,
+    required bool visible,
+    required bool fullScreen,
+    required bool maximized,
+    required DateTime now,
+  }) {
+    final bounds = _bounds;
+    if (bounds == null || !visible) return null;
+    final shownAt = _shownAt ??= now;
+    if (now.difference(shownAt) > window) {
+      _bounds = null;
+      return null;
+    }
+    if (!isResize) return null;
+    _bounds = null;
+    // A window restored straight into full screen, or maximized by the
+    // desktop, is the screen's size; resizing it would fight that state.
+    if (fullScreen || maximized) return null;
+    return bounds;
+  }
+}
+
 /// Translates one nativeapi window event into the [WindowEvent] the controller
 /// consumes, or null for an event it has no use for.
 ///
@@ -265,7 +311,9 @@ class NativeWindowService implements WindowService {
 /// Rather than infer which from the events seen before — wrong whenever one was
 /// missed — a restore asks the window, via [isMaximized], what it now is. A
 /// restore that changes nothing is harmless: the controller drops an event that
-/// matches its state.
+/// matches its state. The probe reads the window when Dart *receives* the event
+/// (`NativeCallable.listener` delivers asynchronously), not when it happened —
+/// fine here, since the controller wants the window's current state anyway.
 ///
 /// Linux reports only the continuous move/resize stream, one event per change,
 /// with no settled "drag finished" event, which is why the controller debounces.

@@ -310,7 +310,7 @@ and each theme draws its own: a flat 32px bar in Mission Control, a run of block
 (`MIN` / `MAX` / `CLOSE`) in LCARS. Drag the bar to move the window, double-click to
 maximise.
 
-Four details that are load-bearing rather than incidental:
+Six details that are load-bearing rather than incidental:
 
 - **`titleBarStyle = hidden`, never `setFrameless`.** On the runner's header-bar
   path — Wayland, and X11 under GNOME — the former hides the header *widget* and

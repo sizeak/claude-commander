@@ -102,4 +102,70 @@ void main() {
       }
     });
   });
+
+  group('LaunchBoundsFix', () {
+    const bounds = WindowBounds(x: 0, y: 0, width: 1000, height: 700);
+    final t0 = DateTime(2026);
+
+    WindowBounds? event(
+      LaunchBoundsFix fix, {
+      bool resize = true,
+      bool visible = true,
+      bool fullScreen = false,
+      bool maximized = false,
+      Duration at = Duration.zero,
+    }) => fix.onEvent(
+      isResize: resize,
+      visible: visible,
+      fullScreen: fullScreen,
+      maximized: maximized,
+      now: t0.add(at),
+    );
+
+    test('re-applies once, on the first resize after the window shows', () {
+      final fix = LaunchBoundsFix()..arm(bounds);
+      expect(event(fix), bounds);
+      expect(event(fix), isNull, reason: 'one shot');
+    });
+
+    test('a resize while the window is still unmapped keeps it pending', () {
+      // X11 can configure a realized, unmapped window; spending the fix there
+      // would let the map's own resize bring the grown size back.
+      final fix = LaunchBoundsFix()..arm(bounds);
+      expect(event(fix, visible: false), isNull);
+      expect(event(fix), bounds);
+    });
+
+    test('expires when no resize follows the show, so a later user resize '
+        'is never snapped back', () {
+      // A window that maps at exactly the asked size sends no resize at all.
+      final fix = LaunchBoundsFix()..arm(bounds);
+      expect(event(fix, resize: false), isNull); // e.g. focus, on show
+      expect(
+        event(
+          fix,
+          at: LaunchBoundsFix.defaultWindow + const Duration(seconds: 1),
+        ),
+        isNull,
+      );
+    });
+
+    test('a resize inside the window after the show still re-applies', () {
+      final fix = LaunchBoundsFix()..arm(bounds);
+      expect(event(fix, resize: false), isNull);
+      expect(event(fix, at: const Duration(milliseconds: 300)), bounds);
+    });
+
+    test('never fights a full-screen or maximized window', () {
+      final full = LaunchBoundsFix()..arm(bounds);
+      expect(event(full, fullScreen: true), isNull);
+      expect(event(full), isNull, reason: 'spent, not deferred');
+      final max = LaunchBoundsFix()..arm(bounds);
+      expect(event(max, maximized: true), isNull);
+    });
+
+    test('does nothing unless armed', () {
+      expect(event(LaunchBoundsFix()), isNull);
+    });
+  });
 }
