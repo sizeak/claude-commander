@@ -1,7 +1,8 @@
 import 'dart:async';
-import 'dart:ui' show Rect;
+import 'dart:ui' show Rect, Size;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show WidgetsBinding;
 import 'package:window_manager/window_manager.dart' as native;
 
 /// A change to the window that did **not** come from us.
@@ -182,14 +183,16 @@ class NativeWindowService implements WindowService {
         (throw StateError('nativeapi found no window'));
     _window = window;
     window.addListener((event) {
-      final relaunch = _launchBounds.onEvent(
-        isResize: event is native.WindowResizedEvent,
-        visible: window.isVisible,
-        fullScreen: window.isFullScreen,
-        maximized: window.isMaximized,
-        now: DateTime.now(),
-      );
-      if (relaunch != null) window.bounds = relaunch.rect.toNative();
+      if (event is native.WindowResizedEvent && _launchBounds.armed) {
+        final relaunch = _launchBounds.onResize(
+          size: event.newSize.toSize(),
+          visible: window.isVisible,
+          fullScreen: window.isFullScreen,
+          maximized: window.isMaximized,
+          now: DateTime.now(),
+        );
+        if (relaunch != null) window.bounds = relaunch.rect.toNative();
+      }
       final translated = translateWindowEvent(
         event,
         isMaximized: () => window.isMaximized,
@@ -225,6 +228,12 @@ class NativeWindowService implements WindowService {
     window.bounds = bounds.rect.toNative();
     if (!window.isVisible && defaultTargetPlatform == TargetPlatform.linux) {
       _launchBounds.arm(bounds);
+      // The runner shows the window on the first frame, so that is when the
+      // deadline starts — not at whatever native event happens to come first,
+      // which for a window that got no focus might be the user's own resize.
+      WidgetsBinding.instance.waitUntilFirstFrameRasterized.then(
+        (_) => _launchBounds.markShown(DateTime.now()),
+      );
     }
   }
 
@@ -247,23 +256,27 @@ class NativeWindowService implements WindowService {
 
 /// Re-applies bounds set before the window was first shown, once it has been.
 ///
-/// nativeapi 0.5.10 on Linux sizes a not-yet-mapped window wrongly while the
-/// title bar is hidden: it maps 90px wider and taller than asked (45px a side,
-/// the gutter its own hidden-title-bar shadow reserves, counted once too
-/// often), while the same call after mapping is exact. Pinned by
-/// `integration_test/native_window_test.dart`. Left alone it compounds: the
-/// map's own resize events make [WindowController] save the grown size, so
-/// every launch would open 90px bigger than the last.
+/// nativeapi 0.5.10 on Linux sizes a not-yet-shown window wrongly while the
+/// title bar is hidden: it maps 90px wider and taller than asked, while the same
+/// call after it is shown is exact. Pinned by
+/// `integration_test/native_window_test.dart`. The cause appears to be the
+/// gutter nativeapi reserves for its own hidden-title-bar shadow, which it adds
+/// after map (`window_shadow_linux.h`, `AddGutter`, reached from `Decide` on the
+/// compositor's first state event or a 300ms timeout) — unconfirmed beyond the
+/// matching 45px a side. Left alone it compounds: the map's own resize events
+/// make [WindowController] save the grown size, so every launch would open 90px
+/// bigger than the last.
 ///
-/// The fix fires on the first resize *after* the window is visible — a resize
-/// of a realized but unmapped window (X11 can send one) would spend it too
-/// early — and expires [window] after the window is first seen visible. The
-/// expiry is what keeps it from ever answering a user's own resize: a window
-/// that maps at exactly the asked size sends no resize at all, and without a
-/// deadline the fix would wait for, and undo, the user's first drag.
+/// For [window] after the first frame (when the runner shows the window), every
+/// resize that does not match the armed size is answered with the armed bounds
+/// again — every one, not just the first, because that gutter can land after an
+/// earlier map-time configure. A matching resize is inert, so the fix's own echo
+/// does not loop. Full screen and maximized are left alone (they are the
+/// screen's size) without disarming. Once [window] has passed it disarms, which
+/// is what keeps it from ever answering a user's resize.
 ///
-/// Pure, so `flutter test` covers it; [NativeWindowService] feeds it the
-/// window's state with each native event.
+/// Pure, so `flutter test` covers it; [NativeWindowService] feeds it each native
+/// resize with the window's state.
 class LaunchBoundsFix {
   static const defaultWindow = Duration(seconds: 2);
 
@@ -273,14 +286,20 @@ class LaunchBoundsFix {
 
   LaunchBoundsFix({this.window = defaultWindow});
 
+  bool get armed => _bounds != null;
+
   void arm(WindowBounds bounds) {
     _bounds = bounds;
     _shownAt = null;
   }
 
-  /// The bounds to apply now, or null.
-  WindowBounds? onEvent({
-    required bool isResize,
+  /// Starts the deadline. Called once the first frame — and so the window — is
+  /// up; a visible resize that arrives first starts it instead.
+  void markShown(DateTime now) => _shownAt ??= now;
+
+  /// The bounds to apply in answer to a resize to [size], or null.
+  WindowBounds? onResize({
+    required Size size,
     required bool visible,
     required bool fullScreen,
     required bool maximized,
@@ -293,11 +312,11 @@ class LaunchBoundsFix {
       _bounds = null;
       return null;
     }
-    if (!isResize) return null;
-    _bounds = null;
-    // A window restored straight into full screen, or maximized by the
-    // desktop, is the screen's size; resizing it would fight that state.
     if (fullScreen || maximized) return null;
+    if (size.width.round() == bounds.width &&
+        size.height.round() == bounds.height) {
+      return null;
+    }
     return bounds;
   }
 }

@@ -131,7 +131,10 @@ if(PATCHELF_EXECUTABLE)
     execute_process(
       COMMAND \"${PATCHELF_EXECUTABLE}\" --add-rpath \"\$ORIGIN\"
         \"${INSTALL_BUNDLE_LIB_DIR}/${FLUTTER_LIBRARY_NAME}\"
-      COMMAND_ERROR_IS_FATAL ANY)
+      RESULT_VARIABLE patchelf_result)
+    if(NOT patchelf_result EQUAL 0)
+      message(FATAL_ERROR \"patchelf --add-rpath failed: \${patchelf_result}\")
+    endif()
     " COMPONENT Runtime)
 endif()
 

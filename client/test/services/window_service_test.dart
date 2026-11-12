@@ -57,9 +57,8 @@ void main() {
       );
     });
 
-    // nativeapi has no "unmaximized" event: leaving maximize, leaving minimize
-    // and (on some compositors) leaving full screen all arrive as one
-    // `restored`. Inferring which from the previous event goes wrong whenever an
+    // nativeapi has no "unmaximized" event: leaving maximize and leaving
+    // minimize both arrive as one `restored`. Inferring which from the previous event goes wrong whenever an
     // event was missed, so the window is asked instead.
     test('a restore that leaves the window unmaximized is an unmaximize', () {
       expect(
@@ -105,44 +104,77 @@ void main() {
 
   group('LaunchBoundsFix', () {
     const bounds = WindowBounds(x: 0, y: 0, width: 1000, height: 700);
+    const asked = Size(1000, 700);
+    const grown = Size(1090, 790);
     final t0 = DateTime(2026);
 
-    WindowBounds? event(
+    WindowBounds? resize(
       LaunchBoundsFix fix, {
-      bool resize = true,
+      Size size = grown,
       bool visible = true,
       bool fullScreen = false,
       bool maximized = false,
       Duration at = Duration.zero,
-    }) => fix.onEvent(
-      isResize: resize,
+    }) => fix.onResize(
+      size: size,
       visible: visible,
       fullScreen: fullScreen,
       maximized: maximized,
       now: t0.add(at),
     );
 
-    test('re-applies once, on the first resize after the window shows', () {
-      final fix = LaunchBoundsFix()..arm(bounds);
-      expect(event(fix), bounds);
-      expect(event(fix), isNull, reason: 'one shot');
+    LaunchBoundsFix shown() => LaunchBoundsFix()
+      ..arm(bounds)
+      ..markShown(t0);
+
+    test('re-applies a resize that misses the armed size', () {
+      expect(resize(shown()), bounds);
     });
 
-    test('a resize while the window is still unmapped keeps it pending', () {
-      // X11 can configure a realized, unmapped window; spending the fix there
-      // would let the map's own resize bring the grown size back.
-      final fix = LaunchBoundsFix()..arm(bounds);
-      expect(event(fix, visible: false), isNull);
-      expect(event(fix), bounds);
+    test('ignores a resize that already matches, so its own echo is inert', () {
+      expect(resize(shown(), size: asked), isNull);
     });
 
-    test('expires when no resize follows the show, so a later user resize '
-        'is never snapped back', () {
-      // A window that maps at exactly the asked size sends no resize at all.
-      final fix = LaunchBoundsFix()..arm(bounds);
-      expect(event(fix, resize: false), isNull); // e.g. focus, on show
+    test('keeps correcting until the deadline, not just once', () {
+      // nativeapi can add its shadow gutter after an earlier map-time
+      // configure; a one-shot fix spent on that first resize would miss it.
+      final fix = shown();
+      expect(resize(fix), bounds);
+      expect(resize(fix, size: asked), isNull);
+      expect(resize(fix, at: const Duration(milliseconds: 400)), bounds);
+    });
+
+    test('expires, so a user resize after launch is never snapped back', () {
+      final fix = shown();
       expect(
-        event(
+        resize(
+          fix,
+          at: LaunchBoundsFix.defaultWindow + const Duration(seconds: 1),
+        ),
+        isNull,
+      );
+      expect(fix.armed, isFalse);
+    });
+
+    test('the deadline runs from the first frame even when no other event '
+        'arrived, so the first event minutes later is a user resize', () {
+      // A window that maps at exactly the asked size and gets no focus event
+      // sends nothing at all until the user acts.
+      final fix = shown();
+      expect(resize(fix, at: const Duration(minutes: 3)), isNull);
+    });
+
+    test('a resize before the window shows is ignored and keeps it armed', () {
+      final fix = LaunchBoundsFix()..arm(bounds);
+      expect(resize(fix, visible: false), isNull);
+      expect(fix.armed, isTrue);
+    });
+
+    test('a visible resize before the first-frame mark starts the clock', () {
+      final fix = LaunchBoundsFix()..arm(bounds);
+      expect(resize(fix), bounds);
+      expect(
+        resize(
           fix,
           at: LaunchBoundsFix.defaultWindow + const Duration(seconds: 1),
         ),
@@ -150,22 +182,18 @@ void main() {
       );
     });
 
-    test('a resize inside the window after the show still re-applies', () {
-      final fix = LaunchBoundsFix()..arm(bounds);
-      expect(event(fix, resize: false), isNull);
-      expect(event(fix, at: const Duration(milliseconds: 300)), bounds);
-    });
-
-    test('never fights a full-screen or maximized window', () {
-      final full = LaunchBoundsFix()..arm(bounds);
-      expect(event(full, fullScreen: true), isNull);
-      expect(event(full), isNull, reason: 'spent, not deferred');
-      final max = LaunchBoundsFix()..arm(bounds);
-      expect(event(max, maximized: true), isNull);
+    test('never resizes a full-screen or maximized window, but stays armed '
+        'for the rest of the window', () {
+      final fix = shown();
+      expect(resize(fix, fullScreen: true), isNull);
+      expect(resize(fix, maximized: true), isNull);
+      expect(fix.armed, isTrue);
     });
 
     test('does nothing unless armed', () {
-      expect(event(LaunchBoundsFix()), isNull);
+      final fix = LaunchBoundsFix()..markShown(t0);
+      expect(fix.armed, isFalse);
+      expect(resize(fix), isNull);
     });
   });
 }
