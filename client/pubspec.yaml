@@ -62,11 +62,13 @@ dependencies:
   # requirement here for flutter_rust_bridge, so no new toolchain.
   super_clipboard: ^0.9.1
   # Desktop window control: fullscreen, hiding the native title bar, and reading
-  # back the window's geometry so it can be restored on the next launch. Declares
-  # only linux/macos/windows, so every call is behind the `WindowService` seam
-  # (`services/window_service.dart`) — on Android the plugin is simply absent and
-  # an ungated call would throw `MissingPluginException`.
-  window_manager: ^0.5.2
+  # back the window's geometry so it can be restored on the next launch. Built on
+  # nativeapi over FFI, not a platform channel. window_manager declares only
+  # linux/macos/windows, but nativeapi also declares Android, so its native
+  # library is in the APK too: an ungated call there would reach native code
+  # rather than throw. Every call therefore stays behind the `WindowService` seam
+  # (`services/window_service.dart`), which has no Android implementation.
+  window_manager: ^0.6.0
 
 dev_dependencies:
   flutter_test:

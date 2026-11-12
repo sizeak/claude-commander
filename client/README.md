@@ -310,21 +310,44 @@ and each theme draws its own: a flat 32px bar in Mission Control, a run of block
 (`MIN` / `MAX` / `CLOSE`) in LCARS. Drag the bar to move the window, double-click to
 maximise.
 
-Four details that are load-bearing rather than incidental:
+Six details that are load-bearing rather than incidental:
 
-- **`setTitleBarStyle(hidden)`, never `setAsFrameless`.** On the runner's header-bar
+- **`titleBarStyle = hidden`, never `setFrameless`.** On the runner's header-bar
   path — Wayland, and X11 under GNOME — the former hides the header *widget* and
   leaves the window GTK-decorated, so its invisible client-side resize border
-  survives and borderless needs no resize grips of its own. **This does not hold on
-  the other path**: with no header bar the plugin falls through to
-  `gtk_window_set_decorated(false)` (`window_manager_plugin.cc:512-519`), which is
-  what `setAsFrameless` does, so borderless on X11 outside GNOME leaves a window
-  with no resize border — resizable only via the WM (KWin: `Meta`+right-drag).
-  Deliberately not accommodated: X11 is deprecated and out of scope here. Switch
-  the frame to Native in Settings if you are on it.
+  survives and borderless needs no resize grips of its own (cnativeapi 0.5.10,
+  `cxx_impl/src/platform/linux/window_linux.cpp:2103-2120`). **This does not hold on
+  the other path**: with no header bar nativeapi falls through to
+  `gtk_window_set_decorated(false)` (same file, `:2106-2112`), which is what
+  `setFrameless` does too (`:2055-2068`), so borderless on X11 outside GNOME leaves
+  a window with no resize border — resizable only via the WM (KWin:
+  `Meta`+right-drag). Deliberately not accommodated: X11 is deprecated and out of
+  scope here. Switch the frame to Native in Settings if you are on it.
+- **Bounds set before the window is shown are applied twice.** nativeapi maps a
+  window whose title bar is hidden 90px wider and taller than a pre-show
+  `bounds` asked for (apparently the gutter its own shadow reserves, added after
+  map), and the map's resize events would then save the grown size — so every
+  launch opened bigger than the last. `LaunchBoundsFix` answers a resize that
+  grows both dimensions in the first 2s after the first frame with the saved
+  bounds;
+  `integration_test/native_window_test.dart` pins the drift. Launching straight
+  into full screen or maximized skips the fix, and whether leaving that state
+  restores the exact saved size is untested.
 - **Window *position* is X11-only.** Wayland does not let a client place its own
-  window, so the `x,y` in `commander.window.bounds` is honoured only on X11; the
-  size restores everywhere.
+  window — nativeapi positions through `gtk_window_move` (`window_linux.cpp:1956-1962`),
+  which a Wayland compositor ignores — so the `x,y` in `commander.window.bounds` is
+  honoured only on X11; the size restores everywhere.
+- **The native library has to be findable.** window_manager 0.6 is a Dart
+  native-assets package: its C++ core (`libcnativeapi.so`) is compiled by a build
+  hook — on every `flutter test` as well as every desktop build, which is why the
+  Linux client shells carry `libxi` and a `pkg-config` that survives the hook
+  runner's environment filter (see `hookPkgConfig` in `flake.nix`) — and loaded by
+  bare name at run time. `linux/CMakeLists.txt` adds `$ORIGIN` to the bundled
+  engine's RUNPATH so that load finds it; without that, every window call fails and
+  the controller's failure containment makes the window silently ignore them.
+  Run `flutter test integration_test/native_window_test.dart -d linux` on a real
+  desktop after touching any of this: it drives the real window, which unit tests
+  cannot (they load no native library).
 - **F11 is a `FocusManager` *early* key handler.** The terminal view maps F11 to
   `TerminalKey.f11` and forwards the escape sequence to the remote PTY, so the key
   has to be taken before the focus walk reaches it. Neither obvious option does
@@ -338,7 +361,8 @@ Four details that are load-bearing rather than incidental:
   screen, and restoring them would leave nothing to un-maximise back to.
 
 No Android path: `window_manager` declares only linux/macos/windows, so
-`createWindowService()` returns null there — which means no `WindowController`, and
+`createWindowService()` returns null there (nativeapi itself also declares
+Android, so its hook still builds `libcnativeapi.so` into the APK; nothing calls it) — which means no `WindowController`, and
 therefore no window bar and no key handler, without a platform check in the UI.
 
 ## Build and run
