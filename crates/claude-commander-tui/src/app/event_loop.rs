@@ -103,25 +103,17 @@ impl App {
                     self.spawn_preview_update();
                 }
             }
+            AppEvent::StateUpdate(StateUpdate::PreviewReady {
+                spawned_at,
+                session_id,
+                project_id,
+                payload,
+            }) => {
+                return self.apply_preview_ready(spawned_at, session_id, project_id, payload);
+            }
             AppEvent::StateUpdate(update) => {
-                let changed = match &update {
-                    StateUpdate::PreviewReady {
-                        preview_content,
-                        shell_content,
-                        diff_info,
-                        ..
-                    } => {
-                        &self.ui_state.preview_content != preview_content
-                            || &self.ui_state.shell_content != shell_content
-                            || self.ui_state.diff_info.diff != diff_info.diff
-                            || self.ui_state.diff_info.files_changed != diff_info.files_changed
-                            || self.ui_state.diff_info.lines_added != diff_info.lines_added
-                            || self.ui_state.diff_info.lines_removed != diff_info.lines_removed
-                    }
-                    _ => true,
-                };
                 self.handle_state_update(update).await;
-                return changed;
+                return true;
             }
             AppEvent::Tick => {
                 self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);

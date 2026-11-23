@@ -1,6 +1,6 @@
 //! Kanban board model.
 //!
-//! Pure transformation from per-backend [`Snapshot`] DTOs + section
+//! Pure transformation from per-backend [`Snapshot`](crate::api::Snapshot) DTOs + section
 //! config into the board the TUI renders: a project sidebar (grouped per
 //! server when more than one backend is configured) plus one column per
 //! section ("In Progress" catch-all first, then the configured sections in
@@ -18,14 +18,16 @@ use std::ops::Range;
 
 use chrono::{DateTime, Utc};
 
-use crate::api::{SessionInfo, Snapshot};
+use crate::api::SessionInfo;
 use crate::backend::{BackendId, ConnectionState};
 use crate::session::{
     AgentState, IN_PROGRESS, ProjectId, SectionConfig, SessionId, SessionListItem, SessionNode,
     SessionStatus, resolve_stack_parent, stack_root, stack_top,
 };
+use claude_commander_viewmodel::workspace::ScopedSnapshot;
 
-/// One backend's contribution to the board: its cached snapshot plus the
+/// One backend's contribution to the board: the projects and sessions it shows
+/// (its whole snapshot, or the active workspace's share) plus the
 /// identity/health rendered on its sidebar heading.
 pub struct BoardBackendInput<'a> {
     pub backend: BackendId,
@@ -35,7 +37,7 @@ pub struct BoardBackendInput<'a> {
     /// as a non-blocking `⚠` on its sidebar heading (independent of
     /// `connection`, so a mismatched-but-healthy server still shows its cards).
     pub version_warning: Option<crate::backend::VersionMismatch>,
-    pub snapshot: &'a Snapshot,
+    pub scoped: &'a ScopedSnapshot<'a>,
     pub agent_states: &'a BTreeMap<SessionId, AgentState>,
 }
 
@@ -294,16 +296,16 @@ pub fn build_board(
     let mut pending_by_section: HashMap<String, Vec<PendingCard>> = HashMap::new();
 
     for input in inputs {
-        let snapshot = input.snapshot;
-        let by_id: HashMap<SessionId, &SessionInfo> = snapshot
+        let by_id: HashMap<SessionId, &SessionInfo> = input
+            .scoped
             .sessions
             .iter()
-            .map(|s| (s.session_id, s))
+            .map(|s| (s.session_id, *s))
             .collect();
 
         // Stable project order. Ties on `name` fall back to id so ordering
         // never depends on snapshot ordering quirks.
-        let mut sorted_projects: Vec<&crate::api::ProjectInfo> = snapshot.projects.iter().collect();
+        let mut sorted_projects: Vec<&crate::api::ProjectInfo> = input.scoped.projects.clone();
         sorted_projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
 
         let group_start = projects.len();
@@ -787,7 +789,7 @@ mod tests {
                 name: "local".to_string(),
                 connection: ConnectionState::Connected,
                 version_warning: None,
-                snapshot,
+                scoped: &ScopedSnapshot::all(snapshot),
                 agent_states,
             }],
             sections,

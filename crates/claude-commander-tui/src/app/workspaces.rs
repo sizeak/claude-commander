@@ -14,8 +14,6 @@
 //! writes its tag to the owning backend only, which defines the workspace there
 //! if it has to (core's self-heal).
 
-use std::borrow::Cow;
-
 use super::*;
 use claude_commander_core::api::Snapshot;
 use claude_commander_protocol::workspace::{
@@ -51,28 +49,23 @@ impl WorkspaceFilter {
         }
     }
 
-    /// `snapshot` narrowed to the filter's projects and their sessions. A
-    /// session whose project is missing reads as Main (the viewmodel's rule), so
-    /// it stays visible somewhere.
-    pub(crate) fn scope<'a>(&self, snapshot: &'a Snapshot) -> Cow<'a, Snapshot> {
-        let Self::Only(active) = self else {
-            return Cow::Borrowed(snapshot);
-        };
-        let active = active.as_deref();
-        let mut scoped = Snapshot {
-            projects: Vec::new(),
-            sessions: Vec::new(),
-            ..snapshot.clone()
-        };
-        scoped.projects = vm::projects_in_workspace(snapshot, active)
-            .into_iter()
-            .cloned()
-            .collect();
-        scoped.sessions = vm::sessions_in_workspace(snapshot, active)
-            .into_iter()
-            .cloned()
-            .collect();
-        Cow::Owned(scoped)
+    /// The projects and sessions of `snapshot` the filter shows, borrowed.
+    /// A session whose project is missing reads as Main (the viewmodel's
+    /// rule), so it stays visible somewhere.
+    pub(crate) fn scope<'a>(&self, snapshot: &'a Snapshot) -> vm::ScopedSnapshot<'a> {
+        match self {
+            Self::All => vm::ScopedSnapshot::all(snapshot),
+            Self::Only(active) => vm::ScopedSnapshot::in_workspace(snapshot, active.as_deref()),
+        }
+    }
+
+    /// How many sessions [`Self::scope`] keeps, without building it — the
+    /// status bar asks every frame.
+    pub(crate) fn session_count(&self, snapshot: &Snapshot) -> usize {
+        match self {
+            Self::All => snapshot.sessions.len(),
+            Self::Only(active) => vm::sessions_in_workspace(snapshot, active.as_deref()).count(),
+        }
     }
 }
 

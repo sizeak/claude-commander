@@ -2,6 +2,7 @@
 
 use super::*;
 use claude_commander_core::api::{ProjectInfo, SessionInfo, Snapshot};
+use claude_commander_viewmodel::workspace::ScopedSnapshot;
 use std::collections::BTreeMap;
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
@@ -227,33 +228,9 @@ impl App {
                 spawned_at,
                 session_id,
                 project_id,
-                preview_content,
-                shell_content,
-                diff_info,
+                payload,
             } => {
-                // Release the in-flight guard iff this result owns it. Keyed on
-                // the spawn token, not the selection: a result whose guard has
-                // since been replaced must not clear the newer fetch's guard,
-                // and a result for a selection that moved on *without* a
-                // respawn still has to release its own, or the next fetch is
-                // blocked until the 5s backstop.
-                let owns_fetch = self.ui_state.preview_update_spawned_at == Some(spawned_at);
-                if owns_fetch {
-                    self.ui_state.preview_update_spawned_at = None;
-                }
-                // Only paint if the same thing is still selected — otherwise the
-                // pane would briefly show another session's output. Session and
-                // project ids are unique across backends, so comparing ids is
-                // enough.
-                let still_selected = self.ui_state.selected_session_id.map(|r| r.id) == session_id
-                    && self.ui_state.selected_project_id.map(|(_, p)| p) == project_id;
-                if owns_fetch && still_selected {
-                    self.ui_state.preview_content = preview_content;
-                    self.ui_state.shell_content = shell_content;
-                    self.ui_state.diff_info = diff_info;
-                } else {
-                    debug!("Discarding stale PreviewReady (selection changed)");
-                }
+                self.apply_preview_ready(spawned_at, session_id, project_id, payload);
             }
             StateUpdate::EnrichedPrReady {
                 spawned_at,
@@ -845,6 +822,40 @@ impl App {
         }
     }
 
+    /// Paint a finished preview fetch if it is still wanted, returning whether
+    /// the frame needs redrawing. A discarded result never does, so the event
+    /// loop decides the redraw here, after the ownership and selection checks.
+    pub(super) fn apply_preview_ready(
+        &mut self,
+        spawned_at: Instant,
+        session_id: Option<SessionId>,
+        project_id: Option<ProjectId>,
+        payload: super::PreviewPayload,
+    ) -> bool {
+        // Release the in-flight guard iff this result owns it. Keyed on
+        // the spawn token, not the selection: a result whose guard has
+        // since been replaced must not clear the newer fetch's guard,
+        // and a result for a selection that moved on *without* a
+        // respawn still has to release its own, or the next fetch is
+        // blocked until the 5s backstop.
+        let owns_fetch = self.ui_state.preview_update_spawned_at == Some(spawned_at);
+        if owns_fetch {
+            self.ui_state.preview_update_spawned_at = None;
+        }
+        // Only paint if the same thing is still selected — otherwise the
+        // pane would briefly show another session's output. Session and
+        // project ids are unique across backends, so comparing ids is
+        // enough.
+        let still_selected = self.ui_state.selected_session_id.map(|r| r.id) == session_id
+            && self.ui_state.selected_project_id.map(|(_, p)| p) == project_id;
+        if owns_fetch && still_selected {
+            payload.apply(&mut self.ui_state)
+        } else {
+            debug!("Discarding stale PreviewReady (selection changed)");
+            false
+        }
+    }
+
     /// Fold the workspace snapshot's per-project pull status into the render-side
     /// `project_pull_blocked` badge map. The background pull loop maintains the
     /// status server-side; only [`PullStatus::Blocked`] surfaces a badge (an
@@ -993,7 +1004,7 @@ impl App {
         let sections = self.config.effective_sections();
         // The board and its project sidebar show the active workspace only.
         let filter = self.workspace_filter();
-        let scoped: Vec<std::borrow::Cow<'_, Snapshot>> = self
+        let scoped: Vec<ScopedSnapshot<'_>> = self
             .backends
             .iter()
             .map(|h| filter.scope(&h.view.snapshot))
@@ -1002,7 +1013,7 @@ impl App {
             .backends
             .iter()
             .zip(&scoped)
-            .map(|(h, snapshot)| {
+            .map(|(h, scoped)| {
                 let version_warning = if h.id == claude_commander_core::backend::LOCAL_BACKEND_ID {
                     None
                 } else {
@@ -1016,7 +1027,7 @@ impl App {
                     name: h.backend.descriptor().name,
                     connection: h.view.connection.clone(),
                     version_warning,
-                    snapshot,
+                    scoped,
                     agent_states: &h.view.agent_states.states,
                 }
             })
@@ -1088,7 +1099,7 @@ impl App {
         // Every list block — Recent and each backend's tree — shows the
         // active workspace only.
         let filter = self.workspace_filter();
-        let scoped: Vec<std::borrow::Cow<'_, Snapshot>> = self
+        let scoped: Vec<ScopedSnapshot<'_>> = self
             .backends
             .iter()
             .map(|h| filter.scope(&h.view.snapshot))
@@ -1103,9 +1114,9 @@ impl App {
         let recent_limit = self.config.recent_sessions_limit as usize;
         if recent_limit > 0 {
             let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, SessionListItem)> = Vec::new();
-            for (handle, snapshot) in self.backends.iter().zip(&scoped) {
+            for (handle, scoped) in self.backends.iter().zip(&scoped) {
                 let agent_states = &handle.view.agent_states.states;
-                for s in &snapshot.sessions {
+                for s in &scoped.sessions {
                     if let Some(at) = s.last_attached_at {
                         candidates.push((
                             at,
@@ -1149,8 +1160,7 @@ impl App {
         // divider); the per-backend tree appended below is the scrolling list.
         let recents_len = items.len();
 
-        for (handle, snapshot) in self.backends.iter().zip(&scoped) {
-            let snapshot: &Snapshot = snapshot;
+        for (handle, scoped) in self.backends.iter().zip(&scoped) {
             let agent_states = &handle.view.agent_states.states;
             if !single_backend {
                 let version_warning =
@@ -1158,7 +1168,7 @@ impl App {
                         None
                     } else {
                         claude_commander_core::backend::server_version_mismatch(
-                            &snapshot.server.version,
+                            &handle.view.snapshot.server.version,
                             claude_commander_core::VERSION,
                         )
                     };
@@ -1172,7 +1182,7 @@ impl App {
             let mut backend_items = match self.ui_state.view_mode {
                 claude_commander_core::config::ViewMode::SectionGrouped => {
                     build_section_grouped_items(
-                        snapshot,
+                        scoped,
                         &self.config.sections,
                         self.config.in_progress_limit,
                         agent_states,
@@ -1182,7 +1192,7 @@ impl App {
                 }
                 claude_commander_core::config::ViewMode::SectionStacks => {
                     build_stacked_section_items(
-                        snapshot,
+                        scoped,
                         &self.config.sections,
                         self.config.in_progress_limit,
                         agent_states,
@@ -1191,7 +1201,7 @@ impl App {
                     )
                 }
                 // ProjectGrouped (and Board, unreachable here) use the flat view.
-                _ => build_project_grouped_items(snapshot, agent_states),
+                _ => build_project_grouped_items(scoped, agent_states),
             };
             items.append(&mut backend_items);
         }
@@ -1237,7 +1247,7 @@ impl App {
         let stack_chain = self.ui_state.selected_session_id.map(|sref| {
             let snapshot = &self.view_for(sref.backend).snapshot;
             let session_id = sref.id;
-            let by_id = session_index(snapshot);
+            let by_id = session_index(&snapshot.sessions);
             let mut entries: Vec<StackChainEntry> = Vec::new();
             if let Some(session) = by_id.get(&session_id).copied() {
                 let project_sessions: Vec<&SessionInfo> = snapshot
@@ -1344,19 +1354,11 @@ pub(super) fn order_recent<T>(
         .collect()
 }
 
-/// Index a snapshot's sessions by id for O(1) lookup during stack-chain
-/// building.
-fn session_index(
-    snapshot: &claude_commander_core::api::Snapshot,
-) -> std::collections::HashMap<
-    claude_commander_core::session::SessionId,
-    &claude_commander_core::api::SessionInfo,
-> {
-    snapshot
-        .sessions
-        .iter()
-        .map(|s| (s.session_id, s))
-        .collect()
+/// Index sessions by id for O(1) lookup during stack-chain building.
+fn session_index<'a>(
+    sessions: impl IntoIterator<Item = &'a SessionInfo>,
+) -> std::collections::HashMap<SessionId, &'a SessionInfo> {
+    sessions.into_iter().map(|s| (s.session_id, s)).collect()
 }
 
 /// Whether the board's worktree rows span more than one distinct program
@@ -1537,20 +1539,25 @@ const CURRENT_SUFFIX: &str = " — current base";
 /// sessions. In Progress is exempt while some project has no sessions at all:
 /// it is the only section that lists such a project, so hiding it would make
 /// the project unreachable — the usual state of a freshly populated workspace.
-fn hides_empty_section(snapshot: &Snapshot, name: &str, count: usize, hide_empty: bool) -> bool {
+fn hides_empty_section(
+    scoped: &ScopedSnapshot<'_>,
+    name: &str,
+    count: usize,
+    hide_empty: bool,
+) -> bool {
     hide_empty
         && count == 0
         && !(name == claude_commander_core::session::IN_PROGRESS
-            && snapshot.projects.iter().any(|p| p.session_ids.is_empty()))
+            && scoped.projects.iter().any(|p| p.session_ids.is_empty()))
 }
 
 pub(super) fn build_project_grouped_items(
-    snapshot: &Snapshot,
+    scoped: &ScopedSnapshot<'_>,
     agent_states: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionListItem> {
-    let by_id = session_index(snapshot);
+    let by_id = session_index(scoped.sessions.iter().copied());
     let mut items = Vec::new();
-    let mut projects: Vec<&ProjectInfo> = snapshot.projects.iter().collect();
+    let mut projects: Vec<&ProjectInfo> = scoped.projects.clone();
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     for project in projects {
@@ -1587,24 +1594,24 @@ pub(super) fn build_project_grouped_items(
 }
 
 pub(super) fn build_section_grouped_items(
-    snapshot: &Snapshot,
+    scoped: &ScopedSnapshot<'_>,
     sections: &[claude_commander_core::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
     hide_empty_sections: bool,
 ) -> Vec<SessionListItem> {
-    let by_id = session_index(snapshot);
-    let groups = claude_commander_core::session::build_sections(&snapshot.sessions, sections);
+    let by_id = session_index(scoped.sessions.iter().copied());
+    let groups = claude_commander_core::session::build_sections(&scoped.sessions, sections);
 
-    let mut projects: Vec<&ProjectInfo> = snapshot.projects.iter().collect();
+    let mut projects: Vec<&ProjectInfo> = scoped.projects.clone();
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut items = Vec::new();
     let mut first_section = true;
     for group in groups.iter() {
         if hides_empty_section(
-            snapshot,
+            scoped,
             &group.name,
             group.sessions.len(),
             hide_empty_sections,
@@ -1681,7 +1688,7 @@ pub(super) fn build_section_grouped_items(
 }
 
 pub(super) fn build_stacked_section_items(
-    snapshot: &Snapshot,
+    scoped: &ScopedSnapshot<'_>,
     sections: &[claude_commander_core::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
@@ -1702,11 +1709,11 @@ pub(super) fn build_stacked_section_items(
         order: Vec<(SessionId, bool)>,
     }
 
-    let by_id = session_index(snapshot);
+    let by_id = session_index(scoped.sessions.iter().copied());
 
     // Stable project order. Ties on `name` (unusual but possible) fall
     // back to project id so we never depend on HashMap iteration order.
-    let mut projects: Vec<&ProjectInfo> = snapshot.projects.iter().collect();
+    let mut projects: Vec<&ProjectInfo> = scoped.projects.clone();
     projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
 
     // section_name → project_id → Vec<GroupRender>
@@ -1723,9 +1730,10 @@ pub(super) fn build_stacked_section_items(
         // Sort by (created_at, id) so any downstream max_by_key on this
         // slice (e.g. fan-out children with identical created_at in
         // `stack_top`) picks a deterministic winner.
-        let mut project_sessions: Vec<&SessionInfo> = snapshot
+        let mut project_sessions: Vec<&SessionInfo> = scoped
             .sessions
             .iter()
+            .copied()
             .filter(|s| s.project_id == project.id)
             .collect();
         if project_sessions.is_empty() {
@@ -1836,7 +1844,7 @@ pub(super) fn build_stacked_section_items(
             })
             .unwrap_or(0);
 
-        if hides_empty_section(snapshot, section_name, total_count, hide_empty_sections) {
+        if hides_empty_section(scoped, section_name, total_count, hide_empty_sections) {
             continue;
         }
         if !first_section {
@@ -2181,8 +2189,14 @@ mod stack_order_tests {
         let agent_states = BTreeMap::new();
         let collapsed = std::collections::HashSet::new();
 
-        let items =
-            build_stacked_section_items(&state, &sections, None, &agent_states, &collapsed, false);
+        let items = build_stacked_section_items(
+            &ScopedSnapshot::all(&state),
+            &sections,
+            None,
+            &agent_states,
+            &collapsed,
+            false,
+        );
 
         // Walk items: find the "Review" header, then base+child should follow.
         let found_review = items.iter().any(
@@ -2256,7 +2270,7 @@ mod stack_order_tests {
         let state = appstate_from(vec![root.clone(), child.clone()]);
         let sections = vec![section_named("In Review"), section_named("Drafts")];
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2311,7 +2325,7 @@ mod stack_order_tests {
             section_named("Pinned"),
         ];
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2368,7 +2382,7 @@ mod stack_order_tests {
             section_named("Pinned"),
         ];
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2442,7 +2456,7 @@ mod stack_order_tests {
             section_named("Pinned"),
         ];
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2489,7 +2503,7 @@ mod stack_order_tests {
         let state = appstate_from(vec![s.clone()]);
         let sections = vec![section_named("Open"), section_named("Review")];
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2538,7 +2552,7 @@ mod stack_order_tests {
         let state = appstate_from(vec![base.clone(), b.clone(), c.clone()]);
         let sections = vec![section_named("Open"), section_named("Review")];
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2615,7 +2629,7 @@ mod stack_order_tests {
             section_named("Pinned"),
         ];
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2697,7 +2711,7 @@ mod stack_order_tests {
         let collapsed = std::collections::HashSet::new();
 
         let first = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2709,7 +2723,7 @@ mod stack_order_tests {
         // here. 32 calls is well past the birthday-paradox threshold.
         for _ in 0..32 {
             let again = build_stacked_section_items(
-                &state,
+                &ScopedSnapshot::all(&state),
                 &sections,
                 None,
                 &BTreeMap::new(),
@@ -2739,7 +2753,7 @@ mod stack_order_tests {
         let state = appstate_from(vec![older.clone(), newer.clone()]);
         let sections = vec![section_named("Open")];
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2787,7 +2801,7 @@ mod stack_order_tests {
         }];
 
         let items = super::build_section_grouped_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2817,7 +2831,7 @@ mod stack_order_tests {
         let sections: Vec<claude_commander_core::session::SectionConfig> = vec![];
 
         let items = super::build_section_grouped_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             Some(2),
             &BTreeMap::new(),
@@ -2848,7 +2862,7 @@ mod stack_order_tests {
         }];
 
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             Some(1),
             &BTreeMap::new(),
@@ -2883,7 +2897,7 @@ mod stack_order_tests {
 
         // With hide_empty_sections=false, all sections appear.
         let items = super::build_section_grouped_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2909,7 +2923,7 @@ mod stack_order_tests {
 
         // With hide_empty_sections=true, empty sections are omitted.
         let items = super::build_section_grouped_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2937,7 +2951,7 @@ mod stack_order_tests {
 
         // With hide_empty_sections=true, empty sections are omitted.
         let items = build_stacked_section_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -2972,7 +2986,7 @@ mod stack_order_tests {
             (
                 "grouped",
                 super::build_section_grouped_items(
-                    &snapshot,
+                    &ScopedSnapshot::all(&snapshot),
                     &sections,
                     None,
                     &BTreeMap::new(),
@@ -2983,7 +2997,7 @@ mod stack_order_tests {
             (
                 "stacked",
                 build_stacked_section_items(
-                    &snapshot,
+                    &ScopedSnapshot::all(&snapshot),
                     &sections,
                     None,
                     &BTreeMap::new(),
@@ -3023,7 +3037,7 @@ mod stack_order_tests {
         let sections = vec![section_named("Open"), section_named("Review")];
 
         let items = super::build_section_grouped_items(
-            &state,
+            &ScopedSnapshot::all(&state),
             &sections,
             None,
             &BTreeMap::new(),
@@ -3158,7 +3172,10 @@ mod stack_order_tests {
 
         // Warm up so the first-touch allocation cost doesn't dominate the timing.
         for _ in 0..50 {
-            std::hint::black_box(build_project_grouped_items(&snapshot, &agent_states));
+            std::hint::black_box(build_project_grouped_items(
+                &ScopedSnapshot::all(&snapshot),
+                &agent_states,
+            ));
         }
 
         let iterations = 2_000u32;
@@ -3179,11 +3196,14 @@ mod stack_order_tests {
         };
 
         time("project_grouped", &mut || {
-            std::hint::black_box(build_project_grouped_items(&snapshot, &agent_states));
+            std::hint::black_box(build_project_grouped_items(
+                &ScopedSnapshot::all(&snapshot),
+                &agent_states,
+            ));
         });
         time("section_grouped", &mut || {
             std::hint::black_box(build_section_grouped_items(
-                &snapshot,
+                &ScopedSnapshot::all(&snapshot),
                 &sections,
                 Some(5),
                 &agent_states,
@@ -3193,7 +3213,7 @@ mod stack_order_tests {
         });
         time("section_stacks", &mut || {
             std::hint::black_box(build_stacked_section_items(
-                &snapshot,
+                &ScopedSnapshot::all(&snapshot),
                 &sections,
                 Some(5),
                 &agent_states,

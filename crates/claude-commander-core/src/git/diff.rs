@@ -73,6 +73,26 @@ impl DiffInfo {
         self.files_changed > 0 || self.lines_added > 0 || self.lines_removed > 0
     }
 
+    /// Whether `other` shows the same diff: the same text and counts. When
+    /// and against what base it was computed don't count, so a recomputation of
+    /// an unchanged tree is the same content. Exhaustive on purpose: a new
+    /// field fails to compile here until it is classified.
+    pub fn same_content(&self, other: &Self) -> bool {
+        let Self {
+            diff,
+            files_changed,
+            lines_added,
+            lines_removed,
+            line_count: _,
+            computed_at: _,
+            base_commit: _,
+        } = self;
+        *diff == other.diff
+            && *files_changed == other.files_changed
+            && *lines_added == other.lines_added
+            && *lines_removed == other.lines_removed
+    }
+
     /// Get a summary string
     pub fn summary(&self) -> String {
         if !self.has_changes() {
@@ -1198,6 +1218,41 @@ mod tests {
             base_commit: String::new(),
         };
         assert_eq!(info.summary(), "3 file(s), +15 -7 lines");
+    }
+
+    #[test]
+    fn same_content_compares_text_and_counts_but_not_provenance() {
+        let base = DiffInfo {
+            diff: "+a\n".into(),
+            files_changed: 1,
+            lines_added: 1,
+            ..DiffInfo::empty()
+        };
+        let recomputed = DiffInfo {
+            base_commit: "abc".into(),
+            ..base.clone()
+        };
+        assert!(base.same_content(&recomputed));
+        for other in [
+            DiffInfo {
+                diff: "+b\n".into(),
+                ..base.clone()
+            },
+            DiffInfo {
+                files_changed: 2,
+                ..base.clone()
+            },
+            DiffInfo {
+                lines_added: 2,
+                ..base.clone()
+            },
+            DiffInfo {
+                lines_removed: 1,
+                ..base.clone()
+            },
+        ] {
+            assert!(!base.same_content(&other), "{other:?}");
+        }
     }
 
     /// Closes mutant `diff.rs:68:9: replace DiffInfo::is_stale -> bool with true`.

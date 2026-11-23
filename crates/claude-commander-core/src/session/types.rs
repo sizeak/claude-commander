@@ -475,6 +475,32 @@ pub trait SessionNode {
     fn node_entered_section_at(&self) -> DateTime<Utc>;
 }
 
+/// A borrowed node is a node, so a builder can take a narrowed list of
+/// references rather than an owned copy of the sessions.
+impl<T: SessionNode + ?Sized> SessionNode for &T {
+    fn node_id(&self) -> SessionId {
+        (**self).node_id()
+    }
+    fn node_branch(&self) -> &str {
+        (**self).node_branch()
+    }
+    fn node_pr_base_branch(&self) -> Option<&str> {
+        (**self).node_pr_base_branch()
+    }
+    fn node_stack_parent_session_id(&self) -> Option<SessionId> {
+        (**self).node_stack_parent_session_id()
+    }
+    fn node_created_at(&self) -> DateTime<Utc> {
+        (**self).node_created_at()
+    }
+    fn node_current_section(&self) -> Option<&str> {
+        (**self).node_current_section()
+    }
+    fn node_entered_section_at(&self) -> DateTime<Utc> {
+        (**self).node_entered_section_at()
+    }
+}
+
 impl SessionNode for WorktreeSession {
     fn node_id(&self) -> SessionId {
         self.id
