@@ -71,6 +71,7 @@ class _PhoneShellState extends State<PhoneShell> {
           children: [
             SessionListBody(
               showFleetHeader: true,
+              startOnRecent: true,
               onSelect: (store, session) =>
                   openSessionDetail(context, store, session),
             ),

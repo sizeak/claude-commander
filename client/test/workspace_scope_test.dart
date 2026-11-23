@@ -174,10 +174,12 @@ void main() {
       expect(fleet.activeWorkspace, 'Work');
     });
 
-    testWidgets('the Recent view is scoped too', (tester) async {
+    // The phone opens on Recent, so the tests above cover its scoping; this
+    // one switches to the grouped view.
+    testWidgets('the All view is scoped too', (tester) async {
       seedTwoWorkspaces();
       await pumpPhone(tester);
-      await tester.tap(find.text('Recent'));
+      await tester.tap(find.text('All'));
       await tester.pumpAndSettle();
       expect(find.text('Main task'), findsOneWidget);
       expect(find.text('Work task'), findsNothing);

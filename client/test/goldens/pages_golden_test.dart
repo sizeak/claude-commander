@@ -10,6 +10,7 @@ import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
+import 'package:claude_commander_client/util/format.dart';
 import 'package:claude_commander_client/window/window_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -26,8 +27,9 @@ import '../support/golden.dart';
 /// wide shell's column split, which pane owns the navigation. A form can be
 /// perfect in isolation and still land wrong on a page.
 ///
-/// The fixtures are deliberately static: no relative timestamps and no live
-/// state, because a golden that renders "2m ago" is a test that fails at 3am.
+/// The fixtures are deliberately static: no live state, and the clock is pinned
+/// ([debugClock]) so a relative age like "2m" renders the same on every run —
+/// unpinned, a golden showing one is a test that fails at 3am.
 void main() {
   late FakeCommanderApi api;
   late CommanderStore store;
@@ -74,9 +76,14 @@ void main() {
     api.workspacesResponse = const [WorkspaceDef(name: 'Personal')];
     store = CommanderStore(api: api, config: testConfig);
     fleet = FleetStore.withStores([store]);
+    // A week after the fixtures' `createdAt`, so the Recent rows read "1w".
+    debugClock = () => DateTime.utc(2026, 1, 8);
   });
 
-  tearDown(() => fleet.dispose());
+  tearDown(() {
+    debugClock = null;
+    fleet.dispose();
+  });
 
   /// Pumps [child] with a connected server behind it, in one theme.
   Future<void> pumpPage(
