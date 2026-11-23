@@ -150,7 +150,7 @@ class _ActivityBodyState extends State<ActivityBody> {
     if (servers.isEmpty) {
       return const _InlineNote(icon: Icons.dns_outlined, text: 'No servers');
     }
-    final loading = servers.any((s) => s.snapshot == null && s.error == null);
+    final loading = servers.any((s) => !s.hasAnswered);
     if (loading) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 40),

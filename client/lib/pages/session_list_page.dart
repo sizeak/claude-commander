@@ -95,11 +95,22 @@ class SessionListBody extends StatefulWidget {
   /// alone.
   final bool showFleetHeader;
 
+  /// Whether the list opens on the Recent slice rather than All. The phone
+  /// [PhoneShell] turns this on — on a phone the list is the whole screen, and
+  /// the sessions just worked in are what it is opened for. The wide layout
+  /// leaves it off: its fleet column sits beside the detail pane and keeps the
+  /// grouped overview.
+  ///
+  /// Recent lists active sessions only, so when every session is stopped it
+  /// opens on All instead rather than on an empty list.
+  final bool startOnRecent;
+
   const SessionListBody({
     super.key,
     this.selectedId,
     required this.onSelect,
     this.showFleetHeader = false,
+    this.startOnRecent = false,
   });
 
   @override
@@ -109,7 +120,11 @@ class SessionListBody extends StatefulWidget {
 class _SessionListBodyState extends State<SessionListBody> {
   final TextEditingController _search = TextEditingController();
   String _query = '';
-  _SessionView _view = _SessionView.all;
+
+  /// The slice on show; null until `build` decides a [SessionListBody.startOnRecent]
+  /// list's opening one, showing Recent meanwhile.
+  late _SessionView? _view = widget.startOnRecent ? null : _SessionView.all;
+  _SessionView get _shown => _view ?? _SessionView.recent;
 
   /// The active quick filter, or null for none. Tapping the active chip clears
   /// it, so it round-trips off.
@@ -174,6 +189,18 @@ class _SessionListBodyState extends State<SessionListBody> {
         // to assign during build: the value we render with is computed here, so
         // this needs no rebuild of its own.
         _quick = _liveQuick(needs: needs, working: working, review: review);
+        // Open on Recent unless it would be empty — every session stopped —
+        // then All. Decided once every server has sent its sessions — an error
+        // says nothing about a server's, so it doesn't count — and there is at
+        // least one (until then both slices are equally empty, and the first
+        // session created is an active one); kept after, so a session starting
+        // later can't swap the slice under the user. Safe to assign during
+        // build for the same reason as `_quick` above.
+        if (_view == null &&
+            total > 0 &&
+            servers.every((s) => s.snapshot != null)) {
+          _view = active > 0 ? _SessionView.recent : _SessionView.all;
+        }
 
         // Everything under the controls, shared by both framings below: it ends
         // in an `Expanded`, so it is only ever spread into a `Column`.
@@ -194,7 +221,7 @@ class _SessionListBodyState extends State<SessionListBody> {
           Expanded(
             child: RefreshIndicator(
               onRefresh: fleet.refreshAll,
-              child: _view == _SessionView.recent
+              child: _shown == _SessionView.recent
                   ? _buildRecent(context, servers, workspace)
                   : _buildAll(servers, multi, workspace),
             ),
@@ -266,11 +293,11 @@ class _SessionListBodyState extends State<SessionListBody> {
       for (final view in _SessionView.values)
         ChromeSegment(
           label: view.label,
-          selected: _view == view,
+          selected: _shown == view,
           onTap: () => setState(() => _view = view),
         ),
     ],
-    note: _view == _SessionView.recent ? '↓ recency' : 'grouped',
+    note: _shown == _SessionView.recent ? '↓ recency' : 'grouped',
   );
 
   /// The quick-filter chip row. Only chips with a non-zero count show, so a
@@ -475,7 +502,7 @@ class _SessionListBodyState extends State<SessionListBody> {
     // Loading/error take priority over the query notes, so typing while the
     // only server is still connecting shows the spinner (as All mode does),
     // not a misleading "No matches".
-    final loading = servers.any((s) => s.snapshot == null && s.error == null);
+    final loading = servers.any((s) => !s.hasAnswered);
     if (loading) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 24),

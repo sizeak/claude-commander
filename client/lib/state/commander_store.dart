@@ -72,6 +72,11 @@ class CommanderStore extends ChangeNotifier {
   bool _loading = false;
   bool get loading => _loading;
 
+  /// Whether the server has answered its current connection — a snapshot or an
+  /// error. Unlike [loading], a refresh keeps it; a retry or reconnect, which
+  /// clear the error or snapshot, starts it over.
+  bool get hasAnswered => _snapshot != null || _error != null;
+
   StreamSubscription<BigInt>? _changeSub;
   StreamSubscription<ConnectionStateDto>? _connectionSub;
 

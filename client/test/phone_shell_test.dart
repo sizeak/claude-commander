@@ -5,7 +5,9 @@ import 'package:claude_commander_client/pages/create_session_page.dart';
 import 'package:claude_commander_client/pages/phone_shell.dart';
 import 'package:claude_commander_client/pages/session_detail_page.dart';
 import 'package:claude_commander_client/pages/settings_page.dart';
+import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/services/pref_store.dart';
+import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
 import 'package:claude_commander_client/state/fleet_store.dart';
@@ -91,6 +93,106 @@ void main() {
     expect(find.text('FLEET'), findsOneWidget);
     expect(find.text('ACTIVITY'), findsOneWidget);
     expect(find.byType(FloatingActionButton), findsOneWidget);
+  });
+
+  testWidgets('the Fleet tab opens on the Recent slice', (tester) async {
+    // Recent lists active sessions only, so a stopped one tells the slices
+    // apart by content as well as by the ordering note.
+    api.listSessionsResponse = [
+      sessionInfo(title: 'Alpha'),
+      sessionInfo(
+        id: '22222222-2222-3333-4444-555555555555',
+        title: 'Retired',
+        status: SessionStatus.stopped,
+      ),
+    ];
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    expect(find.text('↓ recency'), findsOneWidget);
+    expect(find.text('Alpha'), findsOneWidget);
+    expect(find.text('Retired'), findsNothing);
+  });
+
+  testWidgets('with every session stopped it opens on All instead', (
+    tester,
+  ) async {
+    // Recent would open on "No recent sessions" over a non-zero total.
+    final retired = sessionInfo(
+      title: 'Retired',
+      status: SessionStatus.stopped,
+    );
+    api.listSessionsResponse = [retired];
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    expect(find.text('grouped'), findsOneWidget);
+    expect(find.text('Retired'), findsOneWidget);
+
+    // Decided once, then kept: restarting the session from All must not swap
+    // the list to Recent under the user.
+    api.listSessionsResponse = [
+      sessionInfo(title: 'Retired', status: SessionStatus.running),
+    ];
+    await store.refresh();
+    await tester.pumpAndSettle();
+    expect(find.text('grouped'), findsOneWidget);
+  });
+
+  testWidgets('a fleet with no sessions yet stays on Recent for the first', (
+    tester,
+  ) async {
+    // Nothing to choose between yet, so nothing is decided: the first session
+    // the user creates is an active one, and it should land on Recent.
+    api.listSessionsResponse = const [];
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+    expect(find.text('↓ recency'), findsOneWidget);
+
+    api.listSessionsResponse = [sessionInfo(title: 'First')];
+    await store.refresh();
+    await tester.pumpAndSettle();
+    expect(find.text('↓ recency'), findsOneWidget);
+    expect(find.text('First'), findsOneWidget);
+  });
+
+  testWidgets('a server that failed to connect leaves the slice undecided', (
+    tester,
+  ) async {
+    // One server answers with stopped sessions only; the other fails its first
+    // connect. An error says nothing about that server's sessions, so it must
+    // not settle the list on All before the reconnect brings its running ones.
+    final offlineApi = FakeCommanderApi()..snapshotError = Exception('offline');
+    final offline = CommanderStore(
+      api: offlineApi,
+      config: const ServerConfig(
+        id: 'offline-server',
+        name: 'offline',
+        baseUrl: 'http://127.0.0.1:7879',
+        token: 'test-token',
+      ),
+    );
+    // tearDown disposes this fleet, and with it both stores.
+    fleet = FleetStore.withStores([store, offline]);
+    api.listSessionsResponse = [
+      sessionInfo(title: 'Retired', status: SessionStatus.stopped),
+    ];
+    unawaited(store.connect());
+    unawaited(offline.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+    expect(offline.error, isNotNull);
+
+    offlineApi
+      ..snapshotError = null
+      ..listSessionsResponse = [sessionInfo(title: 'Alpha')];
+    await offline.refresh();
+    await tester.pumpAndSettle();
+    expect(find.text('↓ recency'), findsOneWidget);
+    expect(find.text('Alpha'), findsOneWidget);
   });
 
   testWidgets('switching to the Activity tab does not throw', (tester) async {

@@ -70,6 +70,14 @@ void main() {
     expect(find.byType(SessionDetailBody), findsNothing);
   });
 
+  // The phone opens its fleet list on Recent (see `phone_shell_test.dart`);
+  // the wide layout's fleet column keeps the grouped overview.
+  testWidgets('wide layout opens the fleet list on All', (tester) async {
+    await pumpWide(tester);
+    expect(find.text('grouped'), findsOneWidget);
+    expect(find.text('↓ recency'), findsNothing);
+  });
+
   /// A phone held sideways clears [kWideBreakpoint] on width alone — a Pixel 8a
   /// is 914 × 411dp — and the wide layout is the wrong home for it. See
   /// [useWideLayout].

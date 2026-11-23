@@ -198,6 +198,11 @@ void main() {
 
     // ---- phone: the fleet list ----
     await waitFor(tester, find.text(_focusSession));
+    // The phone opens on Recent; the README's shot is the grouped All view,
+    // and only its rows carry the state word as a text of its own, which the
+    // wait below looks for.
+    await tester.tap(find.text('All'));
+    await settle(tester);
     // Every seeded session present means the snapshot fetch finished, so the
     // capture can't catch a half-populated list.
     for (final title in const [
@@ -283,6 +288,13 @@ void main() {
           find.text(_focusSession).evaluate().isNotEmpty,
       reason: 'the fleet list re-rendered in LCARS',
     );
+    // Re-inflating the shell reset the list to the phone's Recent default; the
+    // shot is "the same fleet list" as client-sessions, so go back to All.
+    // LCARS upper-cases the segment label as it does the row titles.
+    await tester.tap(
+      find.textContaining(RegExp(r'^all$', caseSensitive: false)),
+    );
+    await settle(tester);
     await shoot(tester, 'client-lcars');
     // Back to the default for the desktop shot: the desktop layout is worth
     // showing in the theme most people run.
