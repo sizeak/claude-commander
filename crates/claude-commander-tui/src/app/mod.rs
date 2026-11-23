@@ -67,6 +67,7 @@ use claude_commander_core::tmux::PaneInfo;
 
 mod actions;
 mod background;
+pub(crate) use background::PreviewPayload;
 mod colour_picker;
 mod conversation;
 mod edit_session;
@@ -76,6 +77,7 @@ mod modals;
 mod render;
 mod review;
 mod selection;
+mod setting_key;
 mod settings;
 mod state;
 mod switcher;
@@ -95,6 +97,9 @@ pub(crate) use render::pane_tabs;
 pub use review::DiffReviewState;
 pub(crate) use review::ImageEntry;
 pub use review::ReviewPrepared;
+pub use setting_key::{
+    GeneralKey, ServerKey, SettingKey, TextRowKey, ThemeColour, ThemeKey, ToggleKey, VoiceKey,
+};
 
 /// Direction for mouse scroll events
 enum ScrollDirection {
@@ -1050,7 +1055,8 @@ pub enum SettingsRowKind {
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub label: String,
-    pub field_key: String,
+    /// What the row edits; [`SettingKey::None`] for a heading.
+    pub key: SettingKey,
     pub kind: SettingsRowKind,
     /// Optional color for displaying a swatch next to the value (Theme tab only)
     pub color_swatch: Option<Color>,
@@ -1061,15 +1067,12 @@ pub struct SettingsRow {
 }
 
 impl SettingsRow {
-    /// A free-text settings row.
-    pub fn text(
-        label: impl Into<String>,
-        value: impl Into<String>,
-        field_key: impl Into<String>,
-    ) -> Self {
+    /// A free-text settings row. Its key cannot be a [`ToggleKey`]
+    /// ([`TextRowKey`]).
+    pub fn text(label: impl Into<String>, value: impl Into<String>, key: impl TextRowKey) -> Self {
         Self {
             label: label.into(),
-            field_key: field_key.into(),
+            key: key.into(),
             kind: SettingsRowKind::Text(value.into()),
             color_swatch: None,
             inherited_from: None,
@@ -1077,10 +1080,10 @@ impl SettingsRow {
     }
 
     /// A two-state boolean toggle row.
-    pub fn toggle(label: impl Into<String>, on: bool, field_key: impl Into<String>) -> Self {
+    pub fn toggle(label: impl Into<String>, on: bool, key: ToggleKey) -> Self {
         Self {
             label: label.into(),
-            field_key: field_key.into(),
+            key: SettingKey::Toggle(key),
             kind: SettingsRowKind::Toggle(on),
             color_swatch: None,
             inherited_from: None,
@@ -1091,7 +1094,7 @@ impl SettingsRow {
     pub fn header(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            field_key: String::new(),
+            key: SettingKey::None,
             kind: SettingsRowKind::Header,
             color_swatch: None,
             inherited_from: None,
@@ -1103,16 +1106,16 @@ impl SettingsRow {
         !matches!(self.kind, SettingsRowKind::Header)
     }
 
-    /// A text row that also displays a color swatch (Theme tab).
+    /// A Theme-tab colour row, with its colour's swatch.
     pub fn swatch(
         label: impl Into<String>,
         value: impl Into<String>,
-        field_key: impl Into<String>,
+        colour: ThemeColour,
         color: Color,
     ) -> Self {
         Self {
             label: label.into(),
-            field_key: field_key.into(),
+            key: colour.into(),
             kind: SettingsRowKind::Text(value.into()),
             color_swatch: Some(color),
             inherited_from: None,
@@ -1127,11 +1130,12 @@ impl SettingsRow {
         }
     }
 
-    /// For a Toggle row, the flipped boolean; `None` for other kinds.
-    pub fn toggled(&self) -> Option<bool> {
-        match self.kind {
-            SettingsRowKind::Toggle(on) => Some(!on),
-            SettingsRowKind::Text(_) | SettingsRowKind::Header => None,
+    /// For a Toggle row, its setting and the flipped boolean; `None` for
+    /// other kinds.
+    pub fn toggled(&self) -> Option<(ToggleKey, bool)> {
+        match (&self.kind, self.key) {
+            (SettingsRowKind::Toggle(on), SettingKey::Toggle(key)) => Some((key, !on)),
+            _ => None,
         }
     }
 }

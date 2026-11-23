@@ -117,12 +117,11 @@ pub fn in_workspace(project_workspace: Option<&str>, active: Option<&str>) -> bo
 pub fn projects_in_workspace<'a>(
     snapshot: &'a Snapshot,
     active: Option<&str>,
-) -> Vec<&'a ProjectInfo> {
+) -> impl Iterator<Item = &'a ProjectInfo> {
     snapshot
         .projects
         .iter()
-        .filter(|p| in_workspace(p.workspace.as_deref(), active))
-        .collect()
+        .filter(move |p| in_workspace(p.workspace.as_deref(), active))
 }
 
 /// The workspace a session belongs to: its project's tag. A session whose
@@ -145,12 +144,39 @@ pub fn project_workspace(snapshot: &Snapshot, id: ProjectId) -> Option<&str> {
 pub fn sessions_in_workspace<'a>(
     snapshot: &'a Snapshot,
     active: Option<&str>,
-) -> Vec<&'a SessionInfo> {
+) -> impl Iterator<Item = &'a SessionInfo> {
     snapshot
         .sessions
         .iter()
-        .filter(|s| in_workspace(session_workspace(snapshot, s), active))
-        .collect()
+        .filter(move |s| in_workspace(session_workspace(snapshot, s), active))
+}
+
+/// The projects and sessions a frontend lists from one snapshot — all of
+/// them, or one workspace's share — borrowed, so narrowing to a workspace
+/// copies no project or session. Both lists keep snapshot order.
+#[derive(Debug, Clone, Default)]
+pub struct ScopedSnapshot<'a> {
+    pub projects: Vec<&'a ProjectInfo>,
+    pub sessions: Vec<&'a SessionInfo>,
+}
+
+impl<'a> ScopedSnapshot<'a> {
+    /// Every project and session in `snapshot`.
+    pub fn all(snapshot: &'a Snapshot) -> Self {
+        Self {
+            projects: snapshot.projects.iter().collect(),
+            sessions: snapshot.sessions.iter().collect(),
+        }
+    }
+
+    /// Only `active`'s projects and sessions (`None` = Main). A session whose
+    /// project is missing reads as Main ([`session_workspace`]).
+    pub fn in_workspace(snapshot: &'a Snapshot, active: Option<&str>) -> Self {
+        Self {
+            projects: projects_in_workspace(snapshot, active).collect(),
+            sessions: sessions_in_workspace(snapshot, active).collect(),
+        }
+    }
 }
 
 /// How many sessions in one workspace are waiting for input.
@@ -496,18 +522,36 @@ mod tests {
             vec![def("Work")],
             None,
         );
-        let main_projects: Vec<_> = projects_in_workspace(&snap, None)
-            .iter()
-            .map(|p| p.id)
-            .collect();
+        let main_projects: Vec<_> = projects_in_workspace(&snap, None).map(|p| p.id).collect();
         assert_eq!(main_projects, [main_p.id]);
         let work_sessions: Vec<_> = sessions_in_workspace(&snap, Some("Work"))
-            .iter()
             .map(|s| s.session_id)
             .collect();
         assert_eq!(work_sessions, [s2.session_id]);
-        assert!(sessions_in_workspace(&snap, Some("Nope")).is_empty());
+        assert_eq!(sessions_in_workspace(&snap, Some("Nope")).count(), 0);
         assert_eq!(session_workspace(&snap, &s1), None);
+    }
+
+    /// A scoped snapshot borrows the snapshot's own entries — narrowing copies
+    /// nothing — and agrees with the per-list filters.
+    #[test]
+    fn a_scoped_snapshot_borrows_the_workspaces_entries() {
+        let main_p = project("main-repo", None);
+        let work_p = project("work-repo", Some("Work"));
+        let snap = snapshot(
+            vec![main_p.clone(), work_p.clone()],
+            vec![session(&main_p, "one"), session(&work_p, "two")],
+            vec![def("Work")],
+            None,
+        );
+        let work = ScopedSnapshot::in_workspace(&snap, Some("Work"));
+        assert!(std::ptr::eq(work.projects[0], &snap.projects[1]));
+        assert!(std::ptr::eq(work.sessions[0], &snap.sessions[1]));
+        assert_eq!((work.projects.len(), work.sessions.len()), (1, 1));
+
+        let all = ScopedSnapshot::all(&snap);
+        assert_eq!((all.projects.len(), all.sessions.len()), (2, 2));
+        assert!(std::ptr::eq(all.sessions[0], &snap.sessions[0]));
     }
 
     #[test]

@@ -711,7 +711,7 @@ impl App {
         let session_count: usize = self
             .backends
             .iter()
-            .map(|h| filter.scope(&h.view.snapshot).sessions.len())
+            .map(|h| filter.session_count(&h.view.snapshot))
             .sum();
 
         let sessions_span = Span::styled(

@@ -52,16 +52,20 @@ impl App {
                         } else {
                             c.branch_prefix.clone()
                         },
-                        "branch_prefix",
+                        GeneralKey::BranchPrefix,
                     ),
-                    SettingsRow::text("Shell Program", c.shell_program.clone(), "shell_program"),
+                    SettingsRow::text(
+                        "Shell Program",
+                        c.shell_program.clone(),
+                        GeneralKey::ShellProgram,
+                    ),
                     SettingsRow::text(
                         "Worktrees Directory",
                         c.worktrees_dir
                             .as_ref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "(default)".into()),
-                        "worktrees_dir",
+                        GeneralKey::WorktreesDir,
                     ),
                     SettingsRow::text(
                         "Projects Directory",
@@ -69,58 +73,66 @@ impl App {
                             .as_ref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "(default)".into()),
-                        "projects_dir",
+                        GeneralKey::ProjectsDir,
                     ),
                     SettingsRow::text(
                         "Clone Timeout (s)",
                         c.clone_timeout_secs.to_string(),
-                        "clone_timeout_secs",
+                        GeneralKey::CloneTimeoutSecs,
                     ),
                     SettingsRow::text(
                         "Repo List Timeout (s)",
                         c.repo_list_timeout_secs.to_string(),
-                        "repo_list_timeout_secs",
+                        GeneralKey::RepoListTimeoutSecs,
                     ),
                     SettingsRow::toggle(
                         "Per-Repo Worktree Dirs",
                         c.per_repo_worktree_dirs,
-                        "per_repo_worktree_dirs",
+                        ToggleKey::PerRepoWorktreeDirs,
                     ),
                     SettingsRow::toggle(
                         "Fetch Before Create",
                         c.fetch_before_create,
-                        "fetch_before_create",
+                        ToggleKey::FetchBeforeCreate,
                     ),
-                    SettingsRow::toggle("Skip LFS Smudge", c.skip_lfs_smudge, "skip_lfs_smudge"),
-                    SettingsRow::toggle("Resume Session", c.resume_session, "resume_session"),
-                    SettingsRow::toggle("Nix Develop", c.nix_develop, "nix_develop"),
+                    SettingsRow::toggle(
+                        "Skip LFS Smudge",
+                        c.skip_lfs_smudge,
+                        ToggleKey::SkipLfsSmudge,
+                    ),
+                    SettingsRow::toggle(
+                        "Resume Session",
+                        c.resume_session,
+                        ToggleKey::ResumeSession,
+                    ),
+                    SettingsRow::toggle("Nix Develop", c.nix_develop, ToggleKey::NixDevelop),
                     SettingsRow::toggle(
                         "Hibernate Idle Sessions",
                         c.hibernate_enabled,
-                        "hibernate_enabled",
+                        ToggleKey::HibernateEnabled,
                     ),
                     SettingsRow::text(
                         "Hibernate Idle Timeout (s)",
                         c.hibernate_idle_timeout_secs.to_string(),
-                        "hibernate_idle_timeout_secs",
+                        GeneralKey::HibernateIdleTimeoutSecs,
                     ),
                     SettingsRow::text(
                         "Hibernate Check Interval (s)",
                         c.hibernate_check_interval_secs.to_string(),
-                        "hibernate_check_interval_secs",
+                        GeneralKey::HibernateCheckIntervalSecs,
                     ),
                     SettingsRow::text(
                         "In Progress WIP Limit",
                         c.in_progress_limit
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "(unlimited)".into()),
-                        "in_progress_limit",
+                        GeneralKey::InProgressLimit,
                     ),
                     SettingsRow::header("Editor"),
                     SettingsRow::text(
                         "Editor",
                         c.editor.clone().unwrap_or_else(|| "(auto)".into()),
-                        "editor",
+                        GeneralKey::Editor,
                     ),
                     SettingsRow::text(
                         "Editor is GUI",
@@ -129,112 +141,116 @@ impl App {
                             Some(false) => "false",
                             None => "(auto)",
                         },
-                        "editor_gui",
+                        GeneralKey::EditorGui,
                     ),
                     SettingsRow::header("Pull Requests & Sync"),
                     SettingsRow::text(
                         "Code Host",
                         c.code_host_provider.display_name(),
-                        "code_host_provider",
+                        GeneralKey::CodeHostProvider,
                     ),
                     SettingsRow::text(
                         "GitLab Hostname",
                         c.gitlab_hostname
                             .clone()
                             .unwrap_or_else(|| "(default)".into()),
-                        "gitlab_hostname",
+                        GeneralKey::GitlabHostname,
                     ),
                     SettingsRow::text(
                         "PR Check Interval (s)",
                         c.pr_check_interval_secs.to_string(),
-                        "pr_check_interval_secs",
+                        GeneralKey::PrCheckIntervalSecs,
                     ),
                     SettingsRow::toggle(
                         "Project Pull Enabled",
                         c.project_pull_enabled,
-                        "project_pull_enabled",
+                        ToggleKey::ProjectPullEnabled,
                     ),
                     SettingsRow::text(
                         "Project Pull Interval (s)",
                         c.project_pull_interval_secs.to_string(),
-                        "project_pull_interval_secs",
+                        GeneralKey::ProjectPullIntervalSecs,
                     ),
                     SettingsRow::header("Appearance"),
                     SettingsRow::toggle(
                         "Invert PR Label Color",
                         c.invert_pr_label_color,
-                        "invert_pr_label_color",
+                        ToggleKey::InvertPrLabelColor,
                     ),
                     SettingsRow::toggle(
                         "Show Session Program",
                         c.show_session_program,
-                        "show_session_program",
+                        ToggleKey::ShowSessionProgram,
                     ),
                     SettingsRow::toggle(
                         "Hide Empty Sections",
                         c.hide_empty_sections,
-                        "hide_empty_sections",
+                        ToggleKey::HideEmptySections,
                     ),
                     SettingsRow::text(
                         "Recent Sessions Limit",
                         c.recent_sessions_limit.to_string(),
-                        "recent_sessions_limit",
+                        GeneralKey::RecentSessionsLimit,
                     ),
-                    SettingsRow::toggle("Rounded Borders", c.rounded_borders, "rounded_borders"),
+                    SettingsRow::toggle(
+                        "Rounded Borders",
+                        c.rounded_borders,
+                        ToggleKey::RoundedBorders,
+                    ),
                     SettingsRow::toggle(
                         "Dim Right Pane",
                         c.dim_unfocused_preview,
-                        "dim_unfocused_preview",
+                        ToggleKey::DimUnfocusedPreview,
                     ),
                     SettingsRow::text(
                         "Dim Opacity",
                         c.dim_unfocused_opacity.to_string(),
-                        "dim_unfocused_opacity",
+                        GeneralKey::DimUnfocusedOpacity,
                     ),
                     SettingsRow::header("Performance"),
                     SettingsRow::text(
                         "UI Refresh FPS",
                         c.ui_refresh_fps.to_string(),
-                        "ui_refresh_fps",
+                        GeneralKey::UiRefreshFps,
                     ),
                     SettingsRow::text(
                         "Max Concurrent Tmux",
                         c.max_concurrent_tmux.to_string(),
-                        "max_concurrent_tmux",
+                        GeneralKey::MaxConcurrentTmux,
                     ),
                     SettingsRow::toggle(
                         "Precompute Review Caches",
                         c.precompute_review_caches,
-                        "precompute_review_caches",
+                        ToggleKey::PrecomputeReviewCaches,
                     ),
                     SettingsRow::text(
                         "Number Debounce (ms)",
                         c.session_number_debounce_ms.to_string(),
-                        "session_number_debounce_ms",
+                        GeneralKey::SessionNumberDebounceMs,
                     ),
                     SettingsRow::header("AI Summaries"),
                     SettingsRow::toggle(
                         "AI Summary Enabled",
                         c.ai_summary_enabled,
-                        "ai_summary_enabled",
+                        ToggleKey::AiSummaryEnabled,
                     ),
                     SettingsRow::text(
                         "AI Summary Model",
                         c.ai_summary_model.clone(),
-                        "ai_summary_model",
+                        GeneralKey::AiSummaryModel,
                     ),
                     SettingsRow::header("Commander"),
                     SettingsRow::toggle(
                         "Commander Enabled",
                         c.commander_enabled,
-                        "commander_enabled",
+                        ToggleKey::CommanderEnabled,
                     ),
                     SettingsRow::text(
                         "Commander Program",
                         c.commander_program
                             .clone()
                             .unwrap_or_else(|| "(default)".into()),
-                        "commander_program",
+                        GeneralKey::CommanderProgram,
                     ),
                     SettingsRow::text(
                         "Commander Directory",
@@ -242,13 +258,13 @@ impl App {
                             .as_ref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "(default)".into()),
-                        "commander_dir",
+                        GeneralKey::CommanderDir,
                     ),
                     SettingsRow::header("Privacy"),
                     SettingsRow::toggle(
                         "Usage Telemetry",
                         c.telemetry.enabled,
-                        "telemetry_enabled",
+                        ToggleKey::TelemetryEnabled,
                     ),
                 ])
             }
@@ -256,11 +272,11 @@ impl App {
                 // Three headed groups, in the order a reader goes looking:
                 // speech coming in, speech going out, and the conversation agent
                 // that joins the two. The grouping is PRESENTATION ONLY — the
-                // `[stt]` and `[conversation]` TOML tables and every `field_key`
-                // below are persisted shapes and stay exactly where they are, so
-                // a config file written before this split still loads and a
-                // settings edit still lands in the same table. What changed is
-                // which heading a row is drawn under, nothing more. (Note the
+                // `[stt]` and `[conversation]` TOML tables below are persisted
+                // shapes and stay exactly where they are, so a config file
+                // written before this split still loads and a settings edit
+                // still lands in the same table. What changed is which
+                // heading a row is drawn under, nothing more. (Note the
                 // split crosses the tables: "Text-to-Speech" and "Conversation
                 // Mode" are both `[conversation]` fields, because "is this about
                 // the voice or about the agent?" is the question a reader has,
@@ -273,20 +289,28 @@ impl App {
                 let s = &self.config.stt;
                 with_section_spacers(vec![
                     SettingsRow::header("Transcription"),
-                    SettingsRow::toggle("Enable Voice Input (STT)", s.enabled, "stt_enabled"),
-                    SettingsRow::text("Base URL", s.base_url.clone(), "stt_base_url"),
-                    SettingsRow::text("Model", s.model.clone(), "stt_model"),
+                    SettingsRow::toggle(
+                        "Enable Voice Input (STT)",
+                        s.enabled,
+                        ToggleKey::SttEnabled,
+                    ),
+                    SettingsRow::text("Base URL", s.base_url.clone(), VoiceKey::SttBaseUrl),
+                    SettingsRow::text("Model", s.model.clone(), VoiceKey::SttModel),
                     SettingsRow::text(
                         "Language",
                         s.language.clone().unwrap_or_else(|| "(auto)".into()),
-                        "stt_language",
+                        VoiceKey::SttLanguage,
                     ),
                     SettingsRow::text(
                         "Prompt",
                         s.prompt.clone().unwrap_or_else(|| "(none)".into()),
-                        "stt_prompt",
+                        VoiceKey::SttPrompt,
                     ),
-                    SettingsRow::text("Microphone", self.input_device_label(), "stt_input_device"),
+                    SettingsRow::text(
+                        "Microphone",
+                        self.input_device_label(),
+                        VoiceKey::SttInputDevice,
+                    ),
                     SettingsRow::toggle(
                         if self.pause_media_needs_restart() {
                             "Pause Media While Recording (restart to apply)"
@@ -294,40 +318,52 @@ impl App {
                             "Pause Media While Recording"
                         },
                         s.pause_media,
-                        "stt_pause_media",
+                        ToggleKey::SttPauseMedia,
                     ),
                     SettingsRow::text(
                         "Dictation Submit",
                         s.dictation_submit.label().to_string(),
-                        "stt_dictation_submit",
+                        VoiceKey::SttDictationSubmit,
                     ),
                     SettingsRow::header("Text-to-Speech"),
-                    SettingsRow::text("Base URL", c.base_url.clone(), "conversation_base_url"),
-                    SettingsRow::text("Model", c.model.clone(), "conversation_model"),
+                    SettingsRow::text(
+                        "Base URL",
+                        c.base_url.clone(),
+                        VoiceKey::ConversationBaseUrl,
+                    ),
+                    SettingsRow::text("Model", c.model.clone(), VoiceKey::ConversationModel),
                     SettingsRow::text(
                         "Voice",
                         c.voice.clone().unwrap_or_else(|| "(default)".into()),
-                        "conversation_voice",
+                        VoiceKey::ConversationVoice,
                     ),
                     SettingsRow::text(
                         "Response Format",
                         c.response_format.clone(),
-                        "conversation_format",
+                        VoiceKey::ConversationFormat,
                     ),
-                    SettingsRow::text("Speed", format!("{:.2}", c.speed), "conversation_speed"),
-                    SettingsRow::text("Volume", format!("{:.2}", c.volume), "conversation_volume"),
+                    SettingsRow::text(
+                        "Speed",
+                        format!("{:.2}", c.speed),
+                        VoiceKey::ConversationSpeed,
+                    ),
+                    SettingsRow::text(
+                        "Volume",
+                        format!("{:.2}", c.volume),
+                        VoiceKey::ConversationVolume,
+                    ),
                     SettingsRow::text(
                         "Speak Scope",
                         c.speak_scope.label().to_string(),
-                        "conversation_speak_scope",
+                        VoiceKey::ConversationSpeakScope,
                     ),
                     SettingsRow::header("Conversation Mode"),
                     SettingsRow::toggle(
                         "Enable Conversation Mode",
                         c.enabled,
-                        "conversation_enabled",
+                        ToggleKey::ConversationEnabled,
                     ),
-                    SettingsRow::text("Assistant Name", c.name.clone(), "conversation_name"),
+                    SettingsRow::text("Assistant Name", c.name.clone(), VoiceKey::ConversationName),
                 ])
             }
             SettingsTab::Server => {
@@ -338,16 +374,20 @@ impl App {
                 };
                 with_section_spacers(vec![
                     SettingsRow::header("Embedded Server"),
-                    SettingsRow::toggle("Auto Start With TUI", s.auto_start, "server_auto_start"),
-                    SettingsRow::text("Bind Address", s.bind.to_string(), "server_bind"),
-                    SettingsRow::text("Port", s.port.to_string(), "server_port"),
+                    SettingsRow::toggle(
+                        "Auto Start With TUI",
+                        s.auto_start,
+                        ToggleKey::ServerAutoStart,
+                    ),
+                    SettingsRow::text("Bind Address", s.bind.to_string(), ServerKey::Bind),
+                    SettingsRow::text("Port", s.port.to_string(), ServerKey::Port),
                     // The token is deliberately not shown. It is operator-
                     // equivalent (see docs/configuration.md), the settings modal
                     // is on screen while screen-sharing, and the STT API key sets
                     // the same precedent by being absent from this UI entirely.
                     // Use the palette's "Copy server token" to hand it to a
                     // client; typing over this row replaces it.
-                    SettingsRow::text("Bearer Token", token_display.to_string(), "server_token"),
+                    SettingsRow::text("Bearer Token", token_display.to_string(), ServerKey::Token),
                     SettingsRow::header("Browser Access"),
                     SettingsRow::text(
                         "CORS Allowed Origins",
@@ -356,7 +396,7 @@ impl App {
                         } else {
                             s.cors_allowed_origins.join(", ")
                         },
-                        "server_cors_allowed_origins",
+                        ServerKey::CorsAllowedOrigins,
                     ),
                 ])
             }
@@ -375,11 +415,7 @@ impl App {
                 for (section, actions) in kb.sections() {
                     rows.push(SettingsRow::header(section));
                     for (action, keys) in actions {
-                        rows.push(SettingsRow::text(
-                            action.description(),
-                            keys,
-                            action.config_name(),
-                        ));
+                        rows.push(SettingsRow::text(action.description(), keys, action));
                     }
                 }
                 with_section_spacers(rows)
@@ -425,7 +461,7 @@ impl App {
             rows.push(SettingsRow::text(
                 "Theme for",
                 theme_scope_label(&scope, &merged),
-                "theme_scope",
+                ThemeKey::Scope,
             ));
         }
         if let ThemeScope::Workspace(ws) = &scope {
@@ -436,7 +472,7 @@ impl App {
                 } else {
                     "(already usual)"
                 },
-                "theme_reset",
+                ThemeKey::Reset,
             ));
         }
         rows.push(SettingsRow::text(
@@ -445,59 +481,31 @@ impl App {
                 ThemeScope::Usual => "(auto)".into(),
                 ThemeScope::Workspace(_) => "(usual)".into(),
             }),
-            "preset",
+            ThemeKey::Preset,
         ));
         rows.push(SettingsRow::text(
             "Appearance",
             o.appearance
                 .map(|a| a.as_str().to_string())
                 .unwrap_or_else(|| format!("({from})")),
-            "appearance",
+            ThemeKey::Appearance,
         ));
 
-        macro_rules! theme_row {
-            ($label:expr, $field:ident) => {{
-                let mut row = SettingsRow::swatch(
-                    $label,
-                    // The config spelling (`format_color` writes the same
-                    // forms `ColorValue` serializes to), whether set here or
-                    // inherited.
-                    format_color(o.$field.map_or(t.$field, |cv| cv.0)),
-                    stringify!($field),
-                    t.$field,
-                );
-                if o.$field.is_none() {
-                    row.inherited_from = Some(from);
-                }
-                row
-            }};
-        }
-
-        rows.extend([
-            theme_row!("Border Focused", border_focused),
-            theme_row!("Border Unfocused", border_unfocused),
-            theme_row!("Selection BG", selection_bg),
-            theme_row!("Status Running", status_running),
-            theme_row!("Status Stopped", status_stopped),
-            theme_row!("Status PR", status_pr),
-            theme_row!("Status PR Merged", status_pr_merged),
-            theme_row!("PR Open", pr_open),
-            theme_row!("PR Draft", pr_draft),
-            theme_row!("PR Closed", pr_closed),
-            theme_row!("Text Primary", text_primary),
-            theme_row!("Text Secondary", text_secondary),
-            theme_row!("Text Accent", text_accent),
-            theme_row!("Diff Added", diff_added),
-            theme_row!("Diff Removed", diff_removed),
-            theme_row!("Diff Hunk Header", diff_hunk_header),
-            theme_row!("Diff File Header", diff_file_header),
-            theme_row!("Modal Info", modal_info),
-            theme_row!("Modal Warning", modal_warning),
-            theme_row!("Modal Error", modal_error),
-            theme_row!("Status Bar BG", status_bar_bg),
-            theme_row!("Status Bar FG", status_bar_fg),
-            theme_row!("Status Bar Accent", status_bar_accent),
-        ]);
+        rows.extend(ThemeColour::ALL.iter().map(|&colour| {
+            let own = colour.own(o);
+            let mut row = SettingsRow::swatch(
+                colour.label(),
+                // The config spelling (`format_color` writes the same forms
+                // `ColorValue` serializes to), whether set here or inherited.
+                format_color(own.map_or(colour.resolved(&t), |cv| cv.0)),
+                colour,
+                colour.resolved(&t),
+            );
+            if own.is_none() {
+                row.inherited_from = Some(from);
+            }
+            row
+        }));
         rows
     }
 
@@ -546,14 +554,14 @@ impl App {
 
     /// A Preset or Appearance pick in `scope`. The inherit spellings — empty,
     /// `(auto)`, `(usual)`, `(preset)` — clear the scope's own value.
-    pub(super) fn apply_theme_edit(&mut self, scope: &ThemeScope, field_key: &str, value: &str) {
+    pub(super) fn apply_theme_edit(&mut self, scope: &ThemeScope, key: ThemeKey, value: &str) {
         use claude_commander_core::config::theme::AppearanceValue;
         let inherit = value.is_empty() || matches!(value, "(auto)" | "(usual)" | "(preset)");
-        self.edit_theme_overrides(scope, |o| match field_key {
-            "preset" => o.preset = (!inherit).then(|| value.to_string()),
+        self.edit_theme_overrides(scope, |o| match key {
+            ThemeKey::Preset => o.preset = (!inherit).then(|| value.to_string()),
             // Anything unparseable is ignored rather than silently flipping
             // the surface.
-            "appearance" => {
+            ThemeKey::Appearance => {
                 o.appearance = if inherit {
                     None
                 } else if let Some(a) = AppearanceValue::parse(value) {
@@ -563,16 +571,17 @@ impl App {
                     o.appearance
                 };
             }
-            _ => {}
+            // Picked through their own editors, never as a value.
+            ThemeKey::Scope | ThemeKey::Reset | ThemeKey::Colour(_) => {}
         });
     }
 
-    /// A colour picker's pick on colour row `field_key` in `scope`: `Some`
-    /// sets the scope's own value, `None` clears it so the row inherits.
+    /// A colour picker's pick on `colour`'s row in `scope`: `Some` sets the
+    /// scope's own value, `None` clears it so the row inherits.
     pub(super) fn apply_theme_colour(
         &mut self,
         scope: &ThemeScope,
-        field_key: &str,
+        colour: ThemeColour,
         hex: Option<&str>,
     ) {
         use claude_commander_core::config::theme::ColorValue;
@@ -583,11 +592,7 @@ impl App {
             warn!("Ignoring an unparseable theme colour {hex:?}");
             return;
         }
-        self.edit_theme_overrides(scope, |o| {
-            if let Some(slot) = theme_colour_slot(o, field_key) {
-                *slot = value;
-            }
-        });
+        self.edit_theme_overrides(scope, |o| *colour.slot(o) = value);
     }
 
     /// The scope a Theme-tab editor opened on (pinned by `theme_row_enter`),
@@ -628,16 +633,17 @@ impl App {
         self.toast(format!("{label} now uses the usual theme"));
     }
 
-    /// Open the colour picker on colour row `field_key` in `scope`, fitted to
-    /// the terminal's current size so a key in the same burst as the Enter
-    /// already steps by the drawn row width. `None` if the row is not a colour.
+    /// Open the colour picker on `colour`'s row in `scope`, fitted to the
+    /// terminal's current size so a key in the same burst as the Enter
+    /// already steps by the drawn row width.
     fn open_theme_colour_picker(
         &self,
         scope: &ThemeScope,
-        field_key: &str,
-    ) -> Option<super::colour_picker::ColourPicker> {
-        let mut overrides = self.scope_overrides(scope);
-        let current = (*theme_colour_slot(&mut overrides, field_key)?)
+        colour: ThemeColour,
+    ) -> super::colour_picker::ColourPicker {
+        let overrides = self.scope_overrides(scope);
+        let current = colour
+            .own(&overrides)
             .and_then(|cv| crate::theme::color_to_hex(cv.0));
         let from = inherited_from(&self.effective_theme_scope(scope), &overrides);
         let mut picker = super::colour_picker::ColourPicker::open(
@@ -646,7 +652,7 @@ impl App {
             format!("Inherit ({from})"),
         );
         self.fit_colour_picker(&mut picker, self.ui_state.terminal_size);
-        Some(picker)
+        picker
     }
 
     /// Fit `picker` to the pane it is drawn in within a frame `area`. Before
@@ -666,18 +672,16 @@ impl App {
         let Some(row) = state.rows.get(state.selected_row) else {
             return;
         };
-        let field_key = row.field_key.clone();
+        let SettingKey::Theme(key) = row.key else {
+            return;
+        };
         let current_value = row.text_value().to_string();
         // Pinned: the editor opened here names this scope, so its pick applies
         // to it — or nowhere, if it has gone by then ([`Self::theme_pick_scope`]).
         let scope = self.effective_theme_scope(&state.theme_scope);
         state.theme_scope = scope.clone();
-        let picker_of = |options: Vec<PickerOption>, current: &str| {
-            let selected = options.iter().position(|o| o.value == current).unwrap_or(0);
-            SettingsEditing::OptionPicker { options, selected }
-        };
-        match field_key.as_str() {
-            "theme_scope" => {
+        match key {
+            ThemeKey::Scope => {
                 let merged = self.merged_workspaces();
                 let mut options: Vec<PickerOption> = merged
                     .iter()
@@ -690,13 +694,13 @@ impl App {
                     label: theme_scope_label(&ThemeScope::Usual, &merged),
                     value: theme_scope_value(&ThemeScope::Usual),
                 });
-                state.editing = Some(picker_of(options, &theme_scope_value(&scope)));
+                state.editing = Some(option_picker(options, &theme_scope_value(&scope)));
             }
-            "theme_reset" => {
+            ThemeKey::Reset => {
                 self.reset_workspace_theme(&scope);
                 state.rows = self.settings_rows(state);
             }
-            "preset" => {
+            ThemeKey::Preset => {
                 // A workspace either inherits the usual theme or picks a base
                 // of its own; "(auto)" is the usual theme's inherit spelling.
                 use crate::theme::PRESET_NAMES;
@@ -710,9 +714,9 @@ impl App {
                         .map(PickerOption::plain)
                         .collect(),
                 };
-                state.editing = Some(picker_of(options, &current_value));
+                state.editing = Some(option_picker(options, &current_value));
             }
-            "appearance" => {
+            ThemeKey::Appearance => {
                 // Two named values plus "inherit" — a picker rather than free
                 // text, so there is nothing to mistype.
                 let inherit = format!(
@@ -723,14 +727,12 @@ impl App {
                     .iter()
                     .map(|s| PickerOption::plain(*s))
                     .collect();
-                state.editing = Some(picker_of(options, &current_value));
+                state.editing = Some(option_picker(options, &current_value));
             }
-            key => {
-                if let Some(picker) = self.open_theme_colour_picker(&scope, key) {
-                    state.editing = Some(SettingsEditing::Colour {
-                        picker: Box::new(picker),
-                    });
-                }
+            ThemeKey::Colour(colour) => {
+                state.editing = Some(SettingsEditing::Colour {
+                    picker: Box::new(self.open_theme_colour_picker(&scope, colour)),
+                });
             }
         }
     }
@@ -1358,26 +1360,26 @@ impl App {
     }
 
     /// Apply an edited value from the settings modal to the config.
-    pub(super) fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
-        match tab {
-            SettingsTab::General => match field_key {
-                "branch_prefix" => self.config.branch_prefix = value.to_string(),
-                "shell_program" => self.config.shell_program = value.to_string(),
-                "worktrees_dir" => {
+    pub(super) fn apply_settings_edit(&mut self, key: impl Into<SettingKey>, value: &str) {
+        match key.into() {
+            SettingKey::General(key) => match key {
+                GeneralKey::BranchPrefix => self.config.branch_prefix = value.to_string(),
+                GeneralKey::ShellProgram => self.config.shell_program = value.to_string(),
+                GeneralKey::WorktreesDir => {
                     self.config.worktrees_dir = if value.is_empty() || value == "(default)" {
                         None
                     } else {
                         Some(PathBuf::from(value))
                     };
                 }
-                "projects_dir" => {
+                GeneralKey::ProjectsDir => {
                     self.config.projects_dir = if value.is_empty() || value == "(default)" {
                         None
                     } else {
                         Some(PathBuf::from(value))
                     };
                 }
-                "clone_timeout_secs" => match value.parse::<u64>() {
+                GeneralKey::CloneTimeoutSecs => match value.parse::<u64>() {
                     Ok(v) if v >= 30 => {
                         self.config.clone_timeout_secs = v;
                     }
@@ -1394,7 +1396,7 @@ impl App {
                 // cap to fall back on, so it would produce an empty picker rather
                 // than a short one. No zero-disables case — the whole point of the
                 // bound is that an abandoned `gh api --paginate` gets killed.
-                "repo_list_timeout_secs" => match value.parse::<u64>() {
+                GeneralKey::RepoListTimeoutSecs => match value.parse::<u64>() {
                     Ok(v) if v >= 30 => {
                         self.config.repo_list_timeout_secs = v;
                     }
@@ -1406,21 +1408,21 @@ impl App {
                     }
                     Err(_) => {}
                 },
-                "editor" => {
+                GeneralKey::Editor => {
                     self.config.editor = if value.is_empty() || value == "(auto)" {
                         None
                     } else {
                         Some(value.to_string())
                     };
                 }
-                "editor_gui" => {
+                GeneralKey::EditorGui => {
                     self.config.editor_gui = match value {
                         "true" => Some(true),
                         "false" => Some(false),
                         _ => None,
                     };
                 }
-                "ui_refresh_fps" => match value.parse::<u32>() {
+                GeneralKey::UiRefreshFps => match value.parse::<u32>() {
                     Ok(v) if v >= 1 => {
                         self.config.ui_refresh_fps = v;
                     }
@@ -1432,12 +1434,12 @@ impl App {
                     }
                     Err(_) => {}
                 },
-                "pr_check_interval_secs" => {
+                GeneralKey::PrCheckIntervalSecs => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.pr_check_interval_secs = v;
                     }
                 }
-                "hibernate_idle_timeout_secs" => match value.parse::<u64>() {
+                GeneralKey::HibernateIdleTimeoutSecs => match value.parse::<u64>() {
                     Ok(v) if v >= 60 => {
                         self.config.hibernate_idle_timeout_secs = v;
                     }
@@ -1449,7 +1451,7 @@ impl App {
                     }
                     Err(_) => {}
                 },
-                "hibernate_check_interval_secs" => match value.parse::<u64>() {
+                GeneralKey::HibernateCheckIntervalSecs => match value.parse::<u64>() {
                     Ok(v) if v >= 10 => {
                         self.config.hibernate_check_interval_secs = v;
                     }
@@ -1461,7 +1463,7 @@ impl App {
                     }
                     Err(_) => {}
                 },
-                "project_pull_interval_secs" => match value.parse::<u64>() {
+                GeneralKey::ProjectPullIntervalSecs => match value.parse::<u64>() {
                     Ok(v) if v >= 60 => {
                         self.config.project_pull_interval_secs = v;
                     }
@@ -1473,7 +1475,7 @@ impl App {
                     }
                     Err(_) => {}
                 },
-                "max_concurrent_tmux" => match value.parse::<usize>() {
+                GeneralKey::MaxConcurrentTmux => match value.parse::<usize>() {
                     Ok(v) if v >= 1 => {
                         self.config.max_concurrent_tmux = v;
                     }
@@ -1485,56 +1487,52 @@ impl App {
                     }
                     Err(_) => {}
                 },
-                "session_number_debounce_ms" => {
+                GeneralKey::SessionNumberDebounceMs => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.session_number_debounce_ms = v;
                     }
                 }
-                "recent_sessions_limit" => {
+                GeneralKey::RecentSessionsLimit => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.recent_sessions_limit = v;
                     }
                 }
                 // An opacity outside 0.0..=1.0 would render the pane black or
                 // brighter than the source, so clamp rather than reject.
-                "dim_unfocused_opacity" => {
+                GeneralKey::DimUnfocusedOpacity => {
                     if let Ok(v) = value.parse::<f32>() {
                         self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
                     }
                 }
-                "ai_summary_model" => {
+                GeneralKey::AiSummaryModel => {
                     self.config.ai_summary_model = value.to_string();
                 }
-                "commander_enabled" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.commander_enabled = b;
-                    }
-                }
-                "commander_program" => {
+                GeneralKey::CommanderProgram => {
                     self.config.commander_program = if value.is_empty() || value == "(default)" {
                         None
                     } else {
                         Some(value.to_string())
                     };
                 }
-                "commander_dir" => {
+                GeneralKey::CommanderDir => {
                     self.config.commander_dir = if value.is_empty() || value == "(default)" {
                         None
                     } else {
                         Some(PathBuf::from(value))
                     };
                 }
-                "in_progress_limit" => {
+                GeneralKey::InProgressLimit => {
                     self.config.in_progress_limit = if value.is_empty() || value == "(unlimited)" {
                         None
                     } else {
                         value.parse::<u32>().ok().filter(|&n| n > 0)
                     };
                 }
-                _ => {}
+                // Applied through the service by `apply_settings_edit_live`.
+                GeneralKey::CodeHostProvider | GeneralKey::GitlabHostname => {}
             },
-            SettingsTab::Voice => match field_key {
-                "conversation_name" => {
+            SettingKey::Voice(key) => match key {
+                VoiceKey::ConversationName => {
                     let v = value.trim();
                     self.config.conversation.name = if v.is_empty() {
                         "Claudette".to_string()
@@ -1542,29 +1540,31 @@ impl App {
                         v.to_string()
                     };
                 }
-                "conversation_base_url" => self.config.conversation.base_url = value.to_string(),
-                "conversation_model" => self.config.conversation.model = value.to_string(),
-                "conversation_voice" => {
+                VoiceKey::ConversationBaseUrl => {
+                    self.config.conversation.base_url = value.to_string()
+                }
+                VoiceKey::ConversationModel => self.config.conversation.model = value.to_string(),
+                VoiceKey::ConversationVoice => {
                     self.config.conversation.voice = if value.is_empty() || value == "(default)" {
                         None
                     } else {
                         Some(value.to_string())
                     };
                 }
-                "conversation_format" => {
+                VoiceKey::ConversationFormat => {
                     self.config.conversation.response_format = value.to_string();
                 }
-                "conversation_speed" => {
+                VoiceKey::ConversationSpeed => {
                     if let Ok(v) = value.parse::<f32>() {
                         self.config.conversation.speed = v.clamp(0.25, 4.0);
                     }
                 }
-                "conversation_volume" => {
+                VoiceKey::ConversationVolume => {
                     if let Ok(v) = value.parse::<f32>() {
                         self.config.conversation.volume = v.clamp(0.0, 2.0);
                     }
                 }
-                "conversation_speak_scope" => {
+                VoiceKey::ConversationSpeakScope => {
                     // The picker passes the human label; config/tests use tokens.
                     if let Some(scope) =
                         claude_commander_core::conversation::SpeakScope::from_token(value).or_else(
@@ -1574,23 +1574,23 @@ impl App {
                         self.config.conversation.speak_scope = scope;
                     }
                 }
-                "stt_base_url" => self.config.stt.base_url = value.to_string(),
-                "stt_model" => self.config.stt.model = value.to_string(),
-                "stt_language" => {
+                VoiceKey::SttBaseUrl => self.config.stt.base_url = value.to_string(),
+                VoiceKey::SttModel => self.config.stt.model = value.to_string(),
+                VoiceKey::SttLanguage => {
                     self.config.stt.language = if value.is_empty() || value == "(auto)" {
                         None
                     } else {
                         Some(value.to_string())
                     };
                 }
-                "stt_prompt" => {
+                VoiceKey::SttPrompt => {
                     self.config.stt.prompt = if value.is_empty() || value == "(none)" {
                         None
                     } else {
                         Some(value.to_string())
                     };
                 }
-                "stt_input_device" => {
+                VoiceKey::SttInputDevice => {
                     let v = value.trim();
                     self.config.stt.input_device =
                         if v.is_empty() || v == "(default)" || v == "(auto)" {
@@ -1599,7 +1599,7 @@ impl App {
                             Some(v.to_string())
                         };
                 }
-                "stt_dictation_submit" => {
+                VoiceKey::SttDictationSubmit => {
                     // The picker passes the human label; config/tests use tokens.
                     // An unrecognised value is ignored rather than reset to the
                     // default, so a typo can't quietly disable a submit policy.
@@ -1620,22 +1620,15 @@ impl App {
                         self.respawn_listener();
                     }
                 }
-                _ => {}
             },
-            SettingsTab::Theme => {
-                // The key handler edits the tab's own scope through
-                // `apply_theme_edit`; an unscoped edit is the usual theme's.
-                self.apply_theme_edit(&ThemeScope::Usual, field_key, value);
-                return;
-            }
-            SettingsTab::Keybindings => {
-                use claude_commander_core::config::keybindings::{BindableAction, KeyBinding};
+            // Theme rows edit their scope through `apply_theme_edit`.
+            SettingKey::Theme(_) => return,
+            // Toggle rows flip in place through `apply_bool_setting`; a text
+            // row cannot carry a toggle key (`TextRowKey`), so none gets here.
+            SettingKey::Toggle(_) => return,
+            SettingKey::Keybinding(action) => {
+                use claude_commander_core::config::keybindings::KeyBinding;
                 use std::str::FromStr;
-
-                let Ok(action) = BindableAction::from_str(field_key) else {
-                    warn!("Unknown keybinding action: {}", field_key);
-                    return;
-                };
 
                 // The row value is rendered as a comma-separated list
                 // (e.g. `"k, Up, Ctrl-p"`). Parse each entry back into a
@@ -1675,8 +1668,8 @@ impl App {
 
                 self.config.keybindings.set_keys_for(action, parsed);
             }
-            SettingsTab::Server => match field_key {
-                "server_bind" => match value.trim().parse::<std::net::IpAddr>() {
+            SettingKey::Server(key) => match key {
+                ServerKey::Bind => match value.trim().parse::<std::net::IpAddr>() {
                     Ok(ip) => self.config.server.bind = ip,
                     Err(_) => {
                         self.ui_state.status_message = Some((
@@ -1689,7 +1682,7 @@ impl App {
                 // Port 0 is a legal port that binds an ephemeral one the
                 // operator cannot predict — useless for a client that has to be
                 // pointed at it — so it is refused here.
-                "server_port" => match value.trim().parse::<u16>() {
+                ServerKey::Port => match value.trim().parse::<u16>() {
                     Ok(p) if p > 0 => self.config.server.port = p,
                     _ => {
                         self.ui_state.status_message = Some((
@@ -1699,7 +1692,7 @@ impl App {
                         return;
                     }
                 },
-                "server_token" => {
+                ServerKey::Token => {
                     let trimmed = value.trim();
                     // The row renders a placeholder instead of the secret, so
                     // submitting it unchanged has to mean "leave it alone" rather
@@ -1715,7 +1708,7 @@ impl App {
                         Some(trimmed.to_string())
                     };
                 }
-                "server_cors_allowed_origins" => {
+                ServerKey::CorsAllowedOrigins => {
                     let trimmed = value.trim();
                     self.config.server.cors_allowed_origins =
                         if trimmed.is_empty() || trimmed == "(none)" {
@@ -1728,23 +1721,10 @@ impl App {
                                 .collect()
                         };
                 }
-                _ => {
-                    warn!("Unknown server setting: {}", field_key);
-                    return;
-                }
             },
-            SettingsTab::Sections => {
-                // Sections tab handles its own persistence via save_sections_config
-                return;
-            }
-            SettingsTab::Workspaces => {
-                // Workspaces tab propagates its own edits (handle_workspaces_key)
-                return;
-            }
-            SettingsTab::Programs => {
-                // Programs tab handles its own persistence in handle_programs_key
-                return;
-            }
+            // A heading edits nothing. (The Sections, Workspaces and Programs
+            // tabs have no rows here: each handles and persists its own edits.)
+            SettingKey::None => return,
         }
 
         self.persist_config();
@@ -1769,9 +1749,9 @@ impl App {
     /// Apply an edit and finish code-host changes (provider and GitLab
     /// hostname) through the service's serialized cache-invalidation path,
     /// which also resets the glab probe and refetches PRs.
-    async fn apply_settings_edit_live(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
-        match (tab, field_key) {
-            (SettingsTab::General, "code_host_provider") => {
+    async fn apply_settings_edit_live(&mut self, key: SettingKey, value: &str) {
+        match key {
+            SettingKey::General(GeneralKey::CodeHostProvider) => {
                 use claude_commander_protocol::hosting::CodeHostProvider;
                 let provider = match value {
                     "GitHub" | "github" => CodeHostProvider::Github,
@@ -1780,7 +1760,7 @@ impl App {
                 };
                 self.spawn_code_host_edit(move |config| config.code_host_provider = provider);
             }
-            (SettingsTab::General, "gitlab_hostname") => {
+            SettingKey::General(GeneralKey::GitlabHostname) => {
                 let Some(hostname) = self.parse_gitlab_hostname_setting(value) else {
                     return;
                 };
@@ -1788,7 +1768,7 @@ impl App {
                     config.gitlab_hostname = hostname.clone();
                 });
             }
-            _ => self.apply_settings_edit(tab, field_key, value),
+            _ => self.apply_settings_edit(key, value),
         }
     }
 
@@ -1820,32 +1800,28 @@ impl App {
     ///
     /// Booleans are stored as real `bool`s on [`Config`]; this avoids the
     /// stringify/parse round-trip used by the text-input edit path.
-    pub(super) fn apply_bool_setting(&mut self, field_key: &str, value: bool) {
-        match field_key {
-            "per_repo_worktree_dirs" => self.config.per_repo_worktree_dirs = value,
-            "fetch_before_create" => self.config.fetch_before_create = value,
-            "skip_lfs_smudge" => self.config.skip_lfs_smudge = value,
-            "resume_session" => self.config.resume_session = value,
-            "hibernate_enabled" => self.config.hibernate_enabled = value,
-            "nix_develop" => self.config.nix_develop = value,
-            "project_pull_enabled" => self.config.project_pull_enabled = value,
-            "invert_pr_label_color" => self.config.invert_pr_label_color = value,
-            "show_session_program" => self.config.show_session_program = value,
-            "hide_empty_sections" => self.config.hide_empty_sections = value,
-            "rounded_borders" => self.config.rounded_borders = value,
-            "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
-            "precompute_review_caches" => self.config.precompute_review_caches = value,
-            "ai_summary_enabled" => self.config.ai_summary_enabled = value,
-            "commander_enabled" => self.config.commander_enabled = value,
-            "conversation_enabled" => self.config.conversation.enabled = value,
-            "stt_enabled" => self.config.stt.enabled = value,
-            "stt_pause_media" => self.config.stt.pause_media = value,
-            "telemetry_enabled" => self.config.telemetry.enabled = value,
-            "server_auto_start" => self.config.server.auto_start = value,
-            _ => {
-                warn!("Unknown boolean setting: {}", field_key);
-                return;
-            }
+    pub(super) fn apply_bool_setting(&mut self, key: ToggleKey, value: bool) {
+        match key {
+            ToggleKey::PerRepoWorktreeDirs => self.config.per_repo_worktree_dirs = value,
+            ToggleKey::FetchBeforeCreate => self.config.fetch_before_create = value,
+            ToggleKey::SkipLfsSmudge => self.config.skip_lfs_smudge = value,
+            ToggleKey::ResumeSession => self.config.resume_session = value,
+            ToggleKey::HibernateEnabled => self.config.hibernate_enabled = value,
+            ToggleKey::NixDevelop => self.config.nix_develop = value,
+            ToggleKey::ProjectPullEnabled => self.config.project_pull_enabled = value,
+            ToggleKey::InvertPrLabelColor => self.config.invert_pr_label_color = value,
+            ToggleKey::ShowSessionProgram => self.config.show_session_program = value,
+            ToggleKey::HideEmptySections => self.config.hide_empty_sections = value,
+            ToggleKey::RoundedBorders => self.config.rounded_borders = value,
+            ToggleKey::DimUnfocusedPreview => self.config.dim_unfocused_preview = value,
+            ToggleKey::PrecomputeReviewCaches => self.config.precompute_review_caches = value,
+            ToggleKey::AiSummaryEnabled => self.config.ai_summary_enabled = value,
+            ToggleKey::CommanderEnabled => self.config.commander_enabled = value,
+            ToggleKey::ConversationEnabled => self.config.conversation.enabled = value,
+            ToggleKey::SttEnabled => self.config.stt.enabled = value,
+            ToggleKey::SttPauseMedia => self.config.stt.pause_media = value,
+            ToggleKey::TelemetryEnabled => self.config.telemetry.enabled = value,
+            ToggleKey::ServerAutoStart => self.config.server.auto_start = value,
         }
         self.persist_config();
     }
@@ -1955,13 +1931,10 @@ impl App {
         // search-filtered view (kept after `Enter`), and none of its edits
         // read the rendered value, so it is left as is.
         if state.tab != SettingsTab::Keybindings {
-            let selected = state
-                .rows
-                .get(state.selected_row)
-                .map(|r| r.field_key.clone());
+            let selected = state.rows.get(state.selected_row).map(|r| r.key);
             state.rows = self.settings_rows(&state);
             state.selected_row = selected
-                .and_then(|k| state.rows.iter().position(|r| r.field_key == k))
+                .and_then(|k| state.rows.iter().position(|r| r.key == k))
                 .unwrap_or_else(|| first_selectable_from(&state.rows, 0));
         }
 
@@ -1989,10 +1962,9 @@ impl App {
                 SettingsEditing::TextInput { value } => match key.code {
                     KeyCode::Enter => {
                         let val = value.value().to_string();
-                        let field_key = state.rows[state.selected_row].field_key.clone();
+                        let key = state.rows[state.selected_row].key;
                         state.editing = None;
-                        self.apply_settings_edit_live(state.tab, &field_key, &val)
-                            .await;
+                        self.apply_settings_edit_live(key, &val).await;
                         // Refresh rows after applying
                         state.rows = self.settings_rows(&state);
                         self.ui_state.modal = Modal::Settings(state);
@@ -2027,9 +1999,11 @@ impl App {
                         PickerOutcome::Cancel => state.editing = None,
                         PickerOutcome::Pick(hex) => {
                             state.editing = None;
-                            let field_key = state.rows[state.selected_row].field_key.clone();
-                            if let Some(scope) = self.theme_pick_scope(&state.theme_scope) {
-                                self.apply_theme_colour(&scope, &field_key, hex.as_deref());
+                            if let SettingKey::Theme(ThemeKey::Colour(colour)) =
+                                state.rows[state.selected_row].key
+                                && let Some(scope) = self.theme_pick_scope(&state.theme_scope)
+                            {
+                                self.apply_theme_colour(&scope, colour, hex.as_deref());
                             }
                             state.rows = self.settings_rows(&state);
                         }
@@ -2041,7 +2015,7 @@ impl App {
                         // Commit the entry's value (the display label and stored
                         // value differ only for the mic picker's device ids).
                         let chosen = options[*selected].value.clone();
-                        let field_key = state.rows[state.selected_row].field_key.clone();
+                        let key = state.rows[state.selected_row].key;
                         // Treat "(auto)" as empty string for apply_settings_edit
                         let val = if chosen == "(auto)" {
                             String::new()
@@ -2049,13 +2023,13 @@ impl App {
                             chosen
                         };
                         state.editing = None;
-                        if state.tab == SettingsTab::Theme {
-                            if field_key == "theme_scope" {
+                        if let SettingKey::Theme(key) = key {
+                            if key == ThemeKey::Scope {
                                 if let Some(scope) = parse_theme_scope(&val) {
                                     state.theme_scope = scope;
                                 }
                             } else if let Some(scope) = self.theme_pick_scope(&state.theme_scope) {
-                                self.apply_theme_edit(&scope, &field_key, &val);
+                                self.apply_theme_edit(&scope, key, &val);
                             }
                             state.rows = self.settings_rows(&state);
                             state.selected_row =
@@ -2064,14 +2038,13 @@ impl App {
                             return;
                         }
                         let prev_input_device = self.config.stt.input_device.clone();
-                        self.apply_settings_edit_live(state.tab, &field_key, &val)
-                            .await;
+                        self.apply_settings_edit_live(key, &val).await;
                         // Selecting a *different* microphone rebuilds the running
                         // listener so the new device is used on the next recording,
                         // live. Skip the respawn when the id is unchanged (e.g.
                         // re-picking the current device) to avoid a needless
                         // teardown / re-open of the same device.
-                        if field_key == "stt_input_device"
+                        if key == SettingKey::Voice(VoiceKey::SttInputDevice)
                             && self.config.stt.input_device != prev_input_device
                         {
                             self.respawn_listener();
@@ -2118,9 +2091,8 @@ impl App {
                         .and_then(SettingsRow::toggled)
                 })
                 .flatten();
-            if let Some(new_val) = new_val {
-                let field_key = state.rows[state.selected_row].field_key.clone();
-                self.apply_bool_setting(&field_key, new_val);
+            if let Some((key, new_val)) = new_val {
+                self.apply_bool_setting(key, new_val);
                 state.rows = self.settings_rows(&state);
                 self.ui_state.modal = Modal::Settings(state);
                 return;
@@ -2155,96 +2127,9 @@ impl App {
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::Enter => {
-                        if !state.rows.is_empty() {
-                            let field_key = &state.rows[state.selected_row].field_key;
-                            if field_key == "code_host_provider" {
-                                let options = code_host_options();
-                                let selected = usize::from(
-                                    self.config.code_host_provider
-                                        == claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
-                                );
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else if field_key == "conversation_speak_scope" {
-                                // Inline option picker for the speak-scope enum.
-                                use claude_commander_core::conversation::SpeakScope;
-                                let options: Vec<PickerOption> = SpeakScope::ALL
-                                    .iter()
-                                    .map(|s| PickerOption::plain(s.label()))
-                                    .collect();
-                                let current_value = state.rows[state.selected_row].text_value();
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o.value == current_value)
-                                    .unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else if field_key == "stt_dictation_submit" {
-                                // Inline option picker for the dictation submit
-                                // policy — three named values, so a picker
-                                // rather than free text (same shape as the
-                                // speak-scope row above).
-                                use claude_commander_core::conversation::DictationSubmit;
-                                let options: Vec<PickerOption> = DictationSubmit::ALL
-                                    .iter()
-                                    .map(|s| PickerOption::plain(s.label()))
-                                    .collect();
-                                let current_value = state.rows[state.selected_row].text_value();
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o.value == current_value)
-                                    .unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else if field_key == "stt_input_device" {
-                                // Inline option picker for the microphone: each entry
-                                // shows a friendly label but commits the stable device
-                                // id. "(default)" comes first for the system default.
-                                // Refresh the device cache so the list is current.
-                                self.refresh_input_devices();
-                                let mut options = vec![PickerOption::plain("(default)")];
-                                options.extend(self.stt_input_devices.iter().map(|d| {
-                                    PickerOption {
-                                        label: d.label.clone(),
-                                        value: d.id.clone(),
-                                    }
-                                }));
-                                // Preselect by the stored device id (the row shows
-                                // the friendly label, so read config directly).
-                                let current_id = self
-                                    .config
-                                    .stt
-                                    .input_device
-                                    .clone()
-                                    .unwrap_or_else(|| "(default)".into());
-                                // Keep a configured-but-unplugged device selectable so
-                                // opening the picker doesn't silently reset it.
-                                if current_id != "(default)"
-                                    && !options.iter().any(|o| o.value == current_id)
-                                {
-                                    options.push(PickerOption {
-                                        label: format!("{current_id} (not connected)"),
-                                        value: current_id.clone(),
-                                    });
-                                }
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o.value == current_id)
-                                    .unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else {
-                                let current_value = state.rows[state.selected_row].text_value();
-                                let initial =
-                                    if current_value == "(auto)" || current_value == "(none)" {
-                                        String::new()
-                                    } else {
-                                        current_value.to_string()
-                                    };
-                                state.editing = Some(SettingsEditing::TextInput {
-                                    value: initial.into(),
-                                });
-                            }
+                        if let Some(row) = state.rows.get(state.selected_row) {
+                            let editor = self.row_editor(row.key, row.text_value());
+                            state.editing = Some(editor);
                         }
                         self.ui_state.modal = Modal::Settings(state);
                     }
@@ -2254,6 +2139,82 @@ impl App {
                 },
             }
         }
+    }
+
+    /// The editor Enter opens on a row outside the Theme tab: an option
+    /// picker for an enumerated setting, free text (prefilled with
+    /// `current`, the row's value) otherwise.
+    fn row_editor(&mut self, key: SettingKey, current: &str) -> SettingsEditing {
+        use claude_commander_core::conversation::{DictationSubmit, SpeakScope};
+        match key {
+            SettingKey::General(GeneralKey::CodeHostProvider) => {
+                // Preselected from config: the row shows the display name,
+                // the options carry the config token.
+                let selected = usize::from(
+                    self.config.code_host_provider
+                        == claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+                );
+                SettingsEditing::OptionPicker {
+                    options: code_host_options(),
+                    selected,
+                }
+            }
+            // Named values, so a picker rather than free text.
+            SettingKey::Voice(VoiceKey::ConversationSpeakScope) => option_picker(
+                SpeakScope::ALL
+                    .iter()
+                    .map(|s| PickerOption::plain(s.label()))
+                    .collect(),
+                current,
+            ),
+            SettingKey::Voice(VoiceKey::SttDictationSubmit) => option_picker(
+                DictationSubmit::ALL
+                    .iter()
+                    .map(|s| PickerOption::plain(s.label()))
+                    .collect(),
+                current,
+            ),
+            SettingKey::Voice(VoiceKey::SttInputDevice) => self.input_device_picker(),
+            _ => {
+                let initial = if current == "(auto)" || current == "(none)" {
+                    ""
+                } else {
+                    current
+                };
+                SettingsEditing::TextInput {
+                    value: initial.to_string().into(),
+                }
+            }
+        }
+    }
+
+    /// The microphone picker: each entry shows a friendly label but commits
+    /// the stable device id, with "(default)" first for the system default.
+    /// Refreshes the device cache so the list is current.
+    fn input_device_picker(&mut self) -> SettingsEditing {
+        self.refresh_input_devices();
+        let mut options = vec![PickerOption::plain("(default)")];
+        options.extend(self.stt_input_devices.iter().map(|d| PickerOption {
+            label: d.label.clone(),
+            value: d.id.clone(),
+        }));
+        // Preselect by the stored device id (the row shows the friendly
+        // label, so read config directly).
+        let current_id = self
+            .config
+            .stt
+            .input_device
+            .clone()
+            .unwrap_or_else(|| "(default)".into());
+        // Keep a configured-but-unplugged device selectable so opening the
+        // picker doesn't silently reset it.
+        if current_id != "(default)" && !options.iter().any(|o| o.value == current_id) {
+            options.push(PickerOption {
+                label: format!("{current_id} (not connected)"),
+                value: current_id.clone(),
+            });
+        }
+        option_picker(options, &current_id)
     }
 
     /// Handle a keypress while the Keybindings search box is focused. Typing
@@ -3786,50 +3747,6 @@ fn parse_theme_scope(value: &str) -> Option<ThemeScope> {
     }
 }
 
-/// The colour field of `overrides` a Theme-tab row edits, by its field key.
-/// `None` for a key that is not a colour row (`preset`, `appearance`, …).
-fn theme_colour_slot<'a>(
-    overrides: &'a mut ThemeOverrides,
-    field_key: &str,
-) -> Option<&'a mut Option<claude_commander_core::config::theme::ColorValue>> {
-    macro_rules! slot {
-        ($($name:ident),* $(,)?) => {
-            match field_key {
-                $(stringify!($name) => Some(&mut overrides.$name),)*
-                _ => None,
-            }
-        };
-    }
-    slot!(
-        border_focused,
-        border_unfocused,
-        selection_bg,
-        selection_fg,
-        status_creating,
-        status_running,
-        status_stopped,
-        status_pr,
-        status_pr_merged,
-        pr_open,
-        pr_draft,
-        pr_closed,
-        text_primary,
-        text_secondary,
-        text_accent,
-        diff_added,
-        diff_removed,
-        diff_hunk_header,
-        diff_file_header,
-        diff_context,
-        modal_info,
-        modal_warning,
-        modal_error,
-        status_bar_bg,
-        status_bar_fg,
-        status_bar_accent,
-    )
-}
-
 /// How wide the colour picker's pane is when the settings modal is drawn in a
 /// frame `area`: the whole settings body.
 pub(super) fn colour_picker_width(area: Rect) -> u16 {
@@ -3862,6 +3779,13 @@ fn format_color(color: ratatui::style::Color) -> String {
     }
 }
 
+/// An option picker over `options` with the one whose value is `current`
+/// selected (the first if none is).
+fn option_picker(options: Vec<PickerOption>, current: &str) -> SettingsEditing {
+    let selected = options.iter().position(|o| o.value == current).unwrap_or(0);
+    SettingsEditing::OptionPicker { options, selected }
+}
+
 fn code_host_options() -> Vec<PickerOption> {
     vec![
         PickerOption {
@@ -3878,11 +3802,12 @@ fn code_host_options() -> Vec<PickerOption> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use claude_commander_core::config::keybindings::BindableAction;
 
     fn rows_with_labels(labels: &[&str]) -> Vec<SettingsRow> {
         labels
             .iter()
-            .map(|l| SettingsRow::text(*l, "", "key"))
+            .map(|l| SettingsRow::text(*l, "", GeneralKey::BranchPrefix))
             .collect()
     }
 
@@ -3947,10 +3872,10 @@ mod tests {
     fn keybinding_rows() -> Vec<SettingsRow> {
         vec![
             SettingsRow::header("Navigation"),
-            SettingsRow::text("Navigate up", "k, Up", "navigate_up"),
-            SettingsRow::text("Navigate down", "j, Down", "navigate_down"),
+            SettingsRow::text("Navigate up", "k, Up", BindableAction::NavigateUp),
+            SettingsRow::text("Navigate down", "j, Down", BindableAction::NavigateDown),
             SettingsRow::header("Sessions"),
-            SettingsRow::text("Delete/kill session", "d", "delete_session"),
+            SettingsRow::text("Delete/kill session", "d", BindableAction::DeleteSession),
         ]
     }
 
@@ -3981,12 +3906,15 @@ mod tests {
         assert_eq!(out.len(), 2); // "Sessions" header + the delete row
         assert!(matches!(out[0].kind, SettingsRowKind::Header));
         assert_eq!(out[0].label, "Sessions");
-        assert_eq!(out[1].field_key, "delete_session");
+        assert_eq!(out[1].key, BindableAction::DeleteSession.into());
 
         // Matches on the bound keys ("Up" belongs to navigate_up).
         let out = filter_keybinding_rows(keybinding_rows(), "Up");
         assert_eq!(out[0].label, "Navigation");
-        assert!(out.iter().any(|r| r.field_key == "navigate_up"));
+        assert!(
+            out.iter()
+                .any(|r| r.key == BindableAction::NavigateUp.into())
+        );
     }
 
     #[test]

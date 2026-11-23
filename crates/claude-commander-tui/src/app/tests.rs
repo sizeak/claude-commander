@@ -1021,14 +1021,19 @@ fn test_general_rows_are_grouped_under_section_headers() {
     }
 }
 
+/// The row in `rows` keyed `key`; panics naming the key if there is none.
+fn row_by_key(rows: &[SettingsRow], key: impl Into<SettingKey>) -> &SettingsRow {
+    let key = key.into();
+    rows.iter()
+        .find(|r| r.key == key)
+        .unwrap_or_else(|| panic!("no {key:?} row"))
+}
+
 #[test]
 fn test_worktrees_dir_row_shows_default_when_none() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
-    let row = rows
-        .iter()
-        .find(|r| r.field_key == "worktrees_dir")
-        .unwrap();
+    let row = row_by_key(&rows, GeneralKey::WorktreesDir);
     assert_eq!(row.text_value(), "(default)");
 }
 
@@ -1037,10 +1042,7 @@ fn test_worktrees_dir_row_shows_custom_path() {
     let mut app = make_test_app();
     app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom/path"));
     let rows = app.build_settings_rows(SettingsTab::General);
-    let row = rows
-        .iter()
-        .find(|r| r.field_key == "worktrees_dir")
-        .unwrap();
+    let row = row_by_key(&rows, GeneralKey::WorktreesDir);
     assert_eq!(row.text_value(), "/custom/path");
 }
 
@@ -1050,16 +1052,47 @@ fn test_worktrees_dir_row_shows_custom_path() {
 fn server_tab_rows_cover_the_editable_settings() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::Server);
-    let keys: Vec<&str> = rows
+    let keys: Vec<SettingKey> = rows
         .iter()
-        .map(|r| r.field_key.as_str())
-        .filter(|k| !k.is_empty())
+        .map(|r| r.key)
+        .filter(|k| *k != SettingKey::None)
         .collect();
-    assert!(keys.contains(&"server_auto_start"), "{keys:?}");
-    assert!(keys.contains(&"server_bind"), "{keys:?}");
-    assert!(keys.contains(&"server_port"), "{keys:?}");
-    assert!(keys.contains(&"server_token"), "{keys:?}");
-    assert!(keys.contains(&"server_cors_allowed_origins"), "{keys:?}");
+    assert!(
+        keys.contains(&ToggleKey::ServerAutoStart.into()),
+        "{keys:?}"
+    );
+    assert!(keys.contains(&ServerKey::Bind.into()), "{keys:?}");
+    assert!(keys.contains(&ServerKey::Port.into()), "{keys:?}");
+    assert!(keys.contains(&ServerKey::Token.into()), "{keys:?}");
+    assert!(
+        keys.contains(&ServerKey::CorsAllowedOrigins.into()),
+        "{keys:?}"
+    );
+}
+
+/// A row's key is what its edit dispatches on and how the modal finds the
+/// selected row again after a rebuild, so no two rows on a tab may share one —
+/// and only headings may have none.
+#[test]
+fn settings_rows_have_distinct_keys_per_tab() {
+    let app = make_test_app();
+    for &tab in SettingsTab::ALL.iter() {
+        let rows = app.build_settings_rows(tab);
+        let mut seen = Vec::new();
+        for row in &rows {
+            assert_eq!(
+                row.key == SettingKey::None,
+                !row.is_selectable(),
+                "{tab:?}: {:?} row {:?}",
+                row.label,
+                row.key
+            );
+            if row.key != SettingKey::None {
+                assert!(!seen.contains(&row.key), "{tab:?} repeats {:?}", row.key);
+                seen.push(row.key);
+            }
+        }
+    }
 }
 
 /// The token is operator-equivalent and the settings modal is on screen during
@@ -1070,16 +1103,13 @@ fn server_tab_never_renders_the_token() {
     let mut app = make_test_app();
     app.config.server.token = Some("sekret".into());
     let rows = app.build_settings_rows(SettingsTab::Server);
-    let row = rows
-        .iter()
-        .find(|r| r.field_key == "server_token")
-        .expect("token row");
+    let row = row_by_key(&rows, ServerKey::Token);
     assert_eq!(row.text_value(), "(set)");
     for r in &rows {
         assert!(
             !r.text_value().contains("sekret"),
-            "token leaked into the {} row",
-            r.field_key
+            "token leaked into the {:?} row",
+            r.key
         );
     }
 }
@@ -1087,12 +1117,11 @@ fn server_tab_never_renders_the_token() {
 #[test]
 fn server_tab_edits_round_trip_into_config() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::Server, "server_bind", "0.0.0.0");
-    app.apply_settings_edit(SettingsTab::Server, "server_port", "9999");
-    app.apply_bool_setting("server_auto_start", true);
+    app.apply_settings_edit(ServerKey::Bind, "0.0.0.0");
+    app.apply_settings_edit(ServerKey::Port, "9999");
+    app.apply_bool_setting(ToggleKey::ServerAutoStart, true);
     app.apply_settings_edit(
-        SettingsTab::Server,
-        "server_cors_allowed_origins",
+        ServerKey::CorsAllowedOrigins,
         "http://localhost:3000, http://localhost:5173",
     );
 
@@ -1110,7 +1139,7 @@ fn server_tab_rejects_a_bad_bind_or_port_without_changing_config() {
     let mut app = make_test_app();
     let before = app.config.server.clone();
 
-    app.apply_settings_edit(SettingsTab::Server, "server_bind", "not-an-ip");
+    app.apply_settings_edit(ServerKey::Bind, "not-an-ip");
     assert_eq!(app.config.server.bind, before.bind);
     assert!(
         app.ui_state
@@ -1123,7 +1152,7 @@ fn server_tab_rejects_a_bad_bind_or_port_without_changing_config() {
 
     // Port 0 binds an ephemeral port no client could be pointed at.
     for bad in ["0", "70000", "eight"] {
-        app.apply_settings_edit(SettingsTab::Server, "server_port", bad);
+        app.apply_settings_edit(ServerKey::Port, bad);
         assert_eq!(app.config.server.port, before.port, "accepted port {bad}");
     }
 }
@@ -1135,21 +1164,17 @@ fn submitting_the_token_placeholder_leaves_the_token_alone() {
     let mut app = make_test_app();
     app.config.server.token = Some("sekret".into());
     persist_seeded_config(&app);
-    app.apply_settings_edit(SettingsTab::Server, "server_token", "(set)");
+    app.apply_settings_edit(ServerKey::Token, "(set)");
     assert_eq!(app.config.server.token.as_deref(), Some("sekret"));
 
     // The not-set placeholder is equally inert. Read it off the row rather than
     // hardcoding it, so this stays true if the wording changes.
     app.config.server.token = None;
     let rows = app.build_settings_rows(SettingsTab::Server);
-    let unset_placeholder = rows
-        .iter()
-        .find(|r| r.field_key == "server_token")
-        .map(|r| r.text_value().to_string())
-        .expect("token row");
+    let unset_placeholder = row_by_key(&rows, ServerKey::Token).text_value().to_string();
     app.config.server.token = Some("sekret".into());
     persist_seeded_config(&app);
-    app.apply_settings_edit(SettingsTab::Server, "server_token", &unset_placeholder);
+    app.apply_settings_edit(ServerKey::Token, &unset_placeholder);
     assert_eq!(
         app.config.server.token.as_deref(),
         Some("sekret"),
@@ -1159,12 +1184,12 @@ fn submitting_the_token_placeholder_leaves_the_token_alone() {
     // An explicit empty value does clear it.
     app.config.server.token = Some("sekret".into());
     persist_seeded_config(&app);
-    app.apply_settings_edit(SettingsTab::Server, "server_token", "");
+    app.apply_settings_edit(ServerKey::Token, "");
     assert!(app.config.server.token.is_none());
 
     // A token that happens to start with '(' is still settable — the
     // placeholders are matched exactly, not by their leading paren.
-    app.apply_settings_edit(SettingsTab::Server, "server_token", "(unusual-but-legal");
+    app.apply_settings_edit(ServerKey::Token, "(unusual-but-legal");
     assert_eq!(
         app.config.server.token.as_deref(),
         Some("(unusual-but-legal")
@@ -1276,7 +1301,7 @@ fn copy_server_token_is_hidden_after_a_failed_bind() {
 #[test]
 fn test_apply_worktrees_dir_sets_custom_path() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "/my/worktrees");
+    app.apply_settings_edit(GeneralKey::WorktreesDir, "/my/worktrees");
     assert_eq!(
         app.config.worktrees_dir,
         Some(std::path::PathBuf::from("/my/worktrees"))
@@ -1287,7 +1312,7 @@ fn test_apply_worktrees_dir_sets_custom_path() {
 fn test_apply_worktrees_dir_empty_clears_to_none() {
     let mut app = make_test_app();
     app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom"));
-    app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "");
+    app.apply_settings_edit(GeneralKey::WorktreesDir, "");
     assert_eq!(app.config.worktrees_dir, None);
 }
 
@@ -1295,7 +1320,7 @@ fn test_apply_worktrees_dir_empty_clears_to_none() {
 fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
     let mut app = make_test_app();
     app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom"));
-    app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "(default)");
+    app.apply_settings_edit(GeneralKey::WorktreesDir, "(default)");
     assert_eq!(app.config.worktrees_dir, None);
 }
 
@@ -1307,7 +1332,7 @@ fn test_projects_dir_row_shows_default_when_none() {
     // exactly what this test is about.
     app.config.projects_dir = None;
     let rows = app.build_settings_rows(SettingsTab::General);
-    let row = rows.iter().find(|r| r.field_key == "projects_dir").unwrap();
+    let row = row_by_key(&rows, GeneralKey::ProjectsDir);
     assert_eq!(row.text_value(), "(default)");
 }
 
@@ -1316,22 +1341,22 @@ fn test_projects_dir_row_shows_custom_path() {
     let mut app = make_test_app();
     app.config.projects_dir = Some(std::path::PathBuf::from("/custom/projects"));
     let rows = app.build_settings_rows(SettingsTab::General);
-    let row = rows.iter().find(|r| r.field_key == "projects_dir").unwrap();
+    let row = row_by_key(&rows, GeneralKey::ProjectsDir);
     assert_eq!(row.text_value(), "/custom/projects");
 }
 
 #[test]
 fn test_apply_projects_dir_round_trips_through_the_default_sentinel() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "projects_dir", "/my/projects");
+    app.apply_settings_edit(GeneralKey::ProjectsDir, "/my/projects");
     assert_eq!(
         app.config.projects_dir,
         Some(std::path::PathBuf::from("/my/projects"))
     );
-    app.apply_settings_edit(SettingsTab::General, "projects_dir", "(default)");
+    app.apply_settings_edit(GeneralKey::ProjectsDir, "(default)");
     assert_eq!(app.config.projects_dir, None);
     app.config.projects_dir = Some(std::path::PathBuf::from("/my/projects"));
-    app.apply_settings_edit(SettingsTab::General, "projects_dir", "");
+    app.apply_settings_edit(GeneralKey::ProjectsDir, "");
     assert_eq!(app.config.projects_dir, None);
 }
 
@@ -1339,22 +1364,19 @@ fn test_apply_projects_dir_round_trips_through_the_default_sentinel() {
 fn test_clone_timeout_row_shows_current_value() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
-    let row = rows
-        .iter()
-        .find(|r| r.field_key == "clone_timeout_secs")
-        .unwrap();
+    let row = row_by_key(&rows, GeneralKey::CloneTimeoutSecs);
     assert_eq!(row.text_value(), "1800");
 }
 
 #[test]
 fn test_apply_clone_timeout_rejects_implausibly_short_values() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "clone_timeout_secs", "60");
+    app.apply_settings_edit(GeneralKey::CloneTimeoutSecs, "60");
     assert_eq!(app.config.clone_timeout_secs, 60);
     // Below the floor and unparseable input both leave the value untouched.
-    app.apply_settings_edit(SettingsTab::General, "clone_timeout_secs", "5");
+    app.apply_settings_edit(GeneralKey::CloneTimeoutSecs, "5");
     assert_eq!(app.config.clone_timeout_secs, 60);
-    app.apply_settings_edit(SettingsTab::General, "clone_timeout_secs", "soon");
+    app.apply_settings_edit(GeneralKey::CloneTimeoutSecs, "soon");
     assert_eq!(app.config.clone_timeout_secs, 60);
 }
 
@@ -1362,10 +1384,7 @@ fn test_apply_clone_timeout_rejects_implausibly_short_values() {
 fn test_repo_list_timeout_row_shows_current_value() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
-    let row = rows
-        .iter()
-        .find(|r| r.field_key == "repo_list_timeout_secs")
-        .unwrap();
+    let row = row_by_key(&rows, GeneralKey::RepoListTimeoutSecs);
     assert_eq!(
         row.text_value(),
         claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS.to_string()
@@ -1375,12 +1394,12 @@ fn test_repo_list_timeout_row_shows_current_value() {
 #[test]
 fn test_apply_repo_list_timeout_rejects_implausibly_short_values() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "repo_list_timeout_secs", "600");
+    app.apply_settings_edit(GeneralKey::RepoListTimeoutSecs, "600");
     assert_eq!(app.config.repo_list_timeout_secs, 600);
     // Below the floor and unparseable input both leave the value untouched. There
     // is deliberately no zero-disables case: `0` is just below the floor.
     for rejected in ["5", "0", "soon"] {
-        app.apply_settings_edit(SettingsTab::General, "repo_list_timeout_secs", rejected);
+        app.apply_settings_edit(GeneralKey::RepoListTimeoutSecs, rejected);
         assert_eq!(
             app.config.repo_list_timeout_secs, 600,
             "{rejected} should not have been accepted"
@@ -1411,34 +1430,22 @@ fn test_commander_rows_present_with_defaults() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
 
-    let kind_of = |key: &str| {
-        rows.iter()
-            .find(|r| r.field_key == key)
-            .unwrap_or_else(|| panic!("missing row {key}"))
-            .kind
-            .clone()
-    };
+    let kind_of = |key: SettingKey| row_by_key(&rows, key).kind.clone();
 
     // Disabled by default → toggle carrying false.
-    assert_eq!(kind_of("commander_enabled"), SettingsRowKind::Toggle(false));
+    assert_eq!(
+        kind_of(ToggleKey::CommanderEnabled.into()),
+        SettingsRowKind::Toggle(false)
+    );
     // Program/dir fall back to "(default)" free-text when unset.
     assert_eq!(
-        kind_of("commander_program"),
+        kind_of(GeneralKey::CommanderProgram.into()),
         SettingsRowKind::Text("(default)".to_string())
     );
     assert_eq!(
-        kind_of("commander_dir"),
+        kind_of(GeneralKey::CommanderDir.into()),
         SettingsRowKind::Text("(default)".to_string())
     );
-}
-
-#[test]
-fn test_apply_commander_enabled_toggles_bool() {
-    let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "commander_enabled", "true");
-    assert!(app.config.commander_enabled);
-    app.apply_settings_edit(SettingsTab::General, "commander_enabled", "false");
-    assert!(!app.config.commander_enabled);
 }
 
 #[test]
@@ -1448,9 +1455,9 @@ fn test_toggle_commander_enabled_via_bool_path() {
     // for text/editing rows). This arm must exist or the toggle is a no-op.
     let mut app = make_test_app();
     assert!(!app.config.commander_enabled);
-    app.apply_bool_setting("commander_enabled", true);
+    app.apply_bool_setting(ToggleKey::CommanderEnabled, true);
     assert!(app.config.commander_enabled);
-    app.apply_bool_setting("commander_enabled", false);
+    app.apply_bool_setting(ToggleKey::CommanderEnabled, false);
     assert!(!app.config.commander_enabled);
 }
 
@@ -1461,16 +1468,13 @@ fn test_hide_empty_sections_toggle_and_apply() {
     assert!(app.config.hide_empty_sections);
     // Row is present with correct default value.
     let rows = app.build_settings_rows(SettingsTab::General);
-    let row = rows
-        .iter()
-        .find(|r| r.field_key == "hide_empty_sections")
-        .unwrap_or_else(|| panic!("missing hide_empty_sections row"));
+    let row = row_by_key(&rows, ToggleKey::HideEmptySections);
     assert_eq!(row.kind, SettingsRowKind::Toggle(true));
     // Apply false via bool path (what the toggle uses).
-    app.apply_bool_setting("hide_empty_sections", false);
+    app.apply_bool_setting(ToggleKey::HideEmptySections, false);
     assert!(!app.config.hide_empty_sections);
     // Flip back.
-    app.apply_bool_setting("hide_empty_sections", true);
+    app.apply_bool_setting(ToggleKey::HideEmptySections, true);
     assert!(app.config.hide_empty_sections);
 }
 
@@ -1503,7 +1507,7 @@ async fn toggling_hide_empty_sections_rebuilds_the_list() {
     let rows = app.build_settings_rows(SettingsTab::General);
     let selected_row = rows
         .iter()
-        .position(|r| r.field_key == "hide_empty_sections")
+        .position(|r| r.key == ToggleKey::HideEmptySections.into())
         .unwrap();
     let state = SettingsState {
         tab: SettingsTab::General,
@@ -1532,34 +1536,34 @@ fn test_stt_rows_present_with_defaults() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::Voice);
 
-    let kind_of = |key: &str| {
-        rows.iter()
-            .find(|r| r.field_key == key)
-            .unwrap_or_else(|| panic!("missing row {key}"))
-            .kind
-            .clone()
-    };
+    let kind_of = |key: SettingKey| row_by_key(&rows, key).kind.clone();
 
-    assert_eq!(kind_of("stt_enabled"), SettingsRowKind::Toggle(false));
     assert_eq!(
-        kind_of("stt_base_url"),
+        kind_of(ToggleKey::SttEnabled.into()),
+        SettingsRowKind::Toggle(false)
+    );
+    assert_eq!(
+        kind_of(VoiceKey::SttBaseUrl.into()),
         SettingsRowKind::Text("http://127.0.0.1:8000/v1".to_string())
     );
     // Optional fields fall back to sentinel free-text when unset.
     assert_eq!(
-        kind_of("stt_language"),
+        kind_of(VoiceKey::SttLanguage.into()),
         SettingsRowKind::Text("(auto)".to_string())
     );
     assert_eq!(
-        kind_of("stt_prompt"),
+        kind_of(VoiceKey::SttPrompt.into()),
         SettingsRowKind::Text("(none)".to_string())
     );
     // Media pausing is on by default.
-    assert_eq!(kind_of("stt_pause_media"), SettingsRowKind::Toggle(true));
+    assert_eq!(
+        kind_of(ToggleKey::SttPauseMedia.into()),
+        SettingsRowKind::Toggle(true)
+    );
     // Dictation is insert-only until the user opts into a submit policy; the
     // row shows the enum's human label, not its config token.
     assert_eq!(
-        kind_of("stt_dictation_submit"),
+        kind_of(VoiceKey::SttDictationSubmit.into()),
         SettingsRowKind::Text("Never".to_string())
     );
 }
@@ -1568,17 +1572,14 @@ fn test_stt_rows_present_with_defaults() {
 fn test_apply_stt_pause_media_toggle() {
     let mut app = make_test_app();
     assert!(app.config.stt.pause_media);
-    app.apply_bool_setting("stt_pause_media", false);
+    app.apply_bool_setting(ToggleKey::SttPauseMedia, false);
     assert!(!app.config.stt.pause_media);
 }
 
 /// The label of the Voice tab's "Pause Media While Recording" row.
 fn pause_media_label(app: &App) -> String {
-    app.build_settings_rows(SettingsTab::Voice)
-        .into_iter()
-        .find(|r| r.field_key == "stt_pause_media")
-        .expect("pause media row")
-        .label
+    let rows = app.build_settings_rows(SettingsTab::Voice);
+    row_by_key(&rows, ToggleKey::SttPauseMedia).label.clone()
 }
 
 /// Mark the mic listener as running, as `ensure_listener_started` would.
@@ -1595,7 +1596,7 @@ fn pause_media_row_has_no_restart_note_before_the_listener_starts() {
     // starts, so whatever is saved now is what will apply.
     let mut app = make_test_app();
     assert_eq!(pause_media_label(&app), "Pause Media While Recording");
-    app.apply_bool_setting("stt_pause_media", false);
+    app.apply_bool_setting(ToggleKey::SttPauseMedia, false);
     assert_eq!(pause_media_label(&app), "Pause Media While Recording");
 }
 
@@ -1608,11 +1609,11 @@ fn enabling_pause_media_on_a_running_listener_notes_the_restart() {
     start_test_listener(&app);
     assert_eq!(pause_media_label(&app), "Pause Media While Recording");
 
-    app.apply_bool_setting("stt_pause_media", true);
+    app.apply_bool_setting(ToggleKey::SttPauseMedia, true);
     assert_eq!(pause_media_label(&app), PAUSE_MEDIA_PENDING);
 
     // Flipping back to what is running clears the note.
-    app.apply_bool_setting("stt_pause_media", false);
+    app.apply_bool_setting(ToggleKey::SttPauseMedia, false);
     assert_eq!(pause_media_label(&app), "Pause Media While Recording");
 }
 
@@ -1626,28 +1627,24 @@ fn disabling_pause_media_on_a_running_gate_notes_the_restart() {
     app.conversation.gate = Some(gate);
     assert_eq!(pause_media_label(&app), "Pause Media While Recording");
 
-    app.apply_bool_setting("stt_pause_media", false);
+    app.apply_bool_setting(ToggleKey::SttPauseMedia, false);
     assert_eq!(pause_media_label(&app), PAUSE_MEDIA_PENDING);
 }
 
 #[test]
 fn test_apply_stt_text_fields() {
     let mut app = make_test_app();
-    app.apply_settings_edit(
-        SettingsTab::Voice,
-        "stt_base_url",
-        "http://192.168.1.10:8080/v1",
-    );
-    app.apply_settings_edit(SettingsTab::Voice, "stt_model", "large-v3-turbo");
-    app.apply_settings_edit(SettingsTab::Voice, "stt_language", "en");
+    app.apply_settings_edit(VoiceKey::SttBaseUrl, "http://192.168.1.10:8080/v1");
+    app.apply_settings_edit(VoiceKey::SttModel, "large-v3-turbo");
+    app.apply_settings_edit(VoiceKey::SttLanguage, "en");
     assert_eq!(app.config.stt.base_url, "http://192.168.1.10:8080/v1");
     assert_eq!(app.config.stt.model, "large-v3-turbo");
     assert_eq!(app.config.stt.language.as_deref(), Some("en"));
 
     // Sentinel / empty clears the optional fields back to None.
-    app.apply_settings_edit(SettingsTab::Voice, "stt_language", "(auto)");
+    app.apply_settings_edit(VoiceKey::SttLanguage, "(auto)");
     assert_eq!(app.config.stt.language, None);
-    app.apply_settings_edit(SettingsTab::Voice, "stt_prompt", "");
+    app.apply_settings_edit(VoiceKey::SttPrompt, "");
     assert_eq!(app.config.stt.prompt, None);
 }
 
@@ -1657,9 +1654,9 @@ fn test_toggle_stt_enabled_via_bool_path() {
     // `apply_bool_setting`. This arm must exist or the toggle is a no-op.
     let mut app = make_test_app();
     assert!(!app.config.stt.enabled);
-    app.apply_bool_setting("stt_enabled", true);
+    app.apply_bool_setting(ToggleKey::SttEnabled, true);
     assert!(app.config.stt.enabled);
-    app.apply_bool_setting("stt_enabled", false);
+    app.apply_bool_setting(ToggleKey::SttEnabled, false);
     assert!(!app.config.stt.enabled);
 }
 
@@ -1688,7 +1685,7 @@ fn test_voice_tab_rows_are_grouped_under_three_headers() {
     // Walk the list, remembering the most recent non-blank header, so every
     // field is checked against the group it actually renders under.
     let mut section = "";
-    let mut under: Vec<(&str, &str)> = Vec::new();
+    let mut under: Vec<(&str, SettingKey)> = Vec::new();
     for row in &rows {
         if row.kind == SettingsRowKind::Header {
             if !row.label.is_empty() {
@@ -1696,29 +1693,29 @@ fn test_voice_tab_rows_are_grouped_under_three_headers() {
             }
             continue;
         }
-        under.push((section, row.field_key.as_str()));
+        under.push((section, row.key));
     }
 
     assert_eq!(
         under,
         vec![
-            ("Transcription", "stt_enabled"),
-            ("Transcription", "stt_base_url"),
-            ("Transcription", "stt_model"),
-            ("Transcription", "stt_language"),
-            ("Transcription", "stt_prompt"),
-            ("Transcription", "stt_input_device"),
-            ("Transcription", "stt_pause_media"),
-            ("Transcription", "stt_dictation_submit"),
-            ("Text-to-Speech", "conversation_base_url"),
-            ("Text-to-Speech", "conversation_model"),
-            ("Text-to-Speech", "conversation_voice"),
-            ("Text-to-Speech", "conversation_format"),
-            ("Text-to-Speech", "conversation_speed"),
-            ("Text-to-Speech", "conversation_volume"),
-            ("Text-to-Speech", "conversation_speak_scope"),
-            ("Conversation Mode", "conversation_enabled"),
-            ("Conversation Mode", "conversation_name"),
+            ("Transcription", ToggleKey::SttEnabled.into()),
+            ("Transcription", VoiceKey::SttBaseUrl.into()),
+            ("Transcription", VoiceKey::SttModel.into()),
+            ("Transcription", VoiceKey::SttLanguage.into()),
+            ("Transcription", VoiceKey::SttPrompt.into()),
+            ("Transcription", VoiceKey::SttInputDevice.into()),
+            ("Transcription", ToggleKey::SttPauseMedia.into()),
+            ("Transcription", VoiceKey::SttDictationSubmit.into()),
+            ("Text-to-Speech", VoiceKey::ConversationBaseUrl.into()),
+            ("Text-to-Speech", VoiceKey::ConversationModel.into()),
+            ("Text-to-Speech", VoiceKey::ConversationVoice.into()),
+            ("Text-to-Speech", VoiceKey::ConversationFormat.into()),
+            ("Text-to-Speech", VoiceKey::ConversationSpeed.into()),
+            ("Text-to-Speech", VoiceKey::ConversationVolume.into()),
+            ("Text-to-Speech", VoiceKey::ConversationSpeakScope.into()),
+            ("Conversation Mode", ToggleKey::ConversationEnabled.into()),
+            ("Conversation Mode", VoiceKey::ConversationName.into()),
         ]
     );
 
@@ -1740,13 +1737,13 @@ fn test_apply_stt_dictation_submit_accepts_token_and_label() {
         claude_commander_core::conversation::DictationSubmit::Never
     );
 
-    app.apply_settings_edit(SettingsTab::Voice, "stt_dictation_submit", "agent");
+    app.apply_settings_edit(VoiceKey::SttDictationSubmit, "agent");
     assert_eq!(
         app.config.stt.dictation_submit,
         claude_commander_core::conversation::DictationSubmit::Agent
     );
 
-    app.apply_settings_edit(SettingsTab::Voice, "stt_dictation_submit", "Always");
+    app.apply_settings_edit(VoiceKey::SttDictationSubmit, "Always");
     assert_eq!(
         app.config.stt.dictation_submit,
         claude_commander_core::conversation::DictationSubmit::Always
@@ -1754,7 +1751,7 @@ fn test_apply_stt_dictation_submit_accepts_token_and_label() {
 
     // Anything else leaves the setting alone rather than silently resetting it
     // to the default — a typo must not quietly turn a submit policy off.
-    app.apply_settings_edit(SettingsTab::Voice, "stt_dictation_submit", "sometimes");
+    app.apply_settings_edit(VoiceKey::SttDictationSubmit, "sometimes");
     assert_eq!(
         app.config.stt.dictation_submit,
         claude_commander_core::conversation::DictationSubmit::Always
@@ -1764,28 +1761,24 @@ fn test_apply_stt_dictation_submit_accepts_token_and_label() {
 #[test]
 fn test_apply_commander_program_sets_and_clears() {
     let mut app = make_test_app();
-    app.apply_settings_edit(
-        SettingsTab::General,
-        "commander_program",
-        "claude --model opus",
-    );
+    app.apply_settings_edit(GeneralKey::CommanderProgram, "claude --model opus");
     assert_eq!(
         app.config.commander_program.as_deref(),
         Some("claude --model opus")
     );
-    app.apply_settings_edit(SettingsTab::General, "commander_program", "");
+    app.apply_settings_edit(GeneralKey::CommanderProgram, "");
     assert_eq!(app.config.commander_program, None);
 }
 
 #[test]
 fn test_apply_commander_dir_sets_and_clears() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "commander_dir", "/my/commander");
+    app.apply_settings_edit(GeneralKey::CommanderDir, "/my/commander");
     assert_eq!(
         app.config.commander_dir,
         Some(std::path::PathBuf::from("/my/commander"))
     );
-    app.apply_settings_edit(SettingsTab::General, "commander_dir", "(default)");
+    app.apply_settings_edit(GeneralKey::CommanderDir, "(default)");
     assert_eq!(app.config.commander_dir, None);
 }
 
@@ -1823,43 +1816,53 @@ fn test_boolean_rows_are_toggle_kind() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
 
-    let kind_of = |key: &str| {
-        rows.iter()
-            .find(|r| r.field_key == key)
-            .unwrap_or_else(|| panic!("missing row {key}"))
-            .kind
-            .clone()
-    };
+    let kind_of = |key: SettingKey| row_by_key(&rows, key).kind.clone();
 
     // Two-state booleans render as toggles carrying the live config value.
     assert_eq!(
-        kind_of("fetch_before_create"),
+        kind_of(ToggleKey::FetchBeforeCreate.into()),
         SettingsRowKind::Toggle(app.config.fetch_before_create)
     );
     assert_eq!(
-        kind_of("rounded_borders"),
+        kind_of(ToggleKey::RoundedBorders.into()),
         SettingsRowKind::Toggle(app.config.rounded_borders)
     );
     // Tri-state and free-text fields stay on the text-input flow.
-    assert!(matches!(kind_of("editor_gui"), SettingsRowKind::Text(_)));
-    assert!(matches!(kind_of("branch_prefix"), SettingsRowKind::Text(_)));
+    assert!(matches!(
+        kind_of(GeneralKey::EditorGui.into()),
+        SettingsRowKind::Text(_)
+    ));
+    assert!(matches!(
+        kind_of(GeneralKey::BranchPrefix.into()),
+        SettingsRowKind::Text(_)
+    ));
 }
 
 #[test]
 fn test_toggle_row_flips() {
-    assert_eq!(SettingsRow::toggle("L", false, "k").toggled(), Some(true));
-    assert_eq!(SettingsRow::toggle("L", true, "k").toggled(), Some(false));
+    let key = ToggleKey::NixDevelop;
+    assert_eq!(
+        SettingsRow::toggle("L", false, key).toggled(),
+        Some((key, true))
+    );
+    assert_eq!(
+        SettingsRow::toggle("L", true, key).toggled(),
+        Some((key, false))
+    );
     // Non-toggle rows have no toggled value.
-    assert_eq!(SettingsRow::text("L", "v", "k").toggled(), None);
+    assert_eq!(
+        SettingsRow::text("L", "v", GeneralKey::Editor).toggled(),
+        None
+    );
 }
 
 #[test]
 fn test_apply_bool_setting_flips_config() {
     let mut app = make_test_app();
     app.config.fetch_before_create = false;
-    app.apply_bool_setting("fetch_before_create", true);
+    app.apply_bool_setting(ToggleKey::FetchBeforeCreate, true);
     assert!(app.config.fetch_before_create);
-    app.apply_bool_setting("fetch_before_create", false);
+    app.apply_bool_setting(ToggleKey::FetchBeforeCreate, false);
     assert!(!app.config.fetch_before_create);
 }
 
@@ -1934,15 +1937,9 @@ fn test_refilter_section_picker_keeps_section_rows() {
 fn test_project_pull_rows_present_in_general_tab() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
-    let enabled = rows
-        .iter()
-        .find(|r| r.field_key == "project_pull_enabled")
-        .expect("project_pull_enabled row missing");
+    let enabled = row_by_key(&rows, ToggleKey::ProjectPullEnabled);
     assert_eq!(enabled.kind, SettingsRowKind::Toggle(true));
-    let interval = rows
-        .iter()
-        .find(|r| r.field_key == "project_pull_interval_secs")
-        .expect("project_pull_interval_secs row missing");
+    let interval = row_by_key(&rows, GeneralKey::ProjectPullIntervalSecs);
     assert_eq!(interval.text_value(), "3600");
 }
 
@@ -1950,37 +1947,34 @@ fn test_project_pull_rows_present_in_general_tab() {
 fn test_nix_develop_row_present_in_general_tab() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
-    let row = rows
-        .iter()
-        .find(|r| r.field_key == "nix_develop")
-        .expect("nix_develop row missing");
+    let row = row_by_key(&rows, ToggleKey::NixDevelop);
     assert_eq!(row.kind, SettingsRowKind::Toggle(true));
 }
 
 #[test]
 fn test_apply_nix_develop_round_trip() {
     let mut app = make_test_app();
-    app.apply_bool_setting("nix_develop", false);
+    app.apply_bool_setting(ToggleKey::NixDevelop, false);
     assert!(!app.config.nix_develop);
-    app.apply_bool_setting("nix_develop", true);
+    app.apply_bool_setting(ToggleKey::NixDevelop, true);
     assert!(app.config.nix_develop);
 }
 
 #[test]
 fn test_apply_project_pull_enabled_round_trip() {
     let mut app = make_test_app();
-    app.apply_bool_setting("project_pull_enabled", true);
+    app.apply_bool_setting(ToggleKey::ProjectPullEnabled, true);
     assert!(app.config.project_pull_enabled);
-    app.apply_bool_setting("project_pull_enabled", false);
+    app.apply_bool_setting(ToggleKey::ProjectPullEnabled, false);
     assert!(!app.config.project_pull_enabled);
 }
 
 #[test]
 fn test_apply_project_pull_interval_accepts_60_and_above() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "project_pull_interval_secs", "120");
+    app.apply_settings_edit(GeneralKey::ProjectPullIntervalSecs, "120");
     assert_eq!(app.config.project_pull_interval_secs, 120);
-    app.apply_settings_edit(SettingsTab::General, "project_pull_interval_secs", "60");
+    app.apply_settings_edit(GeneralKey::ProjectPullIntervalSecs, "60");
     assert_eq!(app.config.project_pull_interval_secs, 60);
 }
 
@@ -1988,7 +1982,7 @@ fn test_apply_project_pull_interval_accepts_60_and_above() {
 fn test_apply_project_pull_interval_rejects_below_60() {
     let mut app = make_test_app();
     app.config.project_pull_interval_secs = 3600;
-    app.apply_settings_edit(SettingsTab::General, "project_pull_interval_secs", "30");
+    app.apply_settings_edit(GeneralKey::ProjectPullIntervalSecs, "30");
     assert_eq!(
         app.config.project_pull_interval_secs, 3600,
         "values below 60 must be rejected"
@@ -2002,9 +1996,9 @@ fn test_apply_project_pull_interval_rejects_below_60() {
 #[test]
 fn test_apply_ui_refresh_fps_accepts_positive_values() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "ui_refresh_fps", "60");
+    app.apply_settings_edit(GeneralKey::UiRefreshFps, "60");
     assert_eq!(app.config.ui_refresh_fps, 60);
-    app.apply_settings_edit(SettingsTab::General, "ui_refresh_fps", "1");
+    app.apply_settings_edit(GeneralKey::UiRefreshFps, "1");
     assert_eq!(app.config.ui_refresh_fps, 1);
 }
 
@@ -2014,7 +2008,7 @@ fn test_apply_ui_refresh_fps_rejects_zero() {
     // rate at next launch, crash-looping until config.toml is hand-edited.
     let mut app = make_test_app();
     app.config.ui_refresh_fps = 30;
-    app.apply_settings_edit(SettingsTab::General, "ui_refresh_fps", "0");
+    app.apply_settings_edit(GeneralKey::UiRefreshFps, "0");
     assert_eq!(app.config.ui_refresh_fps, 30, "zero fps must be rejected");
     assert!(
         app.ui_state.status_message.is_some(),
@@ -2025,7 +2019,7 @@ fn test_apply_ui_refresh_fps_rejects_zero() {
 #[test]
 fn test_apply_max_concurrent_tmux_accepts_positive_values() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "max_concurrent_tmux", "8");
+    app.apply_settings_edit(GeneralKey::MaxConcurrentTmux, "8");
     assert_eq!(app.config.max_concurrent_tmux, 8);
 }
 
@@ -2035,7 +2029,7 @@ fn test_apply_max_concurrent_tmux_rejects_zero() {
     // launch, deadlocking every tmux command.
     let mut app = make_test_app();
     app.config.max_concurrent_tmux = 16;
-    app.apply_settings_edit(SettingsTab::General, "max_concurrent_tmux", "0");
+    app.apply_settings_edit(GeneralKey::MaxConcurrentTmux, "0");
     assert_eq!(
         app.config.max_concurrent_tmux, 16,
         "zero concurrency must be rejected"
@@ -8990,9 +8984,7 @@ async fn preview_ready_applies_only_to_the_still_selected_session() {
         spawned_at: token,
         session_id: Some(selected),
         project_id: None,
-        preview_content: "live output".to_string(),
-        shell_content: "$ ".to_string(),
-        diff_info: Arc::new(DiffInfo::empty()),
+        payload: PreviewPayload::Pane("live output".to_string()),
     })
     .await;
     assert_eq!(app.ui_state.preview_content, "live output");
@@ -9004,9 +8996,7 @@ async fn preview_ready_applies_only_to_the_still_selected_session() {
         spawned_at: Instant::now(),
         session_id: Some(SessionId::new()),
         project_id: None,
-        preview_content: "someone else's output".to_string(),
-        shell_content: String::new(),
-        diff_info: Arc::new(DiffInfo::empty()),
+        payload: PreviewPayload::Pane("someone else's output".to_string()),
     })
     .await;
     assert_eq!(
@@ -9200,9 +9190,7 @@ async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
         spawned_at: guard - std::time::Duration::from_millis(1),
         session_id: Some(old),
         project_id: None,
-        preview_content: "stale".to_string(),
-        shell_content: String::new(),
-        diff_info: Arc::new(DiffInfo::empty()),
+        payload: PreviewPayload::Pane("stale".to_string()),
     })
     .await;
 
@@ -9217,9 +9205,7 @@ async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
         spawned_at: guard,
         session_id: Some(new),
         project_id: None,
-        preview_content: "live".to_string(),
-        shell_content: String::new(),
-        diff_info: Arc::new(DiffInfo::empty()),
+        payload: PreviewPayload::Pane("live".to_string()),
     })
     .await;
     assert_eq!(app.ui_state.preview_update_spawned_at, None);
@@ -9295,9 +9281,7 @@ async fn a_selection_change_without_a_respawn_still_releases_the_guard() {
         spawned_at: guard,
         session_id: Some(old),
         project_id: None,
-        preview_content: "departed session".to_string(),
-        shell_content: String::new(),
-        diff_info: Arc::new(DiffInfo::empty()),
+        payload: PreviewPayload::Pane("departed session".to_string()),
     })
     .await;
 
@@ -11673,13 +11657,14 @@ mod workspaces {
     }
 
     #[tokio::test]
-    async fn filter_all_borrows_and_only_narrows_projects_and_sessions() {
+    async fn filter_all_keeps_everything_and_only_narrows_projects_and_sessions() {
         let (app, ms, ws, mp, wp) = app_with_two_workspaces().await;
         let snap = &app.local_view().snapshot;
-        assert!(matches!(
-            WorkspaceFilter::All.scope(snap),
-            std::borrow::Cow::Borrowed(_)
-        ));
+        let all = WorkspaceFilter::All.scope(snap);
+        assert_eq!(
+            (all.projects.len(), all.sessions.len()),
+            (snap.projects.len(), snap.sessions.len())
+        );
         let work = WorkspaceFilter::Only(Some("Work".into())).scope(snap);
         assert_eq!(
             work.projects.iter().map(|p| p.id).collect::<Vec<_>>(),
@@ -11704,6 +11689,26 @@ mod workspaces {
                 .collect::<Vec<_>>(),
             vec![ms]
         );
+    }
+
+    /// The status bar counts sessions every frame without building a scope,
+    /// but must agree with one.
+    #[tokio::test]
+    async fn session_count_agrees_with_scope() {
+        let (app, ..) = app_with_two_workspaces().await;
+        let snap = &app.local_view().snapshot;
+        for filter in [
+            WorkspaceFilter::All,
+            WorkspaceFilter::Only(Some("Work".into())),
+            WorkspaceFilter::Only(None),
+            WorkspaceFilter::Only(Some("Nowhere".into())),
+        ] {
+            assert_eq!(
+                filter.session_count(snap),
+                filter.scope(snap).sessions.len(),
+                "{filter:?}"
+            );
+        }
     }
 
     // -- scoping --
@@ -12696,24 +12701,21 @@ mod workspaces {
         }
     }
 
-    /// Move the Theme tab's cursor to the row editing `field_key`.
-    fn select_row(app: &mut App, field_key: &str) {
+    /// Move the Theme tab's cursor to the row editing `key`.
+    fn select_row(app: &mut App, key: impl Into<SettingKey>) {
+        let key = key.into();
         let Modal::Settings(state) = &mut app.ui_state.modal else {
             panic!("expected a settings modal");
         };
         state.selected_row = state
             .rows
             .iter()
-            .position(|r| r.field_key == field_key)
-            .unwrap_or_else(|| panic!("no {field_key} row"));
+            .position(|r| r.key == key)
+            .unwrap_or_else(|| panic!("no {key:?} row"));
     }
 
-    fn row<'a>(app: &'a App, field_key: &str) -> &'a crate::app::SettingsRow {
-        settings(app)
-            .rows
-            .iter()
-            .find(|r| r.field_key == field_key)
-            .unwrap_or_else(|| panic!("no {field_key} row"))
+    fn row(app: &App, key: impl Into<SettingKey>) -> &crate::app::SettingsRow {
+        super::row_by_key(&settings(app).rows, key)
     }
 
     fn picker(app: &App) -> &crate::app::colour_picker::ColourPicker {
@@ -12724,13 +12726,13 @@ mod workspaces {
     }
 
     /// Two workspaces, Work active, the usual theme truecolor, and the Theme
-    /// tab open (so scoped to Work) with the cursor on `field_key`.
-    async fn work_theme_tab_on(field_key: &str) -> App {
+    /// tab open (so scoped to Work) with the cursor on `key`.
+    async fn work_theme_tab_on(key: impl Into<SettingKey>) -> App {
         let (mut app, ..) = app_with_two_workspaces().await;
         pin_truecolor(&mut app);
         app.switch_workspace(Some("Work".into()), true).await;
         open_theme_tab(&mut app).await;
-        select_row(&mut app, field_key);
+        select_row(&mut app, key);
         app
     }
 
@@ -12740,22 +12742,26 @@ mod workspaces {
 
     #[tokio::test]
     async fn the_theme_tab_opens_on_the_active_workspace() {
-        let app = work_theme_tab_on("preset").await;
+        let app = work_theme_tab_on(ThemeKey::Preset).await;
         assert_eq!(
             settings(&app).theme_scope,
             ThemeScope::Workspace(Some("Work".into()))
         );
-        let keys: Vec<&str> = settings(&app)
-            .rows
-            .iter()
-            .take(4)
-            .map(|r| r.field_key.as_str())
-            .collect();
-        assert_eq!(keys, ["theme_scope", "theme_reset", "preset", "appearance"]);
-        assert_eq!(row(&app, "theme_scope").text_value(), "Work");
-        assert_eq!(row(&app, "preset").text_value(), "(usual)");
+        let keys: Vec<SettingKey> = settings(&app).rows.iter().take(4).map(|r| r.key).collect();
         assert_eq!(
-            row(&app, "text_accent").inherited_from,
+            keys,
+            [
+                ThemeKey::Scope,
+                ThemeKey::Reset,
+                ThemeKey::Preset,
+                ThemeKey::Appearance
+            ]
+            .map(SettingKey::from)
+        );
+        assert_eq!(row(&app, ThemeKey::Scope).text_value(), "Work");
+        assert_eq!(row(&app, ThemeKey::Preset).text_value(), "(usual)");
+        assert_eq!(
+            row(&app, ThemeColour::TextAccent).inherited_from,
             Some("usual"),
             "nothing set for Work: every colour is the usual theme's"
         );
@@ -12766,17 +12772,24 @@ mod workspaces {
         let mut app = make_test_app();
         pin_truecolor(&mut app);
         open_theme_tab(&mut app).await;
-        assert_eq!(settings(&app).rows[0].field_key, "preset", "no scope row");
+        assert_eq!(
+            settings(&app).rows[0].key,
+            ThemeKey::Preset.into(),
+            "no scope row"
+        );
         assert!(
             settings(&app)
                 .rows
                 .iter()
-                .all(|r| r.field_key != "theme_reset")
+                .all(|r| r.key != ThemeKey::Reset.into())
         );
-        assert_eq!(row(&app, "preset").text_value(), "truecolor");
-        assert_eq!(row(&app, "text_accent").inherited_from, Some("preset"));
+        assert_eq!(row(&app, ThemeKey::Preset).text_value(), "truecolor");
+        assert_eq!(
+            row(&app, ThemeColour::TextAccent).inherited_from,
+            Some("preset")
+        );
         // …but its colour rows open the picker, not free text.
-        select_row(&mut app, "text_accent");
+        select_row(&mut app, ThemeColour::TextAccent);
         feed(&mut app, KeyCode::Enter).await;
         feed(&mut app, KeyCode::Char('#')).await;
         type_programs(&mut app, "123456").await;
@@ -12786,12 +12799,12 @@ mod workspaces {
             Some(rgb("#123456"))
         );
         assert_eq!(app.theme.text_accent, rgb("#123456"), "worn at once");
-        assert_eq!(row(&app, "text_accent").inherited_from, None);
+        assert_eq!(row(&app, ThemeColour::TextAccent).inherited_from, None);
     }
 
     #[tokio::test]
     async fn a_pick_in_a_workspace_scope_writes_its_entry_and_restyles_the_ui() {
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         assert_eq!(picker(&app).selected, 0, "inheriting: the Inherit cell");
         assert_eq!(picker(&app).none_label, "Inherit (usual)");
@@ -12813,9 +12826,9 @@ mod workspaces {
             Some(rgb("#aabbcc")),
             "persisted"
         );
-        assert_eq!(row(&app, "text_accent").inherited_from, None);
-        assert_eq!(row(&app, "text_accent").text_value(), "#aabbcc");
-        assert_eq!(row(&app, "theme_reset").text_value(), "customised");
+        assert_eq!(row(&app, ThemeColour::TextAccent).inherited_from, None);
+        assert_eq!(row(&app, ThemeColour::TextAccent).text_value(), "#aabbcc");
+        assert_eq!(row(&app, ThemeKey::Reset).text_value(), "customised");
         // Main still wears the usual theme.
         app.switch_workspace(None, true).await;
         assert_eq!(app.theme.text_accent, Theme::truecolor().text_accent);
@@ -12823,7 +12836,7 @@ mod workspaces {
 
     #[tokio::test]
     async fn picking_a_theme_swatch_saves_its_hex() {
-        let mut app = work_theme_tab_on("border_focused").await;
+        let mut app = work_theme_tab_on(ThemeColour::BorderFocused).await;
         feed(&mut app, KeyCode::Enter).await;
         feed(&mut app, KeyCode::Char('l')).await;
         feed(&mut app, KeyCode::Right).await;
@@ -12843,7 +12856,7 @@ mod workspaces {
 
     #[tokio::test]
     async fn the_inherit_cell_clears_the_override_and_an_empty_entry_goes() {
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         feed(&mut app, KeyCode::Char('#')).await;
         type_programs(&mut app, "aabbcc").await;
@@ -12862,13 +12875,16 @@ mod workspaces {
             "nothing left of Work's theme: {:?}",
             app.config.workspace_themes
         );
-        assert_eq!(row(&app, "text_accent").inherited_from, Some("usual"));
+        assert_eq!(
+            row(&app, ThemeColour::TextAccent).inherited_from,
+            Some("usual")
+        );
         assert_eq!(app.theme.text_accent, Theme::truecolor().text_accent);
     }
 
     #[tokio::test]
     async fn the_scope_row_switches_to_the_usual_theme() {
-        let mut app = work_theme_tab_on("theme_scope").await;
+        let mut app = work_theme_tab_on(ThemeKey::Scope).await;
         feed(&mut app, KeyCode::Enter).await;
         let Some(SettingsEditing::OptionPicker { options, .. }) = &settings(&app).editing else {
             panic!("the scope row opens a picker");
@@ -12882,9 +12898,9 @@ mod workspaces {
             settings(&app)
                 .rows
                 .iter()
-                .all(|r| r.field_key != "theme_reset")
+                .all(|r| r.key != ThemeKey::Reset.into())
         );
-        select_row(&mut app, "text_accent");
+        select_row(&mut app, ThemeColour::TextAccent);
         feed(&mut app, KeyCode::Enter).await;
         assert_eq!(picker(&app).none_label, "Inherit (preset)");
         feed(&mut app, KeyCode::Char('#')).await;
@@ -12904,7 +12920,7 @@ mod workspaces {
 
     #[tokio::test]
     async fn a_workspace_preset_is_a_new_base_without_the_usual_overrides() {
-        let mut app = work_theme_tab_on("preset").await;
+        let mut app = work_theme_tab_on(ThemeKey::Preset).await;
         app.config.theme.border_focused = Some(claude_commander_core::config::theme::ColorValue(
             rgb("#010203"),
         ));
@@ -12931,9 +12947,12 @@ mod workspaces {
             Theme::lcars().border_focused,
             "the usual override does not carry onto a new base"
         );
-        assert_eq!(row(&app, "border_focused").inherited_from, Some("preset"));
+        assert_eq!(
+            row(&app, ThemeColour::BorderFocused).inherited_from,
+            Some("preset")
+        );
         // Back to "(usual)": the entry is empty again, so it goes.
-        select_row(&mut app, "preset");
+        select_row(&mut app, ThemeKey::Preset);
         feed(&mut app, KeyCode::Enter).await; // opens on lcars
         for _ in 0..lcars {
             feed(&mut app, KeyCode::Char('k')).await;
@@ -12945,8 +12964,8 @@ mod workspaces {
 
     #[tokio::test]
     async fn reset_to_usual_theme_drops_the_workspaces_entry() {
-        let mut app = work_theme_tab_on("theme_reset").await;
-        assert_eq!(row(&app, "theme_reset").text_value(), "(already usual)");
+        let mut app = work_theme_tab_on(ThemeKey::Reset).await;
+        assert_eq!(row(&app, ThemeKey::Reset).text_value(), "(already usual)");
         feed(&mut app, KeyCode::Enter).await;
         assert!(
             toast(&app).contains("already uses the usual theme"),
@@ -12993,7 +13012,7 @@ mod workspaces {
             ThemeScope::Workspace(Some("Work".into())),
             "scoped to the selected workspace, not the active one (Main)"
         );
-        assert_eq!(row(&app, "preset").text_value(), "lcars");
+        assert_eq!(row(&app, ThemeKey::Preset).text_value(), "lcars");
     }
 
     /// Work disappears while its Theme-tab editor is open — a hot reload, or
@@ -13006,7 +13025,7 @@ mod workspaces {
 
     #[tokio::test]
     async fn a_colour_picked_for_a_workspace_that_has_gone_is_discarded() {
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         // Off the inherit cell, onto a real swatch — a pick that sets a value.
         feed(&mut app, KeyCode::Char('l')).await;
@@ -13023,7 +13042,7 @@ mod workspaces {
 
     #[tokio::test]
     async fn a_preset_picked_for_a_workspace_that_has_gone_is_discarded() {
-        let mut app = work_theme_tab_on("preset").await;
+        let mut app = work_theme_tab_on(ThemeKey::Preset).await;
         feed(&mut app, KeyCode::Enter).await; // the option picker, on "(usual)"
         lose_work(&mut app).await;
         feed(&mut app, KeyCode::Enter).await;
@@ -13058,7 +13077,7 @@ mod workspaces {
 
     #[tokio::test]
     async fn settings_tab_colour_picker_takes_a_bracketed_paste() {
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         app.handle_input(InputEvent::Paste("  3366ff\n".to_string()))
             .await;
@@ -13072,7 +13091,7 @@ mod workspaces {
 
     #[tokio::test]
     async fn settings_tab_colour_picker_refuses_invalid_hex() {
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         // Tab goes to the hex row and back without leaving the picker or the
         // Theme tab.
@@ -13096,7 +13115,7 @@ mod workspaces {
 
     #[tokio::test]
     async fn settings_tab_colour_picker_esc_cancels_without_saving() {
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         feed(&mut app, KeyCode::Right).await;
         feed(&mut app, KeyCode::Esc).await;
@@ -13112,7 +13131,7 @@ mod workspaces {
     async fn settings_tab_colour_picker_renders() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         feed(&mut app, KeyCode::Tab).await;
         type_programs(&mut app, "#3366f").await;
@@ -13125,7 +13144,7 @@ mod workspaces {
     async fn the_theme_tab_renders_its_scope_row_and_inherited_values() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         app.config.workspace_themes.insert(
             "Work".into(),
             ThemeOverrides {
@@ -13164,7 +13183,7 @@ mod workspaces {
     async fn settings_tab_colour_picker_fits_a_narrow_terminal() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
@@ -13205,7 +13224,7 @@ mod workspaces {
     async fn j_and_k_move_by_the_drawn_width_after_a_render() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
@@ -13222,7 +13241,7 @@ mod workspaces {
     async fn the_picker_is_fitted_when_it_opens() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap(); // the Theme tab, no picker
         feed(&mut app, KeyCode::Enter).await;
@@ -13238,7 +13257,7 @@ mod workspaces {
     async fn a_resize_refits_the_picker() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let mut app = work_theme_tab_on("text_accent").await;
+        let mut app = work_theme_tab_on(ThemeColour::TextAccent).await;
         feed(&mut app, KeyCode::Enter).await;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
@@ -13346,6 +13365,97 @@ async fn an_idle_tick_does_not_invalidate_the_frame() {
     assert!(!app.process_event(AppEvent::Tick).await);
 }
 
+/// A fetch carries only the part it fetched, so the parts it did not fetch
+/// stay as they are rather than being copied into the task and back.
+#[tokio::test]
+async fn a_preview_result_replaces_only_the_part_it_fetched() {
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.preview_content = "current pane".into();
+    app.ui_state.shell_content = "current shell".into();
+    let diff = Arc::new(DiffInfo {
+        diff: "current diff".into(),
+        ..DiffInfo::empty()
+    });
+    app.ui_state.diff_info = Arc::clone(&diff);
+
+    assert!(deliver_preview(
+        &mut app,
+        sid,
+        PreviewPayload::Shell("new shell".into())
+    ));
+    assert_eq!(app.ui_state.preview_content, "current pane");
+    assert_eq!(app.ui_state.shell_content, "new shell");
+    assert!(Arc::ptr_eq(&app.ui_state.diff_info, &diff));
+
+    assert!(deliver_preview(
+        &mut app,
+        sid,
+        PreviewPayload::Pane("new pane".into())
+    ));
+    assert_eq!(app.ui_state.preview_content, "new pane");
+    assert_eq!(app.ui_state.shell_content, "new shell");
+    assert!(Arc::ptr_eq(&app.ui_state.diff_info, &diff));
+
+    let fresh = Arc::new(DiffInfo::empty());
+    assert!(deliver_preview(
+        &mut app,
+        sid,
+        PreviewPayload::Diff(Arc::clone(&fresh))
+    ));
+    assert_eq!(app.ui_state.preview_content, "new pane");
+    assert_eq!(app.ui_state.shell_content, "new shell");
+    assert!(Arc::ptr_eq(&app.ui_state.diff_info, &fresh));
+}
+
+/// Deliver `payload` as the result of the fetch currently in flight for
+/// session `sid`, returning whether the frame needs a redraw.
+fn deliver_preview(app: &mut App, sid: SessionId, payload: PreviewPayload) -> bool {
+    let token = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(token);
+    app.apply_preview_ready(token, Some(sid), None, payload)
+}
+
+/// Only a painted result that changes what is shown asks for a redraw: an
+/// identical one does not, and neither does a stale one that is discarded,
+/// however different its content.
+#[tokio::test]
+async fn only_a_painted_change_to_the_preview_needs_a_redraw() {
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.preview_content = "pane".into();
+
+    assert!(!deliver_preview(
+        &mut app,
+        sid,
+        PreviewPayload::Pane("pane".into())
+    ));
+    assert!(deliver_preview(
+        &mut app,
+        sid,
+        PreviewPayload::Pane("other".into())
+    ));
+
+    // Superseded by a newer fetch: discarded, so nothing to redraw.
+    let newer = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(newer);
+    assert!(!app.apply_preview_ready(
+        newer - Duration::from_millis(1),
+        Some(sid),
+        None,
+        PreviewPayload::Pane("stale".into()),
+    ));
+    // For a selection that has since moved on: likewise.
+    assert!(!deliver_preview(
+        &mut app,
+        SessionId::new(),
+        PreviewPayload::Pane("gone".into())
+    ));
+    assert_eq!(app.ui_state.preview_content, "other");
+}
+
 #[tokio::test]
 async fn superseded_preview_for_the_same_selection_cannot_overwrite_a_newer_resource() {
     let mut app = make_test_app();
@@ -13360,9 +13470,8 @@ async fn superseded_preview_for_the_same_selection_cannot_overwrite_a_newer_reso
         spawned_at: new_token - Duration::from_millis(1),
         session_id: Some(sid),
         project_id: None,
-        preview_content: "obsolete pane".into(),
-        shell_content: "obsolete shell".into(),
-        diff_info: Arc::new(DiffInfo::empty()),
+        // The view is on Shell, so the superseded result carries the shell.
+        payload: PreviewPayload::Shell("obsolete shell".into()),
     })
     .await;
     assert_eq!(app.ui_state.preview_content, "current pane");
@@ -13725,7 +13834,7 @@ async fn edit_session_program_field_shows_alias_and_cycles_commands() {
 #[tokio::test]
 async fn gitlab_hostname_edit_runs_through_the_code_host_path() {
     let (mut app, _) = app_with_remote_session().await;
-    open_general_settings_on(&mut app, "gitlab_hostname");
+    open_general_settings_on(&mut app, GeneralKey::GitlabHostname);
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let keys = std::iter::once(KeyCode::Enter)
         .chain(std::iter::repeat_n(KeyCode::Backspace, 32))
@@ -13969,7 +14078,7 @@ async fn an_attach_that_keeps_ending_returns_to_the_list() {
 #[tokio::test]
 async fn provider_picker_runs_in_background_and_refreshes_its_display() {
     let (mut app, _) = app_with_remote_session().await;
-    open_general_settings_on(&mut app, "code_host_provider");
+    open_general_settings_on(&mut app, GeneralKey::CodeHostProvider);
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     for code in [KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
         app.process_event(AppEvent::Input(crate::event::InputEvent::Key(
@@ -13999,11 +14108,7 @@ async fn provider_picker_runs_in_background_and_refreshes_its_display() {
     let Modal::Settings(state) = &app.ui_state.modal else {
         panic!("settings should stay open");
     };
-    let row = state
-        .rows
-        .iter()
-        .find(|r| r.field_key == "code_host_provider")
-        .unwrap();
+    let row = row_by_key(&state.rows, GeneralKey::CodeHostProvider);
     assert!(matches!(&row.kind, SettingsRowKind::Text(value) if value == "GitLab"));
     app.ui_state.modal = Modal::Error {
         message: "keep this dialog".into(),
@@ -14035,7 +14140,7 @@ async fn settings_edit_after_external_provider_switch_is_not_lost() {
         .unwrap();
     assert_eq!(app.config.code_host_provider, CodeHostProvider::Github);
     let rounded = !app.config.rounded_borders;
-    open_general_settings_on(&mut app, "rounded_borders");
+    open_general_settings_on(&mut app, ToggleKey::RoundedBorders);
     feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
     let persisted = app.service.read_config();
     assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
@@ -14062,7 +14167,7 @@ async fn tui_toggle_after_web_code_host_edit_keeps_the_web_values() {
         .await
         .unwrap();
     let rounded = !app.config.rounded_borders;
-    open_general_settings_on(&mut app, "rounded_borders");
+    open_general_settings_on(&mut app, ToggleKey::RoundedBorders);
     feed_programs_key(&mut app, crossterm::event::KeyCode::Char(' ')).await;
     let persisted = app.service.read_config();
     assert_eq!(persisted.rounded_borders, rounded, "the edit was dropped");
@@ -14075,13 +14180,11 @@ async fn tui_toggle_after_web_code_host_edit_keeps_the_web_values() {
     assert_eq!(app.config.gitlab_hostname, persisted.gitlab_hostname);
 }
 
-/// Open the General settings tab with the `field_key` row selected.
-fn open_general_settings_on(app: &mut App, field_key: &str) {
+/// Open the General settings tab with the `key` row selected.
+fn open_general_settings_on(app: &mut App, key: impl Into<SettingKey>) {
+    let key = key.into();
     let rows = app.build_settings_rows(SettingsTab::General);
-    let selected_row = rows
-        .iter()
-        .position(|r| r.field_key == field_key)
-        .expect("row exists");
+    let selected_row = rows.iter().position(|r| r.key == key).expect("row exists");
     app.ui_state.modal = Modal::Settings(SettingsState {
         tab: SettingsTab::General,
         selected_row,
@@ -14110,7 +14213,7 @@ async fn settings_key_before_config_reloaded_still_connects_a_new_server() {
         .push(server_cfg("buildbox", "http://b:7878"));
     app.service.update_config(reloaded).unwrap();
 
-    open_general_settings_on(&mut app, "rounded_borders");
+    open_general_settings_on(&mut app, ToggleKey::RoundedBorders);
     feed_programs_key(&mut app, crossterm::event::KeyCode::Down).await;
     app.apply_config_reload(Ok(true));
 
@@ -14151,7 +14254,7 @@ async fn code_host_update_before_config_reloaded_still_connects_a_new_server() {
 #[tokio::test]
 async fn settings_toggle_after_external_change_flips_the_fresh_value() {
     let mut app = make_test_app();
-    open_general_settings_on(&mut app, "rounded_borders");
+    open_general_settings_on(&mut app, ToggleKey::RoundedBorders);
     let external = !app.config.rounded_borders;
     let mut patched = app.service.read_config();
     patched.rounded_borders = external;
@@ -14171,7 +14274,7 @@ async fn rejected_settings_save_is_surfaced_and_config_reloaded() {
     let _ = std::fs::remove_file(&config_path);
     std::fs::create_dir_all(&config_path).unwrap();
     let rounded = app.config.rounded_borders;
-    app.apply_bool_setting("rounded_borders", !rounded);
+    app.apply_bool_setting(ToggleKey::RoundedBorders, !rounded);
     // The unsaved edit is discarded, matching the service, which kept none of it.
     assert_eq!(app.config.rounded_borders, rounded);
     assert_eq!(app.service.read_config().rounded_borders, rounded);

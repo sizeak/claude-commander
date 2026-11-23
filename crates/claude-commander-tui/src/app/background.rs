@@ -38,8 +38,9 @@ impl App {
         !self.ui_state.view_mode.is_board() || self.is_info_open()
     }
 
-    /// Spawn a background fetch of the selected session's (or project's) pane
-    /// capture, shell capture and working-tree diff.
+    /// Spawn a background fetch of the one part of the selected session's (or
+    /// project's) preview the visible surface shows: the pane capture, the
+    /// shell capture, or the diff stats ([`PreviewRequest`]).
     ///
     /// Only acquire the resource used by the visible surface. Gated on something actually showing that data, and
     /// guarded by a 5s in-flight window so a slow backend can't queue fetches.
@@ -71,46 +72,25 @@ impl App {
         let spawned_at = Instant::now();
         self.ui_state.preview_update_spawned_at = Some(spawned_at);
 
-        use claude_commander_protocol::preview::PreviewPart;
-        let part = if self.is_info_open() || self.ui_state.right_pane_view == RightPaneView::Info {
-            PreviewPart::Stats
+        let request = if self.is_info_open() || self.ui_state.right_pane_view == RightPaneView::Info
+        {
+            PreviewRequest::Stats
         } else if self.ui_state.right_pane_view == RightPaneView::Shell || session_id.is_none() {
-            PreviewPart::Shell
+            PreviewRequest::Shell
         } else {
-            PreviewPart::Pane
+            PreviewRequest::Pane
         };
-        let old_pane = self.ui_state.preview_content.clone();
-        let old_shell = self.ui_state.shell_content.clone();
-        let old_diff = self.ui_state.diff_info.clone();
         if let Some(task) = self.ui_state.preview_task.take() {
             task.abort();
         }
         self.ui_state.preview_task = Some(tokio::spawn(async move {
-            let (preview_content, diff_info, shell_content) =
-                fetch_preview_part(&backend, session_id, project_id, part).await;
-            let preview_content = if part == PreviewPart::Pane {
-                preview_content
-            } else {
-                old_pane
-            };
-            let shell_content = if part == PreviewPart::Shell {
-                shell_content
-            } else {
-                old_shell
-            };
-            let diff_info = if matches!(part, PreviewPart::Diff | PreviewPart::Stats) {
-                diff_info
-            } else {
-                old_diff
-            };
+            let payload = fetch_preview(&backend, session_id, project_id, request).await;
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::PreviewReady {
                     spawned_at,
                     session_id,
                     project_id,
-                    preview_content,
-                    shell_content,
-                    diff_info,
+                    payload,
                 }))
                 .await;
         }));
@@ -438,61 +418,214 @@ fn diff_info_from_preview(
     })
 }
 
-/// Fetch pane capture, shell capture and working-tree diff for the selected
-/// session or project through the backend trait — a remote selection's content
-/// arrives over the wire. Runs outside the main event loop so it never blocks
-/// keyboard input. Returns `(preview_content, diff_info, shell_content)`.
-///
-/// A project has no agent pane, so its preview content is empty; the
-/// placeholder strings are what the panes render when there is nothing to show.
-async fn fetch_preview_part(
+/// The part of the right pane / Info modal a preview fetch fetched — the
+/// answer to one [`PreviewRequest`].
+#[derive(Debug, Clone)]
+pub enum PreviewPayload {
+    /// Agent-pane capture (empty for a project, which has no agent pane).
+    Pane(String),
+    /// Shell-pane capture, or a placeholder when no shell session exists.
+    Shell(String),
+    /// Working-tree diff stats.
+    Diff(Arc<DiffInfo>),
+}
+
+impl PreviewPayload {
+    /// Replace the fetched part, leaving the others as they are, and report
+    /// whether that changed what is shown — only the fetched part can have.
+    pub(crate) fn apply(self, ui: &mut AppUiState) -> bool {
+        match self {
+            Self::Pane(pane) => replace(&mut ui.preview_content, pane),
+            Self::Shell(shell) => replace(&mut ui.shell_content, shell),
+            Self::Diff(diff) => {
+                let changed = !ui.diff_info.same_content(&diff);
+                ui.diff_info = diff;
+                changed
+            }
+        }
+    }
+}
+
+/// Store `new` in `slot`, reporting whether it differed.
+fn replace(slot: &mut String, new: String) -> bool {
+    let changed = *slot != new;
+    *slot = new;
+    changed
+}
+
+/// The one part of the preview a fetch asks for. Each maps to exactly one
+/// [`PreviewPayload`] variant, so the wire's `PreviewPart::All` — which would
+/// need all three — cannot be requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewRequest {
+    /// The agent pane, for the list views' Preview tab.
+    Pane,
+    /// The shell pane.
+    Shell,
+    /// Diff stats only, for the Info tab and modal.
+    Stats,
+}
+
+impl PreviewRequest {
+    fn part(self) -> claude_commander_protocol::preview::PreviewPart {
+        use claude_commander_protocol::preview::PreviewPart;
+        match self {
+            Self::Pane => PreviewPart::Pane,
+            Self::Shell => PreviewPart::Shell,
+            Self::Stats => PreviewPart::Stats,
+        }
+    }
+}
+
+/// Fetch the requested part of the selected session's or project's preview
+/// through the backend trait — a remote selection's content arrives over the
+/// wire. Runs outside the main event loop so it never blocks keyboard input.
+async fn fetch_preview(
     backend: &Arc<dyn claude_commander_core::backend::CommanderBackend>,
     session_id: Option<SessionId>,
     project_id: Option<ProjectId>,
-    part: claude_commander_protocol::preview::PreviewPart,
-) -> (String, Arc<DiffInfo>, String) {
-    let no_shell = || "No shell session. Press 's' to open one.".to_string();
+    request: PreviewRequest,
+) -> PreviewPayload {
     let target = match (session_id, project_id) {
         (Some(id), _) => claude_commander_core::api::PreviewTarget::Session { id, lines: None },
         (None, Some(pid)) => claude_commander_core::api::PreviewTarget::Project(pid),
         (None, None) => {
-            debug!("fetch_preview_data: no selection");
-            return (
-                "Select a session to see its pane".to_string(),
-                Arc::new(DiffInfo::empty()),
-                String::new(),
-            );
+            debug!("fetch_preview: no selection");
+            // With nothing selected the shell pane is blank rather than
+            // offering to open a shell. (A Pane request implies a session.)
+            return match request {
+                PreviewRequest::Shell => PreviewPayload::Shell(String::new()),
+                PreviewRequest::Pane | PreviewRequest::Stats => preview_payload(request, None),
+            };
         }
     };
-    let on_session = session_id.is_some();
+    let fetched = backend.preview_part(target, request.part()).await;
+    if let Err(e) = &fetched {
+        debug!("fetch_preview: preview error: {e}");
+    }
+    preview_payload(request, fetched.ok())
+}
 
-    match backend.preview_part(target, part).await {
-        Ok(claude_commander_core::api::PreviewData {
-            pane,
-            diff_text,
-            stats,
-            shell,
-            ..
-        }) => (
-            match on_session {
-                true => pane.unwrap_or_else(|| "Unable to capture content".to_string()),
-                // A project row has no agent pane; its tab set is Shell-only.
-                false => String::new(),
-            },
-            diff_info_from_preview(diff_text, stats),
-            shell.unwrap_or_else(no_shell),
+/// The payload for `request` from a fetched preview, or from `None` when the
+/// fetch failed — with the placeholder each pane renders when there is
+/// nothing to show.
+fn preview_payload(
+    request: PreviewRequest,
+    fetched: Option<claude_commander_core::api::PreviewData>,
+) -> PreviewPayload {
+    match request {
+        PreviewRequest::Pane => PreviewPayload::Pane(
+            fetched
+                .and_then(|d| d.pane)
+                .unwrap_or_else(|| "Unable to capture content".to_string()),
         ),
-        Err(e) => {
-            debug!("fetch_preview_data: preview error: {e}");
-            (
-                match on_session {
-                    true => "Unable to capture content".to_string(),
-                    false => String::new(),
-                },
-                Arc::new(DiffInfo::empty()),
-                no_shell(),
-            )
+        PreviewRequest::Shell => PreviewPayload::Shell(
+            fetched
+                .and_then(|d| d.shell)
+                .unwrap_or_else(|| "No shell session. Press 's' to open one.".to_string()),
+        ),
+        PreviewRequest::Stats => PreviewPayload::Diff(match fetched {
+            Some(d) => diff_info_from_preview(d.diff_text, d.stats),
+            None => Arc::new(DiffInfo::empty()),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod preview_payload_tests {
+    use super::*;
+    use claude_commander_core::api::{DiffStat, PreviewData};
+
+    fn data() -> PreviewData {
+        PreviewData {
+            pane: Some("pane".into()),
+            diff_text: "+a\n".into(),
+            diff_stat: None,
+            stats: Some(DiffStat {
+                files_changed: 1,
+                lines_added: 1,
+                lines_removed: 0,
+            }),
+            shell: Some("shell".into()),
         }
+    }
+
+    fn text(p: PreviewPayload) -> String {
+        match p {
+            PreviewPayload::Pane(s) | PreviewPayload::Shell(s) => s,
+            PreviewPayload::Diff(d) => panic!("expected text, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fetched_preview_yields_the_requested_part() {
+        assert!(matches!(
+            preview_payload(PreviewRequest::Pane, Some(data())),
+            PreviewPayload::Pane(p) if p == "pane"
+        ));
+        assert!(matches!(
+            preview_payload(PreviewRequest::Shell, Some(data())),
+            PreviewPayload::Shell(s) if s == "shell"
+        ));
+        let PreviewPayload::Diff(d) = preview_payload(PreviewRequest::Stats, Some(data())) else {
+            panic!("Stats must yield the diff");
+        };
+        assert_eq!(
+            (d.diff.as_str(), d.files_changed, d.lines_added),
+            ("+a\n", 1, 1)
+        );
+    }
+
+    #[test]
+    fn a_failed_or_partial_fetch_falls_back_to_placeholders() {
+        assert_eq!(
+            text(preview_payload(PreviewRequest::Pane, None)),
+            "Unable to capture content"
+        );
+        let no_parts = PreviewData {
+            pane: None,
+            shell: None,
+            ..data()
+        };
+        assert_eq!(
+            text(preview_payload(
+                PreviewRequest::Pane,
+                Some(no_parts.clone())
+            )),
+            "Unable to capture content"
+        );
+        for fetched in [None, Some(no_parts)] {
+            assert_eq!(
+                text(preview_payload(PreviewRequest::Shell, fetched)),
+                "No shell session. Press 's' to open one."
+            );
+        }
+        let PreviewPayload::Diff(d) = preview_payload(PreviewRequest::Stats, None) else {
+            panic!("Stats must yield the diff");
+        };
+        assert!(d.same_content(&DiffInfo::empty()));
+    }
+
+    /// Painting reports whether it changed what is shown, comparing only the
+    /// fetched part.
+    #[test]
+    fn apply_reports_a_change_to_its_own_part_only() {
+        let shown = || AppUiState {
+            preview_content: "pane".into(),
+            shell_content: "shell".into(),
+            ..Default::default()
+        };
+        let applies = |p: PreviewPayload| p.apply(&mut shown());
+        assert!(!applies(PreviewPayload::Pane("pane".into())));
+        assert!(applies(PreviewPayload::Pane("other".into())));
+        assert!(!applies(PreviewPayload::Shell("shell".into())));
+        assert!(applies(PreviewPayload::Shell("other".into())));
+        // An equal recomputed diff is unchanged; a different one is a change.
+        assert!(!applies(PreviewPayload::Diff(Arc::new(DiffInfo::empty()))));
+        assert!(applies(PreviewPayload::Diff(Arc::new(DiffInfo {
+            lines_added: 1,
+            ..DiffInfo::empty()
+        }))));
     }
 }
 

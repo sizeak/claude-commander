@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use claude_commander_core::config::keybindings::{BindableAction, KeyBindings};
-use claude_commander_core::git::{DiffInfo, EnrichedPrInfo};
+use claude_commander_core::git::EnrichedPrInfo;
 use claude_commander_core::session::{ProjectId, SessionId};
 
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -247,10 +247,9 @@ pub enum StateUpdate {
         message: String,
     },
     /// Preview / shell / diff data ready from a background fetch, applied only
-    /// if the same thing is still selected. One fetch feeds every consumer: the
-    /// list views' right pane (`preview_content` / `shell_content`) and the Info
-    /// modal's diffstat (`diff_info`) — `backend.preview()` returns all three in
-    /// a single round trip, so splitting them would double the traffic.
+    /// if the same thing is still selected. A fetch asks for the one part the
+    /// visible surface shows, so it carries only that part: the others stay as
+    /// they are instead of being copied into the task and sent back unchanged.
     PreviewReady {
         /// The value the in-flight guard was set to when this fetch was spawned,
         /// used as a generation token: the guard is cleared only by the result
@@ -262,11 +261,8 @@ pub enum StateUpdate {
         session_id: Option<SessionId>,
         /// Selected project at spawn time, or `None` when a session was selected.
         project_id: Option<ProjectId>,
-        /// Agent-pane capture (empty for a project, which has no agent pane).
-        preview_content: String,
-        /// Shell-pane capture, or a placeholder when no shell session exists.
-        shell_content: String,
-        diff_info: Arc<DiffInfo>,
+        /// The one part this fetch fetched.
+        payload: super::app::PreviewPayload,
     },
     /// Cascade-merge background task finished (completed, paused on conflict,
     /// or errored). The TUI refreshes and shows a toast from the recorded
