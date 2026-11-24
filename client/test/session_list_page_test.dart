@@ -660,4 +660,214 @@ void main() {
     await store.connect();
     await tester.pumpAndSettle();
   });
+
+  group('project picker', () {
+    const webId = 'aaaaaaaa-2222-3333-4444-555555555555';
+    const apiId = 'bbbbbbbb-2222-3333-4444-555555555555';
+    List<SessionInfo> twoProjects() => [
+      sessionInfo(
+        id: '11111111-2222-3333-4444-555555555555',
+        title: 'Web one',
+        projectName: 'web',
+        projectId: webId,
+        lastAttachedAt: DateTime.utc(2026, 1, 1),
+      ),
+      sessionInfo(
+        id: '22222222-2222-3333-4444-555555555555',
+        title: 'Web two',
+        projectName: 'web',
+        projectId: webId,
+        lastAttachedAt: DateTime.utc(2026, 1, 2),
+      ),
+      sessionInfo(
+        id: '33333333-2222-3333-4444-555555555555',
+        title: 'Api one',
+        projectName: 'api',
+        projectId: apiId,
+        lastAttachedAt: DateTime.utc(2026, 1, 3),
+      ),
+    ];
+
+    Future<void> pick(WidgetTester tester, String chip, String option) async {
+      await tester.tap(find.text(chip));
+      await tester.pumpAndSettle();
+      expect(find.text('Filter by project'), findsOneWidget);
+      await tester.tap(
+        find.descendant(of: find.byType(ListTile), matching: find.text(option)),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('choosing a project narrows the list; All projects restores', (
+      tester,
+    ) async {
+      api.listSessionsResponse = twoProjects();
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      await pick(tester, 'project', 'api');
+      expect(find.text('Api one'), findsOneWidget);
+      expect(find.text('Web one'), findsNothing);
+      expect(find.text('Web two'), findsNothing);
+      // The chip now names the choice, so the narrowing is never invisible.
+      expect(find.text('api'), findsOneWidget);
+
+      await pick(tester, 'api', 'All projects');
+      expect(find.text('Api one'), findsOneWidget);
+      expect(find.text('Web one'), findsOneWidget);
+      expect(find.text('Web two'), findsOneWidget);
+      expect(find.text('project'), findsOneWidget);
+    });
+
+    testWidgets('the picker lists each project with its session count', (
+      tester,
+    ) async {
+      api.listSessionsResponse = twoProjects();
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('project'));
+      await tester.pumpAndSettle();
+      Finder tile(String name) => find.ancestor(
+        of: find.descendant(
+          of: find.byType(ListTile),
+          matching: find.text(name),
+        ),
+        matching: find.byType(ListTile),
+      );
+      expect(
+        find.descendant(of: tile('All projects'), matching: find.text('3')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: tile('web'), matching: find.text('2')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: tile('api'), matching: find.text('1')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('dismissing the picker keeps the current filter', (
+      tester,
+    ) async {
+      api.listSessionsResponse = twoProjects();
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      await pick(tester, 'project', 'web');
+      await tester.tap(find.text('web'));
+      await tester.pumpAndSettle();
+      // Tap the barrier above the sheet.
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Filter by project'), findsNothing);
+      expect(find.text('web'), findsOneWidget);
+      expect(find.text('Api one'), findsNothing);
+    });
+
+    testWidgets('the project filter also applies to the Recent view', (
+      tester,
+    ) async {
+      api.listSessionsResponse = twoProjects();
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      await pick(tester, 'project', 'web');
+      await tester.tap(find.text('Recent'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Web one'), findsOneWidget);
+      expect(find.text('Web two'), findsOneWidget);
+      expect(find.text('Api one'), findsNothing);
+    });
+
+    testWidgets('the project filter composes with the search query', (
+      tester,
+    ) async {
+      api.listSessionsResponse = twoProjects();
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      await pick(tester, 'project', 'web');
+      await tester.enterText(find.byType(TextField), 'two');
+      await tester.pumpAndSettle();
+
+      expect(find.text('Web two'), findsOneWidget);
+      expect(find.text('Web one'), findsNothing);
+      expect(find.text('Api one'), findsNothing);
+
+      // A query matching only the other project shows the no-matches note.
+      await tester.enterText(find.byType(TextField), 'Api');
+      await tester.pumpAndSettle();
+      expect(find.text('No matches'), findsOneWidget);
+    });
+
+    testWidgets('the quick chips count within the chosen project', (
+      tester,
+    ) async {
+      // Every session carries an open PR, so each counts towards review. (Not
+      // the working chip: its row glyph animates, so the frame never settles.)
+      api.listSessionsResponse = [
+        for (final (i, s) in twoProjects().indexed)
+          sessionInfo(
+            id: s.id,
+            title: s.title,
+            projectName: s.projectName,
+            projectId: s.projectId.field0.uuid,
+            prNumber: i + 1,
+          ),
+      ];
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      expect(find.text('review · 3'), findsOneWidget);
+      await pick(tester, 'project', 'web');
+      expect(find.text('review · 2'), findsOneWidget);
+    });
+
+    testWidgets('no project chip when there is only one project to pick', (
+      tester,
+    ) async {
+      api.listSessionsResponse = [
+        sessionInfo(title: 'Solo', projectName: 'only'),
+      ];
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      expect(find.text('project'), findsNothing);
+    });
+
+    testWidgets('a chosen project whose sessions are gone stops filtering', (
+      tester,
+    ) async {
+      api.listSessionsResponse = twoProjects();
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      await pick(tester, 'project', 'api');
+      expect(find.text('Web one'), findsNothing);
+
+      // Its last session is deleted. A filter on a project that no longer
+      // appears anywhere would hide everything behind a bare "No matches".
+      api.listSessionsResponse = twoProjects().take(2).toList();
+      api.emitChange();
+      await tester.pumpAndSettle();
+
+      expect(find.text('Web one'), findsOneWidget);
+      expect(find.text('Web two'), findsOneWidget);
+      expect(find.text('api'), findsNothing);
+      expect(find.text('No matches'), findsNothing);
+    });
+  });
 }

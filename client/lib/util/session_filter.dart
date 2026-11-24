@@ -129,3 +129,23 @@ List<E> mostRecent<E>(
   }
   return ordered;
 }
+
+/// The distinct project names across [sessions] with how many sessions each
+/// holds, sorted by name (case-insensitively). Feeds the fleet list's project
+/// picker.
+///
+/// Keyed on [SessionInfo.projectName] rather than the project id on purpose:
+/// ids are per server, so the same repository configured on two servers would
+/// otherwise be offered twice. A name is also what the user picks by.
+List<(String, int)> projectCounts(Iterable<SessionInfo> sessions) {
+  final counts = <String, int>{};
+  for (final s in sessions) {
+    counts.update(s.projectName, (n) => n + 1, ifAbsent: () => 1);
+  }
+  final entries = [for (final e in counts.entries) (e.key, e.value)];
+  entries.sort((a, b) {
+    final byName = a.$1.toLowerCase().compareTo(b.$1.toLowerCase());
+    return byName != 0 ? byName : a.$1.compareTo(b.$1);
+  });
+  return entries;
+}
