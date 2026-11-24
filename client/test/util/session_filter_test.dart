@@ -172,4 +172,36 @@ void main() {
       expect(ranked, ['x', 'y', 'z']);
     });
   });
+
+  group('projectCounts', () {
+    test('counts sessions per project name, sorted case-insensitively', () {
+      final counts = projectCounts([
+        sessionInfo(projectName: 'web'),
+        sessionInfo(projectName: 'API'),
+        sessionInfo(projectName: 'web'),
+        sessionInfo(projectName: 'cli'),
+      ]);
+      expect(counts, [('API', 1), ('cli', 1), ('web', 2)]);
+    });
+
+    test('merges the same project name across distinct project ids', () {
+      // The same repo configured on two servers has two ids but one name; the
+      // picker should offer it once.
+      final counts = projectCounts([
+        sessionInfo(
+          id: '11111111-2222-3333-4444-555555555555',
+          projectName: 'web',
+        ),
+        sessionInfo(
+          id: '22222222-2222-3333-4444-555555555555',
+          projectName: 'web',
+        ),
+      ]);
+      expect(counts, [('web', 2)]);
+    });
+
+    test('is empty for no sessions', () {
+      expect(projectCounts(const []), isEmpty);
+    });
+  });
 }

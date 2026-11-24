@@ -130,6 +130,12 @@ class _SessionListBodyState extends State<SessionListBody> {
   /// it, so it round-trips off.
   _Quick? _quick;
 
+  /// The project the list is narrowed to (a [SessionInfo.projectName]), or
+  /// null for every project. Chosen from a picker rather than typed: the search
+  /// box matches title, branch and program only (the shared scorer's field
+  /// set), and typing a project name on a phone is the slow path anyway.
+  String? _project;
+
   @override
   void dispose() {
     _search.dispose();
@@ -140,6 +146,26 @@ class _SessionListBodyState extends State<SessionListBody> {
 
   void _toggleQuick(_Quick q) =>
       setState(() => _quick = _quick == q ? null : q);
+
+  /// Whether [s] survives the project filter.
+  bool _inProject(SessionInfo s) =>
+      _project == null || s.projectName == _project;
+
+  /// Whether any narrowing beyond the workspace is active — what turns an empty
+  /// list's note from "No sessions" into "No matches".
+  bool get _narrowed => _query.isNotEmpty || _quick != null || _project != null;
+
+  /// Open the project picker and apply the choice. Dismissing the sheet leaves
+  /// the filter as it was; "All projects" clears it.
+  Future<void> _pickProject(List<(String, int)> projects) async {
+    final choice = await showProjectPicker(
+      context,
+      projects: projects,
+      selected: _project,
+    );
+    if (choice == null || !mounted) return;
+    setState(() => _project = choice.project);
+  }
 
   /// The active quick filter, or null when it no longer matches anything (its
   /// chip has dropped out of the row, so it can't be cleared by hand).
@@ -170,12 +196,24 @@ class _SessionListBodyState extends State<SessionListBody> {
         // title's switcher, with their waiting counts.
         final workspace = fleet.activeWorkspace;
 
+        // The picker offers every project in the workspace, whatever is
+        // selected. A selected project that has no sessions left here (deleted,
+        // or the workspace switched under it) is dropped, for the same reason as
+        // a dead quick filter below: nothing would explain the empty list.
+        final projects = projectCounts([
+          for (final store in servers) ...store.sessionsIn(workspace),
+        ]);
+        if (!projects.any((p) => p.$1 == _project)) _project = null;
+
         // A single cross-server pass powers the header counts and the chip row.
+        // The header counts the workspace; the chips count within the selected
+        // project, so they say what tapping one would actually show.
         var active = 0, total = 0, needs = 0, working = 0, review = 0;
         for (final store in servers) {
           for (final s in store.sessionsIn(workspace)) {
             total++;
             if (s.status.isActive) active++;
+            if (!_inProject(s)) continue;
             if (_isNeedsInput(store, s)) needs++;
             if (_isWorking(store, s)) working++;
             if (_isReview(s)) review++;
@@ -209,7 +247,12 @@ class _SessionListBodyState extends State<SessionListBody> {
           // it here so the row lines up with the search box either way.
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: _quickChips(needs: needs, working: working, review: review),
+            child: _quickChips(
+              projects: projects,
+              needs: needs,
+              working: working,
+              review: review,
+            ),
           ),
           // With several servers each group header carries its own connection
           // dot; a lone server has no group header (nor, in the phone shell,
@@ -304,11 +347,22 @@ class _SessionListBodyState extends State<SessionListBody> {
   /// filter never dead-ends on an empty set. The needs-input chip always takes
   /// the attention tint (it's the one that wants attention).
   Widget _quickChips({
+    required List<(String, int)> projects,
     required int needs,
     required int working,
     required int review,
   }) {
     final chips = <Widget>[
+      // The project chip leads and stays put, so it is always in reach rather
+      // than scrolled off behind the attention chips. Pointless with a single
+      // project to choose, unless one is already chosen (then it is the clear).
+      if (projects.length > 1 || _project != null)
+        _QuickChip(
+          label: _project ?? 'project',
+          trailing: Icons.arrow_drop_down,
+          selected: _project != null,
+          onTap: () => _pickProject(projects),
+        ),
       if (needs > 0)
         _QuickChip(
           label: '? needs input · $needs',
@@ -384,6 +438,7 @@ class _SessionListBodyState extends State<SessionListBody> {
         final sessions = matchingSessions(group.sessions, _query)
             .where(
               (session) =>
+                  _inProject(session) &&
                   (_quick == null || _matchesQuick(_quick!, store, session)),
             )
             .toList();
@@ -416,12 +471,8 @@ class _SessionListBodyState extends State<SessionListBody> {
         rows.add((
           '$prefix/empty',
           (context) => _InlineNote(
-            icon: _query.isNotEmpty || _quick != null
-                ? Icons.search_off
-                : Icons.inbox_outlined,
-            text: _query.isNotEmpty || _quick != null
-                ? 'No matches'
-                : 'No sessions',
+            icon: _narrowed ? Icons.search_off : Icons.inbox_outlined,
+            text: _narrowed ? 'No matches' : 'No sessions',
           ),
         ));
       }
@@ -463,6 +514,7 @@ class _SessionListBodyState extends State<SessionListBody> {
       for (final store in servers)
         for (final s in store.sessionsIn(workspace))
           if (s.status.isActive &&
+              _inProject(s) &&
               (_quick == null || _matchesQuick(_quick!, store, s)))
             (store, s),
     ];
@@ -519,7 +571,7 @@ class _SessionListBodyState extends State<SessionListBody> {
         color: CommanderTokens.of(context).danger,
       );
     }
-    if (_query.isNotEmpty || _quick != null) {
+    if (_narrowed) {
       return const _InlineNote(icon: Icons.search_off, text: 'No matches');
     }
     return const _InlineNote(icon: Icons.history, text: 'No recent sessions');
@@ -536,11 +588,16 @@ class _QuickChip extends StatelessWidget {
   final bool amber;
   final VoidCallback onTap;
 
+  /// An icon after the label — the project chip's dropdown caret, which says
+  /// the tap opens a picker rather than toggling.
+  final IconData? trailing;
+
   const _QuickChip({
     required this.label,
     required this.selected,
     required this.onTap,
     this.amber = false,
+    this.trailing,
   });
 
   @override
@@ -574,9 +631,19 @@ class _QuickChip extends StatelessWidget {
             borderRadius: BorderRadius.circular(20),
             border: Border.all(color: borderColor),
           ),
-          child: Text(
-            label,
-            style: t.meta(size: 10, weight: FontWeight.w600, color: textColor),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: t.meta(
+                  size: 10,
+                  weight: FontWeight.w600,
+                  color: textColor,
+                ),
+              ),
+              if (trailing != null) Icon(trailing, size: 14, color: textColor),
+            ],
           ),
         ),
       ),
@@ -663,6 +730,74 @@ Future<void> openSessionDetail(
     ),
   );
   // A lifecycle action bumps the change feed, so the list refreshes itself.
+}
+
+/// What the project picker returned: a project name, or null for "All
+/// projects". Wrapped so that dismissing the sheet (a null *result*) is
+/// distinguishable from choosing to clear the filter.
+typedef ProjectChoice = ({String? project});
+
+/// The fleet list's project picker: "All projects" then every project in
+/// [projects] (name, session count), the [selected] one checked. Resolves to
+/// null when dismissed without a choice.
+Future<ProjectChoice?> showProjectPicker(
+  BuildContext context, {
+  required List<(String, int)> projects,
+  required String? selected,
+}) {
+  final total = projects.fold(0, (sum, p) => sum + p.$2);
+  return showModalBottomSheet<ProjectChoice>(
+    context: context,
+    builder: (context) {
+      Widget option(String? project, String label, int count) => ListTile(
+        leading: Icon(
+          project == null ? Icons.all_inclusive : Icons.folder_outlined,
+        ),
+        title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('$count'),
+            const SizedBox(width: 8),
+            Icon(
+              Icons.check,
+              color: project == selected ? null : Colors.transparent,
+            ),
+          ],
+        ),
+        selected: project == selected,
+        onTap: () =>
+            Navigator.of(context).pop<ProjectChoice>((project: project)),
+      );
+      return SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'Filter by project',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            // The sheet is height-capped, so a long project list scrolls inside
+            // it rather than overflowing.
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  option(null, 'All projects', total),
+                  for (final (name, count) in projects)
+                    option(name, name, count),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }
 
 /// Resolve the server to act on for a per-server action (create/projects/
