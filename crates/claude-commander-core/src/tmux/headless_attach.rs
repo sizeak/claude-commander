@@ -85,14 +85,22 @@ fn pts_name(master_fd: RawFd) -> Option<String> {
 /// Because `-A` reads the *attached clients*, it is a no-op if it runs before the
 /// `tmux attach-session` child has registered as one — a real race at spawn time,
 /// where the child was only just forked (measured ~16ms to register). So this
-/// retries on a short bounded backoff until a client is present, then adjusts.
+/// retries on a short bounded backoff until `client_tty` is attached, then
+/// adjusts. It must be *that* client, not any: an attach over a lingering wider
+/// client finds the session already has one, and a fit that ran then sized the
+/// window to the client about to be detached, which `manual` then kept (every
+/// time on macOS runners with tmux 3.8). Once our client is listed the others are
+/// out of the sum: `attach-session -d` marks them `CLIENT_EXIT` before attaching
+/// the new one (tmux 3.8 `cmd-attach-session.c:155-161`, `server-client.c:621`),
+/// and sizing skips `CLIENT_EXIT` clients (`resize.c:93`, `tmux.h:2325-2328`).
+/// `None` (no tty name could be read) falls back to waiting for any client.
 /// The [`ResizeHandle::resize`] caller already has a live client, so its first
 /// attempt succeeds. Best-effort throughout: a failure or a giving-up leaves the
 /// previous size, no worse than not trying, and the attach itself is already
 /// live. Blocks on the (fast, local-socket) `tmux` calls and reaps them rather
 /// than leaking zombies; the total wait is capped well under the attach's own
 /// process-spawn cost.
-fn resize_window(session_name: &str, tmux_tmpdir: Option<&Path>) {
+fn resize_window(session_name: &str, client_tty: Option<&str>, tmux_tmpdir: Option<&Path>) {
     // ~16ms observed for a client to register; cap the wait an order of
     // magnitude above that so a loaded host still lands it, but the sync path
     // never stalls for long.
@@ -101,8 +109,8 @@ fn resize_window(session_name: &str, tmux_tmpdir: Option<&Path>) {
 
     for _ in 0..ATTEMPTS {
         // `-A` reads the attached clients, so it is a silent no-op with none
-        // attached — wait for one rather than "succeeding" without effect.
-        if !session_has_client(session_name, tmux_tmpdir) {
+        // attached — wait for ours rather than "succeeding" without effect.
+        if !client_attached(session_name, client_tty, tmux_tmpdir) {
             std::thread::sleep(BACKOFF);
             continue;
         }
@@ -123,19 +131,32 @@ fn resize_window(session_name: &str, tmux_tmpdir: Option<&Path>) {
             }
         }
     }
-    warn!("tmux resize-window -A gave up: no client registered for {session_name}");
+    warn!(
+        "tmux resize-window -A gave up: client {client_tty:?} never registered for {session_name}"
+    );
 }
 
-/// Whether the session has at least one attached client. Used to avoid firing
-/// `resize-window -A` (which reads the attached clients) before the attach child
-/// has registered. A spawn failure is treated as "no client" so the caller
-/// retries rather than adjusting against a stale view.
-fn session_has_client(session_name: &str, tmux_tmpdir: Option<&Path>) -> bool {
+/// Whether `client_tty` is attached to the session, or with `None` whether any
+/// client is. Used to avoid firing `resize-window -A` (which reads the attached
+/// clients) before the attach child has registered. A spawn failure is treated
+/// as "not attached" so the caller retries rather than adjusting against a stale
+/// view.
+fn client_attached(
+    session_name: &str,
+    client_tty: Option<&str>,
+    tmux_tmpdir: Option<&Path>,
+) -> bool {
     let mut cmd = std::process::Command::new("tmux");
-    cmd.args(["list-clients", "-t", session_name, "-F", "x"]);
+    cmd.args(["list-clients", "-t", session_name, "-F", "#{client_tty}"]);
     match cmd.with_tmux_tmpdir(tmux_tmpdir).output() {
-        Ok(out) => out.status.success() && !out.stdout.is_empty(),
-        Err(_) => false,
+        Ok(out) if out.status.success() => {
+            let mut ttys = std::str::from_utf8(&out.stdout).unwrap_or("").lines();
+            match client_tty {
+                Some(ours) => ttys.any(|tty| tty == ours),
+                None => ttys.next().is_some(),
+            }
+        }
+        _ => false,
     }
 }
 
@@ -227,7 +248,8 @@ impl HeadlessAttach {
         {
             let session = session.clone();
             let tmpdir = tmpdir.clone();
-            std::thread::spawn(move || resize_window(&session, tmpdir.as_deref()));
+            let tty = client_tty.clone();
+            std::thread::spawn(move || resize_window(&session, tty.as_deref(), tmpdir.as_deref()));
         }
 
         Ok(Self {
@@ -273,6 +295,7 @@ impl HeadlessAttach {
         ResizeHandle {
             fd: self.pty.as_raw_fd(),
             session_name: self.session_name.clone(),
+            client_tty: self.client_tty.as_deref().map(Arc::from),
             tmux_tmpdir: self.tmux_tmpdir.clone(),
         }
     }
@@ -499,6 +522,7 @@ impl AttachTerminator for PtyTerminator {
 pub struct ResizeHandle {
     fd: RawFd,
     session_name: Arc<str>,
+    client_tty: Option<Arc<str>>,
     tmux_tmpdir: Option<Arc<Path>>,
 }
 
@@ -529,7 +553,8 @@ impl ResizeHandle {
         {
             let session = self.session_name.clone();
             let tmpdir = self.tmux_tmpdir.clone();
-            std::thread::spawn(move || resize_window(&session, tmpdir.as_deref()));
+            let tty = self.client_tty.clone();
+            std::thread::spawn(move || resize_window(&session, tty.as_deref(), tmpdir.as_deref()));
         }
 
         if rc != 0 {
@@ -679,6 +704,109 @@ mod client_tail_tests {
         tail.record(b"[ex");
         tail.record(b"ited]\r\n");
         assert_eq!(tail.end(), AttachEnd::SessionEnded);
+    }
+}
+
+#[cfg(test)]
+mod resize_window_tests {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    use tempfile::TempDir;
+
+    use super::{HeadlessAttach, resize_window};
+    use crate::tmux::isolation::TmuxTmpdir;
+
+    fn tmux(sock: &std::path::Path, args: &[&str]) -> String {
+        let mut cmd = Command::new("tmux");
+        cmd.args(args);
+        let out = cmd
+            .with_tmux_tmpdir(Some(sock))
+            .output()
+            .expect("failed to spawn tmux");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn size(sock: &std::path::Path, session: &str) -> String {
+        tmux(
+            sock,
+            &[
+                "display-message",
+                "-t",
+                session,
+                "-p",
+                "#{window_width}x#{window_height}",
+            ],
+        )
+    }
+
+    /// The fit after an attach must wait for *that* client, not for any client.
+    ///
+    /// A narrow attach over a lingering wide one used to fire `resize-window -A`
+    /// as soon as the session had a client, and the wide one already counted: so
+    /// whenever the fit beat the new client's registration it sized the window to
+    /// the client being detached, and `manual` kept it there. macOS runners on
+    /// tmux 3.8 lost that race every time
+    /// (`headless_attach_detaches_a_lingering_wide_client`). Here the awaited
+    /// client never attaches at all, which makes the race deterministic: the fit
+    /// must give up rather than size the window to the wrong client.
+    #[tokio::test]
+    async fn the_fit_waits_for_its_own_client_not_any_client() {
+        if Command::new("tmux").arg("-V").output().is_err() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let sock = tmp.path();
+        let session = "cc-fit-own-client";
+        tmux(
+            sock,
+            &[
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-x",
+                "200",
+                "-y",
+                "50",
+                "sh",
+                "-c",
+                "while true; do sleep 1; done",
+            ],
+        );
+        tmux(
+            sock,
+            &["set-option", "-t", session, "window-size", "manual"],
+        );
+
+        // Another client is attached and would hold the window at 205 wide.
+        let wide = HeadlessAttach::spawn(session, 205, 58, Some(sock)).expect("spawn wide attach");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while size(sock, session) != "205x57" {
+            assert!(
+                Instant::now() < deadline,
+                "precondition: the wide client never fitted the window"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        tmux(
+            sock,
+            &["resize-window", "-t", session, "-x", "120", "-y", "40"],
+        );
+        assert_eq!(size(sock, session), "120x40");
+
+        resize_window(session, Some("/dev/not-an-attached-client"), Some(sock));
+
+        assert_eq!(
+            size(sock, session),
+            "120x40",
+            "a fit for a client that has not attached must not size the window to another one"
+        );
+
+        let (_r, _w, _re, mut child) = wide.split();
+        child.kill().await;
+        tmux(sock, &["kill-server"]);
     }
 }
 
