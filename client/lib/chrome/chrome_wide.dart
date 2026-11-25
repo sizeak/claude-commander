@@ -11,6 +11,7 @@
 /// fallback comprehensible; split across two files, each half looks arbitrary.
 library;
 
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 

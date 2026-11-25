@@ -2,6 +2,7 @@ import 'package:claude_commander_client/chrome/chrome_forms.dart';
 import 'package:claude_commander_client/chrome/lcars/elbow.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -57,7 +58,7 @@ void main() {
   testWidgets('the run folds onto a second line rather than overflowing', (
     tester,
   ) async {
-    await loadCommanderFonts();
+    await loadCommanderFonts(tester);
     await tester.pumpWidget(bar(300));
     await tester.pumpAndSettle();
 
@@ -88,7 +89,7 @@ void main() {
   // so a stretched line's blocks keep their relative sizes and none is ever
   // squeezed below the label it has to hold.
   testWidgets('every folded line fills the column', (tester) async {
-    await loadCommanderFonts();
+    await loadCommanderFonts(tester);
     await tester.pumpWidget(bar(300));
     await tester.pumpAndSettle();
 
@@ -118,7 +119,7 @@ void main() {
   testWidgets('stretching a line grows every block and shrinks none', (
     tester,
   ) async {
-    await loadCommanderFonts();
+    await loadCommanderFonts(tester);
     double widthOf(String label) => tester
         .getSize(find.widgetWithText(ChromeElbow, label.toUpperCase()))
         .width;
@@ -149,7 +150,7 @@ void main() {
   testWidgets('a run that fits stays on one line and fills the column', (
     tester,
   ) async {
-    await loadCommanderFonts();
+    await loadCommanderFonts(tester);
     await tester.pumpWidget(bar(600));
     await tester.pumpAndSettle();
 

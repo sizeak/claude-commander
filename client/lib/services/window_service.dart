@@ -27,7 +27,7 @@ enum WindowEvent {
 ///
 /// The **position** half only takes effect on X11: Wayland does not let a client
 /// place its own window, and nativeapi positions through `gtk_window_move`
-/// (cnativeapi 0.5.10, `window_linux.cpp:1956-1962`), a no-op there and a restored
+/// (cnativeapi 0.6.2, `window_linux.cpp:2050-2059`), a no-op there and a restored
 /// window keeps its size but lands wherever the compositor puts it. Worth knowing
 /// before debugging "the position isn't restored".
 @immutable
@@ -141,18 +141,19 @@ WindowService? createWindowService() => switch (defaultTargetPlatform) {
 
 /// The real window, via `window_manager`'s native API (nativeapi).
 ///
-/// Uses `titleBarStyle = hidden` and deliberately **never** `setFrameless`. On
-/// Linux, where the runner gave the window a GTK header bar — Wayland, and X11
-/// under GNOME — hiding the title bar hides that header *widget* and keeps the
-/// window GTK-decorated, so its invisible client-side resize border survives and
-/// borderless needs no resize grips of its own; `setFrameless(true)` also calls
-/// `gtk_window_set_decorated(FALSE)` and takes resizing with it (cnativeapi
-/// 0.5.10, `cxx_impl/src/platform/linux/window_linux.cpp:2055-2068` for
-/// frameless, `:2103-2120` for the header-bar branch).
+/// Uses `titleBarStyle = hidden`, not `setFrameless`. On Linux, where the
+/// runner gave the window a GTK header bar — Wayland, and X11 under GNOME —
+/// hiding the title bar hides that header *widget* and keeps the window
+/// GTK-decorated, so its invisible client-side resize border survives and
+/// borderless needs no resize grips of its own (cnativeapi 0.6.2,
+/// `cxx_impl/src/platform/linux/window_linux.cpp:2215-2226`). `setFrameless(true)`
+/// adds nothing there — it keeps the decorations of a CSD window with an
+/// explicit title bar — and elsewhere drops them, resize border included
+/// (`:2160-2180`).
 ///
 /// Off that path the two converge: with no header bar, hiding the title bar
 /// falls through to `gtk_window_set_decorated(false)` itself (same file,
-/// `:2106-2112`), so borderless on X11 outside GNOME *does* lose the resize
+/// `:2222-2225`), so borderless on X11 outside GNOME *does* lose the resize
 /// border. Not accommodated on purpose — X11 is deprecated and out of scope —
 /// but do not read the paragraph above as universal.
 class NativeWindowService implements WindowService {
@@ -171,8 +172,8 @@ class NativeWindowService implements WindowService {
   /// Resolves the app's window once and listens to it.
   ///
   /// Resolved once rather than per call because `getCurrent()` is "the focused
-  /// window, falling back to the first visible one" (cnativeapi 0.5.10,
-  /// `window_manager_linux.cpp:894-901`): asked later, it could answer some
+  /// window, falling back to the first visible one" (cnativeapi 0.6.2,
+  /// `window_manager_linux.cpp:942-960`): asked later, it could answer some
   /// other toplevel. Asked now, before the first frame, it answers the runner's
   /// realized-but-unshown window, which that same comment documents as the
   /// supported case.
@@ -332,8 +333,8 @@ class LaunchBoundsFix {
 /// consumes, or null for an event it has no use for.
 ///
 /// nativeapi has no "unmaximized" event: leaving maximize and leaving minimize
-/// both arrive as one `WindowRestoredEvent` (window_manager 0.6.0's own legacy
-/// bridge has to disambiguate them, `lib/src/legacy/window_manager.dart:778-787`).
+/// both arrive as one `WindowRestoredEvent` (window_manager 0.7.1's own legacy
+/// bridge has to disambiguate them, `lib/src/legacy/window_manager.dart:980-990`).
 /// Rather than infer which from the events seen before — wrong whenever one was
 /// missed — a restore asks the window, via [isMaximized], what it now is. A
 /// restore that changes nothing is harmless: the controller drops an event that

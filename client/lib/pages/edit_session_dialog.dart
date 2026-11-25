@@ -1,4 +1,5 @@
 import 'dart:convert';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import '../src/rust/api/mirrors.dart';
 import '../services/session_editor.dart';

@@ -1,5 +1,24 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.13)
+
+# A build directory configured under an older dev shell keeps that shell's
+# compiler: CMake caches CMAKE_CXX_COMPILER as an absolute path and never looks
+# again, and under Nix the old store path still exists, so nothing fails at
+# build time. The app then links against the old glibc and crashes at startup
+# the moment it loads a library built against the new one. After the nixpkgs
+# bump to Mesa 26.3.1 that was "No provider of eglGetPlatformDisplayEXT found",
+# because libgallium needs GLIBC_2.43 and the process had 2.42. Flutter runs
+# this configure step on every build, so checking here catches it every time.
+if(CMAKE_CXX_COMPILER)
+  find_program(CC_CURRENT_CXX NAMES "$ENV{CXX}" clang++ NO_CACHE)
+  if(CC_CURRENT_CXX AND NOT CC_CURRENT_CXX STREQUAL CMAKE_CXX_COMPILER)
+    message(FATAL_ERROR
+      "This build directory was configured with ${CMAKE_CXX_COMPILER}, but the "
+      "compiler on PATH is now ${CC_CURRENT_CXX} (a dev-shell or toolchain "
+      "update). Delete ${CMAKE_BINARY_DIR} and build again.")
+  endif()
+endif()
+
 project(runner LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change

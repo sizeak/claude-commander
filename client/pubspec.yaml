@@ -68,7 +68,7 @@ dependencies:
   # library is in the APK too: an ungated call there would reach native code
   # rather than throw. Every call therefore stays behind the `WindowService` seam
   # (`services/window_service.dart`), which has no Android implementation.
-  window_manager: ^0.6.0
+  window_manager: ^0.7.1
 
 dev_dependencies:
   flutter_test:

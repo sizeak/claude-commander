@@ -250,6 +250,22 @@ libs are any use to the other:
 
 > The Nix SDK is read-only. Every SDK component the build needs must be declared in `flake.nix` (in `platformVersions`, `buildToolsVersions`, `ndkVersions`, etc.) rather than being auto-installed by Gradle or `flutter doctor`.
 
+### material_ui
+
+Flutter 3.50 deprecates `package:flutter/material.dart` in favour of the separately
+versioned `package:material_ui`. The client still imports the SDK's copy, with a
+`// ignore: deprecated_member_use, see README.md "material_ui"` above each import, on purpose.
+
+`material_ui` is not a re-export. It ships its own copy of every Material class
+(`material_ui-1.11.1/lib/src/*` against the SDK's `packages/flutter/lib/src/material/*`),
+so a `ThemeData`, `Theme` or `MaterialApp` from one package is a different type from the
+other's, and `Theme.of` from one cannot find a `Theme` the other provided. Switching
+has to happen in one go, after checking that no dependency still builds Material
+widgets from the SDK. It also brings behaviour changes the SDK copy does not have
+(1.11.0 widens the default TabBar indicator and changes how `InkSparkle` sets its
+shader uniforms, for example), so every golden needs re-checking. To find what is left:
+`grep -rn 'see README.md "material_ui"' client`.
+
 ## Golden tests
 
 `test/goldens/` holds reference images for the chrome layer — each chrome form on
@@ -312,14 +328,14 @@ maximise.
 
 Six details that are load-bearing rather than incidental:
 
-- **`titleBarStyle = hidden`, never `setFrameless`.** On the runner's header-bar
+- **`titleBarStyle = hidden`, not `setFrameless`.** On the runner's header-bar
   path — Wayland, and X11 under GNOME — the former hides the header *widget* and
   leaves the window GTK-decorated, so its invisible client-side resize border
-  survives and borderless needs no resize grips of its own (cnativeapi 0.5.10,
-  `cxx_impl/src/platform/linux/window_linux.cpp:2103-2120`). **This does not hold on
+  survives and borderless needs no resize grips of its own (cnativeapi 0.6.2,
+  `cxx_impl/src/platform/linux/window_linux.cpp:2215-2226`). **This does not hold on
   the other path**: with no header bar nativeapi falls through to
-  `gtk_window_set_decorated(false)` (same file, `:2106-2112`), which is what
-  `setFrameless` does too (`:2055-2068`), so borderless on X11 outside GNOME leaves
+  `gtk_window_set_decorated(false)` (same file, `:2222-2225`), which is what
+  `setFrameless` does too off the header-bar path (`:2160-2180`), so borderless on X11 outside GNOME leaves
   a window with no resize border — resizable only via the WM (KWin:
   `Meta`+right-drag). Deliberately not accommodated: X11 is deprecated and out of
   scope here. Switch the frame to Native in Settings if you are on it.
@@ -334,10 +350,10 @@ Six details that are load-bearing rather than incidental:
   into full screen or maximized skips the fix, and whether leaving that state
   restores the exact saved size is untested.
 - **Window *position* is X11-only.** Wayland does not let a client place its own
-  window — nativeapi positions through `gtk_window_move` (`window_linux.cpp:1956-1962`),
+  window — nativeapi positions through `gtk_window_move` (`window_linux.cpp:2050-2059`),
   which a Wayland compositor ignores — so the `x,y` in `commander.window.bounds` is
   honoured only on X11; the size restores everywhere.
-- **The native library has to be findable.** window_manager 0.6 is a Dart
+- **The native library has to be findable.** window_manager 0.7 is a Dart
   native-assets package: its C++ core (`libcnativeapi.so`) is compiled by a build
   hook — on every `flutter test` as well as every desktop build, which is why the
   Linux client shells carry `libxi` and a `pkg-config` that survives the hook

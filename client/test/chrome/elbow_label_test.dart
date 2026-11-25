@@ -1,6 +1,7 @@
 import 'package:claude_commander_client/chrome/lcars/elbow.dart';
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -46,7 +47,7 @@ void main() {
 
   /// How far the label's ink sits below the block's own centre line.
   Future<double> drop(WidgetTester tester, CommanderTokens t, double s) async {
-    await loadCommanderFonts();
+    await loadCommanderFonts(tester);
     await tester.pumpWidget(block(t, s));
     await tester.pumpAndSettle();
     final box = tester.getRect(find.byType(ChromeElbow));

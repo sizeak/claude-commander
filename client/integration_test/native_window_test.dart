@@ -13,6 +13,7 @@
 // It opens a window on your desktop, maximizes it, takes it full screen and
 // minimizes it last.
 import 'package:claude_commander_client/services/window_service.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';

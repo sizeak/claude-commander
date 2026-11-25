@@ -102,7 +102,7 @@ class WindowController extends ChangeNotifier {
       await _service.setTitle(windowTitle);
       // Geometry first: the pre-fullscreen size is remembered (nativeapi keeps a
       // full-screen request made before first show and restores the requested
-      // normal size on leaving it — window_manager 0.6.0 README, "Upgrading
+      // normal size on leaving it — window_manager 0.7.1 README, "Upgrading
       // from 0.5.x"), so setting it after would leave the un-fullscreened
       // window at the runner's default.
       if (bounds != null) await _service.setBounds(bounds);

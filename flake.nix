@@ -322,10 +322,10 @@
         clientRustupShim = mkRustupShim clientRust;
         clientCiRustupShim = mkRustupShim fenixStable;
         # Native-assets hooks (cnativeapi's `hook/build.dart`, pulled in by
-        # window_manager 0.6) shell out to `pkg-config gtk+-3.0 x11 xi`, but
+        # window_manager 0.7) shell out to `pkg-config gtk+-3.0 x11 xi`, but
         # Flutter runs every hook in a *filtered* environment: hooks_runner's
-        # `includeHookEnvironmentVariable` (hooks_runner-1.5.0
-        # lib/src/build_runner/build_runner.dart:595-639) passes PATH, HOME,
+        # `includeHookEnvironmentVariable` (hooks_runner-1.6.4, as Flutter 3.50.1 pins it,
+        # lib/src/build_runner/build_runner.dart:628-674) passes PATH, HOME,
         # LIBCLANG_PATH and any `NIX_*` variable, and drops everything else —
         # including the `PKG_CONFIG_PATH_FOR_TARGET` the shell's pkg-config
         # wrapper reads. So the hook finds no `.pc` files and the native build,

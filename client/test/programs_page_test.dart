@@ -1,5 +1,6 @@
 import 'package:claude_commander_client/pages/programs_page.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
