@@ -339,16 +339,13 @@ Six details that are load-bearing rather than incidental:
   a window with no resize border — resizable only via the WM (KWin:
   `Meta`+right-drag). Deliberately not accommodated: X11 is deprecated and out of
   scope here. Switch the frame to Native in Settings if you are on it.
-- **Bounds set before the window is shown are applied twice.** nativeapi maps a
-  window whose title bar is hidden 90px wider and taller than a pre-show
-  `bounds` asked for (apparently the gutter its own shadow reserves, added after
-  map), and the map's resize events would then save the grown size — so every
-  launch opened bigger than the last. `LaunchBoundsFix` answers a resize that
-  grows both dimensions in the first 2s after the first frame with the saved
-  bounds;
-  `integration_test/native_window_test.dart` pins the drift. Launching straight
-  into full screen or maximized skips the fix, and whether leaving that state
-  restores the exact saved size is untested.
+- **Bounds set before the window is shown are exact.** nativeapi 0.5.10 mapped
+  a window whose title bar is hidden 90px wider and taller than a pre-show
+  `bounds` asked for, and the map's resize events then saved the grown size, so
+  every launch opened bigger than the last; the client re-applied the bounds
+  after map to compensate. 0.6.2 maps it exactly, so that workaround is gone.
+  `integration_test/native_window_test.dart` pins it: its first assertion is
+  the pre-show round trip.
 - **Window *position* is X11-only.** Wayland does not let a client place its own
   window — nativeapi positions through `gtk_window_move` (`window_linux.cpp:2050-2059`),
   which a Wayland compositor ignores — so the `x,y` in `commander.window.bounds` is

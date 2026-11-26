@@ -1,8 +1,7 @@
 import 'dart:async';
-import 'dart:ui' show Rect, Size;
+import 'dart:ui' show Rect;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart' show WidgetsBinding;
 import 'package:window_manager/window_manager.dart' as native;
 
 /// A change to the window that did **not** come from us.
@@ -159,7 +158,6 @@ WindowService? createWindowService() => switch (defaultTargetPlatform) {
 class NativeWindowService implements WindowService {
   final _events = StreamController<WindowEvent>.broadcast();
   native.Window? _window;
-  final _launchBounds = LaunchBoundsFix();
 
   /// The window [initialize] resolved. Throws before then, which
   /// [WindowController]'s failure containment turns into a no-op.
@@ -185,18 +183,6 @@ class NativeWindowService implements WindowService {
         (throw StateError('nativeapi found no window'));
     _window = window;
     window.addListener((event) {
-      // `armed` only spares the FFI reads below once the fix is spent;
-      // `onResize` is the real guard.
-      if (event is native.WindowResizedEvent && _launchBounds.armed) {
-        final relaunch = _launchBounds.onResize(
-          size: event.newSize.toSize(),
-          visible: window.isVisible,
-          fullScreen: window.isFullScreen,
-          maximized: window.isMaximized,
-          now: DateTime.now(),
-        );
-        if (relaunch != null) window.bounds = relaunch.rect.toNative();
-      }
       final translated = translateWindowEvent(
         event,
         isMaximized: () => window.isMaximized,
@@ -222,24 +208,13 @@ class NativeWindowService implements WindowService {
   Future<WindowBounds> getBounds() async =>
       WindowBounds.fromRect(_target.bounds.toRect());
 
+  /// Exact before the window is first shown too, title bar hidden or not:
+  /// nativeapi 0.5.10 mapped a borderless window 90px wider and taller than a
+  /// pre-show `bounds` asked for, which needed a re-apply after map, and 0.6.2
+  /// does not. `integration_test/native_window_test.dart` pins it.
   @override
-  Future<void> setBounds(WindowBounds bounds) async {
-    final window = _target;
-    // Still applied now, so the first frame is near the right size; the
-    // re-apply after mapping makes it exact. See [LaunchBoundsFix].
-    window.bounds = bounds.rect.toNative();
-    if (defaultTargetPlatform != TargetPlatform.linux || window.isVisible) {
-      return;
-    }
-    if (!_launchBounds.armed) {
-      // The runner shows the window on the first frame, so that is when the
-      // deadline starts (see [LaunchBoundsFix.markShown]).
-      WidgetsBinding.instance.waitUntilFirstFrameRasterized.then(
-        (_) => _launchBounds.markShown(DateTime.now()),
-      );
-    }
-    _launchBounds.arm(bounds);
-  }
+  Future<void> setBounds(WindowBounds bounds) async =>
+      _target.bounds = bounds.rect.toNative();
 
   @override
   Future<bool> isMaximized() async => _target.isMaximized;
@@ -256,77 +231,6 @@ class NativeWindowService implements WindowService {
 
   @override
   Future<void> close() async => _target.close();
-}
-
-/// Re-applies bounds set before the window was first shown, once it has been.
-///
-/// nativeapi 0.5.10 on Linux sizes a not-yet-shown window wrongly while the
-/// title bar is hidden: it maps 90px wider and taller than asked, while the same
-/// call after it is shown is exact. Pinned by
-/// `integration_test/native_window_test.dart`. The cause appears to be the
-/// gutter nativeapi reserves for its own hidden-title-bar shadow, which it adds
-/// after map (`window_shadow_linux.h`, `AddGutter`, reached from `Decide` on the
-/// compositor's first state event or a 300ms timeout) — unconfirmed beyond the
-/// matching 45px a side. Left alone it compounds: the map's own resize events
-/// make [WindowController] save the grown size, so every launch would open 90px
-/// bigger than the last.
-///
-/// For [deadline] after the first frame (when the runner shows the window),
-/// every resize that leaves the window larger than the armed size in *both*
-/// dimensions is answered with the armed bounds again — every one, not just the
-/// first, because the gutter can land after an earlier map-time configure.
-/// Anything else is left alone even inside the deadline: a resize to the armed
-/// size is the fix's own echo, and one that shrinks or grows a single dimension
-/// is the user dragging an edge, a compositor clamping the window to a smaller
-/// screen, or a tile. Full screen and maximized are left alone (they are the
-/// screen's size) without disarming. Once [deadline] has passed it disarms.
-///
-/// Pure, so `flutter test` covers it; [NativeWindowService] feeds it each native
-/// resize with the window's state.
-///
-/// A workaround, not a fix: neither `hasShadow = false` nor `setFrameless`
-/// avoids the gutter, which nativeapi keeps reserved while its shadow is
-/// disabled. Remove it once a cnativeapi release maps a pre-show `bounds`
-/// exactly — `integration_test/native_window_test.dart` is the check.
-class LaunchBoundsFix {
-  static const deadline = Duration(seconds: 2);
-
-  WindowBounds? _bounds;
-  DateTime? _shownAt;
-
-  bool get armed => _bounds != null;
-
-  void arm(WindowBounds bounds) {
-    _bounds = bounds;
-    _shownAt = null;
-  }
-
-  /// Starts the deadline. Called once the first frame — and so the window — is
-  /// up; a visible resize that arrives first starts it instead.
-  void markShown(DateTime now) => _shownAt ??= now;
-
-  /// The bounds to apply in answer to a resize to [size], or null.
-  WindowBounds? onResize({
-    required Size size,
-    required bool visible,
-    required bool fullScreen,
-    required bool maximized,
-    required DateTime now,
-  }) {
-    final bounds = _bounds;
-    if (bounds == null || !visible) return null;
-    final shownAt = _shownAt ??= now;
-    if (now.difference(shownAt) > deadline) {
-      _bounds = null;
-      return null;
-    }
-    if (fullScreen || maximized) return null;
-    // Only growth in both dimensions is the drift; see the class doc.
-    final grown =
-        size.width.round() > bounds.width &&
-        size.height.round() > bounds.height;
-    return grown ? bounds : null;
-  }
 }
 
 /// Translates one nativeapi window event into the [WindowEvent] the controller
