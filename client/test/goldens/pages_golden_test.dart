@@ -12,6 +12,7 @@ import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:claude_commander_client/util/format.dart';
 import 'package:claude_commander_client/window/window_controller.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -93,7 +94,7 @@ void main() {
     required Size size,
     bool bareScaffold = true,
   }) async {
-    await loadCommanderFonts();
+    await loadCommanderFonts(tester);
     useGoldenSurface(tester, size);
     await store.connect();
     // Connected, not connecting: the transient state would put a "Connecting…"

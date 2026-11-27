@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:claude_commander_client/pages/review_page.dart';
 import 'package:claude_commander_client/src/rust/api/diff.dart';
 import 'package:claude_commander_client/src/rust/api/review.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 

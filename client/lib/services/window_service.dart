@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:ui' show Rect;
 
 import 'package:flutter/foundation.dart';
-import 'package:window_manager/window_manager.dart';
+import 'package:window_manager/window_manager.dart' as native;
 
 /// A change to the window that did **not** come from us.
 ///
@@ -25,7 +25,8 @@ enum WindowEvent {
 /// `1280.0000001` would be noise in a preferences file no one can hand-edit.
 ///
 /// The **position** half only takes effect on X11: Wayland does not let a client
-/// place its own window, so `gtk_window_move` is a no-op there and a restored
+/// place its own window, and nativeapi positions through `gtk_window_move`
+/// (cnativeapi 0.6.2, `window_linux.cpp:2050-2059`), a no-op there and a restored
 /// window keeps its size but lands wherever the compositor puts it. Worth knowing
 /// before debugging "the position isn't restored".
 @immutable
@@ -93,15 +94,15 @@ class WindowBounds {
 
 /// The desktop window, as much of it as this app drives.
 ///
-/// A seam over `window_manager` for two reasons. It keeps the plugin — which
-/// declares only linux/macos/windows, so any call on Android throws
-/// `MissingPluginException` — behind one gate, and it makes [WindowController]
-/// testable without a platform channel.
+/// A seam over `window_manager` for two reasons. It keeps the desktop-only
+/// native window API behind one gate — `window_manager` supports only
+/// linux/macos/windows — and it makes [WindowController] testable without the
+/// native library, which `flutter test` never loads.
 abstract class WindowService {
   /// Window changes the desktop made itself.
   Stream<WindowEvent> get events;
 
-  /// Prepares the plugin. Must complete before any other call.
+  /// Resolves the window. Must complete before any other call.
   Future<void> initialize();
 
   Future<void> setTitle(String title);
@@ -133,90 +134,130 @@ abstract class WindowService {
 WindowService? createWindowService() => switch (defaultTargetPlatform) {
   TargetPlatform.linux ||
   TargetPlatform.macOS ||
-  TargetPlatform.windows => WindowManagerService(),
+  TargetPlatform.windows => NativeWindowService(),
   _ => null,
 };
 
-/// The real window, via `window_manager`.
+/// The real window, via `window_manager`'s native API (nativeapi).
 ///
-/// Uses `setTitleBarStyle(hidden)` and deliberately **never** `setAsFrameless`.
-/// On the runner's header-bar path — Wayland, and X11 under GNOME — the former
-/// hides the header *widget* and leaves the window GTK-decorated, so its
-/// invisible client-side resize border survives and borderless needs no resize
-/// grips of its own; frameless forces `decorated=false` and takes resizing with
-/// it.
+/// Uses `titleBarStyle = hidden`, not `setFrameless`. On Linux, where the
+/// runner gave the window a GTK header bar — Wayland, and X11 under GNOME —
+/// hiding the title bar hides that header *widget* and keeps the window
+/// GTK-decorated, so its invisible client-side resize border survives and
+/// borderless needs no resize grips of its own (cnativeapi 0.6.2,
+/// `cxx_impl/src/platform/linux/window_linux.cpp:2215-2226`). `setFrameless(true)`
+/// adds nothing there — it keeps the decorations of a CSD window with an
+/// explicit title bar — and elsewhere drops them, resize border included
+/// (`:2160-2180`).
 ///
-/// Off that path the two converge: with no header bar the plugin falls through to
-/// `gtk_window_set_decorated(false)` itself, so borderless on X11 outside GNOME
-/// *does* lose the resize border. Not accommodated on purpose — X11 is deprecated
-/// and out of scope — but do not read the paragraph above as universal.
-class WindowManagerService with WindowListener implements WindowService {
+/// Off that path the two converge: with no header bar, hiding the title bar
+/// falls through to `gtk_window_set_decorated(false)` itself (same file,
+/// `:2222-2225`), so borderless on X11 outside GNOME *does* lose the resize
+/// border. Not accommodated on purpose — X11 is deprecated and out of scope —
+/// but do not read the paragraph above as universal.
+class NativeWindowService implements WindowService {
   final _events = StreamController<WindowEvent>.broadcast();
+  native.Window? _window;
+
+  /// The window [initialize] resolved. Throws before then, which
+  /// [WindowController]'s failure containment turns into a no-op.
+  native.Window get _target =>
+      _window ?? (throw StateError('NativeWindowService is not initialized'));
 
   @override
   Stream<WindowEvent> get events => _events.stream;
 
+  /// Resolves the app's window once and listens to it.
+  ///
+  /// Resolved once rather than per call because `getCurrent()` is "the focused
+  /// window, falling back to the first visible one" (cnativeapi 0.6.2,
+  /// `window_manager_linux.cpp:942-960`): asked later, it could answer some
+  /// other toplevel. Asked now, before the first frame, it answers the runner's
+  /// realized-but-unshown window, which that same comment documents as the
+  /// supported case.
   @override
   Future<void> initialize() async {
-    await windowManager.ensureInitialized();
-    windowManager.addListener(this);
+    if (_window != null) return;
+    final window =
+        native.WindowManager.instance.getCurrent() ??
+        (throw StateError('nativeapi found no window'));
+    _window = window;
+    window.addListener((event) {
+      final translated = translateWindowEvent(
+        event,
+        isMaximized: () => window.isMaximized,
+      );
+      if (translated != null) _events.add(translated);
+    });
   }
 
-  @override
-  Future<void> setTitle(String title) => windowManager.setTitle(title);
+  // The native API is synchronous (FFI); the seam stays async so the fake and
+  // the controller's failure containment are unchanged.
 
   @override
-  Future<void> setTitleBarHidden(bool hidden) => windowManager.setTitleBarStyle(
-    hidden ? TitleBarStyle.hidden : TitleBarStyle.normal,
-  );
+  Future<void> setTitle(String title) async => _target.title = title;
 
   @override
-  Future<void> setFullScreen(bool value) => windowManager.setFullScreen(value);
+  Future<void> setTitleBarHidden(bool hidden) async => _target.titleBarStyle =
+      hidden ? native.TitleBarStyle.hidden : native.TitleBarStyle.normal;
+
+  @override
+  Future<void> setFullScreen(bool value) async => _target.isFullScreen = value;
 
   @override
   Future<WindowBounds> getBounds() async =>
-      WindowBounds.fromRect(await windowManager.getBounds());
+      WindowBounds.fromRect(_target.bounds.toRect());
+
+  /// Exact before the window is first shown too, title bar hidden or not:
+  /// nativeapi 0.5.10 mapped a borderless window 90px wider and taller than a
+  /// pre-show `bounds` asked for, which needed a re-apply after map, and 0.6.2
+  /// does not. `integration_test/native_window_test.dart` pins it.
+  @override
+  Future<void> setBounds(WindowBounds bounds) async =>
+      _target.bounds = bounds.rect.toNative();
 
   @override
-  Future<void> setBounds(WindowBounds bounds) =>
-      windowManager.setBounds(bounds.rect);
+  Future<bool> isMaximized() async => _target.isMaximized;
 
   @override
-  Future<bool> isMaximized() => windowManager.isMaximized();
+  Future<void> setMaximized(bool value) async =>
+      value ? _target.maximize() : _target.unmaximize();
 
   @override
-  Future<void> setMaximized(bool value) =>
-      value ? windowManager.maximize() : windowManager.unmaximize();
+  Future<void> minimize() async => _target.minimize();
 
   @override
-  Future<void> minimize() => windowManager.minimize();
+  Future<void> startDragging() async => _target.startDragging();
 
   @override
-  Future<void> startDragging() => windowManager.startDragging();
-
-  @override
-  Future<void> close() => windowManager.close();
-
-  // ── WindowListener ─────────────────────────────────────────────────────────
-  // Linux emits the continuous `move`/`resize` pair; the `moved`/`resized`
-  // settled variants are macOS/Windows only, which is why the controller
-  // debounces rather than relying on a drag-finished event.
-
-  @override
-  void onWindowMove() => _events.add(WindowEvent.moved);
-
-  @override
-  void onWindowResize() => _events.add(WindowEvent.resized);
-
-  @override
-  void onWindowMaximize() => _events.add(WindowEvent.maximized);
-
-  @override
-  void onWindowUnmaximize() => _events.add(WindowEvent.unmaximized);
-
-  @override
-  void onWindowEnterFullScreen() => _events.add(WindowEvent.enteredFullScreen);
-
-  @override
-  void onWindowLeaveFullScreen() => _events.add(WindowEvent.leftFullScreen);
+  Future<void> close() async => _target.close();
 }
+
+/// Translates one nativeapi window event into the [WindowEvent] the controller
+/// consumes, or null for an event it has no use for.
+///
+/// nativeapi has no "unmaximized" event: leaving maximize and leaving minimize
+/// both arrive as one `WindowRestoredEvent` (window_manager 0.7.1's own legacy
+/// bridge has to disambiguate them, `lib/src/legacy/window_manager.dart:980-990`).
+/// Rather than infer which from the events seen before — wrong whenever one was
+/// missed — a restore asks the window, via [isMaximized], what it now is. A
+/// restore that changes nothing is harmless: the controller drops an event that
+/// matches its state. The probe reads the window when Dart *receives* the event
+/// (`NativeCallable.listener` delivers asynchronously), not when it happened —
+/// fine here, since the controller wants the window's current state anyway.
+///
+/// Linux reports only the continuous move/resize stream, one event per change,
+/// with no settled "drag finished" event, which is why the controller debounces.
+WindowEvent? translateWindowEvent(
+  native.WindowEvent event, {
+  required bool Function() isMaximized,
+}) => switch (event) {
+  native.WindowMovedEvent() => WindowEvent.moved,
+  native.WindowResizedEvent() => WindowEvent.resized,
+  native.WindowMaximizedEvent() => WindowEvent.maximized,
+  native.WindowRestoredEvent() =>
+    isMaximized() ? WindowEvent.maximized : WindowEvent.unmaximized,
+  native.WindowEnteredFullScreenEvent() => WindowEvent.enteredFullScreen,
+  native.WindowExitedFullScreenEvent() => WindowEvent.leftFullScreen,
+  _ => null,
+};

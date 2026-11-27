@@ -1,5 +1,24 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.13)
+
+# A build directory configured under an older dev shell keeps that shell's
+# compiler: CMake caches CMAKE_CXX_COMPILER as an absolute path and never looks
+# again, and under Nix the old store path still exists, so nothing fails at
+# build time. The app then links against the old glibc and crashes at startup
+# the moment it loads a library built against the new one. After the nixpkgs
+# bump to Mesa 26.3.1 that was "No provider of eglGetPlatformDisplayEXT found",
+# because libgallium needs GLIBC_2.43 and the process had 2.42. Flutter runs
+# this configure step on every build, so checking here catches it every time.
+if(CMAKE_CXX_COMPILER)
+  find_program(CC_CURRENT_CXX NAMES "$ENV{CXX}" clang++ NO_CACHE)
+  if(CC_CURRENT_CXX AND NOT CC_CURRENT_CXX STREQUAL CMAKE_CXX_COMPILER)
+    message(FATAL_ERROR
+      "This build directory was configured with ${CMAKE_CXX_COMPILER}, but the "
+      "compiler on PATH is now ${CC_CURRENT_CXX} (a dev-shell or toolchain "
+      "update). Delete ${CMAKE_BINARY_DIR} and build again.")
+  endif()
+endif()
+
 project(runner LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
@@ -104,7 +123,45 @@ install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}
   COMPONENT Runtime)
 
 install(FILES "${FLUTTER_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
   COMPONENT Runtime)
+
+# Let the Dart VM find native assets (libcnativeapi.so, window_manager's native
+# core) beside it. Flutter registers a bundled Linux asset by bare file name
+# (flutter_tools `isolated/native_assets/native_assets.dart`,
+# `_targetLocationSingleArchitecture`: `Uri(path: fileName)`), so it is found
+# only through the search path of the object that calls dlopen — the engine,
+# libflutter_linux_gtk.so. glibc consults the executable's `$ORIGIN/lib` for that
+# call only when it is a DT_RPATH and the engine has no DT_RUNPATH of its own
+# (glibc `elf/dl-load.c`, `_dl_map_object`: "When the object has the RUNPATH
+# information we don't use any RPATHs"). nixpkgs' engine carries one (its Nix
+# store paths), so under the dev shells every native call failed with
+# "libcnativeapi.so: cannot open shared object file" — reproduced by
+# `integration_test/native_window_test.dart` without this step — and
+# WindowController's failure containment turned that into a window that
+# silently ignored every request. `$ORIGIN` on the bundled engine names
+# bundle/lib, where the assets are installed. Skipped where there is no
+# patchelf: an engine without a RUNPATH falls back to the executable's path,
+# though that fallback is untested here.
+find_program(PATCHELF_EXECUTABLE patchelf)
+if(PATCHELF_EXECUTABLE)
+  get_filename_component(FLUTTER_LIBRARY_NAME "${FLUTTER_LIBRARY}" NAME)
+  install(CODE "
+    execute_process(
+      COMMAND \"${PATCHELF_EXECUTABLE}\" --add-rpath \"\$ORIGIN\"
+        \"${INSTALL_BUNDLE_LIB_DIR}/${FLUTTER_LIBRARY_NAME}\"
+      RESULT_VARIABLE patchelf_result)
+    if(NOT patchelf_result EQUAL 0)
+      message(FATAL_ERROR \"patchelf --add-rpath failed: \${patchelf_result}\")
+    endif()
+    " COMPONENT Runtime)
+else()
+  message(WARNING
+    "patchelf not found: the bundled Flutter engine keeps its own RUNPATH, and "
+    "if it has one (nixpkgs' does) native assets such as libcnativeapi.so "
+    "cannot be loaded, so every window call fails silently. Install patchelf "
+    "and delete this build directory (find_program caches the miss).")
+endif()
 
 foreach(bundled_library ${PLUGIN_BUNDLED_LIBRARIES})
   install(FILES "${bundled_library}"

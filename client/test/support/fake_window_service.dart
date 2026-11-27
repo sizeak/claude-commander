@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:claude_commander_client/services/window_service.dart';
 
-/// A hand-rolled [WindowService] for tests — no plugin, no platform channel.
+/// A hand-rolled [WindowService] for tests — no native library, no window.
 ///
 /// Records every call in [calls] (the same shape [FakeCommanderApi] uses), holds
 /// the bounds [WindowController] reads back, and lets a test push the events a

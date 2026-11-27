@@ -1,5 +1,6 @@
 import 'dart:ui' show lerpDouble;
 
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 
 /// A session's visual state, independent of any theme's colours.

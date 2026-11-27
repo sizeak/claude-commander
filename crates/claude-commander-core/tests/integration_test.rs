@@ -2352,25 +2352,51 @@ async fn headless_attach_detaches_a_lingering_wide_client() {
         .await
     };
 
+    // Waits for the window to reach `want`, failing with what the session's
+    // clients looked like if it never does. Polls rather than sleeping a fixed
+    // interval, so a slow runner is told apart from a window that never moves.
+    let settle = |sock: std::path::PathBuf, want: &'static str, why: &'static str| async move {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let got = size(sock.clone(), session).await;
+            if got == want {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let clients = tmux_iso(
+                    &sock,
+                    &[
+                        "list-clients",
+                        "-F",
+                        "#{client_tty} #{client_width}x#{client_height} [#{client_flags}] session=#{client_session}",
+                    ],
+                )
+                .await;
+                panic!("{why}: window is {got}, want {want}; clients:\n{clients}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    };
+
     // A wide client attaches first and stays — the lingering 205-col client.
     let wide = HeadlessAttach::spawn(session, 205, 58, Some(sock)).expect("spawn wide attach");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert_eq!(
-        size(sock.to_path_buf(), session).await,
+    settle(
+        sock.to_path_buf(),
         "205x57",
-        "precondition: the wide client holds the window wide"
-    );
+        "precondition: the wide client holds the window wide",
+    )
+    .await;
 
     // Now a narrow client attaches. `-d` must detach the wide one, so `-A` fits
     // the window to the narrow client (80×24 → 80×23) rather than staying at the
     // wide client's size.
     let narrow = HeadlessAttach::spawn(session, 80, 24, Some(sock)).expect("spawn narrow attach");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert_eq!(
-        size(sock.to_path_buf(), session).await,
+    settle(
+        sock.to_path_buf(),
         "80x23",
-        "the narrow attach must detach the wide client and fit the window to itself"
-    );
+        "the narrow attach must detach the wide client and fit the window to itself",
+    )
+    .await;
 
     let (_wr, _ww, _wre, mut wide_child) = wide.split();
     let (_nr, _nw, _nre, mut narrow_child) = narrow.split();

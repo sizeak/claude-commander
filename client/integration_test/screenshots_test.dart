@@ -29,6 +29,7 @@ import 'package:claude_commander_client/services/pref_store.dart';
 import 'package:claude_commander_client/src/rust/frb_generated.dart';
 import 'package:claude_commander_client/state/fleet_store.dart';
 import 'package:claude_commander_client/theme/theme_controller.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';

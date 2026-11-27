@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -49,15 +51,38 @@ var materialIconsLoaded = false;
 /// bundled fonts: without this every glyph falls back to Ahem's filled boxes, so
 /// the reference images pin a layout the app never renders and any real type
 /// regression sails through.
-Future<void> loadCommanderFonts() async {
+///
+/// Returns only once the engine's "fonts changed" message has been handled.
+/// Since Flutter 3.50 every attached text render object answers that message
+/// with a transient frame callback (`RelayoutWhenSystemFontsChangeMixin`,
+/// `rendering/object.dart:4719-4740`), so a message still in flight when the
+/// first widget is pumped lands after the test's last frame and fails it with
+/// "An animation is still running even after the widget tree was disposed".
+/// The engine delivers it on the real event loop, which a widget test's fake
+/// clock never advances — hence [WidgetTester.runAsync].
+Future<void> loadCommanderFonts(WidgetTester tester) async {
   if (_fontsLoaded) return;
-  for (final MapEntry(key: family, value: path) in _fonts.entries) {
-    final bytes = File(path).readAsBytesSync();
-    await (FontLoader(
-      family,
-    )..addFont(Future.value(ByteData.sublistView(bytes)))).load();
-  }
-  await _loadMaterialIcons();
+  await tester.runAsync(() async {
+    final announced = Completer<void>();
+    void onFontsChanged() {
+      if (!announced.isCompleted) announced.complete();
+    }
+
+    final systemFonts = PaintingBinding.instance.systemFonts
+      ..addListener(onFontsChanged);
+    try {
+      for (final MapEntry(key: family, value: path) in _fonts.entries) {
+        final bytes = File(path).readAsBytesSync();
+        await (FontLoader(
+          family,
+        )..addFont(Future.value(ByteData.sublistView(bytes)))).load();
+      }
+      await _loadMaterialIcons();
+      await announced.future.timeout(const Duration(seconds: 10));
+    } finally {
+      systemFonts.removeListener(onFontsChanged);
+    }
+  });
   _fontsLoaded = true;
 }
 
@@ -131,7 +156,7 @@ Future<void> pumpGolden(
   required Widget child,
   Size size = const Size(420, 200),
 }) async {
-  await loadCommanderFonts();
+  await loadCommanderFonts(tester);
   useGoldenSurface(tester, size);
   await tester.pumpWidget(goldenFrame(tokens, child));
   await tester.pumpAndSettle();

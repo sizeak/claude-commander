@@ -16,6 +16,7 @@ import 'package:claude_commander_client/theme/theme_data.dart';
 import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:claude_commander_client/widgets/brand_mark.dart';
 import 'package:claude_commander_client/window/window_controller.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -490,7 +491,7 @@ void main() {
       // The shell's own tests do not load the app's faces, and an `Icon`
       // without one is a notdef square whose ink is centred on its box whatever
       // the padding — which would pass this on a glyph that was never drawn.
-      await loadCommanderFonts();
+      await loadCommanderFonts(tester);
       seed();
       useInsets(tester, bottom: 48);
       await pumpLcars(tester);

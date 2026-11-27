@@ -4,6 +4,7 @@ import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/src/rust/api/simple.dart'
     show ScanResultDto;
 import 'package:claude_commander_client/state/commander_store.dart';
+// ignore: deprecated_member_use, see README.md "material_ui"
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
